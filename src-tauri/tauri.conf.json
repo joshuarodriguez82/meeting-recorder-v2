@@ -13,10 +13,13 @@
     "windows": [
       {
         "title": "Meeting Recorder",
-        "width": 800,
-        "height": 600,
+        "width": 1240,
+        "height": 840,
+        "minWidth": 900,
+        "minHeight": 600,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "center": true
       }
     ],
     "security": {

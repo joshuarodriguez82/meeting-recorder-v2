@@ -39,3 +39,17 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+recordings/
+
+# Rust / Tauri build artifacts
+src-tauri/target/
+src-tauri/Cargo.lock.bak
+
+# Generated
+src/app/_generated/
