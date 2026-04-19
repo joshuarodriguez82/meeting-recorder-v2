@@ -28,38 +28,61 @@ export function SearchView({ onOpenSession }: { onOpenSession: (id: string) => v
     try {
       const sessions = await api.listSessions();
       setTotal(sessions.length);
+
+      // First pass: check the already-loaded summary/actions/decisions/reqs
+      // fields from listSessions (no extra fetch needed). Only fetch full
+      // sessions for ones that don't have a match in metadata.
+      const re = new RegExp(escape(q), "i");
       const results: Match[] = [];
+      const needsTranscriptCheck: typeof sessions = [];
+
       for (const s of sessions) {
-        let full: SessionFull;
-        try {
-          full = (await api.getSessionRaw(s.session_id)) as unknown as SessionFull;
-        } catch {
-          continue;
-        }
-        const transcript = full.segments
-          ? full.segments.map((seg) => `${seg.text}`).join(" ")
-          : "";
-        const haystack = [
-          transcript,
-          full.summary || "",
-          full.action_items || "",
-          full.decisions || "",
-          full.requirements || "",
+        const metaHay = [
+          s.display_name,
+          s.client || "",
+          s.project || "",
+          s.summary || "",
+          s.action_items || "",
+          s.decisions || "",
+          s.requirements || "",
         ].join("\n");
-        const re = new RegExp(escape(q), "i");
-        const m = re.exec(haystack);
-        if (!m) continue;
-        const idx = m.index;
-        const before = Math.max(0, idx - 80);
-        const after = Math.min(haystack.length, idx + q.length + 80);
-        const snippet = (before > 0 ? "…" : "") + haystack.slice(before, after).replace(/\s+/g, " ").trim() + (after < haystack.length ? "…" : "");
-        results.push({
-          session_id: s.session_id,
-          display_name: s.display_name,
-          date: s.started_at ? new Date(s.started_at).toLocaleDateString() : "",
-          snippet,
-        });
+        if (re.test(metaHay)) {
+          const m = re.exec(metaHay)!;
+          results.push({
+            session_id: s.session_id,
+            display_name: s.display_name,
+            date: s.started_at ? new Date(s.started_at).toLocaleDateString() : "",
+            snippet: makeSnippet(metaHay, m.index, q.length),
+          });
+        } else if (s.has_transcript) {
+          needsTranscriptCheck.push(s);
+        }
       }
+
+      // Second pass: parallel fetch transcripts and search them
+      const transcriptResults = await Promise.all(
+        needsTranscriptCheck.map(async (s) => {
+          try {
+            const full = (await api.getSessionRaw(s.session_id)) as unknown as SessionFull;
+            const transcript = full.segments
+              ? full.segments.map((seg) => seg.text).join(" ")
+              : "";
+            if (!transcript) return null;
+            const m = re.exec(transcript);
+            if (!m) return null;
+            return {
+              session_id: s.session_id,
+              display_name: s.display_name,
+              date: s.started_at ? new Date(s.started_at).toLocaleDateString() : "",
+              snippet: makeSnippet(transcript, m.index, q.length),
+            } as Match;
+          } catch {
+            return null;
+          }
+        })
+      );
+      for (const r of transcriptResults) if (r) results.push(r);
+
       setMatches(results);
       if (results.length === 0) toast.info("No matches found");
     } catch (e) {
@@ -68,6 +91,14 @@ export function SearchView({ onOpenSession }: { onOpenSession: (id: string) => v
       setSearching(false);
     }
   };
+
+  function makeSnippet(text: string, idx: number, qLen: number): string {
+    const before = Math.max(0, idx - 80);
+    const after = Math.min(text.length, idx + qLen + 80);
+    return (before > 0 ? "…" : "")
+      + text.slice(before, after).replace(/\s+/g, " ").trim()
+      + (after < text.length ? "…" : "");
+  }
 
   return (
     <div className="mx-auto max-w-4xl space-y-4">
