@@ -133,11 +133,11 @@ export function SearchView({ onOpenSession }: { onOpenSession: (id: string) => v
               <button
                 key={i}
                 onClick={() => onOpenSession(m.session_id)}
-                className="w-full text-left border-b last:border-b-0 p-4 hover:bg-muted/40 transition-colors"
+                className="w-full text-left border-b last:border-b-0 p-4 hover:bg-muted/40 transition-colors min-w-0"
               >
-                <div className="text-sm font-medium text-primary">{m.display_name}</div>
+                <div className="text-sm font-medium text-primary truncate">{m.display_name}</div>
                 <div className="text-xs text-muted-foreground mb-2">{m.date}</div>
-                <p className="text-sm text-foreground/90 italic">{m.snippet}</p>
+                <p className="text-sm text-foreground/90 italic break-words">{m.snippet}</p>
               </button>
             ))
           )}
