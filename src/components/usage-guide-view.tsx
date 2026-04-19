@@ -41,6 +41,17 @@ const SECTIONS: Section[] = [
           <li>Click <strong>Start Recording</strong> (bottom of the Audio Devices card).</li>
           <li>When done, <strong>Stop</strong>. A &quot;Just Recorded&quot; card appears with an <strong>Open Session</strong> button.</li>
         </ol>
+        <Tip>
+          <strong>Audio device selection is persistent.</strong> Your mic + loopback choices are
+          saved by device name (not index) so they survive reboots, USB re-plugs, and index
+          shuffling across audio APIs.
+        </Tip>
+        <Tip>
+          <strong>Automatic host-API fallback.</strong> If your selected mic refuses to open under
+          WASAPI (common with webcams like Insta360 when another app is using them), the backend
+          silently retries the same physical device under MME → DirectSound → WDM-KS before giving
+          up. The error toast only appears if every host API fails.
+        </Tip>
         <Warn>
           If System Audio is &quot;Skip&quot;, only your voice is captured — not the other participants.
           Enable Stereo Mix in Windows Sound settings or install VB-Cable.
@@ -58,9 +69,9 @@ const SECTIONS: Section[] = [
           Clients) opens its <strong>Session Detail</strong> dialog with tabs:
         </p>
         <ul className="list-disc pl-5 space-y-1">
-          <li><strong>Overview</strong> — edit meeting name, template, client, project tags. Run any AI extraction.</li>
+          <li><strong>Overview</strong> — audio player (scrub/replay), edit meeting name, template, client, project tags, and run any AI extraction.</li>
           <li><strong>Transcript</strong> — full speaker-labeled timestamped transcript.</li>
-          <li><strong>Speakers</strong> — who was detected, how many segments each spoke.</li>
+          <li><strong>Speakers</strong> — who was detected, how many segments each spoke. <strong>Click any speaker name to rename them</strong> — the new label flows into the transcript and all future AI outputs.</li>
           <li><strong>Summary</strong> — AI summary tailored to the template.</li>
           <li><strong>Actions</strong> — extracted action items (owner + task + due date).</li>
           <li><strong>Decisions</strong> — ADR-style decision log.</li>
@@ -69,6 +80,11 @@ const SECTIONS: Section[] = [
         <Tip>
           Tabs are disabled if their content hasn&apos;t been generated yet. Go to the Overview tab and
           click the matching AI Action button to generate it.
+        </Tip>
+        <Tip>
+          <strong>Playback:</strong> the Overview tab shows an inline audio player so you can scrub
+          through the recording — useful for verifying who said what, or spotting details the
+          transcript missed.
         </Tip>
       </>
     ),
@@ -106,31 +122,40 @@ const SECTIONS: Section[] = [
           <li><strong>Follow-Ups</strong> — all action items across every meeting. Filter by status/client/owner. Click → opens the source meeting on its Actions tab.</li>
           <li><strong>Decisions</strong> — ADR log, click a decision to see full context. &quot;Open Meeting →&quot; to jump in.</li>
           <li><strong>Search</strong> — type a phrase, it searches every transcript + summary + extraction. Click a result to open that session.</li>
-          <li><strong>Clients</strong> — create clients, tag meetings manually, or use <strong>AI Suggest</strong> to auto-tag similar meetings. Each client has a dashboard with stats, meetings, decisions.</li>
-          <li><strong>Prep Brief</strong> — filter by client/project, see a preview of which meetings will be used, generate a pre-meeting brief with recent context, open items, risks, discussion points.</li>
+          <li><strong>Clients</strong> — create clients, nest projects inside each one, tag meetings manually or via <strong>AI Suggest</strong>. Each client has a dashboard with stats, meetings, and a chip row for drilling into individual projects.</li>
+          <li><strong>Prep Brief</strong> — filter by client and (optionally) project. The project dropdown is scoped to the selected client, so you can never cross-contaminate contexts. Generates a pre-meeting brief with recent context, open items, risks, and suggested discussion points.</li>
         </ul>
       </>
     ),
   },
   {
     id: "clients",
-    title: "Clients & Tagging",
+    title: "Clients & Projects",
     content: (
       <>
         <p>
-          Clients are a core organizational unit. Tag meetings to clients to unlock the Client
+          Clients are the top-level organizational unit. Projects live <strong>inside</strong>{" "}
+          clients — every project belongs to exactly one client. Tag meetings to unlock the Client
           Dashboard, filtered Follow-Ups, and Prep Briefs.
         </p>
-        <p><strong>Workflow:</strong></p>
+        <p><strong>Client workflow:</strong></p>
         <ol className="list-decimal pl-5 space-y-2">
           <li>Clients tab → click <strong>+</strong> (top of the client list) to create a new client.</li>
           <li>You&apos;ll be prompted to tag meetings. Select the ones that belong, click <strong>Apply Tag</strong>.</li>
           <li>Use <strong>AI Suggest</strong> to let Claude scan your history and propose which meetings likely belong to this client. High-confidence ones are pre-selected.</li>
           <li>Use <strong>Rename</strong> to rename the client across every tagged meeting at once.</li>
         </ol>
+        <p className="mt-3"><strong>Projects (nested under the selected client):</strong></p>
+        <ol className="list-decimal pl-5 space-y-2">
+          <li>Pick a client, then click <strong>+ New Project</strong> in the Projects card.</li>
+          <li>Projects appear as chips — click one to filter the meetings list and stat cards to just that project.</li>
+          <li>Click <strong>Tag to {"{project}"}</strong> to assign meetings. The dialog only shows meetings that already belong to the current client — projects can never cross client boundaries.</li>
+          <li>Click <strong>Rename Project</strong> to rename within just this client (a project with the same name under a different client is unaffected).</li>
+        </ol>
         <Tip>
-          You can also tag Client + Project directly in the Record view or in any session&apos;s
-          Overview tab.
+          You can also tag Client + Project directly in the Record view, in any session&apos;s
+          Overview tab, or when stopping a recording — all three converge on the same session
+          metadata.
         </Tip>
       </>
     ),
@@ -217,8 +242,28 @@ const SECTIONS: Section[] = [
           <div>
             <dt className="font-medium text-sm">App is slow to start</dt>
             <dd className="text-sm text-muted-foreground mt-1">
-              The backend now starts in ~2 seconds; AI models load lazily on first use (Whisper +
-              Pyannote each take a few seconds). First extraction will be slower than subsequent ones.
+              The backend starts in ~2 seconds; AI models load lazily on first use (Whisper +
+              Pyannote each take a few seconds). Calendar + audio device enumeration is pre-warmed
+              in background threads at launch and cached for 5 min — first UI render should be
+              near-instant after the first visit. Check <code>%APPDATA%\MeetingRecorder\backend.log</code>
+              if it still feels slow.
+            </dd>
+          </div>
+          <div>
+            <dt className="font-medium text-sm">Mic fails to open</dt>
+            <dd className="text-sm text-muted-foreground mt-1">
+              The backend automatically retries across sample rates AND host APIs (WASAPI → MME →
+              DirectSound → WDM-KS). If every attempt fails the device is truly busy or unplugged
+              — close other apps using it (Teams, Zoom, Windows Camera) or pick a different mic.
+              Audio device choices persist across launches so you only select once.
+            </dd>
+          </div>
+          <div>
+            <dt className="font-medium text-sm">Stop button says &quot;fetch failed&quot;</dt>
+            <dd className="text-sm text-muted-foreground mt-1">
+              Every stream close/terminate call is now wrapped with a 2-3s timeout. If a driver
+              deadlocks the backend abandons it and returns anyway. If you still hit this, the
+              backend log will show which operation exceeded its timeout.
             </dd>
           </div>
         </dl>
