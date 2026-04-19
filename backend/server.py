@@ -266,17 +266,31 @@ _gpu_task_state = {
 }
 
 
+_GPU_DETECTION_CACHE: dict | None = None
+
+
 def _detect_gpu_hardware() -> dict:
-    """Best-effort probe: list GPUs and recommend a backend."""
-    import subprocess
+    """Best-effort probe: list GPUs and recommend a backend.
+
+    Cached after first call — GPUs don't change during a session, and
+    every uncached call spawns a PowerShell subprocess which briefly
+    flashes a console window on Windows. The frontend polls /gpu/status
+    every 2s during an install so uncached calls would flash a window
+    every 2 seconds.
+    """
+    global _GPU_DETECTION_CACHE
+    if _GPU_DETECTION_CACHE is not None:
+        return _GPU_DETECTION_CACHE
+
     result = {"nvidia": False, "amd": False, "intel": False, "gpus": []}
     try:
-        # wmic is deprecated but works on all Windows. PowerShell alt:
-        # Get-CimInstance -Class Win32_VideoController
+        # CREATE_NO_WINDOW on Windows so this doesn't flash a console.
+        creationflags = 0x08000000 if os.name == "nt" else 0
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              "Get-CimInstance -Class Win32_VideoController | Select-Object -ExpandProperty Name"],
             capture_output=True, text=True, timeout=10,
+            creationflags=creationflags,
         ).stdout
         for line in out.splitlines():
             name = line.strip()
@@ -299,6 +313,7 @@ def _detect_gpu_hardware() -> dict:
         result["recommended"] = "directml"
     else:
         result["recommended"] = "cpu"
+    _GPU_DETECTION_CACHE = result
     return result
 
 

@@ -48,17 +48,37 @@ fn runtime_dir() -> std::path::PathBuf {
     d
 }
 
-/// Hash of the bundled zip — written to a `.version` file next to the
-/// extracted runtime so app updates trigger a re-extract.
+/// Content fingerprint of the bundled zip — stable across rebuilds that
+/// produce byte-identical zips and across installed-vs-dev zip paths.
+/// Used to decide whether the extracted runtime is stale and must be
+/// re-extracted (which nukes user-installed GPU torch). Reads the first
+/// 64 KB + last 64 KB + file size; collision probability is effectively
+/// zero for our use case and it avoids pulling in a hash crate.
 fn zip_version(zip_path: &std::path::Path) -> String {
-    if let Ok(meta) = std::fs::metadata(zip_path) {
-        let len = meta.len();
-        let mtime = meta.modified().ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs()).unwrap_or(0);
-        return format!("{}-{}", len, mtime);
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = match std::fs::File::open(zip_path) {
+        Ok(f) => f,
+        Err(_) => return "unknown".to_string(),
+    };
+    let len = f.metadata().ok().map(|m| m.len()).unwrap_or(0);
+
+    let window: u64 = 64 * 1024;
+    let mut head = vec![0u8; window.min(len) as usize];
+    let _ = f.seek(SeekFrom::Start(0));
+    let _ = f.read_exact(&mut head);
+    let mut tail = vec![0u8; window.min(len) as usize];
+    if len > window {
+        let _ = f.seek(SeekFrom::Start(len - window));
+        let _ = f.read_exact(&mut tail);
     }
-    "unknown".to_string()
+    // Simple FNV-1a over head + tail. Good enough for "is this the same
+    // zip?" — not a security boundary.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in head.iter().chain(tail.iter()) {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("len={}-fnv={:016x}", len, hash)
 }
 
 /// Extract the bundled backend zip into the per-user runtime directory
@@ -70,30 +90,40 @@ fn ensure_runtime_extracted(zip_path: &std::path::Path) -> Result<std::path::Pat
     let server_py = runtime.join("server.py");
     let expected_version = zip_version(zip_path);
 
-    let needs_extract = if !server_py.exists() {
-        rlog("Runtime not yet extracted");
-        true
-    } else {
-        let current = std::fs::read_to_string(&version_file).unwrap_or_default();
-        if current != expected_version {
-            rlog(&format!("Runtime version mismatch (have {}, need {}) — re-extracting",
-                current, expected_version));
-            true
-        } else {
-            false
-        }
-    };
+    // Essential files that MUST exist for the runtime to work. We only
+    // re-extract if any of these are missing — never purely on version
+    // mismatch, because that would destroy user-installed GPU torch on
+    // every app update. Users can manually wipe
+    // %LOCALAPPDATA%\MeetingRecorder\runtime to force a fresh extract.
+    let essentials = [
+        runtime.join("server.py"),
+        runtime.join("python").join("pythonw.exe"),
+        runtime.join("python").join("python311.dll"),
+    ];
+    let missing: Vec<_> = essentials.iter().filter(|p| !p.exists()).collect();
+    let needs_extract = !missing.is_empty();
 
     if needs_extract {
+        rlog(&format!("Runtime extraction needed (missing: {:?})", missing));
         // Clean slate — remove old runtime so stale .pyc files don't linger.
         let _ = std::fs::remove_dir_all(&runtime);
         std::fs::create_dir_all(&runtime).map_err(|e| format!("mkdir runtime: {}", e))?;
         rlog(&format!("Extracting {} -> {}", zip_path.display(), runtime.display()));
         let t0 = std::time::Instant::now();
-        let status = Command::new("tar")
+        let mut tar_cmd = Command::new("tar");
+        tar_cmd
             .arg("-xf").arg(zip_path)
             .arg("-C").arg(&runtime)
-            .stdout(Stdio::null()).stderr(Stdio::null())
+            .stdout(Stdio::null()).stderr(Stdio::null());
+        // Critical: without CREATE_NO_WINDOW, tar.exe pops a console
+        // window on Windows and the app can't proceed until it closes.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            tar_cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let status = tar_cmd
             .status()
             .map_err(|e| format!("tar.exe failed to run: {}. Is Windows 10+?", e))?;
         if !status.success() {
@@ -102,6 +132,16 @@ fn ensure_runtime_extracted(zip_path: &std::path::Path) -> Result<std::path::Pat
         std::fs::write(&version_file, &expected_version)
             .map_err(|e| format!("writing .version: {}", e))?;
         rlog(&format!("Extracted in {:.1}s", t0.elapsed().as_secs_f32()));
+    } else {
+        let marker = std::fs::read_to_string(&version_file).unwrap_or_default();
+        if marker != expected_version {
+            // Different zip shipped with this exe than what last
+            // extracted the runtime — but the runtime is still intact.
+            // Update the marker silently so we don't log this mismatch
+            // forever. User-installed GPU wheels are preserved.
+            let _ = std::fs::write(&version_file, &expected_version);
+            rlog("Runtime version marker updated without re-extract");
+        }
     }
 
     Ok(runtime)
@@ -230,6 +270,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .manage(backend)
+        .invoke_handler(tauri::generate_handler![restart_backend])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -261,6 +302,34 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Tauri command: kill the current Python sidecar and spawn a fresh one.
+/// Used by the GPU toggle UI to activate a newly-installed torch flavour
+/// without forcing the user to close and reopen the whole app.
+#[tauri::command]
+fn restart_backend(
+    state: tauri::State<'_, BackendProcess>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    rlog("restart_backend command invoked");
+    // Kill the existing child if we own one.
+    if let Ok(mut guard) = state.0.lock() {
+        if let Some(mut child) = guard.take() {
+            match child.kill() {
+                Ok(_) => rlog("Old backend killed"),
+                Err(e) => rlog(&format!("Failed to kill old backend: {}", e)),
+            }
+            let _ = child.wait();
+        }
+    }
+    // Wait briefly for the TCP port to free up so the new spawn binds cleanly.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while port_in_use(BACKEND_PORT) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    spawn_python_backend(&app).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
