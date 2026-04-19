@@ -11,15 +11,61 @@ interface Props {
 }
 
 /**
- * Background poll: every 60s checks today's meetings; when one is within
- * `minutesBefore` of starting, fires a toast with Start/Dismiss actions.
+ * Background poll: every 30s checks today's meetings; when one is within
+ * `minutesBefore` of starting, fires BOTH a native Windows Action Center
+ * toast (via the browser Notification API — routes through WebView2 to
+ * the real Windows toast system so it surfaces even when the app is
+ * minimized/behind other windows) AND an in-app sonner toast as a
+ * fallback inside the current window.
  */
+async function fireNativeNotification(
+  meeting: Meeting,
+  minutesLeft: number,
+  onStart: (m: Meeting) => void,
+): Promise<void> {
+  try {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    if (Notification.permission === "default") {
+      await Notification.requestPermission();
+    }
+    if (Notification.permission !== "granted") return;
+
+    const n = new Notification("📅 Meeting Starting Soon", {
+      body: `${meeting.subject} — starts in ~${minutesLeft} min\nClick to start recording`,
+      requireInteraction: true, // stays in Action Center until dismissed
+      tag: `${meeting.subject}|${meeting.start}`, // dedup same-meeting alerts
+    });
+    n.onclick = () => {
+      // Bring the app window to the foreground and trigger the Record flow.
+      // Tauri v2 exposes focus via the window API; fallback to window.focus().
+      try { window.focus(); } catch {}
+      // Lazy-import so this file stays usable outside Tauri for dev.
+      import("@tauri-apps/api/window")
+        .then((m) => m.getCurrentWindow().setFocus())
+        .catch(() => {});
+      onStart(meeting);
+      n.close();
+    };
+  } catch {
+    // If native notifications are blocked or unavailable, the in-app
+    // toast is still shown — so silently swallow.
+  }
+}
+
 export function CalendarMonitor({ enabled, minutesBefore, onStart }: Props) {
   const notified = useRef<Set<string>>(new Set());
   const dismissed = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (!enabled || minutesBefore <= 0) return;
+
+    // Request notification permission once on mount. On Windows/WebView2
+    // this is a no-op if already granted; otherwise the user gets a
+    // one-time permission dialog.
+    if (typeof window !== "undefined" && "Notification" in window
+        && Notification.permission === "default") {
+      Notification.requestPermission().catch(() => {});
+    }
 
     let firstRun = true;
     const check = async () => {
@@ -38,6 +84,11 @@ export function CalendarMonitor({ enabled, minutesBefore, onStart }: Props) {
           if (secondsUntil >= 0 && secondsUntil <= minutesBefore * 60) {
             notified.current.add(key);
             const minsLeft = Math.max(1, Math.round(secondsUntil / 60));
+            // Native Windows toast — appears in Action Center even if
+            // the app window is minimized or behind other windows.
+            fireNativeNotification(m, minsLeft, onStart);
+            // In-app toast as a belt-and-suspenders fallback so the
+            // user still sees it if the Action Center is silenced.
             toast("📅 Meeting Starting Soon", {
               description: `${m.subject} — starts in ~${minsLeft} min`,
               duration: 60000,
