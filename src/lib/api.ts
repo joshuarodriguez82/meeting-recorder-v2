@@ -179,6 +179,8 @@ export const api = {
 
   // Calendar
   getCalendarToday: () => request<Meeting[]>("/calendar/today"),
+  getUpcomingMeetings: (hours: number = 36) =>
+    request<Meeting[]>(`/calendar/upcoming?hours=${hours}`),
   isCalendarAvailable: () =>
     request<{ available: boolean }>("/calendar/available"),
 

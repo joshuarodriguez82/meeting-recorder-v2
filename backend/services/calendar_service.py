@@ -176,26 +176,23 @@ def _scan_folder_recursively(folder, today: datetime.date,
         logger.debug(f"Skipping folder at depth {depth}: {e}")
 
 
-def get_todays_meetings() -> List[dict]:
-    """
-    Return today's meetings from Outlook calendar.
-    Returns [] if Outlook isn't accessible.
-    """
+def get_meetings_for_date(target_date: datetime.date) -> List[dict]:
+    """Return all meetings on a specific date across every calendar."""
     outlook = _get_outlook()
     if not outlook:
         return []
 
     try:
         ns = outlook.GetNamespace("MAPI")
-        today = datetime.datetime.now().date()
         all_meetings: List[dict] = []
         seen: set = set()
 
         # Fast path: default calendar
         try:
             default_cal = ns.GetDefaultFolder(OL_FOLDER_CALENDAR)
-            logger.info(f"Reading default calendar: {default_cal.Name}")
-            for m in _read_appointments(default_cal, today):
+            logger.info(f"Reading default calendar for {target_date}: "
+                        f"{default_cal.Name}")
+            for m in _read_appointments(default_cal, target_date):
                 key = (m["subject"], m["start"].isoformat())
                 if key not in seen:
                     seen.add(key)
@@ -203,22 +200,75 @@ def get_todays_meetings() -> List[dict]:
         except Exception as e:
             logger.warning(f"Could not read default calendar: {e}")
 
-        # Slow path: scan all stores for additional calendars
-        # (shared calendars, resource calendars, etc.)
+        # Slow path: scan all stores for shared/resource calendars
         try:
             for store in ns.Stores:
                 try:
                     root = store.GetRootFolder()
-                    logger.info(f"Scanning store: {store.DisplayName}")
                     for folder in root.Folders:
-                        _scan_folder_recursively(folder, today, seen, all_meetings)
+                        _scan_folder_recursively(
+                            folder, target_date, seen, all_meetings)
                 except Exception as e:
                     logger.debug(f"Store scan failed: {e}")
         except Exception as e:
             logger.debug(f"Could not enumerate stores: {e}")
 
         all_meetings.sort(key=lambda m: m["start"])
-        logger.info(f"Found {len(all_meetings)} meetings for today")
+        logger.info(f"Found {len(all_meetings)} meetings for {target_date}")
+        return all_meetings
+
+    except Exception as e:
+        logger.error(f"Failed to read calendar: {e}", exc_info=True)
+        return []
+    finally:
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+
+
+def get_todays_meetings() -> List[dict]:
+    """Return today's meetings from Outlook calendar."""
+    return get_meetings_for_date(datetime.datetime.now().date())
+
+
+def get_upcoming_meetings(hours_ahead: int = 36) -> List[dict]:
+    """
+    Return meetings from now through `hours_ahead` hours ahead.
+    Spans across midnight so Monday meetings show on Sunday evening.
+    Defaults to 36 hours to cover late-evening queries for tomorrow.
+    """
+    outlook = _get_outlook()
+    if not outlook:
+        return []
+
+    try:
+        ns = outlook.GetNamespace("MAPI")
+        now = datetime.datetime.now()
+        end = now + datetime.timedelta(hours=hours_ahead)
+
+        all_meetings: List[dict] = []
+        seen: set = set()
+
+        # Read each date covered by the window (usually 1-2 dates)
+        current = now.date()
+        while current <= end.date():
+            per_date = get_meetings_for_date(current)
+            for m in per_date:
+                # Only include meetings whose start is >= now
+                if m["start"] < now:
+                    continue
+                if m["start"] > end:
+                    continue
+                key = (m["subject"], m["start"].isoformat())
+                if key not in seen:
+                    seen.add(key)
+                    all_meetings.append(m)
+            current += datetime.timedelta(days=1)
+
+        all_meetings.sort(key=lambda m: m["start"])
+        logger.info(f"Found {len(all_meetings)} upcoming meetings "
+                    f"(next {hours_ahead}h)")
         return all_meetings
 
     except Exception as e:
