@@ -17,6 +17,7 @@ import { ClientsView } from "@/components/clients-view";
 import { PrepBriefView } from "@/components/prep-brief-view";
 import { UsageGuideView } from "@/components/usage-guide-view";
 import { CalendarMonitor } from "@/components/calendar-monitor";
+import { SessionDetailDialog } from "@/components/session-detail-dialog";
 
 const NAV_ITEMS = [
   { id: "record", label: "Record", icon: Mic },
@@ -38,6 +39,18 @@ export default function Home() {
     wav_count: number;
   } | null>(null);
   const [notifyMinutes, setNotifyMinutes] = useState(0);
+  const [detailSessionId, setDetailSessionId] = useState<string | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailInitialTab, setDetailInitialTab] = useState("overview");
+
+  const openSession = (id: string, tab: string = "overview") => {
+    setDetailSessionId(id);
+    setDetailInitialTab(tab);
+    setDetailOpen(true);
+  };
+
+  const existingClients = Array.from(new Set(sessions.map((s) => s.client).filter(Boolean))).sort();
+  const existingProjects = Array.from(new Set(sessions.map((s) => s.project).filter(Boolean))).sort();
 
   useEffect(() => {
     let cancelled = false;
@@ -184,17 +197,37 @@ export default function Home() {
         </header>
 
         <div className="flex-1 overflow-y-auto p-8">
-          {nav === "record" && <RecordView onSessionsChanged={reloadSessions} />}
-          {nav === "sessions" && <SessionsView sessions={sessions} onReload={reloadSessions} onOpenSession={() => {}} />}
-          {nav === "follow-ups" && <FollowUpsView sessions={sessions} />}
-          {nav === "decisions" && <DecisionsView sessions={sessions} />}
-          {nav === "search" && <SearchView />}
-          {nav === "clients" && <ClientsView sessions={sessions} />}
+          {nav === "record" && (
+            <RecordView onSessionsChanged={reloadSessions} onOpenSession={openSession} />
+          )}
+          {nav === "sessions" && (
+            <SessionsView sessions={sessions} onReload={reloadSessions} onOpenSession={openSession} />
+          )}
+          {nav === "follow-ups" && (
+            <FollowUpsView sessions={sessions} onOpenSession={openSession} />
+          )}
+          {nav === "decisions" && (
+            <DecisionsView sessions={sessions} onOpenSession={openSession} />
+          )}
+          {nav === "search" && <SearchView onOpenSession={openSession} />}
+          {nav === "clients" && (
+            <ClientsView sessions={sessions} onReload={reloadSessions} onOpenSession={openSession} />
+          )}
           {nav === "prep-brief" && <PrepBriefView sessions={sessions} />}
           {nav === "settings" && <SettingsView />}
           {nav === "help" && <UsageGuideView />}
         </div>
       </main>
+
+      <SessionDetailDialog
+        sessionId={detailSessionId}
+        open={detailOpen}
+        onOpenChange={(o) => { setDetailOpen(o); if (!o) setDetailSessionId(null); }}
+        onChanged={reloadSessions}
+        initialTab={detailInitialTab}
+        existingClients={existingClients}
+        existingProjects={existingProjects}
+      />
     </div>
   );
 }
