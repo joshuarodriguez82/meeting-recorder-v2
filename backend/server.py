@@ -286,14 +286,26 @@ async def get_calendar_upcoming(hours: int = 36, refresh: bool = False):
     Pass refresh=true to bypass the 5-minute cache (triggered by the
     Refresh button in the UI when the user added a meeting in Outlook
     and needs it reflected immediately).
+
+    Wrapped in a 15s asyncio timeout so a hung Outlook COM call never
+    leaves the frontend with a dead fetch. On timeout we return [] and
+    let the user Refresh again; the underlying thread finishes at its
+    own pace and populates the cache for next time.
     """
     try:
         if refresh:
             from services.calendar_service import invalidate_calendar_cache
             invalidate_calendar_cache()
-        # Outlook COM is blocking. MUST run off the event loop or every
-        # other endpoint stalls until this returns.
-        meetings = await asyncio.to_thread(get_upcoming_meetings, hours)
+        try:
+            meetings = await asyncio.wait_for(
+                asyncio.to_thread(get_upcoming_meetings, hours),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Calendar fetch ({hours}h) exceeded 15s — returning empty. "
+                f"Outlook/Exchange likely slow to respond. Retry in a moment.")
+            return []
         return _serialize_meetings(meetings)
     except Exception as e:
         logger.exception("Upcoming calendar fetch failed")
@@ -804,21 +816,16 @@ async def startup():
         except Exception as e:
             logger.warning(f"Audio device pre-warm failed: {e}")
 
-    def _prewarm_calendar():
-        # Warm both the 36h (Record view) and 24h (CalendarMonitor poll)
-        # cache keys so neither the first UI render nor the first monitor
-        # tick ever waits on Outlook COM.
-        try:
-            from services.calendar_service import get_upcoming_meetings
-            t0 = time.time()
-            get_upcoming_meetings(36)
-            get_upcoming_meetings(24)
-            logger.info(f"Calendar cache warmed in {time.time()-t0:.1f}s")
-        except Exception as e:
-            logger.warning(f"Calendar pre-warm failed: {e}")
+    # NOTE: We intentionally do NOT pre-warm the calendar here.
+    # Outlook COM occasionally hangs for 30-60s on the first call (usually
+    # waiting on Exchange). If that hang happens in the pre-warm thread it
+    # holds the Outlook lock, making the first user-triggered Refresh also
+    # appear to hang. Better UX is: first calendar fetch runs on-demand
+    # when the user first opens the Record view or the CalendarMonitor
+    # fires. If that fetch hangs, the frontend's own timeout handling +
+    # the in-flight dedup short wait keep the UI responsive.
 
     _t.Thread(target=_prewarm_audio, daemon=True).start()
-    _t.Thread(target=_prewarm_calendar, daemon=True).start()
 
 
 if __name__ == "__main__":
