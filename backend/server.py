@@ -420,6 +420,54 @@ async def decisions(session_id: str):
         session_id, "extract_decisions", "decisions", "export_decisions")
 
 
+class PrepBriefRequest(BaseModel):
+    subject: str
+    client: str = ""
+    project: str = ""
+
+
+@app.post("/prep-brief")
+async def prep_brief(req: PrepBriefRequest):
+    svc.load_settings()
+    if not svc.summarizer:
+        raise HTTPException(status_code=400, detail="Anthropic API key required")
+    sessions = svc.session_svc.list_sessions()
+    # Filter by client or project match
+    related = []
+    for s in sessions:
+        match_client = bool(req.client and s.get("client") == req.client)
+        match_project = bool(req.project and s.get("project") == req.project)
+        if match_client or match_project:
+            related.append(s)
+    if not related:
+        # Fallback: use the 8 most recent processed sessions
+        related = [s for s in sessions if s.get("has_summary")][:8]
+    if not related:
+        return {"brief": "No prior meetings with summaries found to brief from.",
+                "related_count": 0}
+
+    # Build context blob
+    parts = []
+    for s in related[:8]:
+        block = [f"### {s.get('display_name', 'Meeting')} "
+                 f"({(s.get('started_at') or '')[:10]})"]
+        if s.get("summary"):
+            block.append(f"**Summary:**\n{s['summary']}")
+        if s.get("action_items"):
+            block.append(f"**Action Items:**\n{s['action_items']}")
+        if s.get("decisions"):
+            block.append(f"**Decisions:**\n{s['decisions']}")
+        parts.append("\n\n".join(block))
+    prior_notes = "\n\n---\n\n".join(parts)
+
+    try:
+        brief = await svc.summarizer.meeting_prep_brief(prior_notes, req.subject)
+        return {"brief": brief, "related_count": len(related)}
+    except Exception as e:
+        logger.exception("Prep brief failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Retention ────────────────────────────────────────────────────────
 @app.get("/retention/stats")
 async def retention_stats():
