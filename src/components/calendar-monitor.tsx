@@ -21,34 +21,41 @@ interface Props {
 async function fireNativeNotification(
   meeting: Meeting,
   minutesLeft: number,
-  onStart: (m: Meeting) => void,
 ): Promise<void> {
   try {
-    if (typeof window === "undefined" || !("Notification" in window)) return;
-    if (Notification.permission === "default") {
-      await Notification.requestPermission();
+    // Use Tauri's native notification plugin — routes through the
+    // Windows Action Center (toast provider). Works even when the app
+    // is minimized or on another virtual desktop.
+    const [{ sendNotification, isPermissionGranted, requestPermission }] =
+      await Promise.all([
+        import("@tauri-apps/plugin-notification"),
+      ]);
+    let granted = await isPermissionGranted();
+    if (!granted) {
+      const perm = await requestPermission();
+      granted = perm === "granted";
     }
-    if (Notification.permission !== "granted") return;
-
-    const n = new Notification("📅 Meeting Starting Soon", {
-      body: `${meeting.subject} — starts in ~${minutesLeft} min\nClick to start recording`,
-      requireInteraction: true, // stays in Action Center until dismissed
-      tag: `${meeting.subject}|${meeting.start}`, // dedup same-meeting alerts
+    if (!granted) return;
+    await sendNotification({
+      title: "Meeting Starting Soon",
+      body: `${meeting.subject} — starts in ~${minutesLeft} min`,
     });
-    n.onclick = () => {
-      // Bring the app window to the foreground and trigger the Record flow.
-      // Tauri v2 exposes focus via the window API; fallback to window.focus().
-      try { window.focus(); } catch {}
-      // Lazy-import so this file stays usable outside Tauri for dev.
-      import("@tauri-apps/api/window")
-        .then((m) => m.getCurrentWindow().setFocus())
-        .catch(() => {});
-      onStart(meeting);
-      n.close();
-    };
+  } catch (e) {
+    // Tauri plugin not available (e.g. dev in browser) — in-app toast
+    // still fires as fallback.
+    console.warn("Native notification failed:", e);
+  }
+}
+
+async function bringAppForward(): Promise<void> {
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    const w = getCurrentWindow();
+    await w.unminimize().catch(() => {});
+    await w.show().catch(() => {});
+    await w.setFocus().catch(() => {});
   } catch {
-    // If native notifications are blocked or unavailable, the in-app
-    // toast is still shown — so silently swallow.
+    try { window.focus(); } catch {}
   }
 }
 
@@ -59,13 +66,18 @@ export function CalendarMonitor({ enabled, minutesBefore, onStart }: Props) {
   useEffect(() => {
     if (!enabled || minutesBefore <= 0) return;
 
-    // Request notification permission once on mount. On Windows/WebView2
-    // this is a no-op if already granted; otherwise the user gets a
-    // one-time permission dialog.
-    if (typeof window !== "undefined" && "Notification" in window
-        && Notification.permission === "default") {
-      Notification.requestPermission().catch(() => {});
-    }
+    // Request notification permission once on mount via the Tauri
+    // plugin. No-op if already granted.
+    (async () => {
+      try {
+        const { isPermissionGranted, requestPermission } =
+          await import("@tauri-apps/plugin-notification");
+        const granted = await isPermissionGranted();
+        if (!granted) await requestPermission();
+      } catch {
+        /* plugin unavailable in dev browser */
+      }
+    })();
 
     let firstRun = true;
     const check = async () => {
@@ -86,15 +98,17 @@ export function CalendarMonitor({ enabled, minutesBefore, onStart }: Props) {
             const minsLeft = Math.max(1, Math.round(secondsUntil / 60));
             // Native Windows toast — appears in Action Center even if
             // the app window is minimized or behind other windows.
-            fireNativeNotification(m, minsLeft, onStart);
+            fireNativeNotification(m, minsLeft);
             // In-app toast as a belt-and-suspenders fallback so the
-            // user still sees it if the Action Center is silenced.
+            // user still sees it if the Action Center is silenced. The
+            // Start Recording button also unminimizes + focuses the
+            // window so the user doesn't have to Alt-Tab manually.
             toast("📅 Meeting Starting Soon", {
               description: `${m.subject} — starts in ~${minsLeft} min`,
               duration: 60000,
               action: {
                 label: "Start Recording",
-                onClick: () => onStart(m),
+                onClick: () => { bringAppForward(); onStart(m); },
               },
               cancel: {
                 label: "Dismiss",
