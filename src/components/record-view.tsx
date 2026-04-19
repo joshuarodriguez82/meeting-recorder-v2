@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, type AudioDevice, type Meeting, type SessionFull } from "@/lib/api";
 import { toast } from "sonner";
 import {
@@ -18,7 +18,7 @@ import {
   Mail,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -41,6 +41,8 @@ export function RecordView({ onSessionsChanged }: Props) {
   const [outputDevices, setOutputDevices] = useState<AudioDevice[]>([]);
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [loadingCal, setLoadingCal] = useState(false);
+  const [existingClients, setExistingClients] = useState<string[]>([]);
+  const [existingProjects, setExistingProjects] = useState<string[]>([]);
 
   const [meetingName, setMeetingName] = useState("");
   const [template, setTemplate] = useState("General");
@@ -62,16 +64,26 @@ export function RecordView({ onSessionsChanged }: Props) {
   useEffect(() => {
     (async () => {
       try {
-        const [devices, tpls, cal, status] = await Promise.all([
+        const [devices, tpls, cal, status, sessionsList] = await Promise.all([
           api.getAudioDevices(),
           api.getTemplates(),
           api.getUpcomingMeetings(36).catch(() => []),
           api.recordingStatus(),
+          api.listSessions().catch(() => []),
         ]);
         setInputDevices(devices.input);
         setOutputDevices(devices.output);
         setTemplates(tpls);
         setMeetings(cal);
+        // Gather unique clients and projects from existing sessions for autocomplete
+        const clients = Array.from(new Set(
+          sessionsList.map((s) => s.client).filter(Boolean)
+        )).sort();
+        const projects = Array.from(new Set(
+          sessionsList.map((s) => s.project).filter(Boolean)
+        )).sort();
+        setExistingClients(clients);
+        setExistingProjects(projects);
         if (devices.input.length > 0) setMicIdx(devices.input[0].index);
         setRecording(status.is_recording);
         setDuration(status.duration_s);
@@ -251,8 +263,9 @@ export function RecordView({ onSessionsChanged }: Props) {
             Meeting Details
           </CardTitle>
         </CardHeader>
-        <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <div className="md:col-span-2 space-y-2">
+        <CardContent className="space-y-5">
+          {/* Row 1: Meeting name (full width) */}
+          <div className="space-y-2">
             <Label htmlFor="mtg-name">Meeting Name</Label>
             <Input
               id="mtg-name"
@@ -260,12 +273,15 @@ export function RecordView({ onSessionsChanged }: Props) {
               onChange={(e) => setMeetingName(e.target.value)}
               placeholder="e.g. Design Review — 2026-04-20"
               disabled={recording}
+              autoComplete="off"
             />
           </div>
+
+          {/* Row 2: Template (full width, since it's a key choice) */}
           <div className="space-y-2">
             <Label>Template</Label>
             <Select value={template} onValueChange={(v) => v && setTemplate(v)} disabled={recording}>
-              <SelectTrigger>
+              <SelectTrigger className="w-full">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -275,13 +291,43 @@ export function RecordView({ onSessionsChanged }: Props) {
               </SelectContent>
             </Select>
           </div>
-          <div className="space-y-2">
-            <Label>Client</Label>
-            <Input value={client} onChange={(e) => setClient(e.target.value)} placeholder="Optional" disabled={recording} />
-          </div>
-          <div className="md:col-span-2 space-y-2">
-            <Label>Project</Label>
-            <Input value={project} onChange={(e) => setProject(e.target.value)} placeholder="Optional" disabled={recording} />
+
+          {/* Row 3: Client + Project side-by-side, equal width */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="client-input">Client</Label>
+              <Input
+                id="client-input"
+                list="clients-list"
+                value={client}
+                onChange={(e) => setClient(e.target.value)}
+                placeholder="e.g. SimpliSafe"
+                disabled={recording}
+                autoComplete="off"
+              />
+              <datalist id="clients-list">
+                {existingClients.map((c) => (
+                  <option key={c} value={c} />
+                ))}
+              </datalist>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="project-input">Project</Label>
+              <Input
+                id="project-input"
+                list="projects-list"
+                value={project}
+                onChange={(e) => setProject(e.target.value)}
+                placeholder="e.g. AWS Connect PoC"
+                disabled={recording}
+                autoComplete="off"
+              />
+              <datalist id="projects-list">
+                {existingProjects.map((p) => (
+                  <option key={p} value={p} />
+                ))}
+              </datalist>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -294,7 +340,7 @@ export function RecordView({ onSessionsChanged }: Props) {
             Audio Devices
           </CardTitle>
         </CardHeader>
-        <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <CardContent className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="space-y-2">
             <Label>Microphone</Label>
             <Select
@@ -302,7 +348,7 @@ export function RecordView({ onSessionsChanged }: Props) {
               onValueChange={(v: string | null) => setMicIdx(v ? parseInt(v) : null)}
               disabled={recording}
             >
-              <SelectTrigger>
+              <SelectTrigger className="w-full">
                 <SelectValue placeholder="Select mic..." />
               </SelectTrigger>
               <SelectContent>
@@ -321,7 +367,7 @@ export function RecordView({ onSessionsChanged }: Props) {
               onValueChange={(v: string | null) => setOutIdx(!v || v === "none" ? null : parseInt(v))}
               disabled={recording}
             >
-              <SelectTrigger>
+              <SelectTrigger className="w-full">
                 <SelectValue placeholder="Skip" />
               </SelectTrigger>
               <SelectContent>
@@ -347,16 +393,18 @@ export function RecordView({ onSessionsChanged }: Props) {
         </div>
       )}
 
-      {/* Today's meetings */}
+      {/* Upcoming meetings */}
       <Card>
-        <CardHeader className="flex-row items-center justify-between space-y-0">
+        <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <CalendarIcon className="h-4 w-4 text-primary" />
             Upcoming Meetings
           </CardTitle>
-          <Button size="sm" variant="ghost" onClick={refreshCal} disabled={loadingCal}>
-            {loadingCal ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Refresh"}
-          </Button>
+          <CardAction>
+            <Button size="sm" variant="outline" onClick={refreshCal} disabled={loadingCal}>
+              {loadingCal ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Refresh"}
+            </Button>
+          </CardAction>
         </CardHeader>
         <CardContent>
           {meetings.length === 0 ? (

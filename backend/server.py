@@ -25,9 +25,7 @@ from pydantic import BaseModel
 
 from config.settings import Settings
 from core.audio_capture import list_input_devices, list_output_devices
-from core.diarization import DiarizationEngine
-from core.summarizer import Summarizer, MEETING_TEMPLATES
-from core.transcription import TranscriptionEngine
+from core.summarizer import MEETING_TEMPLATES
 from models.session import Session
 from services.calendar_service import (
     get_todays_meetings, get_upcoming_meetings, is_outlook_available,
@@ -37,6 +35,13 @@ from services.recording_service import RecordingService
 from services.retention_service import cleanup as run_retention_cleanup, folder_stats
 from services.session_service import SessionService
 from utils.logger import get_logger
+
+# Heavy ML imports deferred to avoid blocking startup. These load torch +
+# pyannote which take several seconds. Imported lazily inside
+# ensure_models_loaded() so the API is reachable within ~500ms of launch.
+TranscriptionEngine = None  # type: ignore
+DiarizationEngine = None  # type: ignore
+Summarizer = None  # type: ignore
 
 logger = get_logger(__name__)
 
@@ -77,6 +82,11 @@ class Services:
                 on_status=lambda msg: logger.info(f"[rec] {msg}"),
             )
             if self.settings.anthropic_api_key:
+                # Lazy import Summarizer (pulls in anthropic SDK)
+                global Summarizer
+                if Summarizer is None:
+                    from core.summarizer import Summarizer as _Summarizer
+                    Summarizer = _Summarizer
                 self.summarizer = Summarizer(
                     self.settings.anthropic_api_key,
                     model=self.settings.claude_model)
@@ -92,6 +102,17 @@ class Services:
             s = self.load_settings()
             if not s.is_configured:
                 raise RuntimeError("API keys not configured")
+
+            # Lazy import the heavy ML modules here (torch + pyannote +
+            # faster-whisper can take 3-5 seconds to import).
+            global TranscriptionEngine, DiarizationEngine
+            if TranscriptionEngine is None:
+                from core.transcription import TranscriptionEngine as _T
+                TranscriptionEngine = _T
+            if DiarizationEngine is None:
+                from core.diarization import DiarizationEngine as _D
+                DiarizationEngine = _D
+
             logger.info("Loading transcription engine...")
             self.transcription = TranscriptionEngine(s.whisper_model)
             logger.info("Loading diarization engine...")
