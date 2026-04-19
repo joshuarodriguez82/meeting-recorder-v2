@@ -6,7 +6,9 @@ Exposes the Python services as HTTP endpoints.
 import asyncio
 import logging
 import os
+import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -245,6 +247,184 @@ async def save_settings(payload: SettingsDTO):
     svc.models_ready = False
     svc.load_settings()
     return {"ok": True}
+
+
+# ── GPU acceleration toggle ──────────────────────────────────────────
+# The bundled installer ships with CPU-only torch. Users with an NVIDIA
+# GPU can opt-in to CUDA torch; users with AMD/Intel/other GPUs can
+# opt-in to DirectML. Each backend wheel swap runs via pip in a
+# subprocess so the running backend doesn't have to restart mid-install.
+# After a successful swap the UI restarts the backend to pick up the
+# new torch build.
+
+_GPU_TASK_LOCK = threading.Lock()
+_gpu_task_state = {
+    "running": False,
+    "phase": "idle",   # idle | installing | complete | error
+    "message": "",
+    "progress_lines": [],  # last ~30 pip output lines
+}
+
+
+def _detect_gpu_hardware() -> dict:
+    """Best-effort probe: list GPUs and recommend a backend."""
+    import subprocess
+    result = {"nvidia": False, "amd": False, "intel": False, "gpus": []}
+    try:
+        # wmic is deprecated but works on all Windows. PowerShell alt:
+        # Get-CimInstance -Class Win32_VideoController
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance -Class Win32_VideoController | Select-Object -ExpandProperty Name"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+        for line in out.splitlines():
+            name = line.strip()
+            if not name:
+                continue
+            result["gpus"].append(name)
+            low = name.lower()
+            if "nvidia" in low or "geforce" in low or "quadro" in low or "rtx" in low or "gtx" in low:
+                result["nvidia"] = True
+            elif "amd" in low or "radeon" in low:
+                result["amd"] = True
+            elif "intel" in low:
+                result["intel"] = True
+    except Exception as e:
+        logger.warning(f"GPU detection failed: {e}")
+    # Recommendation
+    if result["nvidia"]:
+        result["recommended"] = "cuda"
+    elif result["amd"] or result["intel"]:
+        result["recommended"] = "directml"
+    else:
+        result["recommended"] = "cpu"
+    return result
+
+
+def _current_gpu_backend() -> str:
+    """Introspect the installed torch to report what flavour is live."""
+    try:
+        import torch
+        v = torch.__version__  # e.g. "2.2.2+cpu", "2.2.2+cu121"
+        if "+cu" in v:
+            return "cuda"
+        if "+rocm" in v:
+            return "rocm"
+        try:
+            import torch_directml  # noqa: F401
+            return "directml"
+        except ImportError:
+            pass
+        return "cpu"
+    except Exception:
+        return "unknown"
+
+
+@app.get("/gpu/status")
+async def gpu_status():
+    def _status():
+        return {
+            "current": _current_gpu_backend(),
+            "detected": _detect_gpu_hardware(),
+            "task": dict(_gpu_task_state),
+            "python_exe": sys.executable,
+        }
+    return await asyncio.to_thread(_status)
+
+
+class GpuInstallRequest(BaseModel):
+    backend: str  # "cpu" | "cuda" | "directml"
+
+
+def _run_pip_install(args: list[str]) -> None:
+    """Run pip as a subprocess of the CURRENT venv's python and stream
+    stdout into the task state so the UI can poll /gpu/status for live
+    progress. Does NOT raise — errors are captured in the task state."""
+    import subprocess
+    _gpu_task_state["running"] = True
+    _gpu_task_state["phase"] = "installing"
+    _gpu_task_state["progress_lines"] = []
+    cmd = [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", *args]
+    _gpu_task_state["message"] = "Starting pip install..."
+    logger.info(f"GPU swap: {' '.join(cmd)}")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            creationflags=0x08000000 if os.name == "nt" else 0,  # CREATE_NO_WINDOW
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip()
+            if not line:
+                continue
+            lines = _gpu_task_state["progress_lines"]
+            lines.append(line)
+            if len(lines) > 50:
+                del lines[:-50]
+            _gpu_task_state["message"] = line[:200]
+        rc = proc.wait()
+        if rc == 0:
+            _gpu_task_state["phase"] = "complete"
+            _gpu_task_state["message"] = "Install complete. Restart the app to activate."
+        else:
+            _gpu_task_state["phase"] = "error"
+            _gpu_task_state["message"] = f"pip exited {rc}"
+    except Exception as e:
+        _gpu_task_state["phase"] = "error"
+        _gpu_task_state["message"] = f"Exception: {e}"
+        logger.exception("GPU swap failed")
+    finally:
+        _gpu_task_state["running"] = False
+
+
+@app.post("/gpu/install")
+async def gpu_install(req: GpuInstallRequest):
+    if _gpu_task_state["running"]:
+        raise HTTPException(status_code=409, detail="A GPU install is already running")
+
+    backend_id = req.backend.lower().strip()
+    if backend_id == "cpu":
+        args = [
+            "--index-url", "https://download.pytorch.org/whl/cpu",
+            "--force-reinstall", "--no-deps",
+            "torch==2.2.2", "torchaudio==2.2.2",
+        ]
+        # Also remove torch-directml if present
+        post = ["uninstall", "-y", "torch-directml"]
+    elif backend_id == "cuda":
+        args = [
+            "--index-url", "https://download.pytorch.org/whl/cu121",
+            "--force-reinstall", "--no-deps",
+            "torch==2.2.2", "torchaudio==2.2.2",
+        ]
+        post = ["uninstall", "-y", "torch-directml"]
+    elif backend_id == "directml":
+        args = ["torch-directml"]
+        post = None
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown backend '{req.backend}'. Use cpu, cuda, or directml.",
+        )
+
+    def _do():
+        _run_pip_install(args)
+        if post and _gpu_task_state["phase"] == "complete":
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "pip", *post],
+                    capture_output=True, timeout=60,
+                    creationflags=0x08000000 if os.name == "nt" else 0,
+                )
+            except Exception:
+                pass
+    threading.Thread(target=_do, daemon=True).start()
+    return {"ok": True, "backend": backend_id}
 
 
 # ── Audio devices ────────────────────────────────────────────────────

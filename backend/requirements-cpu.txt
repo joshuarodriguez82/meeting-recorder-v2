@@ -1,0 +1,21 @@
+# CPU-only dependency set for the bundled installer.
+# Install torch from the PyTorch CPU index first, then everything else.
+# Usage:
+#   python -m venv backend/.venv
+#   backend/.venv/Scripts/python -m pip install --upgrade pip
+#   backend/.venv/Scripts/python -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio
+#   backend/.venv/Scripts/python -m pip install -r backend/requirements-cpu.txt
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.0
+anthropic
+python-dotenv
+sounddevice
+soundfile
+scipy
+faster-whisper
+huggingface_hub==0.23.0
+pyannote.audio==3.3.2
+pywin32
+pyaudiowpatch
+numpy==2.1.3

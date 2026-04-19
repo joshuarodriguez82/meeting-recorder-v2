@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { api, formatBytes, type Settings } from "@/lib/api";
 import { toast } from "sonner";
 import { Loader2, Save, Trash2 } from "lucide-react";
+import { GpuAccelerationCard } from "./gpu-acceleration-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -247,6 +248,9 @@ export function SettingsView() {
           />
         </CardContent>
       </Card>
+
+      {/* GPU acceleration */}
+      <GpuAccelerationCard />
 
       {/* Retention */}
       <Card>

@@ -215,6 +215,25 @@ export const api = {
   getAudioDevices: () =>
     request<{ input: AudioDevice[]; output: AudioDevice[] }>("/audio/devices"),
 
+  // GPU acceleration
+  getGpuStatus: () => request<{
+    current: string;
+    detected: {
+      nvidia: boolean; amd: boolean; intel: boolean;
+      gpus: string[]; recommended: string;
+    };
+    task: {
+      running: boolean; phase: string; message: string;
+      progress_lines: string[];
+    };
+    python_exe: string;
+  }>("/gpu/status"),
+  installGpuBackend: (backend: "cpu" | "cuda" | "directml") =>
+    request<{ ok: boolean; backend: string }>("/gpu/install", {
+      method: "POST",
+      body: JSON.stringify({ backend }),
+    }),
+
   // Calendar
   getCalendarToday: () => request<Meeting[]>("/calendar/today"),
   getUpcomingMeetings: (hours: number = 36, refresh = false) =>

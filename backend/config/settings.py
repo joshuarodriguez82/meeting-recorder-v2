@@ -1,6 +1,11 @@
 """
 Application configuration loaded from environment variables.
 All secrets are sourced from .env — never hardcoded.
+
+For portability, config + recordings live under %APPDATA%\\MeetingRecorder
+on Windows, so the bundled backend (inside the installed app directory,
+which is read-only for non-admin users) never needs to write anywhere
+outside the user's profile.
 """
 
 import os
@@ -8,10 +13,30 @@ from pathlib import Path
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
-# Resolve .env relative to this file (backend/../.env = backend/.env)
-# This works regardless of CWD (important when the Tauri shell spawns the
-# Python sidecar — CWD might be anywhere).
-ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+
+def _user_data_dir() -> Path:
+    """%APPDATA%\\MeetingRecorder — the canonical writable directory."""
+    if os.name == "nt":
+        base = os.getenv("APPDATA") or os.getenv("USERPROFILE") or str(Path.home())
+    else:
+        base = os.getenv("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    d = Path(base) / "MeetingRecorder"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+USER_DATA_DIR = _user_data_dir()
+ENV_PATH = USER_DATA_DIR / "config.env"
+
+# Dev fallback: if config.env doesn't exist in APPDATA but backend/.env does,
+# seed APPDATA from it so existing developers don't have to reconfigure.
+_LEGACY_ENV = Path(__file__).resolve().parent.parent / ".env"
+if not ENV_PATH.exists() and _LEGACY_ENV.exists():
+    try:
+        ENV_PATH.write_text(_LEGACY_ENV.read_text(encoding="utf-8"), encoding="utf-8")
+    except Exception:
+        pass
+
 load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 
@@ -46,7 +71,11 @@ class Settings:
             hf_token=os.getenv("HF_TOKEN", ""),
             whisper_model=os.getenv("WHISPER_MODEL", "base"),
             max_speakers=int(os.getenv("MAX_SPEAKERS", "10")),
-            recordings_dir=os.getenv("RECORDINGS_DIR", "recordings"),
+            # Default recordings dir is %APPDATA%\MeetingRecorder\recordings.
+            # Users can override via RECORDINGS_DIR in config.env but shouldn't
+            # need to — the default just works on a fresh install.
+            recordings_dir=os.getenv(
+                "RECORDINGS_DIR", str(USER_DATA_DIR / "recordings")),
             email_to=os.getenv("EMAIL_TO", ""),
             claude_model=os.getenv("CLAUDE_MODEL", "claude-haiku-4-5"),
             notify_minutes_before=int(os.getenv("NOTIFY_MINUTES_BEFORE", "2")),

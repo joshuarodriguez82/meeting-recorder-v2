@@ -55,3 +55,8 @@ src-tauri/Cargo.lock.bak
 src/app/_generated/
 .commit-msg.tmp
 .release-notes.tmp
+backend-bundle.zip
+backend/python/
+backend/.venv/
+backend/recordings/
+.env
