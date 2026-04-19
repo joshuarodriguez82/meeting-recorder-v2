@@ -48,7 +48,12 @@ function parseDecisions(text: string, meta: Omit<Decision, "title" | "decided" |
   return out;
 }
 
-export function DecisionsView({ sessions }: { sessions: SessionSummary[] }) {
+interface Props {
+  sessions: SessionSummary[];
+  onOpenSession: (id: string, tab?: string) => void;
+}
+
+export function DecisionsView({ sessions, onOpenSession }: Props) {
   const [clientFilter, setClientFilter] = useState("All");
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<Decision | null>(null);
@@ -144,8 +149,16 @@ export function DecisionsView({ sessions }: { sessions: SessionSummary[] }) {
                 )}
                 {selected.owner && <Field label="Owner">{selected.owner}</Field>}
                 {selected.impact && <Field label="Impact">{selected.impact}</Field>}
-                <div className="pt-3 border-t text-xs text-muted-foreground">
-                  From <span className="font-medium text-foreground">{selected.meeting}</span> ({selected.session_date})
+                <div className="pt-3 border-t flex items-center justify-between">
+                  <div className="text-xs text-muted-foreground">
+                    From <span className="font-medium text-foreground">{selected.meeting}</span> ({selected.session_date})
+                  </div>
+                  <button
+                    onClick={() => onOpenSession(selected.session_id, "decisions")}
+                    className="text-xs text-primary hover:underline font-medium"
+                  >
+                    Open meeting →
+                  </button>
                 </div>
               </div>
             ) : (

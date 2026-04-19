@@ -53,7 +53,12 @@ function parseActionItems(text: string, meta: Omit<ActionItem, "done" | "owner" 
   return items;
 }
 
-export function FollowUpsView({ sessions }: { sessions: SessionSummary[] }) {
+interface Props {
+  sessions: SessionSummary[];
+  onOpenSession: (id: string, tab?: string) => void;
+}
+
+export function FollowUpsView({ sessions, onOpenSession }: Props) {
   const [statusFilter, setStatusFilter] = useState("Open");
   const [clientFilter, setClientFilter] = useState("All");
   const [ownerFilter, setOwnerFilter] = useState("All");
@@ -141,7 +146,11 @@ export function FollowUpsView({ sessions }: { sessions: SessionSummary[] }) {
             </p>
           ) : (
             filtered.map((i, idx) => (
-              <div key={idx} className="flex items-start gap-3 border-b last:border-b-0 p-4 hover:bg-muted/40">
+              <button
+                key={idx}
+                onClick={() => onOpenSession(i.session_id, "actions")}
+                className="w-full text-left flex items-start gap-3 border-b last:border-b-0 p-4 hover:bg-muted/40 transition-colors"
+              >
                 <span className={`mt-0.5 text-lg ${i.done ? "text-green-600" : "text-muted-foreground"}`}>
                   {i.done ? "✓" : "○"}
                 </span>
@@ -153,12 +162,12 @@ export function FollowUpsView({ sessions }: { sessions: SessionSummary[] }) {
                   </div>
                   <div className="text-xs text-muted-foreground mt-1 flex gap-2 items-center flex-wrap">
                     {i.client && <Badge variant="outline" className="text-[10px]">{i.client}</Badge>}
-                    <span>{i.meeting}</span>
+                    <span className="text-primary">{i.meeting}</span>
                     <span>·</span>
                     <span>{i.session_date}</span>
                   </div>
                 </div>
-              </div>
+              </button>
             ))
           )}
         </CardContent>

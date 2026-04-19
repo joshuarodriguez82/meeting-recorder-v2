@@ -155,6 +155,35 @@ export const api = {
   getSessionFull: (id: string) =>
     request<SessionFull>(`/sessions/${id}`),
 
+  patchSession: (id: string, patch: {
+    display_name?: string;
+    client?: string;
+    project?: string;
+    template?: string;
+  }) =>
+    request<{ ok: boolean }>(`/sessions/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+
+  bulkTag: (session_ids: string[], client?: string, project?: string) =>
+    request<{ updated: number }>("/sessions/bulk-tag", {
+      method: "POST",
+      body: JSON.stringify({ session_ids, client, project }),
+    }),
+
+  suggestTagging: (client: string, project = "") =>
+    request<{ suggestions: Array<{
+      session_id: string;
+      display_name: string;
+      started_at: string;
+      confidence: number;
+      reason: string;
+    }> }>("/clients/suggest-tagging", {
+      method: "POST",
+      body: JSON.stringify({ client, project }),
+    }),
+
   prepBrief: (subject: string, client: string, project: string) =>
     request<{ brief: string; related_count: number }>("/prep-brief", {
       method: "POST",

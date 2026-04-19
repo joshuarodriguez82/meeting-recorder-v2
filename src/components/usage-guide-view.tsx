@@ -3,11 +3,7 @@
 import { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 
-type Section = {
-  id: string;
-  title: string;
-  content: React.ReactNode;
-};
+type Section = { id: string; title: string; content: React.ReactNode };
 
 const SECTIONS: Section[] = [
   {
@@ -16,55 +12,86 @@ const SECTIONS: Section[] = [
     content: (
       <>
         <p>
-          Meeting Recorder is a local desktop tool that captures meetings, transcribes them with AI,
-          and extracts structured notes — summaries, action items, requirements, and decisions.
+          Meeting Recorder captures meetings, transcribes them with AI, and extracts structured
+          notes — summaries, action items, requirements, and decisions — all local on your machine.
         </p>
-        <p>Before you record, configure in <strong>Settings</strong>:</p>
+        <p>First-run setup in <strong>Settings</strong>:</p>
         <ul className="list-disc pl-5 space-y-1">
-          <li>API keys — Anthropic (Claude) and HuggingFace (speaker ID)</li>
-          <li>Audio devices — microphone and a loopback device for System Audio</li>
-          <li>Default email recipient (optional)</li>
+          <li>Paste your Anthropic API key and HuggingFace token</li>
+          <li>Select your microphone and a loopback device for System Audio</li>
+          <li>(Optional) Email recipient, auto-process toggles, retention policy</li>
         </ul>
         <Tip>
-          <strong>Classic Outlook required</strong> for calendar + email features. New Outlook
-          doesn&apos;t support COM automation.
+          Requires <strong>Classic Outlook</strong> for calendar + email. New Outlook blocks COM
+          automation.
         </Tip>
       </>
     ),
   },
   {
     id: "recording",
-    title: "Recording a Meeting",
+    title: "Recording",
     content: (
       <>
         <ol className="list-decimal pl-5 space-y-2">
-          <li>Pick a meeting from <strong>Today&apos;s Meetings</strong> or type a name.</li>
-          <li>Tag it with Client/Project to power Dashboard and Follow-Ups.</li>
-          <li>Pick a Template (General, Requirements, Design Review, etc.).</li>
-          <li>Choose your mic + System Audio (loopback).</li>
-          <li>Hit <strong>Start Recording</strong>.</li>
-          <li>When done, <strong>Stop</strong> — audio is saved and the session opens.</li>
+          <li>Pick a meeting from <strong>Upcoming Meetings</strong> or type a name manually.</li>
+          <li>Tag it with Client and Project (autocompletes from previously-used tags).</li>
+          <li>Pick a Template: General, Requirements Gathering, Design Review, Sprint Planning, Stakeholder Update.</li>
+          <li>Select your mic + System Audio loopback device.</li>
+          <li>Click <strong>Start Recording</strong> (bottom of the Audio Devices card).</li>
+          <li>When done, <strong>Stop</strong>. A &quot;Just Recorded&quot; card appears with an <strong>Open Session</strong> button.</li>
         </ol>
         <Warn>
-          If System Audio is set to &quot;Skip&quot; or not a loopback device, only your voice is
-          captured. The other participants won&apos;t be on the recording.
+          If System Audio is &quot;Skip&quot;, only your voice is captured — not the other participants.
+          Enable Stereo Mix in Windows Sound settings or install VB-Cable.
         </Warn>
       </>
     ),
   },
   {
-    id: "extract",
-    title: "AI Extraction",
+    id: "session-detail",
+    title: "Session Detail",
     content: (
       <>
-        <p>After recording stops, click buttons in order — or turn on <strong>Auto-Process</strong> in Settings:</p>
+        <p>
+          Clicking any session anywhere in the app (Sessions list, Follow-Ups, Decisions, Search,
+          Clients) opens its <strong>Session Detail</strong> dialog with tabs:
+        </p>
+        <ul className="list-disc pl-5 space-y-1">
+          <li><strong>Overview</strong> — edit meeting name, template, client, project tags. Run any AI extraction.</li>
+          <li><strong>Transcript</strong> — full speaker-labeled timestamped transcript.</li>
+          <li><strong>Speakers</strong> — who was detected, how many segments each spoke.</li>
+          <li><strong>Summary</strong> — AI summary tailored to the template.</li>
+          <li><strong>Actions</strong> — extracted action items (owner + task + due date).</li>
+          <li><strong>Decisions</strong> — ADR-style decision log.</li>
+          <li><strong>Requirements</strong> — FR/NFR tables.</li>
+        </ul>
+        <Tip>
+          Tabs are disabled if their content hasn&apos;t been generated yet. Go to the Overview tab and
+          click the matching AI Action button to generate it.
+        </Tip>
+      </>
+    ),
+  },
+  {
+    id: "ai-actions",
+    title: "AI Extractions",
+    content: (
+      <>
+        <p>
+          In the Session Detail <strong>Overview</strong> tab:
+        </p>
         <div className="grid grid-cols-1 gap-3 mt-3">
-          <BtnDesc emoji="⚙" name="Process" desc="Transcribes audio + identifies speakers." />
-          <BtnDesc emoji="✨" name="Summarize" desc="Template-tailored AI summary." />
-          <BtnDesc emoji="📋" name="Action Items" desc="Owner, description, due date, plus open questions." />
+          <BtnDesc emoji="⚙" name="Process" desc="Transcribes audio with Whisper + identifies speakers with Pyannote." />
+          <BtnDesc emoji="✨" name="Summarize" desc="Template-aware summary via Claude." />
+          <BtnDesc emoji="📋" name="Action Items" desc="Owner, task, due date, decisions, open questions." />
+          <BtnDesc emoji="🎯" name="Decisions" desc="ADR log: Decided, Rationale, Alternatives, Owner, Impact." />
           <BtnDesc emoji="📝" name="Requirements" desc="FR/NFR tables with priority and owner." />
-          <BtnDesc emoji="🎯" name="Decisions" desc="ADR-style decision log (Decided, Rationale, Alternatives, Owner, Impact)." />
         </div>
+        <Tip>
+          Status icons in session rows (🎤 ⚙ ✨ 📋 🎯 📝) show at a glance what&apos;s been extracted.
+          Hover any icon for a tooltip.
+        </Tip>
       </>
     ),
   },
@@ -73,14 +100,38 @@ const SECTIONS: Section[] = [
     title: "Knowledge Base",
     content: (
       <>
-        <p>Every recording becomes searchable. Use the sidebar:</p>
+        <p>Every recording becomes part of a searchable knowledge base:</p>
         <ul className="list-disc pl-5 space-y-1">
-          <li><strong>Sessions</strong> — all past recordings, bulk-process, delete.</li>
-          <li><strong>Follow-Ups</strong> — every action item filterable by owner/client/status.</li>
-          <li><strong>Decisions</strong> — auto-generated ADR log across time.</li>
-          <li><strong>Search</strong> — full-text across every transcript.</li>
-          <li><strong>Clients</strong> — per-client dashboard with stats.</li>
+          <li><strong>Sessions</strong> — full history, filter by name/client/project, bulk-process, click any row to open.</li>
+          <li><strong>Follow-Ups</strong> — all action items across every meeting. Filter by status/client/owner. Click → opens the source meeting on its Actions tab.</li>
+          <li><strong>Decisions</strong> — ADR log, click a decision to see full context. &quot;Open Meeting →&quot; to jump in.</li>
+          <li><strong>Search</strong> — type a phrase, it searches every transcript + summary + extraction. Click a result to open that session.</li>
+          <li><strong>Clients</strong> — create clients, tag meetings manually, or use <strong>AI Suggest</strong> to auto-tag similar meetings. Each client has a dashboard with stats, meetings, decisions.</li>
+          <li><strong>Prep Brief</strong> — filter by client/project, see a preview of which meetings will be used, generate a pre-meeting brief with recent context, open items, risks, discussion points.</li>
         </ul>
+      </>
+    ),
+  },
+  {
+    id: "clients",
+    title: "Clients & Tagging",
+    content: (
+      <>
+        <p>
+          Clients are a core organizational unit. Tag meetings to clients to unlock the Client
+          Dashboard, filtered Follow-Ups, and Prep Briefs.
+        </p>
+        <p><strong>Workflow:</strong></p>
+        <ol className="list-decimal pl-5 space-y-2">
+          <li>Clients tab → click <strong>+</strong> (top of the client list) to create a new client.</li>
+          <li>You&apos;ll be prompted to tag meetings. Select the ones that belong, click <strong>Apply Tag</strong>.</li>
+          <li>Use <strong>AI Suggest</strong> to let Claude scan your history and propose which meetings likely belong to this client. High-confidence ones are pre-selected.</li>
+          <li>Use <strong>Rename</strong> to rename the client across every tagged meeting at once.</li>
+        </ol>
+        <Tip>
+          You can also tag Client + Project directly in the Record view or in any session&apos;s
+          Overview tab.
+        </Tip>
       </>
     ),
   },
@@ -89,11 +140,11 @@ const SECTIONS: Section[] = [
     title: "Workflow Automation",
     content: (
       <>
-        <p>In <strong>Settings &gt; Workflow</strong>, turn the app into fire-and-forget:</p>
+        <p>In <strong>Settings &gt; Workflow</strong>:</p>
         <ul className="list-disc pl-5 space-y-1">
-          <li>Auto-process after stop</li>
-          <li>Auto-draft follow-up email to attendees</li>
-          <li>Launch on Windows startup</li>
+          <li><strong>Auto-process after stop</strong> — transcribe → summarize → action items → decisions → requirements all runs automatically when you stop recording.</li>
+          <li><strong>Auto-draft follow-up email</strong> — after processing, drafts an Outlook email to the meeting attendees with your summary, action items, and decisions.</li>
+          <li><strong>Launch on Windows startup</strong> — adds a shortcut to the Startup folder.</li>
         </ul>
       </>
     ),
@@ -104,15 +155,17 @@ const SECTIONS: Section[] = [
     content: (
       <>
         <p>
-          Meeting audio is bulky — a 1-hour meeting is ~230 MB. Over time the folder grows.
+          Audio WAV files are bulky (~230 MB per hour). Retention auto-deletes old audio while
+          keeping transcripts, summaries, and everything else forever.
         </p>
-        <p>
-          In <strong>Settings &gt; Retention</strong>, enable automatic cleanup with separate
-          thresholds for processed (default 7 days) and unprocessed (30 days) audio.
-        </p>
+        <p>Two thresholds in <strong>Settings &gt; Retention</strong>:</p>
+        <ul className="list-disc pl-5 space-y-1">
+          <li><strong>Processed audio</strong> — delete N days after transcription (default 7).</li>
+          <li><strong>Unprocessed audio</strong> — delete M days after recording (default 30).</li>
+        </ul>
         <Tip>
-          Transcripts, summaries, action items, and decisions are <strong>never</strong> deleted —
-          only the raw WAV files. Everything stays searchable.
+          Click <strong>Clean up now</strong> to run retention immediately.
+          Transcripts / summaries / action items / decisions / requirements are <strong>never</strong> deleted.
         </Tip>
       </>
     ),
@@ -123,12 +176,13 @@ const SECTIONS: Section[] = [
     content: (
       <>
         <p>
-          Default is Claude <strong>Haiku 4.5</strong> (~$1/M input + $5/M output tokens). A typical
-          meeting with all extractions costs under $0.05. Hundreds of meetings per year for a few dollars.
+          Default Claude model is <strong>Haiku 4.5</strong> (~$1/M input, $5/M output). A full
+          extraction pipeline for a typical meeting costs under $0.05. Hundreds of meetings per
+          year for a few dollars.
         </p>
         <Tip>
-          For complex design reviews where nuance matters, switch to Sonnet 4.5 in Settings.
-          ~4× the cost but higher quality.
+          For dense design reviews where nuance matters, switch to Sonnet 4.5 in Settings. ~4× the
+          cost, but higher quality. Switch back for routine meetings.
         </Tip>
       </>
     ),
@@ -142,23 +196,29 @@ const SECTIONS: Section[] = [
           <div>
             <dt className="font-medium text-sm">Only my voice was recorded</dt>
             <dd className="text-sm text-muted-foreground mt-1">
-              System Audio isn&apos;t a loopback device. Enable Stereo Mix in Windows Sound settings
-              (Recording tab &rarr; right-click &rarr; Show Disabled Devices &rarr; Enable), or install
-              VB-Cable.
+              System Audio wasn&apos;t a loopback device. Enable Stereo Mix in Windows Sound settings,
+              or install VB-Cable. Then pick it as System Audio in the Record view.
             </dd>
           </div>
           <div>
             <dt className="font-medium text-sm">Calendar shows no meetings</dt>
             <dd className="text-sm text-muted-foreground mt-1">
-              Requires Classic Outlook. Switch from New Outlook in Outlook settings.
+              Requires Classic Outlook (New Outlook doesn&apos;t support COM). Switch in Outlook settings.
             </dd>
           </div>
           <div>
             <dt className="font-medium text-sm">Models failed to load</dt>
             <dd className="text-sm text-muted-foreground mt-1">
-              Invalid HuggingFace token or you haven&apos;t accepted pyannote terms. Visit
+              Invalid HuggingFace token or un-accepted pyannote terms. Visit
               huggingface.co/pyannote/speaker-diarization-3.1 and huggingface.co/pyannote/segmentation-3.0,
-              click &quot;Agree and access repository&quot;, then restart the app.
+              click &quot;Agree and access repository&quot;, then restart.
+            </dd>
+          </div>
+          <div>
+            <dt className="font-medium text-sm">App is slow to start</dt>
+            <dd className="text-sm text-muted-foreground mt-1">
+              The backend now starts in ~2 seconds; AI models load lazily on first use (Whisper +
+              Pyannote each take a few seconds). First extraction will be slower than subsequent ones.
             </dd>
           </div>
         </dl>
@@ -195,9 +255,7 @@ export function UsageGuideView() {
       <Card>
         <CardContent className="p-8 space-y-4 prose-sm max-w-none">
           <h2 className="text-xl font-bold text-primary mb-4">{section.title}</h2>
-          <div className="space-y-3 text-sm leading-relaxed">
-            {section.content}
-          </div>
+          <div className="space-y-3 text-sm leading-relaxed">{section.content}</div>
         </CardContent>
       </Card>
     </div>
@@ -207,8 +265,7 @@ export function UsageGuideView() {
 function Tip({ children }: { children: React.ReactNode }) {
   return (
     <div className="rounded-md border border-primary/30 bg-accent/50 px-4 py-3 my-3 text-sm">
-      <span className="font-medium text-primary">💡 Tip </span>
-      {children}
+      <span className="font-medium text-primary">💡 Tip </span>{children}
     </div>
   );
 }
@@ -216,8 +273,7 @@ function Tip({ children }: { children: React.ReactNode }) {
 function Warn({ children }: { children: React.ReactNode }) {
   return (
     <div className="rounded-md border border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/40 px-4 py-3 my-3 text-sm text-amber-900 dark:text-amber-200">
-      <span className="font-medium">⚠ Note </span>
-      {children}
+      <span className="font-medium">⚠ Note </span>{children}
     </div>
   );
 }
