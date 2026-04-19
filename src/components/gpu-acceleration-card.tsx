@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Zap, Cpu, Loader2 } from "lucide-react";
+import { Zap, Cpu, Loader2, RefreshCw } from "lucide-react";
 
 type GpuStatus = Awaited<ReturnType<typeof api.getGpuStatus>>;
 
@@ -43,7 +43,15 @@ const BACKENDS: {
 export function GpuAccelerationCard() {
   const [status, setStatus] = useState<GpuStatus | null>(null);
   const [installing, setInstalling] = useState<string | null>(null);
+  // Once an install finishes, the Python process in memory still has the
+  // OLD torch imported — `current` keeps reporting the pre-install backend.
+  // Remember the target of the last successful install so we can show a
+  // "Restart required to activate X" state instead of letting the user
+  // click "Use This" again and trigger the install over and over.
+  const [pendingRestartTarget, setPendingRestartTarget] = useState<string | null>(null);
+  const [restarting, setRestarting] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastAttemptRef = useRef<string | null>(null);
 
   const load = async () => {
     try {
@@ -53,6 +61,15 @@ export function GpuAccelerationCard() {
       if (s.task.running) {
         setInstalling(s.task.phase === "installing" ? "running" : null);
       } else {
+        // Task finished. If it completed successfully and current !=
+        // what we asked for, we're in "restart required" land.
+        if (
+          s.task.phase === "complete" &&
+          lastAttemptRef.current &&
+          lastAttemptRef.current !== s.current
+        ) {
+          setPendingRestartTarget(lastAttemptRef.current);
+        }
         setInstalling(null);
       }
     } catch (e) {
@@ -84,13 +101,46 @@ export function GpuAccelerationCard() {
       toast.info(`${labelFor(backend)} is already active`);
       return;
     }
+    if (pendingRestartTarget) {
+      toast.info("An install is already complete — restart the backend to activate it.");
+      return;
+    }
     setInstalling(backend);
+    lastAttemptRef.current = backend;
     try {
       await api.installGpuBackend(backend);
-      toast.info(`Installing ${labelFor(backend)} in the background. This can take a few minutes.`);
+      toast.info(`Installing ${labelFor(backend)}. This can take a few minutes.`);
     } catch (e) {
       setInstalling(null);
+      lastAttemptRef.current = null;
       toast.error(`Install request failed: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  const restartBackend = async () => {
+    setRestarting(true);
+    try {
+      // Tauri command wired in lib.rs — kills the Python child, clears
+      // the port, spawns fresh. Python re-imports torch, picks up the
+      // newly installed flavour.
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("restart_backend");
+      // Poll /health until the new backend is serving.
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        try {
+          await api.health();
+          break;
+        } catch { /* not up yet */ }
+      }
+      setPendingRestartTarget(null);
+      lastAttemptRef.current = null;
+      await load();
+      toast.success("Backend restarted — new GPU runtime is active.");
+    } catch (e) {
+      toast.error(`Restart failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setRestarting(false);
     }
   };
 
@@ -135,12 +185,36 @@ export function GpuAccelerationCard() {
           </div>
         </div>
 
+        {/* Restart banner — shown when an install succeeded but the
+            running Python process still has the old torch imported. */}
+        {pendingRestartTarget && (
+          <div className="rounded-lg border-2 border-primary bg-primary/10 p-3 space-y-2">
+            <div className="font-medium text-sm">
+              Install complete: {labelFor(pendingRestartTarget)}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              The new runtime is on disk but the backend is still running the
+              old one. Click below to restart the backend and activate
+              <strong> {labelFor(pendingRestartTarget)}</strong>.
+            </p>
+            <Button size="sm" onClick={restartBackend} disabled={restarting}>
+              {restarting
+                ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" />
+                : <RefreshCw className="h-3.5 w-3.5 mr-2" />}
+              {restarting ? "Restarting…" : "Restart backend now"}
+            </Button>
+          </div>
+        )}
+
         {/* Backend cards */}
         <div className="space-y-2">
           {BACKENDS.map((b) => {
             const active = current === b.id;
             const recommended = detected.recommended === b.id;
             const thisInstalling = task.running && installing === b.id;
+            const isPendingTarget = pendingRestartTarget === b.id;
+            const anyInstallBlocked =
+              active || task.running || Boolean(pendingRestartTarget);
             return (
               <div
                 key={b.id}
@@ -155,7 +229,12 @@ export function GpuAccelerationCard() {
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-medium text-sm">{b.title}</span>
                       {active && <Badge variant="default" className="text-[10px]">Active</Badge>}
-                      {recommended && !active && (
+                      {isPendingTarget && (
+                        <Badge variant="outline" className="text-[10px] border-primary text-primary">
+                          Installed — restart pending
+                        </Badge>
+                      )}
+                      {recommended && !active && !isPendingTarget && (
                         <Badge variant="outline" className="text-[10px] border-primary text-primary">
                           Recommended for you
                         </Badge>
@@ -169,11 +248,14 @@ export function GpuAccelerationCard() {
                   <Button
                     size="sm"
                     variant={active ? "outline" : "default"}
-                    disabled={active || task.running}
+                    disabled={anyInstallBlocked}
                     onClick={() => install(b.id)}
                   >
                     {thisInstalling ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : null}
-                    {active ? "Active" : thisInstalling ? "Installing…" : "Use This"}
+                    {active ? "Active"
+                      : isPendingTarget ? "Pending restart"
+                      : thisInstalling ? "Installing…"
+                      : "Use This"}
                   </Button>
                 </div>
               </div>
