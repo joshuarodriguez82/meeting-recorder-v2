@@ -305,6 +305,21 @@ async def recording_status():
     )
 
 
+def _start_recording_sync(req: StartRecordingRequest):
+    session = svc.recording_svc.start_recording(
+        mic_device_index=req.mic_device_index,
+        output_device_index=req.output_device_index,
+    )
+    session.display_name = req.meeting_name or ""
+    session.template = req.template or "General"
+    session.client = req.client or ""
+    session.project = req.project or ""
+    session.attendees = req.attendees or []
+    svc.current_session = session
+    svc.record_started_at = datetime.now()
+    return session
+
+
 @app.post("/recording/start")
 async def start_recording(req: StartRecordingRequest):
     svc.load_settings()
@@ -313,21 +328,21 @@ async def start_recording(req: StartRecordingRequest):
     if svc.recording_svc.is_recording:
         raise HTTPException(status_code=409, detail="Already recording")
     try:
-        session = svc.recording_svc.start_recording(
-            mic_device_index=req.mic_device_index,
-            output_device_index=req.output_device_index,
-        )
-        session.display_name = req.meeting_name or ""
-        session.template = req.template or "General"
-        session.client = req.client or ""
-        session.project = req.project or ""
-        session.attendees = req.attendees or []
-        svc.current_session = session
-        svc.record_started_at = datetime.now()
+        # start_recording can take a couple seconds opening audio streams —
+        # run off the event loop so /recording/status stays responsive
+        session = await asyncio.to_thread(_start_recording_sync, req)
         return {"session_id": session.session_id}
     except Exception as e:
         logger.exception("Start recording failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _stop_recording_sync():
+    session = svc.recording_svc.stop_recording()
+    if session:
+        svc.current_session = session
+        svc.session_svc.save(session)
+    return session
 
 
 @app.post("/recording/stop")
@@ -336,11 +351,13 @@ async def stop_recording():
     if not svc.recording_svc or not svc.recording_svc.is_recording:
         raise HTTPException(status_code=409, detail="Not recording")
     try:
-        session = svc.recording_svc.stop_recording()
-        svc.record_started_at = None
+        # stop_recording closes streams, re-reads WAV, resamples, mixes
+        # loopback audio, and saves the final file. Can take 10-30s for
+        # long meetings. Must run off the event loop or polling from the
+        # frontend gets blocked and fetch() eventually gives up.
+        svc.record_started_at = None  # set immediately so status reflects stopped
+        session = await asyncio.to_thread(_stop_recording_sync)
         if session:
-            svc.current_session = session
-            svc.session_svc.save(session)
             return {"session_id": session.session_id, "audio_path": session.audio_path}
         raise HTTPException(status_code=500, detail="Stop returned no session")
     except Exception as e:
@@ -403,7 +420,7 @@ class BulkTagRequest(BaseModel):
     project: Optional[str] = None
 
 
-@app.post("/sessions/bulk-tag")
+@app.post("/tags/apply")
 async def bulk_tag_sessions(req: BulkTagRequest):
     """Apply client and/or project tags to multiple sessions at once."""
     svc.load_settings()
@@ -515,15 +532,16 @@ async def suggest_tagging(req: SuggestTaggingRequest):
 @app.post("/sessions/{session_id}/process")
 async def process_session(session_id: str):
     svc.load_settings()
-    svc.ensure_models_loaded()
-    session = svc.session_svc.load_full(session_id)
+    # ensure_models_loaded is blocking (imports torch etc.) — thread it
+    await asyncio.to_thread(svc.ensure_models_loaded)
+    session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     svc.recording_svc.set_session(session)
     svc.current_session = session
     try:
         result = await svc.recording_svc.process_session()
-        svc.session_svc.save(result)
+        await asyncio.to_thread(svc.session_svc.save, result)
         return {"ok": True, "segments": len(result.segments),
                 "speakers": len(result.speakers)}
     except Exception as e:
@@ -537,7 +555,7 @@ async def _run_extraction(session_id: str, extractor_name: str, field_name: str,
     if not svc.summarizer:
         raise HTTPException(status_code=400,
                             detail="Anthropic API key required")
-    session = svc.session_svc.load_full(session_id)
+    session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     if not session.segments:
@@ -551,10 +569,10 @@ async def _run_extraction(session_id: str, extractor_name: str, field_name: str,
         else:
             result = await method(transcript)
         setattr(session, field_name, result)
-        svc.session_svc.save(session)
+        await asyncio.to_thread(svc.session_svc.save, session)
         try:
             export_fn = getattr(svc.export_svc, export_fn_name)
-            export_fn(session)
+            await asyncio.to_thread(export_fn, session)
         except Exception as ex:
             logger.warning(f"Export failed: {ex}")
         return {"ok": True, field_name: result}
@@ -572,7 +590,7 @@ async def summarize_session(session_id: str, req: TemplateRequest):
     svc.load_settings()
     if not svc.summarizer:
         raise HTTPException(status_code=400, detail="Anthropic API key required")
-    session = svc.session_svc.load_full(session_id)
+    session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
     if not session or not session.segments:
         raise HTTPException(status_code=400, detail="Session has no transcript")
     try:
@@ -580,9 +598,9 @@ async def summarize_session(session_id: str, req: TemplateRequest):
                                                   template=req.template)
         session.summary = result
         session.template = req.template
-        svc.session_svc.save(session)
+        await asyncio.to_thread(svc.session_svc.save, session)
         try:
-            svc.export_svc.export_summary(session)
+            await asyncio.to_thread(svc.export_svc.export_summary, session)
         except Exception:
             pass
         return {"ok": True, "summary": result}

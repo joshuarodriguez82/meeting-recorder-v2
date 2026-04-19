@@ -59,7 +59,7 @@ export function SessionDetailDialog({
   useEffect(() => {
     if (!open || !sessionId) return;
     setLoading(true);
-    setTab(initialTab);
+    setSession(null);
     api.getSessionFull(sessionId)
       .then((s) => {
         setSession(s);
@@ -71,7 +71,14 @@ export function SessionDetailDialog({
       })
       .catch((e) => toast.error(`Could not load session: ${e}`))
       .finally(() => setLoading(false));
-  }, [sessionId, open, initialTab]);
+    // Only refetch when session id changes or dialog opens — NOT on tab changes
+
+  }, [sessionId, open]);
+
+  useEffect(() => {
+    // Sync tab selection when caller changes initialTab while dialog is open
+    if (open) setTab(initialTab);
+  }, [initialTab, open]);
 
   const reload = async () => {
     if (!sessionId) return;
@@ -154,7 +161,7 @@ export function SessionDetailDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-5xl max-h-[85vh] flex flex-col p-0 gap-0">
+      <DialogContent className="sm:max-w-5xl w-[95vw] h-[85vh] flex flex-col p-0 gap-0">
         <DialogHeader className="px-6 py-4 border-b">
           <DialogTitle className="text-lg">
             {loading ? <Loader2 className="h-5 w-5 animate-spin inline" />
