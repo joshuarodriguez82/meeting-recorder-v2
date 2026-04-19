@@ -18,6 +18,28 @@ os.chdir(Path(__file__).resolve().parent)
 # import cleanly even if launched with an odd CWD.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# Compatibility patches needed before importing pyannote/torch:
+#   - NumPy 2.0 removed np.NaN (pyannote uses it)
+#   - PyTorch 2.6 changed torch.load default to weights_only=True (pyannote breaks)
+import numpy as _np
+if not hasattr(_np, 'NaN'):
+    _np.NaN = _np.nan
+if not hasattr(_np, 'NAN'):
+    _np.NAN = _np.nan
+
+try:
+    import torch as _torch
+    from torch.torch_version import TorchVersion as _TorchVersion
+    _torch.serialization.add_safe_globals([_TorchVersion])
+    _orig_torch_load = _torch.load
+    def _patched_torch_load(f, *args, **kwargs):
+        kwargs['weights_only'] = False
+        return _orig_torch_load(f, *args, **kwargs)
+    _torch.load = _patched_torch_load
+except Exception:
+    # torch not installed or can't patch — will fail later with clearer msg
+    pass
+
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware

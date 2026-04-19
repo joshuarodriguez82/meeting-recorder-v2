@@ -112,20 +112,62 @@ class AudioCapture:
             if self._mic_idx is not None:
                 dev_info = sd.query_devices(self._mic_idx)
                 native_sr = int(dev_info["default_samplerate"])
-                channels = min(2, int(dev_info["max_input_channels"]))
+                max_ch = int(dev_info["max_input_channels"])
+                channels = min(2, max_ch)
                 self.actual_sr = native_sr
-                logger.info(f"Mic device: {dev_info['name']}, sr={native_sr}, ch={channels}")
-                mic_stream = sd.InputStream(
-                    device=self._mic_idx,
-                    channels=channels,
-                    samplerate=native_sr,
-                    blocksize=BLOCK_SIZE,
-                    dtype="float32",
-                    callback=self._mic_callback,
-                )
-                mic_stream.start()
+                api_name = sd.query_hostapis(dev_info["hostapi"])["name"]
+                logger.info(
+                    f"Mic device: [{self._mic_idx}] {dev_info['name']} | "
+                    f"api={api_name} ch={channels}/{max_ch} sr={native_sr}")
+
+                # Try multiple configurations — some drivers reject
+                # our preferred blocksize or sample rate combination.
+                attempts = [
+                    # Most compatible first: let driver pick blocksize + high latency
+                    dict(samplerate=native_sr, blocksize=0, latency="high"),
+                    # Try low latency with default blocksize
+                    dict(samplerate=native_sr, blocksize=0, latency="low"),
+                    # Try our BLOCK_SIZE
+                    dict(samplerate=native_sr, blocksize=BLOCK_SIZE, latency="high"),
+                    # Try 16kHz fallback (widely supported, matches target)
+                    dict(samplerate=16000, blocksize=0, latency="high"),
+                    # Try 44100 fallback
+                    dict(samplerate=44100, blocksize=0, latency="high"),
+                ]
+
+                mic_stream = None
+                last_err = None
+                for i, cfg in enumerate(attempts):
+                    try:
+                        logger.info(f"  Mic attempt {i+1}: {cfg}")
+                        mic_stream = sd.InputStream(
+                            device=self._mic_idx,
+                            channels=channels,
+                            samplerate=cfg["samplerate"],
+                            blocksize=cfg["blocksize"],
+                            latency=cfg["latency"],
+                            dtype="float32",
+                            callback=self._mic_callback,
+                        )
+                        mic_stream.start()
+                        self.actual_sr = cfg["samplerate"]
+                        logger.info(
+                            f"  ✓ Mic stream opened: sr={cfg['samplerate']}Hz "
+                            f"ch={channels} latency={cfg['latency']} "
+                            f"blocksize={cfg['blocksize']}")
+                        break
+                    except Exception as e:
+                        last_err = e
+                        logger.warning(f"  ✗ Attempt {i+1} failed: {e}")
+                        continue
+
+                if mic_stream is None:
+                    raise RuntimeError(
+                        f"All mic configurations failed. Last error: {last_err}. "
+                        f"The device may be in use by another app, disconnected, "
+                        f"or driver may need a restart. Try selecting a different mic.")
+
                 self._streams.append(mic_stream)
-                logger.info(f"Mic stream started at {native_sr}Hz, {channels}ch")
 
             if self._out_idx is not None:
                 try:
@@ -134,22 +176,39 @@ class AudioCapture:
                     self._loopback_channels = int(dev_info["maxInputChannels"])
                     self._loopback_sr = int(dev_info["defaultSampleRate"])
                     logger.info(
-                        f"System audio (WASAPI loopback): {dev_info['name']}, "
-                        f"sr={self._loopback_sr}, ch={self._loopback_channels}")
+                        f"Loopback device: [{self._out_idx}] {dev_info['name']} "
+                        f"ch={self._loopback_channels} sr={self._loopback_sr}")
 
-                    self._pa_stream = self._pa.open(
-                        format=pyaudio.paFloat32,
-                        channels=self._loopback_channels,
-                        rate=self._loopback_sr,
-                        input=True,
-                        input_device_index=self._out_idx,
-                        frames_per_buffer=BLOCK_SIZE,
-                    )
-                    # Use a dedicated thread for blocking reads (more reliable than callbacks)
+                    # Try different buffer sizes — some drivers are picky
+                    buffer_attempts = [0, 1024, 4096, 2048]
+                    opened = False
+                    last_err = None
+                    for buf in buffer_attempts:
+                        try:
+                            logger.info(f"  Loopback attempt buffer={buf}")
+                            self._pa_stream = self._pa.open(
+                                format=pyaudio.paFloat32,
+                                channels=self._loopback_channels,
+                                rate=self._loopback_sr,
+                                input=True,
+                                input_device_index=self._out_idx,
+                                frames_per_buffer=buf if buf else 1024,
+                            )
+                            opened = True
+                            logger.info(f"  ✓ Loopback opened with buffer={buf}")
+                            break
+                        except Exception as e:
+                            last_err = e
+                            logger.warning(f"  ✗ Loopback buffer={buf} failed: {e}")
+                            continue
+                    if not opened:
+                        raise last_err or RuntimeError("No working loopback config")
+
+                    # Use a dedicated thread for blocking reads
                     self._loopback_thread = threading.Thread(
                         target=self._loopback_reader, daemon=True)
                     self._loopback_thread.start()
-                    logger.info(f"System audio stream started at {self._loopback_sr}Hz, {self._loopback_channels}ch")
+                    logger.info(f"System audio stream started")
                 except Exception as e:
                     logger.warning(f"System audio capture unavailable: {e}. Mic only.")
                     self._out_idx = None
