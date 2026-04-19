@@ -27,6 +27,13 @@ _cache: dict = {}  # key -> (expires_epoch, result)
 # not two. _inflight[key] -> Event that's set when the result is cached.
 _inflight: dict = {}
 
+# Outlook COM under STA (single-threaded apartment) does not tolerate
+# concurrent access from multiple Python threads — calls can hang for
+# minutes waiting on the other thread's message pump. We serialize every
+# Outlook interaction behind this lock. Each fetch is fast (<1s) so the
+# serialization cost is trivial.
+_OUTLOOK_LOCK = threading.Lock()
+
 # Folders to skip entirely — these never have meetings the user cares
 # about but are slow to enumerate via Exchange. Matched case-insensitively
 # as a substring against the folder / store name.
@@ -372,17 +379,30 @@ def get_upcoming_meetings(hours_ahead: int = 36) -> List[dict]:
             are_owner = True
     if not are_owner:
         logger.info(f"Calendar fetch in progress, waiting ({hours_ahead}h)")
-        wait_event.wait(timeout=120)
+        # Short wait — if the in-flight fetch is wedged, we'd rather return
+        # [] and let the UI retry than hang the HTTP request. Normal fetch
+        # takes <1s; 10s is plenty of slack for Exchange latency.
+        wait_event.wait(timeout=10)
         cached = _cache_get(cache_key)
         return cached if cached is not None else []
 
     t0 = time.time()
+    # Serialize ALL Outlook COM access. STA + concurrent python threads = hangs.
+    lock_acquired = _OUTLOOK_LOCK.acquire(timeout=60)
+    if not lock_acquired:
+        logger.warning("Timed out waiting for Outlook lock — another fetch is stuck")
+        with _CACHE_LOCK:
+            _inflight.pop(cache_key, None)
+        wait_event.set()
+        return []
+
     outlook = _get_outlook()
     if not outlook:
         _cache_put(cache_key, [], ttl=30)  # also cache the miss briefly
         with _CACHE_LOCK:
             _inflight.pop(cache_key, None)
         wait_event.set()
+        _OUTLOOK_LOCK.release()
         return []
 
     try:
@@ -483,6 +503,10 @@ def get_upcoming_meetings(hours_ahead: int = 36) -> List[dict]:
         with _CACHE_LOCK:
             _inflight.pop(cache_key, None)
         wait_event.set()
+        try:
+            _OUTLOOK_LOCK.release()
+        except RuntimeError:
+            pass  # not held on early-return paths
 
 
 def _scan_folder_recursively_range(
