@@ -4,6 +4,28 @@ use tauri::Manager;
 
 struct BackendProcess(Mutex<Option<Child>>);
 
+/// Locations to check for the Python venv (in priority order).
+/// Single-user tool — first existing path wins.
+const VENV_CANDIDATES: &[&str] = &[
+    r"C:\meeting_recorder\.venv\Scripts\pythonw.exe",
+    r"C:\meeting-recorder-v2\backend\.venv\Scripts\pythonw.exe",
+];
+
+const SERVER_CANDIDATES: &[&str] = &[
+    r"C:\meeting-recorder-v2\backend\server.py",
+    r".\backend\server.py",
+];
+
+fn find_first_existing(candidates: &[&str]) -> Option<std::path::PathBuf> {
+    for c in candidates {
+        let p = std::path::PathBuf::from(c);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let backend = BackendProcess(Mutex::new(None));
@@ -18,12 +40,14 @@ pub fn run() {
                         .build(),
                 )?;
             }
-            spawn_python_backend(app.handle())?;
+            match spawn_python_backend(app.handle()) {
+                Ok(_) => log::info!("Python backend sidecar started"),
+                Err(e) => log::error!("Backend startup failed: {}", e),
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
-                // Kill the Python sidecar when the app closes
                 if let Some(state) = window.try_state::<BackendProcess>() {
                     if let Ok(mut guard) = state.0.lock() {
                         if let Some(mut child) = guard.take() {
@@ -38,24 +62,16 @@ pub fn run() {
 }
 
 fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    // Dev: point to the existing venv's python.exe for fast iteration
-    // Prod: expect a bundled pythonw.exe under resources/python/
-    let python_exe = if cfg!(debug_assertions) {
-        std::path::PathBuf::from(r"C:\meeting_recorder\.venv\Scripts\python.exe")
-    } else {
-        let resource_dir = app.path().resource_dir()?;
-        resource_dir.join("python").join("pythonw.exe")
-    };
+    let python_exe = find_first_existing(VENV_CANDIDATES)
+        .ok_or("Could not find Python venv (checked v1 and v2 backend venvs)")?;
+    let server_py = find_first_existing(SERVER_CANDIDATES)
+        .ok_or("Could not find backend/server.py")?;
 
-    let server_py = if cfg!(debug_assertions) {
-        std::path::PathBuf::from(r"C:\meeting-recorder-v2\backend\server.py")
-    } else {
-        let resource_dir = app.path().resource_dir()?;
-        resource_dir.join("backend").join("server.py")
-    };
+    log::info!("Spawning Python: {} {}",
+               python_exe.display(), server_py.display());
 
-    let child = Command::new(python_exe)
-        .arg(server_py)
+    let child = Command::new(&python_exe)
+        .arg(&server_py)
         .spawn()
         .map_err(|e| {
             log::error!("Failed to start Python backend: {}", e);
@@ -65,7 +81,5 @@ fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
     if let Some(state) = app.try_state::<BackendProcess>() {
         *state.0.lock().unwrap() = Some(child);
     }
-
-    log::info!("Python backend sidecar started");
     Ok(())
 }

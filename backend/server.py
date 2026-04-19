@@ -5,8 +5,18 @@ Exposes the Python services as HTTP endpoints.
 
 import asyncio
 import logging
+import os
+import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
+
+# Set CWD to this file's directory so relative paths (like "recordings/")
+# resolve consistently regardless of how the server was launched.
+os.chdir(Path(__file__).resolve().parent)
+# Also ensure backend dir is on sys.path so `config`, `services`, etc.
+# import cleanly even if launched with an odd CWD.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
