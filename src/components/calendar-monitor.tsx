@@ -52,10 +52,11 @@ export function CalendarMonitor({ enabled, minutesBefore, onStart }: Props) {
       }
     };
 
-    // Kick off an immediate check, then every 60s
-    check();
+    // Wait 2 minutes before first check (avoid piling on with the
+    // Record view's startup calendar fetch), then poll every 60s.
+    const firstCheck = setTimeout(check, 120000);
     const id = setInterval(check, 60000);
-    return () => clearInterval(id);
+    return () => { clearTimeout(firstCheck); clearInterval(id); };
   }, [enabled, minutesBefore, onStart]);
 
   return null;
