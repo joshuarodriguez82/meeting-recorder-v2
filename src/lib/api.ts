@@ -75,8 +75,89 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
+export interface RecordingStatus {
+  is_recording: boolean;
+  session_id: string | null;
+  started_at: string | null;
+  duration_s: number;
+  models_ready: boolean;
+  models_loading: boolean;
+  models_error: string | null;
+}
+
+export interface SessionFull {
+  session_id: string;
+  display_name: string;
+  started_at: string | null;
+  ended_at: string | null;
+  audio_path: string | null;
+  summary: string | null;
+  action_items: string | null;
+  requirements: string | null;
+  decisions: string | null;
+  template: string;
+  client: string;
+  project: string;
+  attendees: string[];
+  segments: Array<{ speaker_id: string; start: number; end: number; text: string }>;
+  speakers: Record<string, { speaker_id: string; display_name: string }>;
+}
+
 export const api = {
   health: () => request<{ status: string; version: string }>("/health"),
+  getTemplates: () => request<string[]>("/templates"),
+
+  // Recording
+  recordingStatus: () => request<RecordingStatus>("/recording/status"),
+  startRecording: (body: {
+    mic_device_index: number | null;
+    output_device_index: number | null;
+    meeting_name: string;
+    template: string;
+    client: string;
+    project: string;
+    attendees: string[];
+  }) =>
+    request<{ session_id: string }>("/recording/start", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  stopRecording: () =>
+    request<{ session_id: string; audio_path: string }>("/recording/stop", {
+      method: "POST",
+    }),
+  loadModels: () =>
+    request<{ loading: boolean }>("/models/load", { method: "POST" }),
+
+  // AI extraction
+  processSession: (id: string) =>
+    request<{ ok: boolean; segments: number; speakers: number }>(
+      `/sessions/${id}/process`, { method: "POST" }
+    ),
+  summarize: (id: string, template: string) =>
+    request<{ ok: boolean; summary: string }>(
+      `/sessions/${id}/summarize`,
+      { method: "POST", body: JSON.stringify({ template }) }
+    ),
+  actionItems: (id: string) =>
+    request<{ ok: boolean; action_items: string }>(
+      `/sessions/${id}/action-items`, { method: "POST" }
+    ),
+  requirements: (id: string) =>
+    request<{ ok: boolean; requirements: string }>(
+      `/sessions/${id}/requirements`, { method: "POST" }
+    ),
+  decisions: (id: string) =>
+    request<{ ok: boolean; decisions: string }>(
+      `/sessions/${id}/decisions`, { method: "POST" }
+    ),
+
+  getSessionFull: (id: string) =>
+    request<SessionFull>(`/sessions/${id}`),
+
+
+  getSessionRaw: (id: string) =>
+    request<Record<string, unknown>>(`/sessions/${id}`),
 
   // Settings
   getSettings: () => request<Settings>("/settings"),
@@ -97,7 +178,6 @@ export const api = {
 
   // Sessions
   listSessions: () => request<SessionSummary[]>("/sessions"),
-  getSession: (id: string) => request<Record<string, unknown>>(`/sessions/${id}`),
   deleteSession: (id: string) =>
     request<{ ok: boolean }>(`/sessions/${id}`, { method: "DELETE" }),
 
