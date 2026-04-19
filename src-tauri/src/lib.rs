@@ -10,23 +10,154 @@ struct BackendProcess(Mutex<Option<Child>>);
 
 const BACKEND_PORT: u16 = 17645;
 
-/// Locations to check for the Python venv (in priority order).
-const VENV_CANDIDATES: &[&str] = &[
-    r"C:\meeting-recorder-v2\backend\.venv\Scripts\pythonw.exe",
-    r"C:\meeting-recorder-v2\backend\.venv\Scripts\python.exe",
-    r"C:\meeting_recorder\.venv\Scripts\pythonw.exe",
-    r"C:\meeting_recorder\.venv\Scripts\python.exe",
-];
+/// Where the backend zip is installed on disk by Tauri.
+fn resolve_bundle_zip() -> Option<std::path::PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            // Tauri installs resources alongside the exe by default; check
+            // a few conventional subdirs just to be safe across bundler
+            // versions (wix / nsis / portable).
+            let candidates = [
+                dir.join("resources").join("backend-bundle.zip"),
+                dir.join("backend-bundle.zip"),
+                dir.join("resources").join("_up_").join("backend-bundle.zip"),
+            ];
+            for c in &candidates {
+                if c.exists() {
+                    return Some(c.clone());
+                }
+            }
+        }
+    }
+    // Dev checkout
+    let dev = std::path::PathBuf::from(r"C:\meeting-recorder-v2\backend-bundle.zip");
+    if dev.exists() {
+        return Some(dev);
+    }
+    None
+}
 
-const SERVER_CANDIDATES: &[&str] = &[
-    r"C:\meeting-recorder-v2\backend\server.py",
-];
+/// Where the extracted runtime lives per-user. Writable, survives app
+/// updates, cleaned up only if the user explicitly removes %APPDATA%.
+fn runtime_dir() -> std::path::PathBuf {
+    let base = std::env::var("LOCALAPPDATA")
+        .or_else(|_| std::env::var("APPDATA"))
+        .unwrap_or_else(|_| std::env::var("USERPROFILE").unwrap_or_default());
+    let d = std::path::PathBuf::from(base).join("MeetingRecorder").join("runtime");
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
 
-fn find_first_existing(candidates: &[&str]) -> Option<std::path::PathBuf> {
-    for c in candidates {
-        let p = std::path::PathBuf::from(c);
-        if p.exists() {
-            return Some(p);
+/// Hash of the bundled zip — written to a `.version` file next to the
+/// extracted runtime so app updates trigger a re-extract.
+fn zip_version(zip_path: &std::path::Path) -> String {
+    if let Ok(meta) = std::fs::metadata(zip_path) {
+        let len = meta.len();
+        let mtime = meta.modified().ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs()).unwrap_or(0);
+        return format!("{}-{}", len, mtime);
+    }
+    "unknown".to_string()
+}
+
+/// Extract the bundled backend zip into the per-user runtime directory
+/// if it doesn't already exist or if the bundled version changed.
+/// Uses the Windows built-in `tar.exe` (BSD libarchive, ships in 10+).
+fn ensure_runtime_extracted(zip_path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let runtime = runtime_dir();
+    let version_file = runtime.join(".version");
+    let server_py = runtime.join("server.py");
+    let expected_version = zip_version(zip_path);
+
+    let needs_extract = if !server_py.exists() {
+        rlog("Runtime not yet extracted");
+        true
+    } else {
+        let current = std::fs::read_to_string(&version_file).unwrap_or_default();
+        if current != expected_version {
+            rlog(&format!("Runtime version mismatch (have {}, need {}) — re-extracting",
+                current, expected_version));
+            true
+        } else {
+            false
+        }
+    };
+
+    if needs_extract {
+        // Clean slate — remove old runtime so stale .pyc files don't linger.
+        let _ = std::fs::remove_dir_all(&runtime);
+        std::fs::create_dir_all(&runtime).map_err(|e| format!("mkdir runtime: {}", e))?;
+        rlog(&format!("Extracting {} -> {}", zip_path.display(), runtime.display()));
+        let t0 = std::time::Instant::now();
+        let status = Command::new("tar")
+            .arg("-xf").arg(zip_path)
+            .arg("-C").arg(&runtime)
+            .stdout(Stdio::null()).stderr(Stdio::null())
+            .status()
+            .map_err(|e| format!("tar.exe failed to run: {}. Is Windows 10+?", e))?;
+        if !status.success() {
+            return Err(format!("tar exited with {}", status));
+        }
+        std::fs::write(&version_file, &expected_version)
+            .map_err(|e| format!("writing .version: {}", e))?;
+        rlog(&format!("Extracted in {:.1}s", t0.elapsed().as_secs_f32()));
+    }
+
+    Ok(runtime)
+}
+
+/// Resolve the installed backend directory: prefer the extracted runtime
+/// when a bundle zip is present; fall back to the dev checkout.
+fn resolve_backend_dir() -> Option<std::path::PathBuf> {
+    if let Some(zip) = resolve_bundle_zip() {
+        match ensure_runtime_extracted(&zip) {
+            Ok(d) => {
+                if d.join("server.py").exists() {
+                    return Some(d);
+                }
+                rlog("Extraction ran but server.py not found — bundle may be corrupted");
+            }
+            Err(e) => rlog(&format!("Runtime extract failed: {}", e)),
+        }
+    }
+    // Dev fallback — git checkout that already has backend/server.py
+    let dev = std::path::PathBuf::from(r"C:\meeting-recorder-v2\backend");
+    if dev.join("server.py").exists() {
+        return Some(dev);
+    }
+    None
+}
+
+/// Locate pythonw.exe inside the extracted runtime or dev venv.
+fn resolve_python(backend_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    // Production: embeddable Python at backend/python/
+    let embed = [
+        backend_dir.join("python").join("pythonw.exe"),
+        backend_dir.join("python").join("python.exe"),
+    ];
+    for c in &embed {
+        if c.exists() {
+            return Some(c.clone());
+        }
+    }
+    // Dev: venv
+    let venv = [
+        backend_dir.join(".venv").join("Scripts").join("pythonw.exe"),
+        backend_dir.join(".venv").join("Scripts").join("python.exe"),
+    ];
+    for c in &venv {
+        if c.exists() {
+            return Some(c.clone());
+        }
+    }
+    // Legacy
+    let legacy = [
+        std::path::PathBuf::from(r"C:\meeting_recorder\.venv\Scripts\pythonw.exe"),
+    ];
+    for c in &legacy {
+        if c.exists() {
+            return Some(c.clone());
         }
     }
     None
@@ -143,14 +274,15 @@ fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let python_exe = find_first_existing(VENV_CANDIDATES)
-        .ok_or("Could not find Python venv. Checked:\n  \
-                C:\\meeting-recorder-v2\\backend\\.venv\\Scripts\\pythonw.exe\n  \
-                C:\\meeting_recorder\\.venv\\Scripts\\pythonw.exe\n\
-                Run `python setup.py` in the meeting-recorder-v2 folder.")?;
-    let server_py = find_first_existing(SERVER_CANDIDATES)
-        .ok_or("Could not find backend/server.py at C:\\meeting-recorder-v2\\backend\\server.py")?;
+    let backend_dir = resolve_backend_dir().ok_or(
+        "Could not find bundled backend/ directory. The installer may be \
+         corrupted; reinstall from Releases.")?;
+    let server_py = backend_dir.join("server.py");
+    let python_exe = resolve_python(&backend_dir).ok_or(
+        "Could not find Python venv inside the installed backend. The \
+         installer may be corrupted; reinstall from Releases.")?;
 
+    rlog(&format!("Backend dir: {}", backend_dir.display()));
     rlog(&format!("Spawning Python: {}", python_exe.display()));
     rlog(&format!("  server.py: {}", server_py.display()));
     rlog(&format!("  backend.log: {}", backend_log_path().display()));
