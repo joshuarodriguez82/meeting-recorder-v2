@@ -183,7 +183,7 @@ export default function Home() {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-6">
+        <div className="flex-1 overflow-y-auto p-8">
           {nav === "record" && <RecordView onSessionsChanged={reloadSessions} />}
           {nav === "sessions" && <SessionsView sessions={sessions} onReload={reloadSessions} onOpenSession={() => {}} />}
           {nav === "follow-ups" && <FollowUpsView sessions={sessions} />}
