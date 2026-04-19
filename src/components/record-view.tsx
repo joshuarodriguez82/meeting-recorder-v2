@@ -214,7 +214,9 @@ export function RecordView({ onSessionsChanged, onOpenSession }: Props) {
   const refreshCal = async () => {
     setLoadingCal(true);
     try {
-      const cal = await api.getUpcomingMeetings(36);
+      // User-initiated refresh always bypasses the 5-minute cache so a
+      // meeting that was just added in Outlook shows up immediately.
+      const cal = await api.getUpcomingMeetings(36, true);
       setMeetings(cal);
       toast.success(`Loaded ${cal.length} upcoming meetings`);
     } catch (e) {

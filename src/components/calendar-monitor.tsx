@@ -21,9 +21,14 @@ export function CalendarMonitor({ enabled, minutesBefore, onStart }: Props) {
   useEffect(() => {
     if (!enabled || minutesBefore <= 0) return;
 
+    let firstRun = true;
     const check = async () => {
       try {
-        const meetings = await api.getUpcomingMeetings(24);
+        // First poll after launch bypasses the backend's 5-min cache
+        // (the pre-warm may have populated it before the user added a
+        // meeting in Outlook). Subsequent polls use the cache.
+        const meetings = await api.getUpcomingMeetings(24, firstRun);
+        firstRun = false;
         const now = Date.now();
         for (const m of meetings) {
           const key = `${m.subject}|${m.start}`;
@@ -52,10 +57,12 @@ export function CalendarMonitor({ enabled, minutesBefore, onStart }: Props) {
       }
     };
 
-    // Wait 2 minutes before first check (avoid piling on with the
-    // Record view's startup calendar fetch), then poll every 60s.
-    const firstCheck = setTimeout(check, 120000);
-    const id = setInterval(check, 60000);
+    // First check ~10s after mount — backend pre-warm finishes in 1-2s
+    // and we want the user to get a notification quickly for meetings
+    // they just added in Outlook. Then poll every 30s so freshly-added
+    // meetings get picked up within half a minute.
+    const firstCheck = setTimeout(check, 10000);
+    const id = setInterval(check, 30000);
     return () => { clearTimeout(firstCheck); clearInterval(id); };
   }, [enabled, minutesBefore, onStart]);
 

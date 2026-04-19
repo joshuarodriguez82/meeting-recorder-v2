@@ -279,12 +279,18 @@ async def get_calendar_today():
 
 
 @app.get("/calendar/upcoming")
-async def get_calendar_upcoming(hours: int = 36):
+async def get_calendar_upcoming(hours: int = 36, refresh: bool = False):
     """
     Meetings from now through N hours ahead.
     Default 36h covers the rest of today + all of tomorrow.
+    Pass refresh=true to bypass the 5-minute cache (triggered by the
+    Refresh button in the UI when the user added a meeting in Outlook
+    and needs it reflected immediately).
     """
     try:
+        if refresh:
+            from services.calendar_service import invalidate_calendar_cache
+            invalidate_calendar_cache()
         # Outlook COM is blocking. MUST run off the event loop or every
         # other endpoint stalls until this returns.
         meetings = await asyncio.to_thread(get_upcoming_meetings, hours)

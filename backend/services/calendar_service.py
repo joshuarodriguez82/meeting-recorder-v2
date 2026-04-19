@@ -123,16 +123,8 @@ def _get_outlook(retries: int = 3, delay: float = 1.0):
 def _parse_appointment(item, today: datetime.date) -> Optional[dict]:
     """Extract meeting info from an Outlook AppointmentItem."""
     try:
-        start = item.Start       # pywin32 returns timezone-aware local datetime
-        end = item.End
-
-        # Convert pywin32 datetime to a naive local datetime we can compare
-        start_local = datetime.datetime(
-            start.year, start.month, start.day,
-            start.hour, start.minute, start.second)
-        end_local = datetime.datetime(
-            end.year, end.month, end.day,
-            end.hour, end.minute, end.second)
+        start_local = _to_local_naive(item.Start)
+        end_local = _to_local_naive(item.End)
 
         if start_local.date() != today:
             return None
@@ -216,17 +208,26 @@ def _read_appointments_range(
     return meetings
 
 
+def _to_local_naive(dt) -> datetime.datetime:
+    """
+    Convert an Outlook COM datetime (pywintypes.datetime) to a naive
+    local datetime.
+
+    IMPORTANT: pywin32 on Windows stamps the tzinfo as UTC on
+    pywintypes.datetime objects, but the numeric field values are
+    actually already in LOCAL time (what Outlook displays). Calling
+    astimezone() shifts them a second time, which caused 4:40 PM
+    meetings to appear as 11:40 AM. Trust the raw fields instead.
+    """
+    return datetime.datetime(
+        dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second)
+
+
 def _parse_appointment_any_date(item, start_date, end_date):
     """Same as _parse_appointment but accepts any date in [start_date, end_date]."""
     try:
-        start = item.Start
-        end = item.End
-        start_local = datetime.datetime(
-            start.year, start.month, start.day,
-            start.hour, start.minute, start.second)
-        end_local = datetime.datetime(
-            end.year, end.month, end.day,
-            end.hour, end.minute, end.second)
+        start_local = _to_local_naive(item.Start)
+        end_local = _to_local_naive(item.End)
         d = start_local.date()
         if d < start_date or d > end_date:
             return None
@@ -395,9 +396,24 @@ def get_upcoming_meetings(hours_ahead: int = 36) -> List[dict]:
         seen: set = set()
         scanned_entry_ids: set = set()  # dedup folders across stores
 
+        dropped_past = 0
+        dropped_future = 0
+        dropped_samples: List[str] = []
+
         def consume(folder):
+            nonlocal dropped_past, dropped_future
             for m in _read_appointments_range(folder, start_date, end_date):
-                if m["start"] < now or m["start"] > end:
+                if m["start"] < now:
+                    dropped_past += 1
+                    if len(dropped_samples) < 5:
+                        dropped_samples.append(
+                            f"PAST: {m['subject']} @ {m['start']} (now={now})")
+                    continue
+                if m["start"] > end:
+                    dropped_future += 1
+                    if len(dropped_samples) < 5:
+                        dropped_samples.append(
+                            f"FUTURE: {m['subject']} @ {m['start']} (end={end})")
                     continue
                 key = (m["subject"], m["start"].isoformat())
                 if key not in seen:
@@ -427,23 +443,31 @@ def get_upcoming_meetings(hours_ahead: int = 36) -> List[dict]:
                 try:
                     store_name = getattr(store, "DisplayName", "") or ""
                     if _should_skip_store(store_name):
-                        logger.debug(f"Skipping store: {store_name}")
+                        logger.info(f"(skip store: {store_name})")
                         continue
+                    logger.info(f"Walking store: {store_name}")
                     root = store.GetRootFolder()
                     for folder in root.Folders:
                         _scan_folder_recursively_range(
                             folder, start_date, end_date,
                             seen, all_meetings, scanned_entry_ids)
                 except Exception as e:
-                    logger.debug(f"Store scan failed: {e}")
+                    logger.warning(f"Store scan failed for '{store_name}': {e}")
         except Exception as e:
-            logger.debug(f"Could not enumerate stores: {e}")
+            logger.warning(f"Could not enumerate stores: {e}")
 
         all_meetings.sort(key=lambda m: m["start"])
         elapsed = time.time() - t0
         logger.info(
             f"Found {len(all_meetings)} upcoming meetings ({hours_ahead}h) "
-            f"in {elapsed:.1f}s")
+            f"in {elapsed:.1f}s  [dropped: {dropped_past} already-started, "
+            f"{dropped_future} beyond {hours_ahead}h]")
+        if dropped_samples:
+            logger.info(f"Filter drop samples: {dropped_samples}")
+        # Log the subjects/starts we're returning so we can see if the
+        # user's just-added meeting made it through.
+        for m in all_meetings:
+            logger.info(f"  UPCOMING: {m['subject']} @ {m['start']}")
         _cache_put(cache_key, all_meetings)
         return all_meetings
 
@@ -470,8 +494,12 @@ def _scan_folder_recursively_range(
     try:
         name = getattr(folder, "Name", "") or ""
         if _should_skip_folder(name):
+            logger.info(f"  (skip folder by keyword: {name})")
             return
-        if getattr(folder, "DefaultItemType", -1) == 1:
+        is_cal = getattr(folder, "DefaultItemType", -1) == 1
+        if is_cal:
+            logger.info(f"  (found calendar folder: {name} at depth {depth})")
+        if is_cal:  # keep existing condition flow below untouched
             # Skip folders we already scanned (e.g. default calendar
             # encountered again via the store walk).
             entry_id = None
