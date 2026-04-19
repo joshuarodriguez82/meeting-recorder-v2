@@ -52,14 +52,28 @@ export default function Home() {
   const existingClients = Array.from(new Set(sessions.map((s) => s.client).filter(Boolean))).sort();
   const existingProjects = Array.from(new Set(sessions.map((s) => s.project).filter(Boolean))).sort();
 
+  const [backendAttempts, setBackendAttempts] = useState(0);
+  const [backendError, setBackendError] = useState<string | null>(null);
+
   useEffect(() => {
     let cancelled = false;
+    let attempts = 0;
     const check = async () => {
       try {
         await api.health();
         if (!cancelled) setBackendReady(true);
       } catch {
-        if (!cancelled) setTimeout(check, 1000);
+        if (cancelled) return;
+        attempts += 1;
+        setBackendAttempts(attempts);
+        if (attempts >= 30) {
+          setBackendError(
+            "Backend failed to start after 30 seconds. " +
+            "Check %APPDATA%\\MeetingRecorder\\backend.log and rust.log for details."
+          );
+        } else {
+          setTimeout(check, 1000);
+        }
       }
     };
     check();
@@ -87,11 +101,52 @@ export default function Home() {
 
   if (!backendReady) {
     return (
-      <div className="flex h-screen items-center justify-center">
-        <div className="flex flex-col items-center gap-3 text-muted-foreground">
-          <Loader2 className="h-6 w-6 animate-spin" />
-          <div className="text-sm">Starting backend…</div>
-        </div>
+      <div className="flex h-screen items-center justify-center p-8">
+        {backendError ? (
+          <div className="max-w-xl space-y-4">
+            <div className="flex items-center gap-3 text-red-600">
+              <div className="h-2 w-2 rounded-full bg-red-600" />
+              <h2 className="font-semibold">Backend didn&apos;t start</h2>
+            </div>
+            <p className="text-sm text-muted-foreground">{backendError}</p>
+            <div className="rounded-md border bg-muted/40 p-4 text-xs font-mono space-y-2">
+              <div>
+                <strong>Log files:</strong>
+                <br />
+                %APPDATA%\MeetingRecorder\backend.log
+                <br />
+                %APPDATA%\MeetingRecorder\rust.log
+              </div>
+              <div>
+                <strong>Common causes:</strong>
+                <br />
+                • Python venv missing (run <code>python setup.py</code>)
+                <br />
+                • Another instance is running (check Task Manager for meeting-recorder.exe / pythonw.exe)
+                <br />
+                • Port 17645 held by a zombie process
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => window.location.reload()}
+                className="px-4 py-2 rounded-md bg-primary text-primary-foreground text-sm"
+              >
+                Retry
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center gap-3 text-muted-foreground">
+            <Loader2 className="h-6 w-6 animate-spin" />
+            <div className="text-sm">Starting backend…</div>
+            {backendAttempts > 5 && (
+              <div className="text-xs text-muted-foreground max-w-xs text-center">
+                Taking longer than expected. Attempt {backendAttempts}/30. Python is loading torch+pyannote; this can take up to 20s on first launch.
+              </div>
+            )}
+          </div>
+        )}
       </div>
     );
   }
