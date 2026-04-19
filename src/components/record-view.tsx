@@ -53,21 +53,26 @@ export function RecordView({ onSessionsChanged, onOpenSession }: Props) {
 
   const [session, setSession] = useState<SessionFull | null>(null);
 
-  // Load initial data
+  // Load initial data. CRITICAL: we don't Promise.all the calendar in
+  // because Outlook COM can take 5-15s on cold start and we don't want
+  // that blocking the audio dropdown / templates from rendering.
   useEffect(() => {
     (async () => {
       try {
-        const [devices, tpls, cal, status, sessionsList] = await Promise.all([
+        // Fast-path: everything local (device list, templates, sessions)
+        const [devices, tpls, status, sessionsList] = await Promise.all([
           api.getAudioDevices(),
           api.getTemplates(),
-          api.getUpcomingMeetings(36).catch(() => []),
           api.recordingStatus(),
           api.listSessions().catch(() => []),
         ]);
         setInputDevices(devices.input);
         setOutputDevices(devices.output);
         setTemplates(tpls);
-        setMeetings(cal);
+        // Slow-path: calendar fires in parallel, updates when ready
+        api.getUpcomingMeetings(36)
+          .then((cal) => setMeetings(cal))
+          .catch(() => setMeetings([]));
         // Gather unique clients and projects from existing sessions for autocomplete
         const clients = Array.from(new Set(
           sessionsList.map((s) => s.client).filter(Boolean)
@@ -77,7 +82,35 @@ export function RecordView({ onSessionsChanged, onOpenSession }: Props) {
         )).sort();
         setExistingClients(clients);
         setExistingProjects(projects);
-        if (devices.input.length > 0) setMicIdx(devices.input[0].index);
+
+        // Restore saved device selection by NAME (indices can shift
+        // between reboots when devices are plugged in/out, so we match
+        // on stable name).
+        const savedMicName = typeof window !== "undefined"
+          ? window.localStorage.getItem("mr.micDeviceName")
+          : null;
+        const savedOutName = typeof window !== "undefined"
+          ? window.localStorage.getItem("mr.outputDeviceName")
+          : null;
+
+        const matchedMic = savedMicName
+          ? devices.input.find((d) => d.name === savedMicName)
+          : null;
+        if (matchedMic) {
+          setMicIdx(matchedMic.index);
+        } else if (devices.input.length > 0) {
+          setMicIdx(devices.input[0].index);
+        }
+
+        if (savedOutName === "__none__") {
+          setOutIdx(null);
+        } else {
+          const matchedOut = savedOutName
+            ? devices.output.find((d) => d.name === savedOutName)
+            : null;
+          if (matchedOut) setOutIdx(matchedOut.index);
+        }
+
         setRecording(status.is_recording);
         setDuration(status.duration_s);
         setModelsLoading(status.models_loading);
@@ -91,6 +124,32 @@ export function RecordView({ onSessionsChanged, onOpenSession }: Props) {
       }
     })();
   }, []);
+
+  // Persist device selection by name whenever it changes.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (inputDevices.length === 0 || micIdx === null) return;
+    const dev = inputDevices.find((d) => d.index === micIdx);
+    if (dev) window.localStorage.setItem("mr.micDeviceName", dev.name);
+  }, [micIdx, inputDevices]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (outIdx === null) {
+      // Only persist "none" once we've actually loaded devices, so we
+      // don't overwrite a real saved value with the initial null state.
+      if (outputDevices.length > 0) {
+        window.localStorage.setItem("mr.outputDeviceName", "__none__");
+      }
+      return;
+    }
+    const dev = outputDevices.find((d) => d.index === outIdx);
+    if (dev) window.localStorage.setItem("mr.outputDeviceName", dev.name);
+  }, [outIdx, outputDevices]);
+
+  // Look up the currently selected device objects for display.
+  const selectedMic = inputDevices.find((d) => d.index === micIdx);
+  const selectedOut = outputDevices.find((d) => d.index === outIdx);
 
   // Poll recording status while recording
   useEffect(() => {
@@ -289,12 +348,14 @@ export function RecordView({ onSessionsChanged, onOpenSession }: Props) {
               disabled={recording}
             >
               <SelectTrigger className="w-full">
-                <SelectValue placeholder="Select mic..." />
+                <span className="truncate text-left">
+                  {selectedMic ? selectedMic.name : "Select mic..."}
+                </span>
               </SelectTrigger>
               <SelectContent>
                 {inputDevices.map((d) => (
                   <SelectItem key={d.index} value={d.index.toString()}>
-                    [{d.index}] {d.name}
+                    {d.name}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -308,13 +369,15 @@ export function RecordView({ onSessionsChanged, onOpenSession }: Props) {
               disabled={recording}
             >
               <SelectTrigger className="w-full">
-                <SelectValue placeholder="Skip" />
+                <span className="truncate text-left">
+                  {selectedOut ? selectedOut.name : "Skip — mic only"}
+                </span>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="none">Skip — mic only</SelectItem>
                 {outputDevices.map((d) => (
                   <SelectItem key={d.index} value={d.index.toString()}>
-                    [{d.index}] {d.name}
+                    {d.name}
                   </SelectItem>
                 ))}
               </SelectContent>

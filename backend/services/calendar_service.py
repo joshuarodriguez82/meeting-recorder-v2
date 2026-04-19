@@ -6,12 +6,82 @@ Works with Classic Outlook. Gracefully fails with New Outlook.
 
 import datetime
 import time
+import threading
 import pythoncom
 import win32com.client
 from typing import List, Optional
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Module-level cache. Outlook COM is very slow on accounts with Exchange
+# resource / shared calendars (each folder enumeration is 5-7s), so we
+# memoize aggressively and background-refresh. 5 minutes is long enough
+# that polling never re-hits COM in a normal session.
+_CACHE_LOCK = threading.Lock()
+_CACHE_TTL_SECONDS = 300  # 5 minutes
+_cache: dict = {}  # key -> (expires_epoch, result)
+
+# Per-key in-flight dedup. If the pre-warm thread and a real API request
+# both ask for the same key at the same time, we want one Outlook call,
+# not two. _inflight[key] -> Event that's set when the result is cached.
+_inflight: dict = {}
+
+# Folders to skip entirely — these never have meetings the user cares
+# about but are slow to enumerate via Exchange. Matched case-insensitively
+# as a substring against the folder / store name.
+_SKIP_FOLDER_KEYWORDS = (
+    "resource",       # "Development Resources Calendar", etc.
+    "birthday",
+    "holiday",
+    "us holidays",
+    "contacts",
+    "public folders",
+    "shared folders",
+)
+
+# Top-level store names to skip. Personal archive stores etc.
+_SKIP_STORE_KEYWORDS = (
+    "public folders",
+    "internet calendars",
+)
+
+
+def _should_skip_folder(name: str) -> bool:
+    if not name:
+        return False
+    low = name.lower()
+    return any(kw in low for kw in _SKIP_FOLDER_KEYWORDS)
+
+
+def _should_skip_store(name: str) -> bool:
+    if not name:
+        return False
+    low = name.lower()
+    return any(kw in low for kw in _SKIP_STORE_KEYWORDS)
+
+
+def _cache_get(key):
+    with _CACHE_LOCK:
+        entry = _cache.get(key)
+        if not entry:
+            return None
+        exp, val = entry
+        if time.time() > exp:
+            _cache.pop(key, None)
+            return None
+        return val
+
+
+def _cache_put(key, val, ttl=_CACHE_TTL_SECONDS):
+    with _CACHE_LOCK:
+        _cache[key] = (time.time() + ttl, val)
+
+
+def invalidate_calendar_cache():
+    """Called by the /calendar/upcoming endpoint when the user hits Refresh."""
+    with _CACHE_LOCK:
+        _cache.clear()
 
 # Outlook default folder constants
 OL_FOLDER_CALENDAR = 9
@@ -99,35 +169,28 @@ def _parse_appointment(item, today: datetime.date) -> Optional[dict]:
         return None
 
 
-def _read_appointments(folder, target_date: datetime.date) -> List[dict]:
+def _read_appointments_range(
+    folder, start_date: datetime.date, end_date: datetime.date
+) -> List[dict]:
     """
-    Read appointments from a single calendar folder for a given date.
-    Handles recurring meetings by expanding occurrences.
-
-    CRITICAL: For Outlook COM to expand recurrences, you MUST:
-      1. Call Sort("[Start]") FIRST
-      2. Set IncludeRecurrences = True AFTER sort
-      3. Re-apply both to the filtered collection after Restrict
-    Otherwise, recurring meetings only return the master event.
+    Read appointments from a folder between start_date and end_date
+    (inclusive) in ONE pass. Before, we called this per-date which
+    multiplied the COM round-trips.
     """
     meetings: List[dict] = []
     try:
         items = folder.Items
-        # Order matters for recurrence expansion:
         items.Sort("[Start]")
         items.IncludeRecurrences = True
 
-        # Restriction window — one day either side to cover TZ edge cases
-        yesterday = target_date - datetime.timedelta(days=1)
-        tomorrow = target_date + datetime.timedelta(days=2)
+        yesterday = start_date - datetime.timedelta(days=1)
+        day_after = end_date + datetime.timedelta(days=2)
         restriction = (
             f"[Start] >= '{yesterday.strftime('%m/%d/%Y')} 12:00 AM' AND "
-            f"[Start] <= '{tomorrow.strftime('%m/%d/%Y')} 11:59 PM'"
+            f"[Start] <= '{day_after.strftime('%m/%d/%Y')} 11:59 PM'"
         )
-
         try:
             filtered = items.Restrict(restriction)
-            # Must re-apply sort + recurrences to the filtered collection
             filtered.Sort("[Start]")
             filtered.IncludeRecurrences = True
         except Exception as e:
@@ -137,18 +200,68 @@ def _read_appointments(folder, target_date: datetime.date) -> List[dict]:
         count = 0
         for item in filtered:
             count += 1
-            if count > 500:
-                logger.warning(f"Folder '{folder.Name}' has >500 items, truncating")
+            if count > 1000:
+                logger.warning(f"Folder '{folder.Name}' >1000 items, truncating")
                 break
-            parsed = _parse_appointment(item, target_date)
+            parsed = _parse_appointment_any_date(item, start_date, end_date)
             if parsed:
                 meetings.append(parsed)
 
-        logger.info(f"  '{folder.Name}': {len(meetings)} meetings for "
-                    f"{target_date} (scanned {count} items)")
+        logger.info(
+            f"  '{folder.Name}': {len(meetings)} meetings in "
+            f"{start_date}..{end_date} (scanned {count})")
     except Exception as e:
-        logger.warning(f"Could not read folder '{getattr(folder, 'Name', '?')}': {e}")
+        logger.warning(
+            f"Could not read folder '{getattr(folder, 'Name', '?')}': {e}")
     return meetings
+
+
+def _parse_appointment_any_date(item, start_date, end_date):
+    """Same as _parse_appointment but accepts any date in [start_date, end_date]."""
+    try:
+        start = item.Start
+        end = item.End
+        start_local = datetime.datetime(
+            start.year, start.month, start.day,
+            start.hour, start.minute, start.second)
+        end_local = datetime.datetime(
+            end.year, end.month, end.day,
+            end.hour, end.minute, end.second)
+        d = start_local.date()
+        if d < start_date or d > end_date:
+            return None
+        duration_min = max(1, int((end_local - start_local).total_seconds() / 60))
+        attendees = []
+        try:
+            for r in item.Recipients:
+                try:
+                    addr = str(getattr(r, "Address", "") or "")
+                    name = str(getattr(r, "Name", "") or "")
+                    if addr:
+                        attendees.append(addr)
+                    elif name:
+                        attendees.append(name)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return {
+            "subject":  str(item.Subject) if item.Subject else "Untitled Meeting",
+            "start":    start_local,
+            "end":      end_local,
+            "location": str(getattr(item, "Location", "") or ""),
+            "organizer": str(getattr(item, "Organizer", "") or ""),
+            "attendees": attendees,
+            "duration": duration_min,
+        }
+    except Exception as e:
+        logger.debug(f"Skipping appointment: {e}")
+        return None
+
+
+def _read_appointments(folder, target_date: datetime.date) -> List[dict]:
+    """Backwards-compat wrapper."""
+    return _read_appointments_range(folder, target_date, target_date)
 
 
 def _scan_folder_recursively(folder, today: datetime.date,
@@ -235,40 +348,103 @@ def get_todays_meetings() -> List[dict]:
 def get_upcoming_meetings(hours_ahead: int = 36) -> List[dict]:
     """
     Return meetings from now through `hours_ahead` hours ahead.
-    Spans across midnight so Monday meetings show on Sunday evening.
-    Defaults to 36 hours to cover late-evening queries for tomorrow.
+    ONE Outlook connection. ONE pass per folder. Cached 5 min so polling
+    never re-hits COM. Concurrent callers share a single in-flight
+    request via _inflight so pre-warm + real request don't compete.
     """
+    cache_key = ("upcoming", hours_ahead)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        logger.info(f"Calendar cache hit ({hours_ahead}h)")
+        return cached
+
+    # Dedup concurrent requests — if another thread is already fetching
+    # this same key, wait for it instead of kicking off a second COM call.
+    wait_event = None
+    are_owner = False
+    with _CACHE_LOCK:
+        if cache_key in _inflight:
+            wait_event = _inflight[cache_key]
+        else:
+            wait_event = threading.Event()
+            _inflight[cache_key] = wait_event
+            are_owner = True
+    if not are_owner:
+        logger.info(f"Calendar fetch in progress, waiting ({hours_ahead}h)")
+        wait_event.wait(timeout=120)
+        cached = _cache_get(cache_key)
+        return cached if cached is not None else []
+
+    t0 = time.time()
     outlook = _get_outlook()
     if not outlook:
+        _cache_put(cache_key, [], ttl=30)  # also cache the miss briefly
+        with _CACHE_LOCK:
+            _inflight.pop(cache_key, None)
+        wait_event.set()
         return []
 
     try:
         ns = outlook.GetNamespace("MAPI")
         now = datetime.datetime.now()
         end = now + datetime.timedelta(hours=hours_ahead)
+        start_date = now.date()
+        end_date = end.date()
 
         all_meetings: List[dict] = []
         seen: set = set()
+        scanned_entry_ids: set = set()  # dedup folders across stores
 
-        # Read each date covered by the window (usually 1-2 dates)
-        current = now.date()
-        while current <= end.date():
-            per_date = get_meetings_for_date(current)
-            for m in per_date:
-                # Only include meetings whose start is >= now
-                if m["start"] < now:
-                    continue
-                if m["start"] > end:
+        def consume(folder):
+            for m in _read_appointments_range(folder, start_date, end_date):
+                if m["start"] < now or m["start"] > end:
                     continue
                 key = (m["subject"], m["start"].isoformat())
                 if key not in seen:
                     seen.add(key)
                     all_meetings.append(m)
-            current += datetime.timedelta(days=1)
+
+        # Default calendar — fast path
+        default_entry_id = None
+        try:
+            default_cal = ns.GetDefaultFolder(OL_FOLDER_CALENDAR)
+            try:
+                default_entry_id = default_cal.EntryID
+            except Exception:
+                pass
+            logger.info(f"Reading default calendar: {default_cal.Name}")
+            consume(default_cal)
+            if default_entry_id:
+                scanned_entry_ids.add(default_entry_id)
+        except Exception as e:
+            logger.warning(f"Default calendar read failed: {e}")
+
+        # Other stores/shared calendars — ONE walk. Skip stores we don't
+        # care about (resource calendars, public folders) entirely so we
+        # don't pay the per-folder Exchange latency cost.
+        try:
+            for store in ns.Stores:
+                try:
+                    store_name = getattr(store, "DisplayName", "") or ""
+                    if _should_skip_store(store_name):
+                        logger.debug(f"Skipping store: {store_name}")
+                        continue
+                    root = store.GetRootFolder()
+                    for folder in root.Folders:
+                        _scan_folder_recursively_range(
+                            folder, start_date, end_date,
+                            seen, all_meetings, scanned_entry_ids)
+                except Exception as e:
+                    logger.debug(f"Store scan failed: {e}")
+        except Exception as e:
+            logger.debug(f"Could not enumerate stores: {e}")
 
         all_meetings.sort(key=lambda m: m["start"])
-        logger.info(f"Found {len(all_meetings)} upcoming meetings "
-                    f"(next {hours_ahead}h)")
+        elapsed = time.time() - t0
+        logger.info(
+            f"Found {len(all_meetings)} upcoming meetings ({hours_ahead}h) "
+            f"in {elapsed:.1f}s")
+        _cache_put(cache_key, all_meetings)
         return all_meetings
 
     except Exception as e:
@@ -279,6 +455,49 @@ def get_upcoming_meetings(hours_ahead: int = 36) -> List[dict]:
             pythoncom.CoUninitialize()
         except Exception:
             pass
+        # Release any waiting requests — both on success and on error.
+        with _CACHE_LOCK:
+            _inflight.pop(cache_key, None)
+        wait_event.set()
+
+
+def _scan_folder_recursively_range(
+    folder, start_date, end_date, seen, results,
+    scanned_entry_ids: Optional[set] = None, depth: int = 0,
+):
+    if depth > 3:  # Capped recursion — calendar folders are always near the root
+        return
+    try:
+        name = getattr(folder, "Name", "") or ""
+        if _should_skip_folder(name):
+            return
+        if getattr(folder, "DefaultItemType", -1) == 1:
+            # Skip folders we already scanned (e.g. default calendar
+            # encountered again via the store walk).
+            entry_id = None
+            if scanned_entry_ids is not None:
+                try:
+                    entry_id = folder.EntryID
+                except Exception:
+                    pass
+                if entry_id and entry_id in scanned_entry_ids:
+                    return
+                if entry_id:
+                    scanned_entry_ids.add(entry_id)
+            for m in _read_appointments_range(folder, start_date, end_date):
+                key = (m["subject"], m["start"].isoformat())
+                if key not in seen:
+                    seen.add(key)
+                    results.append(m)
+        # Only recurse if this folder isn't itself a calendar — calendar
+        # folders don't have useful subfolders and iterating them is slow.
+        else:
+            for sub in folder.Folders:
+                _scan_folder_recursively_range(
+                    sub, start_date, end_date, seen, results,
+                    scanned_entry_ids, depth + 1)
+    except Exception as e:
+        logger.debug(f"Skipping folder at depth {depth}: {e}")
 
 
 def is_outlook_available() -> bool:

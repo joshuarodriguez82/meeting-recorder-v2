@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, type SessionSummary } from "@/lib/api";
 import { toast } from "sonner";
 import { Loader2, Sparkles, Copy, Info } from "lucide-react";
@@ -25,18 +25,31 @@ export function PrepBriefView({ sessions }: { sessions: SessionSummary[] }) {
     () => Array.from(new Set(sessions.map((s) => s.client).filter(Boolean))).sort(),
     [sessions]
   );
-  const projects = useMemo(
-    () => Array.from(new Set(sessions.map((s) => s.project).filter(Boolean))).sort(),
-    [sessions]
-  );
+  // Projects are scoped to the currently selected client. If no client is
+  // picked yet, show every project so the user can still filter broadly.
+  const projects = useMemo(() => {
+    const pool = client ? sessions.filter((s) => s.client === client) : sessions;
+    return Array.from(new Set(pool.map((s) => s.project).filter(Boolean))).sort();
+  }, [sessions, client]);
 
-  // Preview which meetings will be used
+  // Clearing client or switching to a client that doesn't have the
+  // currently selected project should reset the project filter.
+  useEffect(() => {
+    if (project && !projects.includes(project)) {
+      setProject("");
+    }
+  }, [project, projects]);
+
+  // Preview which meetings will be used. When both client AND project
+  // are set we AND them — a project always belongs to a client, so that's
+  // the correct semantics. Earlier this was OR, which incorrectly pulled
+  // in meetings from other clients that happened to share a project name.
   const relatedPreview = useMemo(() => {
     if (!client && !project) return [];
     return sessions.filter((s) => {
-      const mC = client && s.client === client;
-      const mP = project && s.project === project;
-      return mC || mP;
+      if (client && s.client !== client) return false;
+      if (project && s.project !== project) return false;
+      return Boolean(client) || Boolean(project);
     }).slice(0, 8);
   }, [client, project, sessions]);
 
@@ -184,7 +197,7 @@ export function PrepBriefView({ sessions }: { sessions: SessionSummary[] }) {
             </p>
           </CardHeader>
           <CardContent>
-            <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed rounded-lg bg-muted/40 p-4">
+            <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed rounded-lg bg-muted/40 p-4 max-w-full overflow-x-hidden">
               {brief}
             </pre>
           </CardContent>

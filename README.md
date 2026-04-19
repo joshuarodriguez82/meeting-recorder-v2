@@ -4,6 +4,15 @@ AI-powered meeting recorder for Windows — transcribes meetings, identifies spe
 
 **Native desktop app** built with Tauri + Rust for the shell, Next.js + React + shadcn/ui for the UI, and a Python FastAPI sidecar wrapping all the heavy lifting (Whisper, Pyannote, Claude).
 
+## Download (Windows)
+
+Prebuilt installers are published under [**Releases**](https://github.com/joshuarodriguez82/meeting-recorder-v2/releases). Pick one:
+
+- **`Meeting Recorder_2.0.0_x64-setup.exe`** — NSIS installer, double-click to install. Creates a Start Menu shortcut and uninstaller.
+- **`Meeting Recorder_2.0.0_x64_en-US.msi`** — MSI installer, for IT-managed / Group Policy deploys.
+
+After install you still need a one-time setup to drop in API keys and accept the HuggingFace model terms — see [First-run setup](#first-run-setup) below.
+
 ## Architecture
 
 ```
@@ -29,8 +38,9 @@ AI-powered meeting recorder for Windows — transcribes meetings, identifies spe
 ### Recording
 - **Captures mic + system audio** via WASAPI loopback (works with headphones)
 - **Unlimited recording duration** — streams to disk
-- **Auto device discovery** — mic + loopback (Stereo Mix, VB-Cable)
-- **Calendar-driven start** — click a meeting from Today's Meetings to pre-fill the name
+- **Auto device discovery** with host-API fallback — if WASAPI refuses the mic, the backend silently retries under MME → DirectSound → WDM-KS before giving up
+- **Persistent device selection** — mic and loopback choices saved by name, survive reboots and USB re-plugs
+- **Calendar-driven start** — click a meeting from Upcoming Meetings to pre-fill the name + attendees
 
 ### AI extraction (Claude)
 - **Summary** — template-aware (General, Requirements Gathering, Design Review, Sprint Planning, Stakeholder Update)
@@ -41,11 +51,12 @@ AI-powered meeting recorder for Windows — transcribes meetings, identifies spe
 - **Default model:** Claude Haiku 4.5 (~$1/M input, $5/M output). Haiku + Sonnet selectable in Settings.
 
 ### Knowledge base
-- **Sessions** — full history, bulk process, delete
+- **Sessions** — full history, bulk process, delete, click any row to open the session dialog
+- **Session Detail dialog** — inline audio player, editable tags, rename speakers with one click, run any AI extraction on the fly
 - **Follow-Ups** — action items aggregated across every meeting, filterable by status/client/owner/text
 - **Decisions** — ADR-style decision log, list + detail pane
 - **Transcript Search** — full-text search with context snippets
-- **Client Dashboard** — per-client stats, meetings, open actions, recent decisions
+- **Clients + nested Projects** — Projects live inside Clients (one-to-many). Client dashboard shows a chip row of its projects; click a chip to drill into just that project's meetings. AI-assisted tagging suggests which meetings belong to a given client.
 
 ### Workflow
 - **Auto-process after stop** — full transcribe + extract chain runs automatically
@@ -54,9 +65,15 @@ AI-powered meeting recorder for Windows — transcribes meetings, identifies spe
 - **Retention policy** — automatic cleanup of old audio WAV files, separate thresholds for processed/unprocessed. Transcripts/summaries never deleted.
 
 ### Calendar
-- **Today's Meetings** panel pulled from Outlook on launch (Classic Outlook only)
+- **Upcoming Meetings** panel pulled from Outlook on launch (Classic Outlook only)
 - **Popup notifications** 2 min before a scheduled meeting starts
 - **Attendee capture** from Outlook invites for follow-up emails
+- **Fast** — calendar is pre-warmed in a background thread at startup, cached 5 minutes, and Exchange resource / shared calendars are skipped automatically (they used to add 60+ seconds of COM latency)
+
+### Performance
+- Backend is responsive within ~500 ms of launch; AI models load lazily on first use
+- Every blocking call (Outlook COM, audio device enumeration, disk I/O for session list) runs off the asyncio event loop so one slow endpoint never stalls the others
+- Calendar and audio devices are cached in-memory with in-flight dedup — concurrent callers share a single COM round-trip
 
 ## Prerequisites
 
@@ -69,6 +86,8 @@ AI-powered meeting recorder for Windows — transcribes meetings, identifies spe
 
 ## Install & build from source
 
+Most users should just download the installer from [Releases](https://github.com/joshuarodriguez82/meeting-recorder-v2/releases). Build from source only if you're hacking on the code.
+
 ```powershell
 # 1. Clone
 git clone https://github.com/joshuarodriguez82/meeting-recorder-v2.git
@@ -80,20 +99,19 @@ python setup.py
 # 3. Frontend + Rust dependencies
 npm install
 
-# 4. Build the release .exe (takes 3-5 min first time)
-npm run tauri build
+# 4. Build the release .exe + installers (takes 3-5 min first time)
+npx tauri build
 
-# 5. Create a desktop shortcut
+# 5. (Optional) Create a desktop shortcut to the portable exe
 python make_shortcut.py
 ```
 
 After this you have:
-- `src-tauri/target/release/meeting-recorder.exe` — single executable
-- `src-tauri/target/release/bundle/nsis/Meeting Recorder_2.0.0_x64-setup.exe` — NSIS installer
-- `src-tauri/target/release/bundle/msi/Meeting Recorder_2.0.0_x64_en-US.msi` — MSI installer
-- Desktop shortcut pointing to the release exe
+- `src-tauri/target/release/meeting-recorder.exe` — single portable executable
+- `src-tauri/target/release/bundle/nsis/Meeting Recorder_2.0.0_x64-setup.exe` — NSIS installer (ships in Releases)
+- `src-tauri/target/release/bundle/msi/Meeting Recorder_2.0.0_x64_en-US.msi` — MSI installer (ships in Releases)
 
-Double-click the shortcut to launch.
+Double-click either installer to install, or run the portable exe directly.
 
 ## First-run setup
 

@@ -19,7 +19,7 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Loader2, Cog, Sparkles, ClipboardList, FileText, Target,
-  Users, Save, X,
+  Users, Save, X, Pencil, Check,
 } from "lucide-react";
 
 interface Props {
@@ -59,7 +59,10 @@ export function SessionDetailDialog({
   useEffect(() => {
     if (!open || !sessionId) return;
     setLoading(true);
-    setSession(null);
+    // Only blank out the session if we're switching to a different id —
+    // when the dialog just re-opens or `reload()` runs, keep the last
+    // payload visible so the user doesn't see a flash of empty state.
+    setSession((prev) => (prev && prev.session_id === sessionId ? prev : null));
     api.getSessionFull(sessionId)
       .then((s) => {
         setSession(s);
@@ -209,9 +212,22 @@ export function SessionDetailDialog({
               </TabsList>
             </div>
 
-            <ScrollArea className="flex-1">
-              <div className="p-6">
+            <ScrollArea className="flex-1 min-h-0">
+              <div className="p-6 min-w-0 max-w-full break-words">
                 <TabsContent value="overview" className="mt-0 space-y-6">
+                  {session.audio_path && (
+                    <div className="space-y-2">
+                      <Label className="text-xs uppercase tracking-wider text-muted-foreground">Recording</Label>
+                      <audio
+                        controls
+                        preload="metadata"
+                        className="w-full"
+                        src={`http://127.0.0.1:17645/sessions/${sessionId}/audio`}
+                      >
+                        Your browser doesn&apos;t support audio playback.
+                      </audio>
+                    </div>
+                  )}
                   <div className="space-y-2">
                     <Label>Meeting Name</Label>
                     <Input
@@ -303,7 +319,10 @@ export function SessionDetailDialog({
                 </TabsContent>
 
                 <TabsContent value="speakers" className="mt-0">
-                  <SpeakersView session={session} />
+                  <SpeakersView
+                    session={session}
+                    onRenamed={async () => { await reload(); onChanged?.(); }}
+                  />
                 </TabsContent>
 
                 <TabsContent value="summary" className="mt-0">
@@ -335,15 +354,15 @@ function TranscriptView({ session }: { session: SessionFull }) {
     return <p className="text-sm text-muted-foreground text-center py-8">No transcript yet. Run Process.</p>;
   }
   return (
-    <div className="space-y-1 font-mono text-sm leading-relaxed">
+    <div className="space-y-1 font-mono text-sm leading-relaxed max-w-full">
       {session.segments.map((seg, i) => {
         const name = session.speakers[seg.speaker_id]?.display_name || seg.speaker_id;
         const start = formatTime(seg.start);
         return (
-          <div key={i} className="flex gap-3 py-0.5 hover:bg-muted/30 rounded px-2">
+          <div key={i} className="flex gap-3 py-0.5 hover:bg-muted/30 rounded px-2 min-w-0">
             <span className="text-xs text-muted-foreground w-12 shrink-0 pt-0.5">{start}</span>
             <span className="font-semibold text-primary w-32 shrink-0 truncate">{name}</span>
-            <span className="flex-1">{seg.text}</span>
+            <span className="flex-1 min-w-0 break-words">{seg.text}</span>
           </div>
         );
       })}
@@ -351,29 +370,119 @@ function TranscriptView({ session }: { session: SessionFull }) {
   );
 }
 
-function SpeakersView({ session }: { session: SessionFull }) {
+function SpeakersView({
+  session,
+  onRenamed,
+}: {
+  session: SessionFull;
+  onRenamed: () => void | Promise<void>;
+}) {
   const speakers = Object.values(session.speakers);
   if (speakers.length === 0) {
     return <p className="text-sm text-muted-foreground text-center py-8">No speakers identified yet.</p>;
   }
   return (
     <div className="space-y-2">
+      <p className="text-xs text-muted-foreground mb-3">
+        Click a speaker&apos;s name to rename them. The new name flows into the transcript,
+        summary, action items, and decisions (next time you regenerate them).
+      </p>
       {speakers.map((sp) => {
         const count = session.segments.filter((s) => s.speaker_id === sp.speaker_id).length;
         return (
-          <div key={sp.speaker_id} className="flex items-center gap-4 rounded-lg border p-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-accent text-accent-foreground">
-              <Users className="h-4 w-4" />
-            </div>
-            <div className="flex-1">
-              <div className="text-sm font-medium">{sp.display_name}</div>
-              <div className="text-xs text-muted-foreground">
-                {sp.speaker_id} · {count} segments
-              </div>
-            </div>
-          </div>
+          <SpeakerRow
+            key={sp.speaker_id}
+            sessionId={session.session_id}
+            speakerId={sp.speaker_id}
+            displayName={sp.display_name}
+            segmentCount={count}
+            onRenamed={onRenamed}
+          />
         );
       })}
+    </div>
+  );
+}
+
+function SpeakerRow({
+  sessionId, speakerId, displayName, segmentCount, onRenamed,
+}: {
+  sessionId: string;
+  speakerId: string;
+  displayName: string;
+  segmentCount: number;
+  onRenamed: () => void | Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(displayName);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => { setValue(displayName); }, [displayName]);
+
+  const save = async () => {
+    const next = value.trim();
+    if (!next || next === displayName) {
+      setEditing(false);
+      setValue(displayName);
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.renameSpeaker(sessionId, speakerId, next);
+      toast.success(`Renamed "${displayName}" to "${next}"`);
+      setEditing(false);
+      await onRenamed();
+    } catch (e) {
+      toast.error(`Rename failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const cancel = () => {
+    setEditing(false);
+    setValue(displayName);
+  };
+
+  return (
+    <div className="flex items-center gap-4 rounded-lg border p-3">
+      <div className="flex h-10 w-10 items-center justify-center rounded-full bg-accent text-accent-foreground shrink-0">
+        <Users className="h-4 w-4" />
+      </div>
+      <div className="flex-1 min-w-0">
+        {editing ? (
+          <div className="flex items-center gap-2">
+            <Input
+              autoFocus
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") save();
+                if (e.key === "Escape") cancel();
+              }}
+              disabled={saving}
+              className="h-8"
+            />
+            <Button size="sm" onClick={save} disabled={saving} className="h-8">
+              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={cancel} disabled={saving} className="h-8">
+              <X className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setEditing(true)}
+            className="group flex items-center gap-2 text-left w-full min-w-0"
+          >
+            <span className="text-sm font-medium truncate">{displayName || speakerId}</span>
+            <Pencil className="h-3 w-3 text-muted-foreground opacity-0 group-hover:opacity-100 shrink-0" />
+          </button>
+        )}
+        <div className="text-xs text-muted-foreground">
+          {speakerId} · {segmentCount} segments
+        </div>
+      </div>
     </div>
   );
 }
@@ -383,7 +492,7 @@ function MarkdownBlock({ content }: { content: string }) {
     return <p className="text-sm text-muted-foreground text-center py-8">Nothing here yet.</p>;
   }
   return (
-    <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed bg-muted/40 rounded-lg p-5">
+    <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed bg-muted/40 rounded-lg p-5 max-w-full overflow-x-hidden">
       {content}
     </pre>
   );
