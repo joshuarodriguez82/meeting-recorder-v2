@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 interface Props {
   sessions: SessionSummary[];
@@ -15,7 +16,30 @@ interface Props {
   onOpenSession: (id: string) => void;
 }
 
-export function SessionsView({ sessions, onReload }: Props) {
+export function StatusIcons({ session }: { session: SessionSummary }) {
+  const icons = [
+    { show: session.audio_exists, emoji: "🎤", label: "Audio file exists" },
+    { show: session.has_transcript, emoji: "⚙", label: "Transcribed + speakers identified" },
+    { show: session.has_summary, emoji: "✨", label: "Summary generated" },
+    { show: session.has_action_items, emoji: "📋", label: "Action items extracted" },
+    { show: session.has_decisions, emoji: "🎯", label: "Decisions extracted" },
+    { show: session.has_requirements, emoji: "📝", label: "Requirements extracted" },
+  ];
+  return (
+    <TooltipProvider>
+      {icons.map((i, idx) => i.show && (
+        <Tooltip key={idx}>
+          <TooltipTrigger
+            render={<span className="inline-flex items-center rounded-full border px-1.5 py-0.5 text-[11px] cursor-default">{i.emoji}</span>}
+          />
+          <TooltipContent>{i.label}</TooltipContent>
+        </Tooltip>
+      ))}
+    </TooltipProvider>
+  );
+}
+
+export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
   const [filter, setFilter] = useState("");
   const [bulkRunning, setBulkRunning] = useState(false);
 
@@ -87,9 +111,10 @@ export function SessionsView({ sessions, onReload }: Props) {
           ) : (
             <div>
               {filtered.map((s) => (
-                <div
+                <button
                   key={s.session_id}
-                  className="flex items-center gap-4 border-b last:border-b-0 p-4 hover:bg-muted/40 transition-colors"
+                  onClick={() => onOpenSession(s.session_id)}
+                  className="w-full text-left flex items-center gap-4 border-b last:border-b-0 p-4 hover:bg-muted/40 transition-colors"
                 >
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-medium truncate">{s.display_name}</div>
@@ -104,17 +129,16 @@ export function SessionsView({ sessions, onReload }: Props) {
                     </div>
                   </div>
                   <div className="flex items-center gap-1 flex-wrap justify-end">
-                    {s.audio_exists && <Badge variant="outline" className="text-[10px]">🎤</Badge>}
-                    {s.has_transcript && <Badge variant="outline" className="text-[10px]">⚙</Badge>}
-                    {s.has_summary && <Badge variant="outline" className="text-[10px]">✨</Badge>}
-                    {s.has_action_items && <Badge variant="outline" className="text-[10px]">📋</Badge>}
-                    {s.has_decisions && <Badge variant="outline" className="text-[10px]">🎯</Badge>}
-                    {s.has_requirements && <Badge variant="outline" className="text-[10px]">📝</Badge>}
+                    <StatusIcons session={s} />
                   </div>
-                  <Button size="icon" variant="ghost" onClick={() => del(s.session_id, s.display_name)}>
+                  <span
+                    role="button"
+                    onClick={(e) => { e.stopPropagation(); del(s.session_id, s.display_name); }}
+                    className="h-7 w-7 inline-flex items-center justify-center rounded-md hover:bg-destructive/10 text-muted-foreground hover:text-destructive cursor-pointer"
+                  >
                     <Trash2 className="h-3.5 w-3.5" />
-                  </Button>
-                </div>
+                  </span>
+                </button>
               ))}
             </div>
           )}

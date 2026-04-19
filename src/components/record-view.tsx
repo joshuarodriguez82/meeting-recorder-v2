@@ -10,12 +10,7 @@ import {
   Square,
   Play,
   Mic,
-  Cog,
-  ClipboardList,
   FileText,
-  Target,
-  Save,
-  Mail,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,13 +24,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
 
 interface Props {
   onSessionsChanged: () => void;
+  onOpenSession: (id: string, tab?: string) => void;
 }
 
-export function RecordView({ onSessionsChanged }: Props) {
+export function RecordView({ onSessionsChanged, onOpenSession }: Props) {
   const [templates, setTemplates] = useState<string[]>([]);
   const [inputDevices, setInputDevices] = useState<AudioDevice[]>([]);
   const [outputDevices, setOutputDevices] = useState<AudioDevice[]>([]);
@@ -54,11 +49,9 @@ export function RecordView({ onSessionsChanged }: Props) {
 
   const [recording, setRecording] = useState(false);
   const [duration, setDuration] = useState(0);
-  const [modelsReady, setModelsReady] = useState(false);
   const [modelsLoading, setModelsLoading] = useState(false);
 
   const [session, setSession] = useState<SessionFull | null>(null);
-  const [processing, setProcessing] = useState<string | null>(null);
 
   // Load initial data
   useEffect(() => {
@@ -87,7 +80,6 @@ export function RecordView({ onSessionsChanged }: Props) {
         if (devices.input.length > 0) setMicIdx(devices.input[0].index);
         setRecording(status.is_recording);
         setDuration(status.duration_s);
-        setModelsReady(status.models_ready);
         setModelsLoading(status.models_loading);
 
         // Kick off background model load if not already done
@@ -115,17 +107,16 @@ export function RecordView({ onSessionsChanged }: Props) {
 
   // Poll for model readiness
   useEffect(() => {
-    if (modelsReady) return;
+    if (!modelsLoading) return;
     const t = setInterval(async () => {
       try {
         const s = await api.recordingStatus();
-        setModelsReady(s.models_ready);
         setModelsLoading(s.models_loading);
-        if (s.models_ready) clearInterval(t);
+        if (!s.models_loading) clearInterval(t);
       } catch {}
     }, 3000);
     return () => clearInterval(t);
-  }, [modelsReady]);
+  }, [modelsLoading]);
 
   const start = async () => {
     try {
@@ -158,57 +149,6 @@ export function RecordView({ onSessionsChanged }: Props) {
       onSessionsChanged();
     } catch (e) {
       toast.error(`Stop failed: ${e instanceof Error ? e.message : e}`);
-    }
-  };
-
-  const runProcess = async () => {
-    if (!session) return;
-    setProcessing("process");
-    try {
-      await api.processSession(session.session_id);
-      const s = await api.getSessionFull(session.session_id);
-      setSession(s);
-      toast.success(`Transcribed (${s.segments.length} segments, ${Object.keys(s.speakers).length} speakers)`);
-    } catch (e) {
-      toast.error(`Process failed: ${e instanceof Error ? e.message : e}`);
-    } finally {
-      setProcessing(null);
-    }
-  };
-
-  const runSummarize = async () => {
-    if (!session) return;
-    setProcessing("summarize");
-    try {
-      await api.summarize(session.session_id, template);
-      const s = await api.getSessionFull(session.session_id);
-      setSession(s);
-      toast.success("Summary ready");
-    } catch (e) {
-      toast.error(`Summarize failed: ${e instanceof Error ? e.message : e}`);
-    } finally {
-      setProcessing(null);
-    }
-  };
-
-  const runExtraction = async (
-    kind: "action_items" | "requirements" | "decisions",
-    label: string
-  ) => {
-    if (!session) return;
-    setProcessing(kind);
-    try {
-      const fn = kind === "action_items" ? api.actionItems
-        : kind === "requirements" ? api.requirements
-        : api.decisions;
-      await fn(session.session_id);
-      const s = await api.getSessionFull(session.session_id);
-      setSession(s);
-      toast.success(`${label} extracted`);
-    } catch (e) {
-      toast.error(`${label} failed: ${e instanceof Error ? e.message : e}`);
-    } finally {
-      setProcessing(null);
     }
   };
 
@@ -381,17 +321,15 @@ export function RecordView({ onSessionsChanged }: Props) {
             </Select>
           </div>
         </CardContent>
+        {!recording && !session && (
+          <div className="px-6 pb-5 pt-1 flex justify-end border-t border-border/50 pt-4 mt-2">
+            <Button size="lg" onClick={start} className="bg-red-600 hover:bg-red-700 text-white px-8 h-11">
+              <Play className="h-4 w-4 mr-2 fill-current" />
+              Start Recording
+            </Button>
+          </div>
+        )}
       </Card>
-
-      {/* Start button (when not recording) */}
-      {!recording && !session && (
-        <div className="flex justify-center">
-          <Button size="lg" onClick={start} className="bg-red-600 hover:bg-red-700 text-white px-8 h-11">
-            <Play className="h-4 w-4 mr-2 fill-current" />
-            Start Recording
-          </Button>
-        </div>
-      )}
 
       {/* Upcoming meetings */}
       <Card>
@@ -457,134 +395,27 @@ export function RecordView({ onSessionsChanged }: Props) {
         </CardContent>
       </Card>
 
-      {/* Session view after recording */}
+      {/* Session view after recording — open in dialog for full tabs */}
       {session && (
-        <SessionPanel
-          session={session}
-          processing={processing}
-          modelsReady={modelsReady}
-          modelsLoading={modelsLoading}
-          template={template}
-          onProcess={runProcess}
-          onSummarize={runSummarize}
-          onExtract={runExtraction}
-        />
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <FileText className="h-4 w-4 text-primary" />
+              Just Recorded: {session.display_name || `Session ${session.session_id}`}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="flex items-center justify-between">
+            <div className="text-sm text-muted-foreground">
+              Audio saved. Open the session to transcribe, summarize, and extract.
+            </div>
+            <Button onClick={() => onOpenSession(session.session_id)}>
+              Open Session
+            </Button>
+          </CardContent>
+        </Card>
       )}
     </div>
   );
-}
-
-function SessionPanel({
-  session,
-  processing,
-  modelsReady,
-  modelsLoading,
-  template,
-  onProcess,
-  onSummarize,
-  onExtract,
-}: {
-  session: SessionFull;
-  processing: string | null;
-  modelsReady: boolean;
-  modelsLoading: boolean;
-  template: string;
-  onProcess: () => void;
-  onSummarize: () => void;
-  onExtract: (kind: "action_items" | "requirements" | "decisions", label: string) => void;
-}) {
-  const hasTranscript = session.segments && session.segments.length > 0;
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          <FileText className="h-4 w-4 text-primary" />
-          {session.display_name || `Session ${session.session_id}`}
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {/* Action buttons */}
-        <div className="flex flex-wrap gap-2">
-          <Button
-            variant={hasTranscript ? "outline" : "default"}
-            onClick={onProcess}
-            disabled={processing !== null || !modelsReady}
-          >
-            {processing === "process" ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <Cog className="h-3.5 w-3.5 mr-2" />}
-            Process
-          </Button>
-          <Button variant="outline" onClick={onSummarize} disabled={!hasTranscript || processing !== null}>
-            {processing === "summarize" ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <Sparkles className="h-3.5 w-3.5 mr-2" />}
-            Summarize
-          </Button>
-          <Button variant="outline" onClick={() => onExtract("action_items", "Action Items")} disabled={!hasTranscript || processing !== null}>
-            {processing === "action_items" ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <ClipboardList className="h-3.5 w-3.5 mr-2" />}
-            Action Items
-          </Button>
-          <Button variant="outline" onClick={() => onExtract("requirements", "Requirements")} disabled={!hasTranscript || processing !== null}>
-            {processing === "requirements" ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <FileText className="h-3.5 w-3.5 mr-2" />}
-            Requirements
-          </Button>
-          <Button variant="outline" onClick={() => onExtract("decisions", "Decisions")} disabled={!hasTranscript || processing !== null}>
-            {processing === "decisions" ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <Target className="h-3.5 w-3.5 mr-2" />}
-            Decisions
-          </Button>
-        </div>
-        {!modelsReady && (
-          <p className="text-xs text-muted-foreground">
-            {modelsLoading ? "Loading AI models in background..." : "Models not loaded — check API keys in Settings."}
-          </p>
-        )}
-
-        <Separator />
-
-        {/* Content sections */}
-        {hasTranscript && (
-          <Section title="Transcript" content={formatTranscript(session)} />
-        )}
-        {session.summary && <Section title="Summary" content={session.summary} accent />}
-        {session.action_items && <Section title="Action Items" content={session.action_items} accent />}
-        {session.decisions && <Section title="Decisions" content={session.decisions} accent />}
-        {session.requirements && <Section title="Requirements" content={session.requirements} accent />}
-        {!hasTranscript && (
-          <p className="text-sm text-muted-foreground text-center py-6">
-            Click Process to transcribe the audio and identify speakers.
-          </p>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-function Section({ title, content, accent = false }: { title: string; content: string; accent?: boolean }) {
-  return (
-    <div>
-      <h3 className={`text-xs font-semibold uppercase tracking-wider mb-2 ${accent ? "text-primary" : "text-muted-foreground"}`}>
-        {title}
-      </h3>
-      <div className="rounded-lg bg-muted/40 p-4 text-sm leading-relaxed whitespace-pre-wrap font-mono">
-        {content}
-      </div>
-    </div>
-  );
-}
-
-function formatTranscript(s: SessionFull): string {
-  return s.segments
-    .map((seg) => {
-      const name = s.speakers[seg.speaker_id]?.display_name || seg.speaker_id;
-      const start = formatT(seg.start);
-      const end = formatT(seg.end);
-      return `[${start} → ${end}] ${name}: ${seg.text}`;
-    })
-    .join("\n");
-}
-
-function formatT(s: number): string {
-  const m = Math.floor(s / 60);
-  const sec = Math.floor(s % 60);
-  return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
 }
 
 function dayLabel(d: Date): string {

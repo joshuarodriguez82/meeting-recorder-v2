@@ -371,6 +371,147 @@ async def delete_session(session_id: str):
     return {"ok": True}
 
 
+class SessionPatchRequest(BaseModel):
+    display_name: Optional[str] = None
+    client: Optional[str] = None
+    project: Optional[str] = None
+    template: Optional[str] = None
+
+
+@app.patch("/sessions/{session_id}")
+async def patch_session(session_id: str, req: SessionPatchRequest):
+    """Update editable session metadata (name, tags, template)."""
+    svc.load_settings()
+    session = svc.session_svc.load_full(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if req.display_name is not None:
+        session.display_name = req.display_name
+    if req.client is not None:
+        session.client = req.client
+    if req.project is not None:
+        session.project = req.project
+    if req.template is not None:
+        session.template = req.template
+    svc.session_svc.save(session)
+    return {"ok": True}
+
+
+class BulkTagRequest(BaseModel):
+    session_ids: list[str]
+    client: Optional[str] = None
+    project: Optional[str] = None
+
+
+@app.post("/sessions/bulk-tag")
+async def bulk_tag_sessions(req: BulkTagRequest):
+    """Apply client and/or project tags to multiple sessions at once."""
+    svc.load_settings()
+    updated = 0
+    for sid in req.session_ids:
+        session = svc.session_svc.load_full(sid)
+        if not session:
+            continue
+        if req.client is not None:
+            session.client = req.client
+        if req.project is not None:
+            session.project = req.project
+        svc.session_svc.save(session)
+        updated += 1
+    return {"updated": updated}
+
+
+class SuggestTaggingRequest(BaseModel):
+    client: str
+    project: str = ""
+
+
+@app.post("/clients/suggest-tagging")
+async def suggest_tagging(req: SuggestTaggingRequest):
+    """
+    Use Claude to suggest which untagged sessions likely belong to a client.
+    Returns [{session_id, display_name, confidence, reason}].
+    """
+    svc.load_settings()
+    if not svc.summarizer:
+        raise HTTPException(status_code=400, detail="Anthropic API key required")
+
+    all_sessions = svc.session_svc.list_sessions()
+    # Candidates: sessions without the target client/project tag
+    candidates = [
+        s for s in all_sessions
+        if s.get("client", "").strip().lower() != req.client.strip().lower()
+    ]
+    if not candidates:
+        return {"suggestions": []}
+
+    # Build lightweight context for Claude
+    candidate_lines = []
+    for s in candidates[:50]:  # cap to keep prompt small
+        display = s.get("display_name", "")
+        summary = (s.get("summary") or "")[:180]
+        line = f"ID:{s['session_id']} | {display}"
+        if summary:
+            line += f" | {summary}"
+        candidate_lines.append(line)
+
+    prompt = (
+        f"I have a client named '{req.client}'"
+        + (f" with project '{req.project}'" if req.project else "")
+        + ". Below is a list of meeting recordings that are NOT currently "
+        "tagged with this client. For each one, decide if it likely belongs "
+        "to this client based on its title and/or summary.\n\n"
+        "Return ONLY a JSON array, no other text:\n"
+        '[{"id": "ABC123", "confidence": 0.0-1.0, "reason": "short why"}]\n\n'
+        "Only include items with confidence >= 0.5.\n\n"
+        "Meetings:\n" + "\n".join(candidate_lines)
+    )
+
+    try:
+        import anthropic, json
+        client_anthropic = anthropic.AsyncAnthropic(
+            api_key=svc.settings.anthropic_api_key)
+        msg = await client_anthropic.messages.create(
+            model=svc.settings.claude_model,
+            max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = msg.content[0].text.strip()
+        # Strip code fences if any
+        if text.startswith("```"):
+            text = "\n".join(line for line in text.split("\n")
+                              if not line.startswith("```"))
+        try:
+            suggestions = json.loads(text)
+        except json.JSONDecodeError:
+            # Extract JSON array from text if wrapped in prose
+            import re
+            m = re.search(r"\[[\s\S]*\]", text)
+            if m:
+                suggestions = json.loads(m.group())
+            else:
+                suggestions = []
+
+        # Enrich with display_name
+        by_id = {s["session_id"]: s for s in candidates}
+        enriched = []
+        for item in suggestions:
+            sid = item.get("id", "")
+            if sid in by_id:
+                enriched.append({
+                    "session_id": sid,
+                    "display_name": by_id[sid].get("display_name", ""),
+                    "started_at": by_id[sid].get("started_at", ""),
+                    "confidence": item.get("confidence", 0),
+                    "reason": item.get("reason", ""),
+                })
+        enriched.sort(key=lambda x: x["confidence"], reverse=True)
+        return {"suggestions": enriched}
+    except Exception as e:
+        logger.exception("Suggest tagging failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/sessions/{session_id}/process")
 async def process_session(session_id: str):
     svc.load_settings()
