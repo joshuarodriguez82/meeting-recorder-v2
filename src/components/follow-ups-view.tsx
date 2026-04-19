@@ -155,7 +155,7 @@ export function FollowUpsView({ sessions, onOpenSession }: Props) {
                   {i.done ? "✓" : "○"}
                 </span>
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm">
+                  <div className="text-sm break-words">
                     {i.owner && <span className="font-medium">[{i.owner}] </span>}
                     {i.description}
                     {i.due && <span className="text-muted-foreground"> (Due: {i.due})</span>}

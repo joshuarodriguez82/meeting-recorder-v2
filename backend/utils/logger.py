@@ -3,6 +3,17 @@
 import logging
 import sys
 
+# Force stdout/stderr to UTF-8 so unicode characters in log messages don't
+# crash the cp1252 charmap codec on Windows (which is what you get when
+# stdout is redirected to a file by the Tauri shell).
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 
 def get_logger(name: str) -> logging.Logger:
     """

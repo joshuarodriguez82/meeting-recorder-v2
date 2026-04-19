@@ -233,8 +233,8 @@ export default function Home() {
       </aside>
 
       {/* Main */}
-      <main className="flex flex-1 flex-col overflow-hidden">
-        <header className="flex h-16 items-center justify-between border-b border-border bg-background/80 px-6 backdrop-blur">
+      <main className="flex flex-1 flex-col overflow-hidden min-w-0">
+        <header className="flex h-16 items-center justify-between border-b border-border bg-background/80 px-6 backdrop-blur shrink-0">
           <div>
             <h1 className="text-lg font-semibold capitalize">{nav.replace("-", " ")}</h1>
             <p className="text-xs text-muted-foreground">
@@ -243,7 +243,7 @@ export default function Home() {
               {nav === "follow-ups" && "Track action items across every meeting"}
               {nav === "decisions" && "Every decision, auto-generated ADR log"}
               {nav === "search" && "Search across all transcripts"}
-              {nav === "clients" && "Per-client overview of meetings and work"}
+              {nav === "clients" && "Clients and their projects — drill in to see meetings"}
               {nav === "prep-brief" && "Generate a pre-meeting brief from past sessions"}
               {nav === "settings" && "Configure API keys, devices, and workflow"}
               {nav === "help" && "How to use Meeting Recorder"}
@@ -251,7 +251,7 @@ export default function Home() {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-8">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden p-8 min-h-0">
           {nav === "record" && (
             <RecordView onSessionsChanged={reloadSessions} onOpenSession={openSession} />
           )}

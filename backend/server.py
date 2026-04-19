@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -249,7 +250,12 @@ async def save_settings(payload: SettingsDTO):
 # ── Audio devices ────────────────────────────────────────────────────
 @app.get("/audio/devices")
 async def get_audio_devices():
-    return {"input": list_input_devices(), "output": list_output_devices()}
+    # sd.query_devices() is synchronous and can take 1-3s on Windows
+    # (Bluetooth stack enumeration). Run in a thread so the event loop
+    # stays responsive for other endpoints.
+    def _list_both():
+        return {"input": list_input_devices(), "output": list_output_devices()}
+    return await asyncio.to_thread(_list_both)
 
 
 # ── Calendar ─────────────────────────────────────────────────────────
@@ -265,7 +271,8 @@ def _serialize_meetings(meetings):
 async def get_calendar_today():
     """Today's meetings (date-based, doesn't cross midnight)."""
     try:
-        return _serialize_meetings(get_todays_meetings())
+        meetings = await asyncio.to_thread(get_todays_meetings)
+        return _serialize_meetings(meetings)
     except Exception as e:
         logger.exception("Calendar fetch failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -278,7 +285,10 @@ async def get_calendar_upcoming(hours: int = 36):
     Default 36h covers the rest of today + all of tomorrow.
     """
     try:
-        return _serialize_meetings(get_upcoming_meetings(hours_ahead=hours))
+        # Outlook COM is blocking. MUST run off the event loop or every
+        # other endpoint stalls until this returns.
+        meetings = await asyncio.to_thread(get_upcoming_meetings, hours)
+        return _serialize_meetings(meetings)
     except Exception as e:
         logger.exception("Upcoming calendar fetch failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -286,7 +296,7 @@ async def get_calendar_upcoming(hours: int = 36):
 
 @app.get("/calendar/available")
 async def calendar_available():
-    return {"available": is_outlook_available()}
+    return await asyncio.to_thread(is_outlook_available)
 
 
 # ── Recording ────────────────────────────────────────────────────────
@@ -390,14 +400,20 @@ async def stop_recording():
 # ── Sessions ─────────────────────────────────────────────────────────
 @app.get("/sessions")
 async def list_sessions():
-    svc.load_settings()
-    return svc.session_svc.list_sessions()
+    # Reading every session JSON off disk can be slow with lots of
+    # sessions — 50+ sessions × small file reads adds up. Run off-loop.
+    def _do():
+        svc.load_settings()
+        return svc.session_svc.list_sessions()
+    return await asyncio.to_thread(_do)
 
 
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str):
-    svc.load_settings()
-    data = svc.session_svc.load(session_id)
+    def _do():
+        svc.load_settings()
+        return svc.session_svc.load(session_id)
+    data = await asyncio.to_thread(_do)
     if not data:
         raise HTTPException(status_code=404, detail="Session not found")
     return data
@@ -408,6 +424,21 @@ async def delete_session(session_id: str):
     svc.load_settings()
     svc.session_svc.delete(session_id)
     return {"ok": True}
+
+
+@app.get("/sessions/{session_id}/audio")
+async def get_session_audio(session_id: str):
+    """Stream the session's WAV file so the UI can play it in an <audio> element."""
+    from fastapi.responses import FileResponse
+    from pathlib import Path as _P
+    svc.load_settings()
+    data = svc.session_svc.load(session_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Session not found")
+    audio_path = data.get("audio_path")
+    if not audio_path or not _P(audio_path).exists():
+        raise HTTPException(status_code=404, detail="Audio file not found")
+    return FileResponse(audio_path, media_type="audio/wav", filename=_P(audio_path).name)
 
 
 class SessionPatchRequest(BaseModel):
@@ -434,6 +465,25 @@ async def patch_session(session_id: str, req: SessionPatchRequest):
         session.template = req.template
     svc.session_svc.save(session)
     return {"ok": True}
+
+
+class SpeakerRenameRequest(BaseModel):
+    display_name: str
+
+
+@app.patch("/sessions/{session_id}/speakers/{speaker_id}")
+async def rename_speaker(session_id: str, speaker_id: str, req: SpeakerRenameRequest):
+    """Rename a speaker on a session — updates the Speaker.display_name."""
+    svc.load_settings()
+    session = svc.session_svc.load_full(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if speaker_id not in session.speakers:
+        raise HTTPException(status_code=404, detail="Speaker not on this session")
+    session.rename_speaker(speaker_id, req.display_name.strip())
+    svc.session_svc.save(session)
+    return {"ok": True, "speaker_id": speaker_id,
+            "display_name": session.speakers[speaker_id].display_name}
 
 
 class BulkTagRequest(BaseModel):
@@ -663,12 +713,15 @@ async def prep_brief(req: PrepBriefRequest):
     if not svc.summarizer:
         raise HTTPException(status_code=400, detail="Anthropic API key required")
     sessions = svc.session_svc.list_sessions()
-    # Filter by client or project match
+    # Filter: when client+project are both set we AND them (project always
+    # belongs to a client). When only one is set, filter by that alone.
     related = []
     for s in sessions:
-        match_client = bool(req.client and s.get("client") == req.client)
-        match_project = bool(req.project and s.get("project") == req.project)
-        if match_client or match_project:
+        if req.client and s.get("client") != req.client:
+            continue
+        if req.project and s.get("project") != req.project:
+            continue
+        if req.client or req.project:
             related.append(s)
     if not related:
         # Fallback: use the 8 most recent processed sessions
@@ -730,6 +783,36 @@ async def startup():
         logger.info("Backend started")
     except Exception as e:
         logger.warning(f"Settings not yet configured: {e}")
+
+    # Pre-warm the slow stuff in background threads so the first frontend
+    # request doesn't pay the latency. These populate module-level caches.
+    import threading as _t
+
+    def _prewarm_audio():
+        try:
+            from core.audio_capture import list_input_devices, list_output_devices
+            t0 = time.time()
+            list_input_devices()
+            list_output_devices()
+            logger.info(f"Audio device cache warmed in {time.time()-t0:.1f}s")
+        except Exception as e:
+            logger.warning(f"Audio device pre-warm failed: {e}")
+
+    def _prewarm_calendar():
+        # Warm both the 36h (Record view) and 24h (CalendarMonitor poll)
+        # cache keys so neither the first UI render nor the first monitor
+        # tick ever waits on Outlook COM.
+        try:
+            from services.calendar_service import get_upcoming_meetings
+            t0 = time.time()
+            get_upcoming_meetings(36)
+            get_upcoming_meetings(24)
+            logger.info(f"Calendar cache warmed in {time.time()-t0:.1f}s")
+        except Exception as e:
+            logger.warning(f"Calendar pre-warm failed: {e}")
+
+    _t.Thread(target=_prewarm_audio, daemon=True).start()
+    _t.Thread(target=_prewarm_calendar, daemon=True).start()
 
 
 if __name__ == "__main__":

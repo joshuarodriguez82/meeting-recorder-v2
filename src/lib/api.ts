@@ -166,6 +166,15 @@ export const api = {
       body: JSON.stringify(patch),
     }),
 
+  renameSpeaker: (session_id: string, speaker_id: string, display_name: string) =>
+    request<{ ok: boolean; speaker_id: string; display_name: string }>(
+      `/sessions/${session_id}/speakers/${encodeURIComponent(speaker_id)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ display_name }),
+      }
+    ),
+
   bulkTag: (session_ids: string[], client?: string, project?: string) =>
     request<{ updated: number }>("/tags/apply", {
       method: "POST",

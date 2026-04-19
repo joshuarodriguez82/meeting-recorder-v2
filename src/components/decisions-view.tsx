@@ -175,9 +175,9 @@ export function DecisionsView({ sessions, onOpenSession }: Props) {
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div>
+    <div className="min-w-0">
       <div className="text-[10px] font-medium uppercase tracking-wider text-primary mb-1">{label}</div>
-      <div className="text-sm">{children}</div>
+      <div className="text-sm break-words">{children}</div>
     </div>
   );
 }

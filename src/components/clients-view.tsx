@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
-import { Plus, Sparkles, Loader2, Tag, Pencil, Trash2 } from "lucide-react";
+import { Plus, Sparkles, Loader2, Tag, Pencil, Trash2, FolderKanban, X } from "lucide-react";
 
 interface Props {
   sessions: SessionSummary[];
@@ -37,6 +37,20 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
   const [showTagMeetings, setShowTagMeetings] = useState(false);
   const [showAiSuggest, setShowAiSuggest] = useState(false);
   const [showRename, setShowRename] = useState(false);
+
+  // Project sub-selection (null = show all meetings for this client)
+  const [selectedProject, setSelectedProject] = useState<string | null>(null);
+  // Extra projects the user has created for this client but hasn't tagged yet
+  const [pendingProjectsByClient, setPendingProjectsByClient] = useState<Record<string, string[]>>({});
+  const [showNewProject, setShowNewProject] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [showTagProject, setShowTagProject] = useState(false);
+  const [showRenameProject, setShowRenameProject] = useState(false);
+
+  // Reset project sub-selection whenever we switch clients
+  useEffect(() => {
+    setSelectedProject(null);
+  }, [selected]);
 
   useEffect(() => {
     if (!selected && clients.length > 0) setSelected(clients[0]);
@@ -84,20 +98,47 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
 
   const clientSessions = sessions.filter((s) => s.client === selected);
   const totalSeconds = clientSessions.reduce((sum, s) => sum + s.duration_s, 0);
-  const projects = new Set(clientSessions.map((s) => s.project).filter(Boolean));
-  const openActions = clientSessions.reduce((count, s) => {
+
+  // Projects that have been tagged on real meetings for this client …
+  const taggedProjects = Array.from(
+    new Set(clientSessions.map((s) => s.project).filter(Boolean))
+  ).sort();
+  // … plus any the user created but hasn't tagged yet (pending, per-client)
+  const pendingForThisClient = pendingProjectsByClient[selected] || [];
+  const projectsList = Array.from(new Set([...taggedProjects, ...pendingForThisClient])).sort();
+
+  // Meetings to show in the table (filtered by project chip if one is active)
+  const visibleSessions = selectedProject
+    ? clientSessions.filter((s) => s.project === selectedProject)
+    : clientSessions;
+  const visibleSeconds = visibleSessions.reduce((sum, s) => sum + s.duration_s, 0);
+  const openActions = visibleSessions.reduce((count, s) => {
     if (!s.action_items) return count;
     return count + (s.action_items.match(/^\s*-\s*\[\s\]/gm)?.length || 0);
   }, 0);
-  const decisions = clientSessions.reduce((count, s) => {
+  const decisions = visibleSessions.reduce((count, s) => {
     if (!s.decisions) return count;
     return count + (s.decisions.match(/^##/gm)?.length || 0);
   }, 0);
 
+  const handleCreateProject = () => {
+    const n = newProjectName.trim();
+    if (!n || !selected) return;
+    setPendingProjectsByClient((prev) => {
+      const existing = prev[selected] || [];
+      return { ...prev, [selected]: Array.from(new Set([...existing, n])) };
+    });
+    setSelectedProject(n);
+    setShowNewProject(false);
+    setNewProjectName("");
+    setShowTagProject(true);
+    toast.success(`Project "${n}" ready under ${selected} — tag meetings to it`);
+  };
+
   return (
-    <div className="mx-auto max-w-6xl grid grid-cols-1 md:grid-cols-[240px_1fr] gap-6">
+    <div className="mx-auto max-w-6xl grid grid-cols-1 md:grid-cols-[240px_minmax(0,1fr)] gap-6">
       {/* Client list sidebar */}
-      <div className="space-y-2">
+      <div className="space-y-2 min-w-0">
         <div className="flex items-center justify-between px-1">
           <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
             Clients ({clients.length})
@@ -132,12 +173,12 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
       </div>
 
       {/* Selected client detail */}
-      <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-xl font-semibold">{selected}</h2>
+      <div className="space-y-6 min-w-0">
+        <div className="flex items-center justify-between gap-3 min-w-0">
+          <div className="min-w-0">
+            <h2 className="text-xl font-semibold truncate">{selected}</h2>
             <p className="text-xs text-muted-foreground">
-              {clientSessions.length} meetings · {projects.size} projects · {formatDuration(totalSeconds)} total
+              {clientSessions.length} meetings · {projectsList.length} projects · {formatDuration(totalSeconds)} total
             </p>
           </div>
           <div className="flex gap-2">
@@ -156,10 +197,82 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
           </div>
         </div>
 
-        {/* Stat cards */}
+        {/* Projects under this client — click a chip to filter below */}
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between py-3">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <FolderKanban className="h-4 w-4 text-primary" />
+              Projects
+            </CardTitle>
+            <div className="flex gap-2">
+              {selectedProject && (
+                <Button variant="outline" size="sm" onClick={() => setShowRenameProject(true)}>
+                  <Pencil className="h-3.5 w-3.5 mr-2" />
+                  Rename Project
+                </Button>
+              )}
+              <Button size="sm" variant="outline" onClick={() => setShowNewProject(true)}>
+                <Plus className="h-3.5 w-3.5 mr-2" />
+                New Project
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="pt-0">
+            {projectsList.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                No projects yet. Create one to group meetings into workstreams.
+              </p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => setSelectedProject(null)}
+                  className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                    selectedProject === null
+                      ? "bg-primary text-primary-foreground border-primary"
+                      : "bg-background hover:bg-accent"
+                  }`}
+                >
+                  All ({clientSessions.length})
+                </button>
+                {projectsList.map((p) => {
+                  const count = clientSessions.filter((s) => s.project === p).length;
+                  const active = selectedProject === p;
+                  return (
+                    <button
+                      key={p}
+                      onClick={() => setSelectedProject(active ? null : p)}
+                      className={`group flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs transition-colors ${
+                        active
+                          ? "bg-primary text-primary-foreground border-primary"
+                          : "bg-background hover:bg-accent"
+                      }`}
+                    >
+                      <span>{p}</span>
+                      <Badge variant="outline" className={`text-[10px] ${active ? "border-primary-foreground/40 text-primary-foreground" : ""}`}>
+                        {count}
+                      </Badge>
+                    </button>
+                  );
+                })}
+                {selectedProject && (
+                  <Button
+                    size="sm"
+                    onClick={() => setShowTagProject(true)}
+                    className="h-7 text-xs ml-2"
+                  >
+                    <Tag className="h-3 w-3 mr-1.5" />
+                    Tag to {selectedProject}
+                  </Button>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Stat cards — reflect the current filter (all client meetings OR just the selected project) */}
         <div className="grid grid-cols-4 gap-3">
-          <StatCard label="Meetings" value={clientSessions.length.toString()} />
-          <StatCard label="Hours" value={(totalSeconds / 3600).toFixed(1)} />
+          <StatCard label="Meetings" value={visibleSessions.length.toString()} />
+          <StatCard label="Hours" value={(visibleSeconds / 3600).toFixed(1)} />
           <StatCard label="Open Actions" value={openActions.toString()} />
           <StatCard label="Decisions" value={decisions.toString()} />
         </div>
@@ -167,15 +280,19 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
         {/* Meetings list */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-sm">Meetings</CardTitle>
+            <CardTitle className="text-sm">
+              {selectedProject ? `Meetings in "${selectedProject}"` : "Meetings"}
+            </CardTitle>
           </CardHeader>
           <CardContent className="p-0">
-            {clientSessions.length === 0 ? (
+            {visibleSessions.length === 0 ? (
               <p className="text-sm text-muted-foreground py-8 text-center">
-                No meetings tagged with this client yet. Click &quot;Tag Meetings&quot; above.
+                {selectedProject
+                  ? `No meetings in "${selectedProject}" yet. Click "Tag to ${selectedProject}" above.`
+                  : "No meetings tagged with this client yet. Click \"Tag Meetings\" above."}
               </p>
             ) : (
-              clientSessions.map((s) => (
+              visibleSessions.map((s) => (
                 <button
                   key={s.session_id}
                   onClick={() => onOpenSession(s.session_id)}
@@ -232,7 +349,256 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
         sessions={sessions}
         onRenamed={(newName) => { setSelected(newName); onReload(); }}
       />
+
+      <NewProjectDialog
+        open={showNewProject}
+        onOpenChange={setShowNewProject}
+        client={selected}
+        name={newProjectName}
+        setName={setNewProjectName}
+        onCreate={handleCreateProject}
+      />
+
+      <TagProjectDialog
+        open={showTagProject}
+        onOpenChange={setShowTagProject}
+        client={selected}
+        project={selectedProject || ""}
+        sessions={sessions}
+        onDone={onReload}
+      />
+
+      <RenameProjectDialog
+        open={showRenameProject}
+        onOpenChange={setShowRenameProject}
+        client={selected}
+        project={selectedProject || ""}
+        sessions={sessions}
+        onRenamed={(newName) => { setSelectedProject(newName); onReload(); }}
+      />
     </div>
+  );
+}
+
+function NewProjectDialog({
+  open, onOpenChange, client, name, setName, onCreate,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  client: string;
+  name: string;
+  setName: (s: string) => void;
+  onCreate: () => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>New Project under {client}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3 py-2">
+          <div className="space-y-2">
+            <Label>Project Name</Label>
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. AWS Connect PoC"
+              autoFocus
+              onKeyDown={(e) => e.key === "Enter" && onCreate()}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            After creating, you&apos;ll tag meetings under <strong>{client}</strong> to this project.
+          </p>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button onClick={onCreate} disabled={!name.trim()}>Create</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function TagProjectDialog({
+  open, onOpenChange, client, project, sessions, onDone,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  client: string;
+  project: string;
+  sessions: SessionSummary[];
+  onDone: () => void;
+}) {
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [filter, setFilter] = useState("");
+  const [applying, setApplying] = useState(false);
+
+  useEffect(() => {
+    if (open) setSelected(new Set());
+  }, [open, project]);
+
+  // Scope: meetings under this client that aren't already in this project
+  const available = sessions.filter((s) =>
+    s.client === client &&
+    s.project !== project &&
+    (!filter || s.display_name.toLowerCase().includes(filter.toLowerCase()))
+  );
+
+  const toggle = (id: string) => {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    setSelected(next);
+  };
+
+  const apply = async () => {
+    if (selected.size === 0 || !project) return;
+    setApplying(true);
+    try {
+      // Set both client and project so untagged-client meetings get both at once
+      const res = await api.bulkTag(Array.from(selected), client, project);
+      toast.success(`Tagged ${res.updated} meetings to ${client} / ${project}`);
+      onDone();
+      onOpenChange(false);
+    } catch (e) {
+      toast.error(`Tag failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col p-0 gap-0">
+        <DialogHeader className="px-6 py-4 border-b">
+          <DialogTitle>
+            Tag meetings to <span className="text-primary">{project}</span>
+          </DialogTitle>
+          <p className="text-xs text-muted-foreground mt-1">
+            Only showing meetings under <strong>{client}</strong>. To add a meeting from a different
+            client, re-tag its client first.
+          </p>
+        </DialogHeader>
+        <div className="px-6 py-3 border-b">
+          <Input
+            placeholder="Filter meetings..."
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            autoComplete="off"
+          />
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          {available.length === 0 ? (
+            <p className="text-sm text-muted-foreground p-8 text-center">
+              No untagged meetings for {client}.
+            </p>
+          ) : (
+            available.map((s) => (
+              <label
+                key={s.session_id}
+                className="flex items-center gap-3 border-b last:border-b-0 p-3 hover:bg-muted/40 cursor-pointer text-sm"
+              >
+                <input
+                  type="checkbox"
+                  checked={selected.has(s.session_id)}
+                  onChange={() => toggle(s.session_id)}
+                  className="h-4 w-4"
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="truncate font-medium">{s.display_name}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {s.started_at ? new Date(s.started_at).toLocaleDateString() : ""}
+                    {s.project && <> · currently: <span className="text-amber-600">{s.project}</span></>}
+                  </div>
+                </div>
+              </label>
+            ))
+          )}
+        </div>
+        <DialogFooter className="px-6 py-3 border-t">
+          <p className="text-sm text-muted-foreground mr-auto">{selected.size} selected</p>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button onClick={apply} disabled={selected.size === 0 || applying}>
+            {applying ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : null}
+            Apply Tag
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RenameProjectDialog({
+  open, onOpenChange, client, project, sessions, onRenamed,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  client: string;
+  project: string;
+  sessions: SessionSummary[];
+  onRenamed: (newName: string) => void;
+}) {
+  const [name, setName] = useState(project);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (open) setName(project);
+  }, [open, project]);
+
+  const affected = sessions.filter((s) => s.client === client && s.project === project).length;
+
+  const save = async () => {
+    const n = name.trim();
+    if (!n || n === project) {
+      onOpenChange(false);
+      return;
+    }
+    setSaving(true);
+    try {
+      const ids = sessions
+        .filter((s) => s.client === client && s.project === project)
+        .map((s) => s.session_id);
+      await api.bulkTag(ids, undefined, n);
+      toast.success(`Renamed project to "${n}" (${ids.length} meetings updated)`);
+      onRenamed(n);
+      onOpenChange(false);
+    } catch (e) {
+      toast.error(`Rename failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Rename Project</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3 py-2">
+          <div className="space-y-2">
+            <Label>New Name</Label>
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              autoFocus
+              onKeyDown={(e) => e.key === "Enter" && save()}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            This will update {affected} meeting{affected === 1 ? "" : "s"} under{" "}
+            <strong>{client}</strong> currently tagged &quot;{project}&quot;.
+          </p>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button onClick={save} disabled={!name.trim() || saving}>
+            {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : null}
+            Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
