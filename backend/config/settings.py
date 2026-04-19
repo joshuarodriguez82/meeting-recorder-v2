@@ -8,9 +8,11 @@ from pathlib import Path
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
-load_dotenv()
-
+# Resolve .env relative to this file (backend/../.env = backend/.env)
+# This works regardless of CWD (important when the Tauri shell spawns the
+# Python sidecar — CWD might be anywhere).
 ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 
 @dataclass(frozen=True)
