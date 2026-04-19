@@ -65,7 +65,7 @@ export function RecordView({ onSessionsChanged }: Props) {
         const [devices, tpls, cal, status] = await Promise.all([
           api.getAudioDevices(),
           api.getTemplates(),
-          api.getCalendarToday().catch(() => []),
+          api.getUpcomingMeetings(36).catch(() => []),
           api.recordingStatus(),
         ]);
         setInputDevices(devices.input);
@@ -203,9 +203,9 @@ export function RecordView({ onSessionsChanged }: Props) {
   const refreshCal = async () => {
     setLoadingCal(true);
     try {
-      const cal = await api.getCalendarToday();
+      const cal = await api.getUpcomingMeetings(36);
       setMeetings(cal);
-      toast.success(`Loaded ${cal.length} meetings`);
+      toast.success(`Loaded ${cal.length} upcoming meetings`);
     } catch (e) {
       toast.error(`Calendar: ${e instanceof Error ? e.message : e}`);
     } finally {
@@ -352,7 +352,7 @@ export function RecordView({ onSessionsChanged }: Props) {
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <CardTitle className="flex items-center gap-2 text-base">
             <CalendarIcon className="h-4 w-4 text-primary" />
-            Today&apos;s Meetings
+            Upcoming Meetings
           </CardTitle>
           <Button size="sm" variant="ghost" onClick={refreshCal} disabled={loadingCal}>
             {loadingCal ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Refresh"}
@@ -361,7 +361,7 @@ export function RecordView({ onSessionsChanged }: Props) {
         <CardContent>
           {meetings.length === 0 ? (
             <p className="text-sm text-muted-foreground text-center py-8">
-              No meetings for today, or Outlook not connected.
+              No upcoming meetings in the next 36 hours, or Outlook not connected.
             </p>
           ) : (
             <div className="space-y-2">
@@ -379,7 +379,10 @@ export function RecordView({ onSessionsChanged }: Props) {
                         : past ? "opacity-60" : "hover:bg-muted/40"
                     }`}
                   >
-                    <div className="flex flex-col items-start w-20 text-xs font-medium">
+                    <div className="flex flex-col items-start w-24 text-xs font-medium">
+                      <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                        {dayLabel(start)}
+                      </span>
                       <span>{start.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
                       <span className="text-muted-foreground">
                         {end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -534,6 +537,17 @@ function formatT(s: number): string {
   const m = Math.floor(s / 60);
   const sec = Math.floor(s % 60);
   return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+}
+
+function dayLabel(d: Date): string {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const target = new Date(d);
+  target.setHours(0, 0, 0, 0);
+  const diff = Math.round((target.getTime() - today.getTime()) / 86400000);
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Tomorrow";
+  return d.toLocaleDateString([], { weekday: "short" });
 }
 
 function formatDur(seconds: number): string {

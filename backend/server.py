@@ -29,7 +29,9 @@ from core.diarization import DiarizationEngine
 from core.summarizer import Summarizer, MEETING_TEMPLATES
 from core.transcription import TranscriptionEngine
 from models.session import Session
-from services.calendar_service import get_todays_meetings, is_outlook_available
+from services.calendar_service import (
+    get_todays_meetings, get_upcoming_meetings, is_outlook_available,
+)
 from services.export_service import ExportService
 from services.recording_service import RecordingService
 from services.retention_service import cleanup as run_retention_cleanup, folder_stats
@@ -208,17 +210,34 @@ async def get_audio_devices():
 
 
 # ── Calendar ─────────────────────────────────────────────────────────
+def _serialize_meetings(meetings):
+    return [{
+        **m,
+        "start": m["start"].isoformat() if hasattr(m["start"], "isoformat") else m["start"],
+        "end": m["end"].isoformat() if hasattr(m["end"], "isoformat") else m["end"],
+    } for m in meetings]
+
+
 @app.get("/calendar/today")
 async def get_calendar_today():
+    """Today's meetings (date-based, doesn't cross midnight)."""
     try:
-        meetings = get_todays_meetings()
-        return [{
-            **m,
-            "start": m["start"].isoformat() if hasattr(m["start"], "isoformat") else m["start"],
-            "end": m["end"].isoformat() if hasattr(m["end"], "isoformat") else m["end"],
-        } for m in meetings]
+        return _serialize_meetings(get_todays_meetings())
     except Exception as e:
         logger.exception("Calendar fetch failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/calendar/upcoming")
+async def get_calendar_upcoming(hours: int = 36):
+    """
+    Meetings from now through N hours ahead.
+    Default 36h covers the rest of today + all of tomorrow.
+    """
+    try:
+        return _serialize_meetings(get_upcoming_meetings(hours_ahead=hours))
+    except Exception as e:
+        logger.exception("Upcoming calendar fetch failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 

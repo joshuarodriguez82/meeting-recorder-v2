@@ -23,7 +23,7 @@ export function CalendarMonitor({ enabled, minutesBefore, onStart }: Props) {
 
     const check = async () => {
       try {
-        const meetings = await api.getCalendarToday();
+        const meetings = await api.getUpcomingMeetings(24);
         const now = Date.now();
         for (const m of meetings) {
           const key = `${m.subject}|${m.start}`;
