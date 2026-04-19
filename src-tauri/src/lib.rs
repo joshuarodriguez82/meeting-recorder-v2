@@ -162,7 +162,9 @@ fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
         .map_err(|e| format!("Couldn't clone log fd: {}", e))?;
 
     let mut cmd = Command::new(&python_exe);
-    cmd.arg(&server_py)
+    cmd.arg("-u")  // unbuffered stdout/stderr — critical so logs flush immediately
+       .arg(&server_py)
+       .env("PYTHONUNBUFFERED", "1")
        .stdout(Stdio::from(log_file))
        .stderr(Stdio::from(log_file2));
 
