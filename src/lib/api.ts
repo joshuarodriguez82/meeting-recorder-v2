@@ -167,7 +167,7 @@ export const api = {
     }),
 
   bulkTag: (session_ids: string[], client?: string, project?: string) =>
-    request<{ updated: number }>("/sessions/bulk-tag", {
+    request<{ updated: number }>("/tags/apply", {
       method: "POST",
       body: JSON.stringify({ session_ids, client, project }),
     }),

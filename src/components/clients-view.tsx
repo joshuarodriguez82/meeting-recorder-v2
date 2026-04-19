@@ -20,10 +20,17 @@ interface Props {
 }
 
 export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
-  const clients = useMemo(
+  // Client names actually used on sessions
+  const taggedClients = useMemo(
     () => Array.from(new Set(sessions.map((s) => s.client).filter(Boolean))).sort(),
     [sessions]
   );
+  // Additional names the user has created this session that aren't tagged yet
+  const [pendingClients, setPendingClients] = useState<string[]>([]);
+  const clients = useMemo(() => {
+    const merged = new Set([...taggedClients, ...pendingClients]);
+    return Array.from(merged).sort();
+  }, [taggedClients, pendingClients]);
   const [selected, setSelected] = useState<string>("");
   const [showNewClient, setShowNewClient] = useState(false);
   const [newClientName, setNewClientName] = useState("");
@@ -34,6 +41,17 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
   useEffect(() => {
     if (!selected && clients.length > 0) setSelected(clients[0]);
   }, [clients, selected]);
+
+  const handleCreate = () => {
+    const n = newClientName.trim();
+    if (!n) return;
+    setPendingClients((prev) => Array.from(new Set([...prev, n])));
+    setSelected(n);
+    setShowNewClient(false);
+    setNewClientName("");
+    setShowTagMeetings(true);
+    toast.success(`Client "${n}" ready — tag meetings to it`);
+  };
 
   if (clients.length === 0 && !showNewClient) {
     return (
@@ -57,15 +75,7 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
             onOpenChange={setShowNewClient}
             name={newClientName}
             setName={setNewClientName}
-            onCreate={() => {
-              const n = newClientName.trim();
-              if (!n) return;
-              setSelected(n);
-              setShowNewClient(false);
-              setNewClientName("");
-              setShowTagMeetings(true);
-              toast.success(`Client "${n}" ready — tag some meetings to it.`);
-            }}
+            onCreate={handleCreate}
           />
         </div>
       </div>
@@ -197,15 +207,7 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
         onOpenChange={setShowNewClient}
         name={newClientName}
         setName={setNewClientName}
-        onCreate={() => {
-          const n = newClientName.trim();
-          if (!n) return;
-          setSelected(n);
-          setShowNewClient(false);
-          setNewClientName("");
-          setShowTagMeetings(true);
-          toast.success(`Client "${n}" ready — tag some meetings to it.`);
-        }}
+        onCreate={handleCreate}
       />
 
       <TagMeetingsDialog
