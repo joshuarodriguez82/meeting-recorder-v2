@@ -97,6 +97,7 @@ pub fn run() {
     rlog(&format!("Backend port: {}", BACKEND_PORT));
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(backend)
         .setup(|app| {
             if cfg!(debug_assertions) {
