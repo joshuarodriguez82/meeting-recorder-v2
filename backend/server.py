@@ -1,13 +1,11 @@
 """
 FastAPI sidecar server for the Tauri frontend.
-Exposes the existing Python services as HTTP endpoints.
+Exposes the Python services as HTTP endpoints.
 """
 
 import asyncio
 import logging
-import uuid
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 import uvicorn
@@ -17,9 +15,13 @@ from pydantic import BaseModel
 
 from config.settings import Settings
 from core.audio_capture import list_input_devices, list_output_devices
+from core.diarization import DiarizationEngine
+from core.summarizer import Summarizer, MEETING_TEMPLATES
+from core.transcription import TranscriptionEngine
 from models.session import Session
 from services.calendar_service import get_todays_meetings, is_outlook_available
 from services.export_service import ExportService
+from services.recording_service import RecordingService
 from services.retention_service import cleanup as run_retention_cleanup, folder_stats
 from services.session_service import SessionService
 from utils.logger import get_logger
@@ -28,7 +30,6 @@ logger = get_logger(__name__)
 
 app = FastAPI(title="Meeting Recorder Backend", version="2.0.0")
 
-# Allow the Tauri dev server + production webview to hit the API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,31 +39,67 @@ app.add_middleware(
 )
 
 
-# ── Lazy service initialization ──────────────────────────────────────
+# ── Lazy service container ──────────────────────────────────────────
 class Services:
     def __init__(self):
         self.settings: Optional[Settings] = None
         self.session_svc: Optional[SessionService] = None
         self.export_svc: Optional[ExportService] = None
-        self.transcription = None
-        self.diarization = None
-        self.summarizer = None
-        self.recording_svc = None
+        self.recording_svc: Optional[RecordingService] = None
+        self.transcription: Optional[TranscriptionEngine] = None
+        self.diarization: Optional[DiarizationEngine] = None
+        self.summarizer: Optional[Summarizer] = None
         self.current_session: Optional[Session] = None
+        self.models_ready = False
+        self.models_loading = False
+        self.models_error: Optional[str] = None
+        self.record_started_at: Optional[datetime] = None
 
     def load_settings(self) -> Settings:
         if self.settings is None:
             self.settings = Settings.from_env()
             self.session_svc = SessionService(self.settings.recordings_dir)
             self.export_svc = ExportService(self.settings.recordings_dir)
+            self.recording_svc = RecordingService(
+                settings=self.settings,
+                on_status=lambda msg: logger.info(f"[rec] {msg}"),
+            )
+            if self.settings.anthropic_api_key:
+                self.summarizer = Summarizer(
+                    self.settings.anthropic_api_key,
+                    model=self.settings.claude_model)
         return self.settings
+
+    def ensure_models_loaded(self):
+        """Blocking: load transcription + diarization engines if not loaded."""
+        if self.models_ready or self.models_loading:
+            return
+        self.models_loading = True
+        self.models_error = None
+        try:
+            s = self.load_settings()
+            if not s.is_configured:
+                raise RuntimeError("API keys not configured")
+            logger.info("Loading transcription engine...")
+            self.transcription = TranscriptionEngine(s.whisper_model)
+            logger.info("Loading diarization engine...")
+            self.diarization = DiarizationEngine(s.hf_token, s.max_speakers)
+            self.recording_svc.set_engines(self.transcription, self.diarization)
+            self.models_ready = True
+            logger.info("Models loaded")
+        except Exception as e:
+            logger.exception("Model load failed")
+            self.models_error = str(e)
+            raise
+        finally:
+            self.models_loading = False
 
 
 svc = Services()
 
 
 # ── Models ───────────────────────────────────────────────────────────
-class SettingsResponse(BaseModel):
+class SettingsDTO(BaseModel):
     anthropic_api_key: str
     hf_token: str
     whisper_model: str
@@ -87,6 +124,17 @@ class StartRecordingRequest(BaseModel):
     template: str = "General"
     client: str = ""
     project: str = ""
+    attendees: list[str] = []
+
+
+class RecordingStatus(BaseModel):
+    is_recording: bool
+    session_id: Optional[str] = None
+    started_at: Optional[str] = None
+    duration_s: int = 0
+    models_ready: bool = False
+    models_loading: bool = False
+    models_error: Optional[str] = None
 
 
 # ── Health ───────────────────────────────────────────────────────────
@@ -96,10 +144,10 @@ async def health():
 
 
 # ── Settings ─────────────────────────────────────────────────────────
-@app.get("/settings", response_model=SettingsResponse)
+@app.get("/settings", response_model=SettingsDTO)
 async def get_settings():
     s = svc.load_settings()
-    return SettingsResponse(
+    return SettingsDTO(
         anthropic_api_key=s.anthropic_api_key,
         hf_token=s.hf_token,
         whisper_model=s.whisper_model,
@@ -119,7 +167,7 @@ async def get_settings():
 
 
 @app.post("/settings")
-async def save_settings(payload: SettingsResponse):
+async def save_settings(payload: SettingsDTO):
     Settings.save_to_env(
         anthropic_api_key=payload.anthropic_api_key,
         hf_token=payload.hf_token,
@@ -136,17 +184,17 @@ async def save_settings(payload: SettingsResponse):
         retention_processed_days=payload.retention_processed_days,
         retention_unprocessed_days=payload.retention_unprocessed_days,
     )
-    svc.settings = None  # force reload
+    # Force reload
+    svc.settings = None
+    svc.models_ready = False
+    svc.load_settings()
     return {"ok": True}
 
 
 # ── Audio devices ────────────────────────────────────────────────────
 @app.get("/audio/devices")
 async def get_audio_devices():
-    return {
-        "input": list_input_devices(),
-        "output": list_output_devices(),
-    }
+    return {"input": list_input_devices(), "output": list_output_devices()}
 
 
 # ── Calendar ─────────────────────────────────────────────────────────
@@ -154,7 +202,6 @@ async def get_audio_devices():
 async def get_calendar_today():
     try:
         meetings = get_todays_meetings()
-        # datetime -> ISO string for JSON
         return [{
             **m,
             "start": m["start"].isoformat() if hasattr(m["start"], "isoformat") else m["start"],
@@ -168,6 +215,87 @@ async def get_calendar_today():
 @app.get("/calendar/available")
 async def calendar_available():
     return {"available": is_outlook_available()}
+
+
+# ── Recording ────────────────────────────────────────────────────────
+def _load_models_async():
+    """Fire-and-forget model load on a thread."""
+    import threading
+    if svc.models_ready or svc.models_loading:
+        return
+    threading.Thread(target=svc.ensure_models_loaded, daemon=True).start()
+
+
+@app.post("/models/load")
+async def trigger_model_load():
+    """Kick off async model load."""
+    _load_models_async()
+    return {"loading": True}
+
+
+@app.get("/recording/status", response_model=RecordingStatus)
+async def recording_status():
+    svc.load_settings()
+    rec = svc.recording_svc
+    is_rec = rec is not None and rec.is_recording
+    session_id = rec.current_session.session_id if is_rec and rec.current_session else None
+    duration_s = 0
+    started_iso = None
+    if is_rec and svc.record_started_at:
+        duration_s = int((datetime.now() - svc.record_started_at).total_seconds())
+        started_iso = svc.record_started_at.isoformat()
+    return RecordingStatus(
+        is_recording=is_rec,
+        session_id=session_id,
+        started_at=started_iso,
+        duration_s=duration_s,
+        models_ready=svc.models_ready,
+        models_loading=svc.models_loading,
+        models_error=svc.models_error,
+    )
+
+
+@app.post("/recording/start")
+async def start_recording(req: StartRecordingRequest):
+    svc.load_settings()
+    if not svc.recording_svc:
+        raise HTTPException(status_code=500, detail="Recording service not initialized")
+    if svc.recording_svc.is_recording:
+        raise HTTPException(status_code=409, detail="Already recording")
+    try:
+        session = svc.recording_svc.start_recording(
+            mic_device_index=req.mic_device_index,
+            output_device_index=req.output_device_index,
+        )
+        session.display_name = req.meeting_name or ""
+        session.template = req.template or "General"
+        session.client = req.client or ""
+        session.project = req.project or ""
+        session.attendees = req.attendees or []
+        svc.current_session = session
+        svc.record_started_at = datetime.now()
+        return {"session_id": session.session_id}
+    except Exception as e:
+        logger.exception("Start recording failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/recording/stop")
+async def stop_recording():
+    svc.load_settings()
+    if not svc.recording_svc or not svc.recording_svc.is_recording:
+        raise HTTPException(status_code=409, detail="Not recording")
+    try:
+        session = svc.recording_svc.stop_recording()
+        svc.record_started_at = None
+        if session:
+            svc.current_session = session
+            svc.session_svc.save(session)
+            return {"session_id": session.session_id, "audio_path": session.audio_path}
+        raise HTTPException(status_code=500, detail="Stop returned no session")
+    except Exception as e:
+        logger.exception("Stop recording failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Sessions ─────────────────────────────────────────────────────────
@@ -193,6 +321,105 @@ async def delete_session(session_id: str):
     return {"ok": True}
 
 
+@app.post("/sessions/{session_id}/process")
+async def process_session(session_id: str):
+    svc.load_settings()
+    svc.ensure_models_loaded()
+    session = svc.session_svc.load_full(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    svc.recording_svc.set_session(session)
+    svc.current_session = session
+    try:
+        result = await svc.recording_svc.process_session()
+        svc.session_svc.save(result)
+        return {"ok": True, "segments": len(result.segments),
+                "speakers": len(result.speakers)}
+    except Exception as e:
+        logger.exception("Process failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _run_extraction(session_id: str, extractor_name: str, field_name: str,
+                           export_fn_name: str, extra_arg=None):
+    svc.load_settings()
+    if not svc.summarizer:
+        raise HTTPException(status_code=400,
+                            detail="Anthropic API key required")
+    session = svc.session_svc.load_full(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not session.segments:
+        raise HTTPException(status_code=400,
+                            detail="Session has no transcript (run /process first)")
+    transcript = session.full_transcript()
+    try:
+        method = getattr(svc.summarizer, extractor_name)
+        if extra_arg is not None:
+            result = await method(transcript, extra_arg)
+        else:
+            result = await method(transcript)
+        setattr(session, field_name, result)
+        svc.session_svc.save(session)
+        try:
+            export_fn = getattr(svc.export_svc, export_fn_name)
+            export_fn(session)
+        except Exception as ex:
+            logger.warning(f"Export failed: {ex}")
+        return {"ok": True, field_name: result}
+    except Exception as e:
+        logger.exception(f"{extractor_name} failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class TemplateRequest(BaseModel):
+    template: str = "General"
+
+
+@app.post("/sessions/{session_id}/summarize")
+async def summarize_session(session_id: str, req: TemplateRequest):
+    svc.load_settings()
+    if not svc.summarizer:
+        raise HTTPException(status_code=400, detail="Anthropic API key required")
+    session = svc.session_svc.load_full(session_id)
+    if not session or not session.segments:
+        raise HTTPException(status_code=400, detail="Session has no transcript")
+    try:
+        result = await svc.summarizer.summarize(session.full_transcript(),
+                                                  template=req.template)
+        session.summary = result
+        session.template = req.template
+        svc.session_svc.save(session)
+        try:
+            svc.export_svc.export_summary(session)
+        except Exception:
+            pass
+        return {"ok": True, "summary": result}
+    except Exception as e:
+        logger.exception("Summarize failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/sessions/{session_id}/action-items")
+async def action_items(session_id: str):
+    return await _run_extraction(
+        session_id, "extract_action_items", "action_items",
+        "export_action_items")
+
+
+@app.post("/sessions/{session_id}/requirements")
+async def requirements(session_id: str):
+    return await _run_extraction(
+        session_id, "extract_requirements", "requirements",
+        "export_requirements")
+
+
+@app.post("/sessions/{session_id}/decisions")
+async def decisions(session_id: str):
+    return await _run_extraction(
+        session_id, "extract_decisions", "decisions", "export_decisions")
+
+
 # ── Retention ────────────────────────────────────────────────────────
 @app.get("/retention/stats")
 async def retention_stats():
@@ -210,6 +437,12 @@ async def retention_cleanup(processed_days: int = 7, unprocessed_days: int = 30)
     )
 
 
+# ── Templates ────────────────────────────────────────────────────────
+@app.get("/templates")
+async def get_templates():
+    return list(MEETING_TEMPLATES.keys())
+
+
 # ── Startup ──────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
@@ -221,6 +454,5 @@ async def startup():
 
 
 if __name__ == "__main__":
-    # Run on port 17645 (arbitrary; unlikely to clash)
     logging.basicConfig(level=logging.INFO)
     uvicorn.run(app, host="127.0.0.1", port=17645, log_level="info")
