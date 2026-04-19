@@ -1,0 +1,377 @@
+"""
+Claude-powered meeting summarizer and speaker identifier.
+"""
+
+import asyncio
+import json
+import re
+from typing import Dict
+from anthropic import AsyncAnthropic
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+def _markdown_to_html(text: str) -> str:
+    """Convert basic markdown to HTML for email display."""
+    lines = text.split("\n")
+    html_lines = []
+    in_list = False
+
+    for line in lines:
+        # Headers
+        if line.startswith("### "):
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            html_lines.append(
+                f'<h3 style="color:#1a1a1a;font-size:15px;margin:16px 0 6px;">'
+                f'{line[4:]}</h3>')
+        elif line.startswith("## "):
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            html_lines.append(
+                f'<h2 style="color:#003a57;font-size:17px;margin:20px 0 8px;'
+                f'border-bottom:1px solid #ddd;padding-bottom:4px;">'
+                f'{line[3:]}</h2>')
+        elif line.startswith("# "):
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            html_lines.append(
+                f'<h1 style="color:#003a57;font-size:20px;margin:20px 0 10px;">'
+                f'{line[2:]}</h1>')
+        # Bullet points
+        elif line.startswith("- ") or line.startswith("* "):
+            if not in_list:
+                html_lines.append(
+                    '<ul style="margin:6px 0;padding-left:20px;">')
+                in_list = True
+            content = _inline_markdown(line[2:])
+            html_lines.append(
+                f'<li style="margin:4px 0;color:#333;">{content}</li>')
+        # Numbered list
+        elif re.match(r"^\d+\. ", line):
+            if not in_list:
+                html_lines.append(
+                    '<ol style="margin:6px 0;padding-left:20px;">')
+                in_list = True
+            content = _inline_markdown(re.sub(r"^\d+\. ", "", line))
+            html_lines.append(
+                f'<li style="margin:4px 0;color:#333;">{content}</li>')
+        # Empty line
+        elif line.strip() == "":
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            html_lines.append('<div style="height:8px;"></div>')
+        # Regular paragraph
+        else:
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            content = _inline_markdown(line)
+            html_lines.append(
+                f'<p style="margin:4px 0;color:#333;line-height:1.6;">'
+                f'{content}</p>')
+
+    if in_list:
+        html_lines.append("</ul>")
+
+    return "\n".join(html_lines)
+
+
+def _inline_markdown(text: str) -> str:
+    """Convert inline markdown (bold, italic, code) to HTML."""
+    # Bold
+    text = re.sub(r"\*\*(.+?)\*\*", r'<strong>\1</strong>', text)
+    text = re.sub(r"__(.+?)__",     r'<strong>\1</strong>', text)
+    # Italic
+    text = re.sub(r"\*(.+?)\*",     r'<em>\1</em>', text)
+    text = re.sub(r"_(.+?)_",       r'<em>\1</em>', text)
+    # Inline code
+    text = re.sub(r"`(.+?)`",
+                  r'<code style="background:#f0f0f0;padding:1px 4px;'
+                  r'border-radius:3px;font-family:monospace;">\1</code>',
+                  text)
+    return text
+
+
+MEETING_TEMPLATES = {
+    "General": (
+        "Please summarize this meeting transcript. "
+        "Include: key topics discussed, decisions made, "
+        "action items, and any follow-ups needed."
+    ),
+    "Requirements Gathering": (
+        "This is a requirements gathering meeting. Summarize with focus on: "
+        "1) Business context and problem statement discussed, "
+        "2) Functional requirements identified (what the system should do), "
+        "3) Non-functional requirements (performance, security, scalability), "
+        "4) Constraints and assumptions mentioned, "
+        "5) Open questions that need follow-up, "
+        "6) Stakeholder priorities and any conflicts between requirements."
+    ),
+    "Design Review": (
+        "This is a design/architecture review meeting. Summarize with focus on: "
+        "1) Solution overview and architecture discussed, "
+        "2) Design decisions made and their rationale, "
+        "3) Trade-offs considered, "
+        "4) Risks and concerns raised, "
+        "5) Feedback and requested changes, "
+        "6) Next steps and action items."
+    ),
+    "Sprint Planning": (
+        "This is a sprint planning meeting. Summarize with focus on: "
+        "1) Sprint goal agreed upon, "
+        "2) Stories/tasks committed to with owners, "
+        "3) Capacity concerns or blockers raised, "
+        "4) Dependencies identified, "
+        "5) Carry-over items from previous sprint, "
+        "6) Key risks to sprint delivery."
+    ),
+    "Stakeholder Update": (
+        "This is a stakeholder update meeting. Summarize with focus on: "
+        "1) Project status and progress reported, "
+        "2) Milestones achieved or missed, "
+        "3) Risks and issues escalated, "
+        "4) Decisions requested from stakeholders, "
+        "5) Decisions made by stakeholders, "
+        "6) Next steps and timeline updates."
+    ),
+}
+
+
+DEFAULT_MODEL = "claude-haiku-4-5"
+
+
+class Summarizer:
+
+    def __init__(self, api_key: str, model: str = DEFAULT_MODEL):
+        self._client = AsyncAnthropic(api_key=api_key)
+        self._model = model or DEFAULT_MODEL
+
+    async def summarize(self, transcript: str, template: str = "General") -> str:
+        prompt = MEETING_TEMPLATES.get(template, MEETING_TEMPLATES["General"])
+        logger.info(f"Requesting meeting summary (template={template}) from Claude...")
+        try:
+            message = await asyncio.wait_for(
+                self._client.messages.create(
+                    model=self._model,
+                    max_tokens=1024,
+                    messages=[{
+                        "role": "user",
+                        "content": f"{prompt}\n\n{transcript}"
+                    }]
+                ),
+                timeout=60.0
+            )
+            summary = message.content[0].text
+            logger.info("Summary received.")
+            return summary
+        except Exception as e:
+            raise RuntimeError(f"Summarization API call failed: {e}") from e
+
+    async def extract_action_items(self, transcript: str) -> str:
+        logger.info("Extracting action items from Claude...")
+        try:
+            message = await asyncio.wait_for(
+                self._client.messages.create(
+                    model=self._model,
+                    max_tokens=1024,
+                    messages=[{
+                        "role": "user",
+                        "content": (
+                            "Analyze this meeting transcript and extract the following "
+                            "in clearly structured markdown:\n\n"
+                            "## Action Items\n"
+                            "List each action item with: who is responsible, what they "
+                            "need to do, and by when (if mentioned). Use checkboxes.\n"
+                            "Format: - [ ] **[Owner]**: Action description (Due: date if mentioned)\n\n"
+                            "## Decisions Made\n"
+                            "List each decision that was agreed upon in the meeting.\n\n"
+                            "## Open Questions\n"
+                            "List questions that were raised but not resolved.\n\n"
+                            "If a section has no items, write 'None identified.'\n\n"
+                            f"{transcript}"
+                        )
+                    }]
+                ),
+                timeout=60.0
+            )
+            result = message.content[0].text
+            logger.info("Action items extracted.")
+            return result
+        except Exception as e:
+            raise RuntimeError(f"Action items extraction failed: {e}") from e
+
+    async def extract_decisions(self, transcript: str) -> str:
+        """Extract decisions made with rationale — an auto-generated ADR log."""
+        logger.info("Extracting decisions from Claude...")
+        try:
+            message = await asyncio.wait_for(
+                self._client.messages.create(
+                    model=self._model,
+                    max_tokens=1024,
+                    messages=[{
+                        "role": "user",
+                        "content": (
+                            "Analyze this meeting transcript and extract every DECISION "
+                            "made. Return structured markdown with one entry per decision "
+                            "in this format:\n\n"
+                            "## Decision: [short title]\n"
+                            "- **Decided:** what was agreed upon\n"
+                            "- **Rationale:** why (context, drivers)\n"
+                            "- **Alternatives considered:** options that were rejected "
+                            "(if any mentioned)\n"
+                            "- **Owner:** who made the call (if identifiable)\n"
+                            "- **Impact:** systems/teams/clients affected\n\n"
+                            "Only include decisions that were actually MADE, not just "
+                            "discussed. Skip discussions without conclusions.\n\n"
+                            "If no decisions were made, write: 'No decisions made in this "
+                            "meeting.'\n\n"
+                            f"{transcript}"
+                        )
+                    }]
+                ),
+                timeout=60.0
+            )
+            result = message.content[0].text
+            logger.info("Decisions extracted.")
+            return result
+        except Exception as e:
+            raise RuntimeError(f"Decisions extraction failed: {e}") from e
+
+    async def meeting_prep_brief(self, prior_notes: str, upcoming_subject: str) -> str:
+        """Generate a prep brief from prior meeting notes for an upcoming meeting."""
+        logger.info(f"Generating prep brief for: {upcoming_subject}")
+        try:
+            message = await asyncio.wait_for(
+                self._client.messages.create(
+                    model=self._model,
+                    max_tokens=1024,
+                    messages=[{
+                        "role": "user",
+                        "content": (
+                            "You're preparing a Solutions Architect for an upcoming meeting. "
+                            "Based on the summaries, decisions, action items, and requirements "
+                            "from previous related meetings, generate a concise pre-meeting "
+                            "brief in markdown with these sections:\n\n"
+                            "## Recent Context\n"
+                            "Key topics discussed in recent meetings — 3-5 bullets.\n\n"
+                            "## Open Action Items\n"
+                            "Outstanding action items (especially for this person). "
+                            "Status and owner.\n\n"
+                            "## Open Questions / Risks\n"
+                            "Unresolved questions or risks raised previously.\n\n"
+                            "## Suggested Discussion Points\n"
+                            "What you should raise or follow up on in this meeting.\n\n"
+                            "Keep it tight and actionable. If a section has no content, "
+                            "write 'None.'\n\n"
+                            f"Upcoming meeting: {upcoming_subject}\n\n"
+                            f"=== PRIOR MEETING NOTES ===\n{prior_notes}"
+                        )
+                    }]
+                ),
+                timeout=60.0
+            )
+            result = message.content[0].text
+            logger.info("Prep brief generated.")
+            return result
+        except Exception as e:
+            raise RuntimeError(f"Prep brief generation failed: {e}") from e
+
+    async def extract_requirements(self, transcript: str) -> str:
+        logger.info("Extracting requirements from Claude...")
+        try:
+            message = await asyncio.wait_for(
+                self._client.messages.create(
+                    model=self._model,
+                    max_tokens=2048,
+                    messages=[{
+                        "role": "user",
+                        "content": (
+                            "Analyze this meeting transcript and extract all requirements "
+                            "discussed. Return structured markdown with:\n\n"
+                            "## Functional Requirements\n"
+                            "| ID | Requirement | Priority | Owner |\n"
+                            "|---|---|---|---|\n"
+                            "| FR-001 | Description | High/Med/Low | Person if mentioned |\n\n"
+                            "## Non-Functional Requirements\n"
+                            "Same table format with IDs like NFR-001.\n\n"
+                            "## Constraints\n"
+                            "List any technical, business, or timeline constraints mentioned.\n\n"
+                            "## Assumptions\n"
+                            "List assumptions made during the discussion.\n\n"
+                            "Assign priority based on context clues (urgency, emphasis, "
+                            "stakeholder tone). If a section has no items, write 'None identified.'\n\n"
+                            f"{transcript}"
+                        )
+                    }]
+                ),
+                timeout=90.0
+            )
+            result = message.content[0].text
+            logger.info("Requirements extracted.")
+            return result
+        except Exception as e:
+            raise RuntimeError(f"Requirements extraction failed: {e}") from e
+
+    async def identify_speakers(self, transcript: str) -> Dict[str, str]:
+        logger.info("Requesting speaker identification from Claude...")
+        try:
+            message = await asyncio.wait_for(
+                self._client.messages.create(
+                    model=self._model,
+                    max_tokens=512,
+                    messages=[{
+                        "role": "user",
+                        "content": (
+                            "Analyze this meeting transcript and identify any speakers "
+                            "who introduced themselves by name. Return ONLY a JSON object "
+                            "mapping speaker IDs to their real names. "
+                            "Only include speakers where you are confident of their name "
+                            "from an explicit introduction like 'Hi I'm X', 'My name is X', "
+                            "'This is X speaking', etc. "
+                            "If no introductions are found, return an empty JSON object {}.\n\n"
+                            "Example response: "
+                            "{\"SPEAKER_00\": \"John Smith\", \"SPEAKER_02\": \"Sarah Jones\"}\n\n"
+                            f"Transcript:\n{transcript}"
+                        )
+                    }]
+                ),
+                timeout=30.0
+            )
+            raw = message.content[0].text.strip()
+            logger.info(f"Speaker identification response: {raw}")
+
+            if raw.startswith("```"):
+                lines = raw.split("\n")
+                raw = "\n".join(
+                    line for line in lines
+                    if not line.startswith("```")
+                ).strip()
+
+            result = json.loads(raw)
+            if not isinstance(result, dict):
+                return {}
+
+            filtered = {
+                k: v for k, v in result.items()
+                if isinstance(k, str) and isinstance(v, str)
+                and k.startswith("SPEAKER") and v.strip()
+            }
+            logger.info(f"Identified {len(filtered)} speakers by name")
+            return filtered
+
+        except json.JSONDecodeError:
+            logger.warning("Speaker ID response was not valid JSON")
+            return {}
+        except Exception as e:
+            logger.warning(f"Speaker identification failed: {e}")
+            return {}
+
+    def summary_to_html(self, summary: str) -> str:
+        """Convert a markdown summary to formatted HTML for email."""
+        return _markdown_to_html(summary)

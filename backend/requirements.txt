@@ -1,0 +1,15 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.0
+anthropic
+python-dotenv
+sounddevice
+soundfile
+scipy
+matplotlib
+faster-whisper
+huggingface_hub==0.23.0
+pyannote.audio==3.3.2
+pywin32
+pyaudiowpatch
+numpy==2.1.3
