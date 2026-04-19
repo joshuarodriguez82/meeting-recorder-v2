@@ -5,6 +5,7 @@ import { api, formatBytes, type SessionSummary } from "@/lib/api";
 import {
   Mic, History, CheckSquare, Target, Search,
   LayoutDashboard, Settings as SettingsIcon, HelpCircle, Loader2,
+  Sparkles,
 } from "lucide-react";
 import { RecordView } from "@/components/record-view";
 import { SettingsView } from "@/components/settings-view";
@@ -13,7 +14,9 @@ import { FollowUpsView } from "@/components/follow-ups-view";
 import { DecisionsView } from "@/components/decisions-view";
 import { SearchView } from "@/components/search-view";
 import { ClientsView } from "@/components/clients-view";
+import { PrepBriefView } from "@/components/prep-brief-view";
 import { UsageGuideView } from "@/components/usage-guide-view";
+import { CalendarMonitor } from "@/components/calendar-monitor";
 
 const NAV_ITEMS = [
   { id: "record", label: "Record", icon: Mic },
@@ -22,6 +25,7 @@ const NAV_ITEMS = [
   { id: "decisions", label: "Decisions", icon: Target },
   { id: "search", label: "Search", icon: Search },
   { id: "clients", label: "Clients", icon: LayoutDashboard },
+  { id: "prep-brief", label: "Prep Brief", icon: Sparkles },
 ];
 
 export default function Home() {
@@ -33,6 +37,7 @@ export default function Home() {
     session_count: number;
     wav_count: number;
   } | null>(null);
+  const [notifyMinutes, setNotifyMinutes] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -50,12 +55,14 @@ export default function Home() {
 
   const reloadSessions = async () => {
     try {
-      const [s, stats] = await Promise.all([
+      const [s, stats, settings] = await Promise.all([
         api.listSessions(),
         api.getRetentionStats().catch(() => null),
+        api.getSettings().catch(() => null),
       ]);
       setSessions(s);
       setStorage(stats);
+      if (settings) setNotifyMinutes(settings.notify_minutes_before);
     } catch (e) {
       console.error(e);
     }
@@ -78,6 +85,11 @@ export default function Home() {
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-background">
+      <CalendarMonitor
+        enabled={notifyMinutes > 0}
+        minutesBefore={notifyMinutes}
+        onStart={() => setNav("record")}
+      />
       {/* Sidebar */}
       <aside className="flex h-full w-60 flex-col border-r border-border bg-sidebar">
         <div className="flex h-16 items-center gap-2.5 border-b border-border px-4">
@@ -164,6 +176,7 @@ export default function Home() {
               {nav === "decisions" && "Every decision, auto-generated ADR log"}
               {nav === "search" && "Search across all transcripts"}
               {nav === "clients" && "Per-client overview of meetings and work"}
+              {nav === "prep-brief" && "Generate a pre-meeting brief from past sessions"}
               {nav === "settings" && "Configure API keys, devices, and workflow"}
               {nav === "help" && "How to use Meeting Recorder"}
             </p>
@@ -177,6 +190,7 @@ export default function Home() {
           {nav === "decisions" && <DecisionsView sessions={sessions} />}
           {nav === "search" && <SearchView />}
           {nav === "clients" && <ClientsView sessions={sessions} />}
+          {nav === "prep-brief" && <PrepBriefView sessions={sessions} />}
           {nav === "settings" && <SettingsView />}
           {nav === "help" && <UsageGuideView />}
         </div>
