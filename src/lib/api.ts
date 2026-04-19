@@ -217,8 +217,10 @@ export const api = {
 
   // Calendar
   getCalendarToday: () => request<Meeting[]>("/calendar/today"),
-  getUpcomingMeetings: (hours: number = 36) =>
-    request<Meeting[]>(`/calendar/upcoming?hours=${hours}`),
+  getUpcomingMeetings: (hours: number = 36, refresh = false) =>
+    request<Meeting[]>(
+      `/calendar/upcoming?hours=${hours}${refresh ? "&refresh=true" : ""}`
+    ),
   isCalendarAvailable: () =>
     request<{ available: boolean }>("/calendar/available"),
 
