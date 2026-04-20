@@ -102,13 +102,14 @@ export function RecordView({ onSessionsChanged, onOpenSession }: Props) {
           setMicIdx(devices.input[0].index);
         }
 
-        if (savedOutName === "__none__") {
-          setOutIdx(null);
-        } else {
-          const matchedOut = savedOutName
-            ? devices.output.find((d) => d.name === savedOutName)
-            : null;
-          if (matchedOut) setOutIdx(matchedOut.index);
+        const matchedOut = savedOutName && savedOutName !== "__none__"
+          ? devices.output.find((d) => d.name === savedOutName)
+          : null;
+        if (matchedOut) {
+          setOutIdx(matchedOut.index);
+        } else if (devices.output.length > 0) {
+          // Default to the first speaker (system audio is always on).
+          setOutIdx(devices.output[0].index);
         }
 
         setRecording(status.is_recording);
@@ -135,14 +136,7 @@ export function RecordView({ onSessionsChanged, onOpenSession }: Props) {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    if (outIdx === null) {
-      // Only persist "none" once we've actually loaded devices, so we
-      // don't overwrite a real saved value with the initial null state.
-      if (outputDevices.length > 0) {
-        window.localStorage.setItem("mr.outputDeviceName", "__none__");
-      }
-      return;
-    }
+    if (outIdx === null) return;
     const dev = outputDevices.find((d) => d.index === outIdx);
     if (dev) window.localStorage.setItem("mr.outputDeviceName", dev.name);
   }, [outIdx, outputDevices]);
@@ -366,17 +360,16 @@ export function RecordView({ onSessionsChanged, onOpenSession }: Props) {
           <div className="space-y-2">
             <Label>System Audio (loopback)</Label>
             <Select
-              value={outIdx?.toString() ?? "none"}
-              onValueChange={(v: string | null) => setOutIdx(!v || v === "none" ? null : parseInt(v))}
+              value={outIdx?.toString() ?? ""}
+              onValueChange={(v: string | null) => setOutIdx(v ? parseInt(v) : null)}
               disabled={recording}
             >
               <SelectTrigger className="w-full">
                 <span className="truncate text-left">
-                  {selectedOut ? selectedOut.name : "Skip — mic only"}
+                  {selectedOut ? selectedOut.name : "Select speaker..."}
                 </span>
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="none">Skip — mic only</SelectItem>
                 {outputDevices.map((d) => (
                   <SelectItem key={d.index} value={d.index.toString()}>
                     {d.name}

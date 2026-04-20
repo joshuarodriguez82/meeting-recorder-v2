@@ -10,8 +10,11 @@ import { Zap, Cpu, Loader2, RefreshCw } from "lucide-react";
 
 type GpuStatus = Awaited<ReturnType<typeof api.getGpuStatus>>;
 
+// DirectML intentionally omitted: torch-directml only publishes wheels for
+// Python 3.10 and the bundled runtime is 3.13. Re-add once Microsoft ships
+// a compatible wheel — see https://pypi.org/project/torch-directml/#files
 const BACKENDS: {
-  id: "cpu" | "cuda" | "directml";
+  id: "cpu" | "cuda";
   title: string;
   subtitle: string;
   bytes: string;
@@ -22,7 +25,7 @@ const BACKENDS: {
     title: "CPU (default, bundled)",
     subtitle: "Runs on any machine. Transcription takes ~5-10% of meeting duration.",
     bytes: "0 MB — already installed",
-    when: "Use if you don't have a compatible GPU or don't care about speed.",
+    when: "Use if you don't have an NVIDIA GPU.",
   },
   {
     id: "cuda",
@@ -30,13 +33,6 @@ const BACKENDS: {
     subtitle: "10× faster transcription on NVIDIA GTX / RTX / Quadro GPUs.",
     bytes: "~2.2 GB download",
     when: "Recommended if your machine has an NVIDIA GPU with CUDA 12 support.",
-  },
-  {
-    id: "directml",
-    title: "AMD / Intel (DirectML)",
-    subtitle: "3-5× faster via DirectX 12 compute. Works on AMD Radeon, Intel Arc, and integrated GPUs.",
-    bytes: "~500 MB download",
-    when: "Recommended if you have an AMD GPU, or no NVIDIA card but a modern Intel / AMD integrated GPU.",
   },
 ];
 
