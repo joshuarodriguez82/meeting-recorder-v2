@@ -43,6 +43,41 @@ except Exception:
     # torch not installed or can't patch — will fail later with clearer msg
     pass
 
+# speechbrain 1.0+ wraps its top-level package in a LazyModule that
+# hijacks __getattr__ to trigger submodule imports via inspect. When
+# pytorch_lightning.utilities.model_helpers.is_scripting (called during
+# pyannote.audio's Pipeline construction) iterates inspect.stack(),
+# inspect.getmodule() reaches into the LazyModule, which itself calls
+# inspect.getframeinfo() — infinite recursion, crash.
+# Workaround: eagerly import every lazy-proxied speechbrain submodule
+# so the LazyModule never needs to resolve anything on demand.
+try:
+    import importlib as _importlib
+    import speechbrain as _sb
+    # These are the ones pytorch_lightning touches transitively; force
+    # them fully loaded before any pyannote import happens.
+    for _sub in ("utils", "utils.importutils", "utils.quirks",
+                 "utils.checkpoints", "utils.data_utils",
+                 "inference", "pretrained",
+                 "dataio", "nnet", "lobes", "processing"):
+        try:
+            _importlib.import_module(f"speechbrain.{_sub}")
+        except Exception:
+            pass
+    # Touch every attribute on the top-level package so any remaining
+    # lazy shims resolve now instead of during inspect.stack walking.
+    for _attr in list(dir(_sb)):
+        try:
+            getattr(_sb, _attr)
+        except Exception:
+            pass
+    # Also bump recursion limit — belt and suspenders. Pytorch-lightning's
+    # is_scripting check walks every frame; on some Python layouts that
+    # walks quite deep.
+    sys.setrecursionlimit(max(sys.getrecursionlimit(), 5000))
+except Exception:
+    pass
+
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
