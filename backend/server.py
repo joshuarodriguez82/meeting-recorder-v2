@@ -270,13 +270,14 @@ _GPU_DETECTION_CACHE: dict | None = None
 
 
 def _detect_gpu_hardware() -> dict:
-    """Best-effort probe: list GPUs and recommend a backend.
+    """Best-effort GPU probe via the Windows registry — NO subprocess.
 
-    Cached after first call — GPUs don't change during a session, and
-    every uncached call spawns a PowerShell subprocess which briefly
-    flashes a console window on Windows. The frontend polls /gpu/status
-    every 2s during an install so uncached calls would flash a window
-    every 2 seconds.
+    Previous versions shelled out to PowerShell (Get-CimInstance). On
+    corporate laptops with AppLocker / SentinelOne / CrowdStrike /
+    Zscaler that subprocess call was being killed and taking the whole
+    backend down with it. Reading DisplayAdapters directly from the
+    registry is the same information, involves no child process, and
+    works in locked-down environments.
     """
     global _GPU_DETECTION_CACHE
     if _GPU_DETECTION_CACHE is not None:
@@ -284,29 +285,41 @@ def _detect_gpu_hardware() -> dict:
 
     result = {"nvidia": False, "amd": False, "intel": False, "gpus": []}
     try:
-        # CREATE_NO_WINDOW on Windows so this doesn't flash a console.
-        creationflags = 0x08000000 if os.name == "nt" else 0
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "Get-CimInstance -Class Win32_VideoController | Select-Object -ExpandProperty Name"],
-            capture_output=True, text=True, timeout=10,
-            creationflags=creationflags,
-        ).stdout
-        for line in out.splitlines():
-            name = line.strip()
-            if not name:
-                continue
-            result["gpus"].append(name)
-            low = name.lower()
-            if "nvidia" in low or "geforce" in low or "quadro" in low or "rtx" in low or "gtx" in low:
-                result["nvidia"] = True
-            elif "amd" in low or "radeon" in low:
-                result["amd"] = True
-            elif "intel" in low:
-                result["intel"] = True
+        import winreg
+        # Each installed display adapter gets a subkey under this path
+        # with a "DriverDesc" value holding its human-readable name.
+        key_path = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as root:
+            i = 0
+            while True:
+                try:
+                    sub_name = winreg.EnumKey(root, i)
+                except OSError:
+                    break
+                i += 1
+                # Registry has "Properties" and "Configuration" subkeys
+                # we want to skip — only numeric-named ones are adapters.
+                if not sub_name.isdigit():
+                    continue
+                try:
+                    with winreg.OpenKey(root, sub_name) as sub:
+                        desc, _ = winreg.QueryValueEx(sub, "DriverDesc")
+                except OSError:
+                    continue
+                if not isinstance(desc, str) or not desc:
+                    continue
+                result["gpus"].append(desc)
+                low = desc.lower()
+                if any(t in low for t in ("nvidia", "geforce", "quadro", "rtx", "gtx")):
+                    result["nvidia"] = True
+                elif "amd" in low or "radeon" in low:
+                    result["amd"] = True
+                elif "intel" in low:
+                    result["intel"] = True
     except Exception as e:
-        logger.warning(f"GPU detection failed: {e}")
-    # Recommendation
+        # Never let this tip over the whole backend.
+        logger.warning(f"GPU detection failed (registry): {e}")
+
     if result["nvidia"]:
         result["recommended"] = "cuda"
     elif result["amd"] or result["intel"]:
