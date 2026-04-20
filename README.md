@@ -115,18 +115,38 @@ Double-click either installer to install, or run the portable exe directly.
 
 ## First-run setup
 
-The app opens without API keys configured. Before you can process meetings:
+You need **two tokens** before Meeting Recorder can process recordings:
 
-1. **Open File > Settings** (the sidebar Settings button)
-2. Paste your **Anthropic API key** ([console.anthropic.com](https://console.anthropic.com))
-3. Paste your **HuggingFace token** ([huggingface.co/settings/tokens](https://huggingface.co/settings/tokens))
-4. Click **Save**
+### 1. Anthropic API key — powers AI extraction
 
-Then open these URLs and click "Agree and access repository" on each (required for speaker identification):
-- https://huggingface.co/pyannote/speaker-diarization-3.1
-- https://huggingface.co/pyannote/segmentation-3.0
+Used for summaries, action items, requirements, decisions, and prep briefs. Costs money (~$0.05 per meeting on Haiku 4.5, the default).
 
-Restart the app. Models will load in the background on launch.
+1. Sign up at [console.anthropic.com](https://console.anthropic.com)
+2. **Billing → Buy credits** — add $5–10 to start
+3. [**Settings → API Keys**](https://console.anthropic.com/settings/keys) → **Create Key**
+4. **Permissions:** default (read/write is fine)
+5. Copy the value (starts with `sk-ant-api03-`)
+
+### 2. HuggingFace token — powers speaker identification
+
+Used to download the pyannote diarization models (runs locally on your machine after download). Free.
+
+1. Sign up at [huggingface.co/join](https://huggingface.co/join)
+2. [**Settings → Access Tokens**](https://huggingface.co/settings/tokens) → **Create new token**
+3. **Token type:** `Read` (Write and Fine-grained are unnecessary)
+4. Copy the value (starts with `hf_`)
+5. **Critical — accept model terms on BOTH of these pages** (otherwise speaker identification 403s on first Process):
+   - <https://huggingface.co/pyannote/speaker-diarization-3.1> → click "Agree and access repository"
+   - <https://huggingface.co/pyannote/segmentation-3.0> → click "Agree and access repository"
+
+### Plug them in
+
+1. Launch Meeting Recorder, go to **Settings** in the sidebar
+2. Paste both tokens into the respective fields
+3. Click **Save Settings**
+4. **Restart the app** so the backend reloads config and downloads the pyannote models (~200 MB, one-time, happens on first Process)
+
+Tokens are stored locally in `%LOCALAPPDATA%\MeetingRecorder\config.env` — never roams to other machines.
 
 ## Dev loop (hot reload)
 
