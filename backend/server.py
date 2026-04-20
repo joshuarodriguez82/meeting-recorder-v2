@@ -830,6 +830,20 @@ async def suggest_tagging(req: SuggestTaggingRequest):
 @app.post("/sessions/{session_id}/process")
 async def process_session(session_id: str):
     svc.load_settings()
+    # Fail fast with a helpful message BEFORE trying to load models — if
+    # API keys aren't set, models can't load and the user sees a cryptic
+    # "Process failed" toast. Show them where to fix it instead.
+    if not svc.settings or not svc.settings.is_configured:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "API keys not configured. Open Settings → paste your "
+                "Anthropic API key and HuggingFace token → Save, then "
+                "accept the pyannote model terms at "
+                "huggingface.co/pyannote/speaker-diarization-3.1 and "
+                "huggingface.co/pyannote/segmentation-3.0."
+            ),
+        )
     # ensure_models_loaded is blocking (imports torch etc.) — thread it
     await asyncio.to_thread(svc.ensure_models_loaded)
     session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
