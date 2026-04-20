@@ -99,23 +99,46 @@ export function SettingsView() {
       <Card>
         <CardHeader>
           <CardTitle className="text-base">API Keys</CardTitle>
+          <p className="text-xs text-muted-foreground mt-1">
+            Both are required. Anthropic powers AI extraction (summaries, action
+            items, decisions, requirements, prep briefs). HuggingFace powers
+            speaker identification via pyannote. Both are free to start, stored
+            only on this machine in{" "}
+            <code className="text-[11px]">%LOCALAPPDATA%\MeetingRecorder\config.env</code>.
+          </p>
         </CardHeader>
-        <CardContent className="space-y-4">
+        <CardContent className="space-y-5">
+          {/* Anthropic */}
           <div className="space-y-2">
             <Label>Anthropic API Key</Label>
             <Input
               type="password"
               value={settings.anthropic_api_key}
               onChange={(e) => update("anthropic_api_key", e.target.value)}
-              placeholder="sk-ant-..."
+              placeholder="sk-ant-api03-..."
+              autoComplete="off"
             />
-            <p className="text-xs text-muted-foreground">
-              Get one at{" "}
-              <a href="https://console.anthropic.com" target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                console.anthropic.com
-              </a>
-            </p>
+            <div className="rounded-md border bg-muted/40 p-3 text-xs space-y-1.5">
+              <div className="font-medium text-foreground">How to get an Anthropic key:</div>
+              <ol className="list-decimal pl-5 space-y-1 text-muted-foreground">
+                <li>
+                  Sign up at{" "}
+                  <a href="https://console.anthropic.com" target="_blank" rel="noreferrer"
+                     className="text-primary hover:underline">console.anthropic.com</a>
+                </li>
+                <li>Add $5-10 of credit (Billing → Buy credits) — a full meeting costs ~$0.05 on Haiku</li>
+                <li>
+                  Go to{" "}
+                  <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer"
+                     className="text-primary hover:underline">Settings → API Keys</a>,
+                  click <strong>Create Key</strong>
+                </li>
+                <li>Copy the key (starts with <code className="text-[11px]">sk-ant-api03-</code>) and paste above</li>
+              </ol>
+            </div>
           </div>
+
+          {/* HuggingFace */}
           <div className="space-y-2">
             <Label>HuggingFace Token</Label>
             <Input
@@ -123,14 +146,57 @@ export function SettingsView() {
               value={settings.hf_token}
               onChange={(e) => update("hf_token", e.target.value)}
               placeholder="hf_..."
+              autoComplete="off"
             />
-            <p className="text-xs text-muted-foreground">
-              Get one at{" "}
-              <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                huggingface.co/settings/tokens
-              </a>{" "}
-              — and accept model terms for pyannote/speaker-diarization-3.1 + pyannote/segmentation-3.0
-            </p>
+            <div className="rounded-md border bg-muted/40 p-3 text-xs space-y-1.5">
+              <div className="font-medium text-foreground">
+                How to get a HuggingFace token (and why there are 3 steps):
+              </div>
+              <ol className="list-decimal pl-5 space-y-1 text-muted-foreground">
+                <li>
+                  Sign up at{" "}
+                  <a href="https://huggingface.co/join" target="_blank" rel="noreferrer"
+                     className="text-primary hover:underline">huggingface.co/join</a>{" "}
+                  (free)
+                </li>
+                <li>
+                  Go to{" "}
+                  <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer"
+                     className="text-primary hover:underline">Settings → Access Tokens</a>,
+                  click <strong>Create new token</strong>. <strong>Type: Read</strong> is enough
+                  (don&apos;t need Write or Fine-grained). Copy the token
+                  (starts with <code className="text-[11px]">hf_</code>) and paste above
+                </li>
+                <li>
+                  <strong>Important:</strong> accept the model terms on BOTH of these pages (click
+                  &quot;Agree and access repository&quot;):
+                  <ul className="list-disc pl-5 mt-1 space-y-0.5">
+                    <li>
+                      <a href="https://huggingface.co/pyannote/speaker-diarization-3.1"
+                         target="_blank" rel="noreferrer"
+                         className="text-primary hover:underline">
+                        pyannote/speaker-diarization-3.1
+                      </a>
+                    </li>
+                    <li>
+                      <a href="https://huggingface.co/pyannote/segmentation-3.0"
+                         target="_blank" rel="noreferrer"
+                         className="text-primary hover:underline">
+                        pyannote/segmentation-3.0
+                      </a>
+                    </li>
+                  </ul>
+                  Without accepting both, speaker diarization will fail with a 403 when models
+                  try to download the first time you Process a recording.
+                </li>
+              </ol>
+            </div>
+          </div>
+
+          <div className="rounded-md border border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/40 px-4 py-3 text-xs text-amber-900 dark:text-amber-200">
+            After saving both keys, <strong>restart the app</strong> so the backend reloads
+            config and downloads the pyannote models into cache (~200 MB, one-time, happens on
+            first Process).
           </div>
         </CardContent>
       </Card>

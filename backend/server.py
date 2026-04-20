@@ -834,14 +834,20 @@ async def process_session(session_id: str):
     # API keys aren't set, models can't load and the user sees a cryptic
     # "Process failed" toast. Show them where to fix it instead.
     if not svc.settings or not svc.settings.is_configured:
+        missing = []
+        if not (svc.settings and svc.settings.anthropic_api_key):
+            missing.append("Anthropic API key (get at console.anthropic.com)")
+        if not (svc.settings and svc.settings.hf_token):
+            missing.append(
+                "HuggingFace token (get at huggingface.co/settings/tokens, "
+                "then accept model terms at huggingface.co/pyannote/speaker-"
+                "diarization-3.1 and huggingface.co/pyannote/segmentation-3.0)"
+            )
         raise HTTPException(
             status_code=400,
             detail=(
-                "API keys not configured. Open Settings → paste your "
-                "Anthropic API key and HuggingFace token → Save, then "
-                "accept the pyannote model terms at "
-                "huggingface.co/pyannote/speaker-diarization-3.1 and "
-                "huggingface.co/pyannote/segmentation-3.0."
+                "API keys not configured. Open Settings → paste the "
+                "required tokens → Save. Missing: " + "; ".join(missing)
             ),
         )
     # ensure_models_loaded is blocking (imports torch etc.) — thread it
