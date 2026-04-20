@@ -99,43 +99,18 @@ fn ensure_runtime_extracted(zip_path: &std::path::Path) -> Result<std::path::Pat
     // Essential files that MUST exist for the runtime to work. If any
     // are missing, we re-extract. We don't re-extract purely on version
     // mismatch because that destroys user-installed GPU torch wheels.
+    // Note: we no longer check for python/pythonw.exe here — the
+    // bundle doesn't ship an embeddable Python anymore (see
+    // HANDOFF.md bug #1,2 and bootstrap_app_venv below).
     let essentials = [
         runtime.join("server.py"),
-        runtime.join("python").join("pythonw.exe"),
     ];
     let missing: Vec<_> = essentials.iter()
         .filter(|p| !p.exists())
         .map(|p| p.to_path_buf())
         .collect();
 
-    // Additionally force a re-extract when the bundled Python MAJOR
-    // version differs from what's extracted. If the installer ships
-    // python313.dll but the runtime has python311.dll (or vice versa),
-    // we'd try to launch mismatched binaries and either crash or use
-    // stale packages compiled against the wrong Python. Walk a few
-    // known version DLL names to detect drift.
-    let py_dir = runtime.join("python");
-    let py_dll_names = ["python313.dll", "python312.dll", "python311.dll",
-                        "python310.dll", "python314.dll"];
-    let extracted_py: Option<&str> = py_dll_names.iter()
-        .find(|n| py_dir.join(n).exists())
-        .copied();
-    // We know the current bundle ships Python 3.13. If the extracted
-    // runtime shows a DIFFERENT version, force re-extract.
-    const BUNDLED_PY_DLL: &str = "python313.dll";
-    let python_mismatch = match extracted_py {
-        Some(name) => name != BUNDLED_PY_DLL,
-        None => true, // couldn't find any python DLL, treat as missing
-    };
-
-    let needs_extract = !missing.is_empty() || python_mismatch;
-    if python_mismatch && missing.is_empty() {
-        rlog(&format!(
-            "Python version changed (extracted: {}, bundled: {}) — re-extracting. \
-             Note: if you previously enabled GPU acceleration you'll need to click \
-             'Use This' on the GPU / DirectML option again after this launch.",
-            extracted_py.unwrap_or("none"), BUNDLED_PY_DLL));
-    }
+    let needs_extract = !missing.is_empty();
 
     if needs_extract {
         rlog(&format!("Runtime extraction needed (missing: {:?})", missing));

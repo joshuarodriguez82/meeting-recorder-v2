@@ -9,14 +9,10 @@ ROOT = Path(__file__).parent
 BACKEND = ROOT / "backend"
 OUT = ROOT / "backend-bundle.zip"
 
-INCLUDE_DIRS = ["python", "config", "core", "meeting_recorder", "models", "services", "utils"]
+INCLUDE_DIRS = ["config", "core", "meeting_recorder", "models", "services", "utils"]
 INCLUDE_FILES = ["server.py", "requirements-cpu.txt"]
 # Skip __pycache__ dirs (they contain compiled bytecode for .py files
-# in site-packages, which Python regenerates on first import — no need
-# to ship them). Do NOT add ".pyc" here: the EMBEDDED Python's stdlib
-# lives under python/Lib as bare .pyc files (no .py source alongside),
-# and excluding .pyc silently strips the entire Python stdlib, making
-# Python fail at startup with "No module named 'encodings'".
+# which Python regenerates on first import — no need to ship them).
 SKIP_PATTERNS = ("__pycache__",)
 
 def should_skip(path: Path) -> bool:
