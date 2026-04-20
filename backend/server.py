@@ -105,6 +105,7 @@ from services.calendar_service import (
 from services.export_service import ExportService
 from services.recording_service import RecordingService
 from services.retention_service import cleanup as run_retention_cleanup, folder_stats
+from services.recovery_service import recover_orphans
 from services.session_service import SessionService
 from utils.logger import get_logger
 
@@ -1122,9 +1123,32 @@ async def startup():
     except Exception as e:
         logger.warning(f"Settings not yet configured: {e}")
 
+    # Crash recovery: if a previous run died mid-`/recording/stop`, merge
+    # the orphan `_recording_*.wav` / `_loopback_*.wav` temp files into
+    # real sessions so they appear in the Session Browser. Off-loop so a
+    # slow merge on a big recording can't block the HTTP server coming up.
+    def _recover_orphans():
+        try:
+            if svc.settings is None or svc.session_svc is None:
+                return
+            results = recover_orphans(
+                recordings_dir=svc.settings.recordings_dir,
+                session_svc=svc.session_svc,
+            )
+            recovered = [r for r in results if r.get("status") == "recovered"]
+            if recovered:
+                logger.info(
+                    f"Crash recovery: merged {len(recovered)} orphan "
+                    f"recording(s) on startup"
+                )
+        except Exception as e:
+            logger.exception(f"Crash recovery pass failed: {e}")
+
     # Pre-warm the slow stuff in background threads so the first frontend
     # request doesn't pay the latency. These populate module-level caches.
     import threading as _t
+
+    _t.Thread(target=_recover_orphans, daemon=True).start()
 
     def _prewarm_audio():
         try:
