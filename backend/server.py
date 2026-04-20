@@ -21,6 +21,18 @@ os.chdir(Path(__file__).resolve().parent)
 # import cleanly even if launched with an odd CWD.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# Intel Fortran runtime (shipped with numpy/scipy/torch's MKL) installs a
+# Windows console-close handler that aborts the Python process with exit
+# code 200 ("forrtl: error (200): program aborting due to window-CLOSE
+# event"). This fires when pyannote.audio loads on pythonw.exe: MKL
+# attaches a transient console to install the handler, Windows raises the
+# CLOSE event when the console detaches, the handler kills the process.
+# These env vars tell the Fortran runtime to skip the handler entirely.
+# Must be set BEFORE importing numpy/torch/scipy, which is why it's here
+# at the very top of server.py (the Rust shell also sets them on spawn).
+os.environ.setdefault("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "1")
+os.environ.setdefault("FOR_DISABLE_STACK_TRACE", "1")
+
 # Compatibility patches needed before importing pyannote/torch:
 #   - NumPy 2.0 removed np.NaN (pyannote uses it)
 #   - PyTorch 2.6 changed torch.load default to weights_only=True (pyannote breaks)
@@ -131,6 +143,30 @@ class Services:
         self.models_loading = False
         self.models_error: Optional[str] = None
         self.record_started_at: Optional[datetime] = None
+        # Latest status message from the recording/processing pipeline,
+        # surfaced to the frontend via /recording/status so the user can
+        # see "Transcribing…", "Identifying speakers…" while the long
+        # POST /process call is blocking. Previously this signal only
+        # went to the log file, so the UI had no way to show progress.
+        self.current_status: str = ""
+
+    def _record_status(self, msg: str) -> None:
+        """Log + stash the status so /recording/status can return it."""
+        # Translate internal stage tokens into human-readable strings.
+        stage_labels = {
+            "__stage:transcribe:active__":  "Transcribing…",
+            "__stage:transcribe:done__":    "Transcription complete",
+            "__stage:diarize:active__":     "Identifying speakers…",
+            "__stage:diarize:done__":       "Speaker identification complete",
+            "__stage:speakers:active__":    "Assigning speakers to segments…",
+        }
+        display = msg
+        for token, label in stage_labels.items():
+            display = display.replace(token, label)
+        display = display.strip()
+        if display:
+            self.current_status = display
+            logger.info(f"[rec] {display}")
 
     def load_settings(self) -> Settings:
         if self.settings is None:
@@ -139,7 +175,7 @@ class Services:
             self.export_svc = ExportService(self.settings.recordings_dir)
             self.recording_svc = RecordingService(
                 settings=self.settings,
-                on_status=lambda msg: logger.info(f"[rec] {msg}"),
+                on_status=self._record_status,
             )
             if self.settings.anthropic_api_key:
                 # Lazy import Summarizer (pulls in anthropic SDK)
@@ -228,6 +264,11 @@ class RecordingStatus(BaseModel):
     models_ready: bool = False
     models_loading: bool = False
     models_error: Optional[str] = None
+    # Latest status from the recording/processing pipeline. Updated as
+    # each stage progresses (e.g. "Transcribing…", "Identifying
+    # speakers…") so the UI can show progress during the long POST
+    # /sessions/{id}/process call. Empty string when idle.
+    current_status: str = ""
 
 
 # ── Health ───────────────────────────────────────────────────────────
@@ -355,10 +396,14 @@ def _detect_gpu_hardware() -> dict:
         # Never let this tip over the whole backend.
         logger.warning(f"GPU detection failed (registry): {e}")
 
+    # DirectML intentionally not recommended even when AMD/Intel GPU is
+    # present: torch-directml only ships wheels for Python 3.10, and the
+    # app runtime is Python 3.13. `pip install torch-directml` fails with
+    # "could not find a version that satisfies the requirement". Until
+    # Microsoft publishes a Python 3.13-compatible wheel, non-NVIDIA
+    # machines should stay on CPU.
     if result["nvidia"]:
         result["recommended"] = "cuda"
-    elif result["amd"] or result["intel"]:
-        result["recommended"] = "directml"
     else:
         result["recommended"] = "cpu"
     _GPU_DETECTION_CACHE = result
@@ -467,12 +512,23 @@ async def gpu_install(req: GpuInstallRequest):
         ]
         post = ["uninstall", "-y", "torch-directml"]
     elif backend_id == "directml":
-        args = ["torch-directml"]
-        post = None
+        # DirectML is disabled at the API level until torch-directml ships
+        # wheels for Python 3.13. Reject with a clear explanation instead of
+        # letting pip fail with a cryptic "no matching distribution" error.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "DirectML isn't available on this build yet. torch-directml "
+                "only publishes wheels for Python 3.10; the app runs on "
+                "Python 3.13. Stay on CPU — on non-NVIDIA laptops the "
+                "speed difference isn't large. This will re-enable when "
+                "Microsoft releases a newer torch-directml wheel."
+            ),
+        )
     else:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown backend '{req.backend}'. Use cpu, cuda, or directml.",
+            detail=f"Unknown backend '{req.backend}'. Use cpu or cuda.",
         )
 
     def _do():
@@ -595,6 +651,7 @@ async def recording_status():
         models_ready=svc.models_ready,
         models_loading=svc.models_loading,
         models_error=svc.models_error,
+        current_status=svc.current_status,
     )
 
 

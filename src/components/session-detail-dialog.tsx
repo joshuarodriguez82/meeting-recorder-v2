@@ -47,7 +47,32 @@ export function SessionDetailDialog({
   const [session, setSession] = useState<SessionFull | null>(null);
   const [loading, setLoading] = useState(false);
   const [processing, setProcessing] = useState<string | null>(null);
+  const [processingStatus, setProcessingStatus] = useState("");
   const [tab, setTab] = useState(initialTab);
+
+  // While an async backend job is running (process / summarize / extract),
+  // poll /recording/status so we can surface `current_status` strings like
+  // "Transcribing…" / "Identifying speakers…" as a subtle status line
+  // under the dialog header. Without this the user just sees a spinner
+  // with no idea what step is running or whether the backend is alive.
+  useEffect(() => {
+    if (!processing) {
+      setProcessingStatus("");
+      return;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const s = await api.recordingStatus();
+        if (!cancelled) setProcessingStatus(s.current_status ?? "");
+      } catch {
+        if (!cancelled) setProcessingStatus("");
+      }
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [processing]);
 
   // Editable state
   const [displayName, setDisplayName] = useState("");
@@ -311,6 +336,14 @@ export function SessionDetailDialog({
                         Requirements
                       </Button>
                     </div>
+                    {processing && (
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        <span>
+                          {processingStatus || "Working…"}
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </TabsContent>
 

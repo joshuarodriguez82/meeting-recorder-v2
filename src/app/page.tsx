@@ -54,6 +54,51 @@ export default function Home() {
 
   const [backendAttempts, setBackendAttempts] = useState(0);
   const [backendError, setBackendError] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState<string>("");
+  const [pipelineStatus, setPipelineStatus] = useState<{
+    loading: boolean; text: string;
+  }>({ loading: false, text: "" });
+
+  // Pull the installed Tauri app version so the sidebar shows the real
+  // build number instead of a stale hardcoded string.
+  useEffect(() => {
+    (async () => {
+      try {
+        const { getVersion } = await import("@tauri-apps/api/app");
+        const v = await getVersion();
+        setAppVersion(v);
+      } catch {
+        // Not running under Tauri (e.g. `next dev` in a browser) — keep blank.
+      }
+    })();
+  }, []);
+
+  // Poll /recording/status so the sidebar can show what the backend is
+  // currently doing — model warmup on cold start, transcription progress
+  // during processing, etc. The user wanted visible feedback instead of
+  // silent delays where the app looked frozen or unresponsive.
+  useEffect(() => {
+    if (!backendReady) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const s = await api.recordingStatus();
+        if (cancelled) return;
+        if (s.models_loading) {
+          setPipelineStatus({ loading: true, text: "Loading AI models…" });
+        } else if (s.current_status && !s.is_recording) {
+          setPipelineStatus({ loading: true, text: s.current_status });
+        } else {
+          setPipelineStatus({ loading: false, text: "" });
+        }
+      } catch {
+        // Backend unreachable — don't overwrite any message in flight.
+      }
+    };
+    tick();
+    const id = setInterval(tick, 2000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [backendReady]);
 
   useEffect(() => {
     let cancelled = false;
@@ -181,11 +226,22 @@ export default function Home() {
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
             <Mic className="h-4 w-4" />
           </div>
-          <div className="flex flex-col leading-tight">
+          <div className="flex flex-col leading-tight min-w-0 flex-1">
             <span className="text-sm font-semibold">Meeting Recorder</span>
-            <span className="text-[10px] text-muted-foreground">v2.0</span>
+            <span className="text-[10px] text-muted-foreground">
+              {appVersion ? `v${appVersion}` : "v2"}
+            </span>
           </div>
         </div>
+        {pipelineStatus.loading && (
+          <div
+            className="flex items-center gap-2 border-b border-border bg-accent/30 px-4 py-2 text-xs text-foreground"
+            title={pipelineStatus.text}
+          >
+            <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0 text-primary" />
+            <span className="truncate">{pipelineStatus.text}</span>
+          </div>
+        )}
 
         <nav className="flex-1 overflow-y-auto p-3">
           <div className="mb-2 px-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
