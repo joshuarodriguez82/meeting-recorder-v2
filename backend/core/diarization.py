@@ -14,13 +14,22 @@ class DiarizationEngine:
     def __init__(self, hf_token: str, max_speakers: int = 8):
         from pyannote.audio import Pipeline
         import torch
-        logger.info("Loading pyannote diarization pipeline on GPU...")
         self._pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
         )
-        self._pipeline.to(torch.device("cuda"))
+        # Move the pipeline to CUDA if available — otherwise it runs on
+        # CPU. Hardcoding `.to("cuda")` crashes on machines with CPU-only
+        # torch (AssertionError: Torch not compiled with CUDA enabled).
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+            logger.info("Loading pyannote diarization pipeline on GPU (CUDA).")
+        else:
+            device = torch.device("cpu")
+            logger.info("Loading pyannote diarization pipeline on CPU "
+                        "(no CUDA-enabled torch detected).")
+        self._pipeline.to(device)
         self._max_speakers = max_speakers
-        logger.info("Diarization pipeline loaded on GPU.")
+        logger.info("Diarization pipeline loaded.")
 
     async def diarize(self, audio_path: str) -> List[dict]:
         logger.info(f"Diarizing: {audio_path}")
