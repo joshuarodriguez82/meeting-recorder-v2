@@ -15,9 +15,21 @@ from dotenv import load_dotenv
 
 
 def _user_data_dir() -> Path:
-    """%APPDATA%\\MeetingRecorder — the canonical writable directory."""
+    """
+    %LOCALAPPDATA%\\MeetingRecorder — the canonical writable directory.
+
+    IMPORTANT: we use LOCALAPPDATA, not APPDATA (Roaming). Corporate
+    environments like TTEC enable OneDrive Known Folder Move which
+    redirects %APPDATA% into OneDrive; sync causes stale reads, file
+    locks mid-write, and intermittent 'failed to fetch' errors from
+    the frontend when config/recordings are being synced in the
+    background. LOCALAPPDATA is per-machine and never redirected.
+    """
     if os.name == "nt":
-        base = os.getenv("APPDATA") or os.getenv("USERPROFILE") or str(Path.home())
+        base = (os.getenv("LOCALAPPDATA")
+                or os.getenv("APPDATA")
+                or os.getenv("USERPROFILE")
+                or str(Path.home()))
     else:
         base = os.getenv("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     d = Path(base) / "MeetingRecorder"
@@ -28,8 +40,26 @@ def _user_data_dir() -> Path:
 USER_DATA_DIR = _user_data_dir()
 ENV_PATH = USER_DATA_DIR / "config.env"
 
-# Dev fallback: if config.env doesn't exist in APPDATA but backend/.env does,
-# seed APPDATA from it so existing developers don't have to reconfigure.
+# Migration: pre-v2.1.2 stored config.env under %APPDATA% (Roaming),
+# which OneDrive Known Folder Move redirects on corporate laptops and
+# causes sync conflicts. If the old config is still there and the new
+# one isn't, seed the new location so users keep their API keys.
+_OLD_ROAMING_ENV = None
+if os.name == "nt":
+    _roaming = os.getenv("APPDATA")
+    if _roaming:
+        _OLD_ROAMING_ENV = Path(_roaming) / "MeetingRecorder" / "config.env"
+if (_OLD_ROAMING_ENV and _OLD_ROAMING_ENV.exists()
+        and _OLD_ROAMING_ENV.resolve() != ENV_PATH.resolve()
+        and not ENV_PATH.exists()):
+    try:
+        ENV_PATH.write_text(
+            _OLD_ROAMING_ENV.read_text(encoding="utf-8"), encoding="utf-8")
+    except Exception:
+        pass
+
+# Dev fallback: if config.env still doesn't exist but backend/.env does,
+# seed from it so existing developers don't have to reconfigure.
 _LEGACY_ENV = Path(__file__).resolve().parent.parent / ".env"
 if not ENV_PATH.exists() and _LEGACY_ENV.exists():
     try:

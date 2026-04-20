@@ -58,6 +58,12 @@ export default function Home() {
   useEffect(() => {
     let cancelled = false;
     let attempts = 0;
+    // Max startup wait. Cold-starts on corporate laptops where every
+    // torch/pyannote DLL hits the AV scanner can take 2-3 minutes on
+    // first launch. After that the OS page cache makes launches fast.
+    // We'd rather keep retrying quietly than show a false "failed"
+    // screen to users who just need to wait.
+    const MAX_ATTEMPTS = 240; // 4 minutes
     const check = async () => {
       try {
         await api.health();
@@ -66,10 +72,12 @@ export default function Home() {
         if (cancelled) return;
         attempts += 1;
         setBackendAttempts(attempts);
-        if (attempts >= 30) {
+        if (attempts >= MAX_ATTEMPTS) {
           setBackendError(
-            "Backend failed to start after 30 seconds. " +
-            "Check %APPDATA%\\MeetingRecorder\\backend.log and rust.log for details."
+            `Backend failed to start after ${MAX_ATTEMPTS} seconds. ` +
+            "Click Retry — if the backend finished starting while this " +
+            "screen was up, it will come online immediately. Otherwise " +
+            "check %APPDATA%\\MeetingRecorder\\backend.log and rust.log."
           );
         } else {
           setTimeout(check, 1000);
@@ -140,9 +148,18 @@ export default function Home() {
           <div className="flex flex-col items-center gap-3 text-muted-foreground">
             <Loader2 className="h-6 w-6 animate-spin" />
             <div className="text-sm">Starting backend…</div>
-            {backendAttempts > 5 && (
+            {backendAttempts > 5 && backendAttempts <= 30 && (
               <div className="text-xs text-muted-foreground max-w-xs text-center">
-                Taking longer than expected. Attempt {backendAttempts}/30. Python is loading torch+pyannote; this can take up to 20s on first launch.
+                Loading torch + pyannote models. Takes 10-30s on warm cache,
+                up to 2-3 minutes on first launch after install while Windows
+                Defender scans the runtime. ({backendAttempts}s elapsed)
+              </div>
+            )}
+            {backendAttempts > 30 && (
+              <div className="text-xs text-muted-foreground max-w-xs text-center">
+                Still starting — this is normal on corporate laptops where
+                antivirus scans each DLL on first access. Hang tight.
+                ({backendAttempts}s elapsed)
               </div>
             )}
           </div>

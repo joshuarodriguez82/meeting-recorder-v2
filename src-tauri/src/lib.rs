@@ -203,11 +203,16 @@ fn resolve_python(backend_dir: &std::path::Path) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Get the log directory — %APPDATA%\MeetingRecorder\
+/// Get the log directory. Use %LOCALAPPDATA% (not %APPDATA%) because
+/// corporate policies like TTEC's Known Folder Move redirect %APPDATA%
+/// into OneDrive, which locks/syncs our log files mid-write and causes
+/// the backend to silently fail on some operations. LOCALAPPDATA is
+/// per-machine and never redirected.
 fn log_dir() -> std::path::PathBuf {
-    let appdata = std::env::var("APPDATA")
+    let localappdata = std::env::var("LOCALAPPDATA")
+        .or_else(|_| std::env::var("APPDATA"))
         .unwrap_or_else(|_| std::env::var("USERPROFILE").unwrap_or_default());
-    let dir = std::path::PathBuf::from(appdata).join("MeetingRecorder");
+    let dir = std::path::PathBuf::from(localappdata).join("MeetingRecorder");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -283,6 +288,58 @@ pub fn run() {
                 Ok(_) => rlog("Python backend sidecar spawn requested"),
                 Err(e) => rlog(&format!("ERROR: Backend startup failed: {}", e)),
             }
+            // Watchdog: if the Python process dies unexpectedly (killed
+            // by corporate AV, OOM, unhandled exception), respawn it
+            // after a short delay. Corporate security agents like
+            // SentinelOne / CrowdStrike sometimes kill subprocesses
+            // during runtime; without this the app becomes dead-weight
+            // with no recovery short of the user quitting and reopening.
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let mut consecutive_restarts = 0;
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    let child_alive = if let Some(state) = app_handle.try_state::<BackendProcess>() {
+                        if let Ok(mut guard) = state.0.lock() {
+                            match guard.as_mut() {
+                                Some(c) => match c.try_wait() {
+                                    Ok(Some(status)) => {
+                                        rlog(&format!(
+                                            "Backend exited unexpectedly: {:?}", status));
+                                        *guard = None;
+                                        false
+                                    }
+                                    Ok(None) => true,
+                                    Err(e) => {
+                                        rlog(&format!("try_wait error: {}", e));
+                                        false
+                                    }
+                                },
+                                None => false,
+                            }
+                        } else { true }
+                    } else { true };
+                    if child_alive {
+                        consecutive_restarts = 0;
+                        continue;
+                    }
+                    // Don't loop on a broken install — if Python keeps
+                    // dying within seconds of spawn, back off.
+                    consecutive_restarts += 1;
+                    if consecutive_restarts > 5 {
+                        rlog("Backend crashed 5+ times in a row — giving up. \
+                              Check backend.log for the cause, reinstall if needed.");
+                        break;
+                    }
+                    if port_in_use(BACKEND_PORT) {
+                        continue; // something is listening, possibly another instance
+                    }
+                    rlog(&format!("Respawning backend (attempt {})", consecutive_restarts));
+                    if let Err(e) = spawn_python_backend(&app_handle) {
+                        rlog(&format!("Respawn failed: {}", e));
+                    }
+                }
+            });
             Ok(())
         })
         .on_window_event(|window, event| {
