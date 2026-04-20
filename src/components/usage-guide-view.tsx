@@ -12,18 +12,64 @@ const SECTIONS: Section[] = [
     content: (
       <>
         <p>
-          Meeting Recorder captures meetings, transcribes them with AI, and extracts structured
-          notes — summaries, action items, requirements, and decisions — all local on your machine.
+          Meeting Recorder captures meetings, transcribes them with Whisper (on your machine),
+          identifies speakers with Pyannote (on your machine), and uses Claude to extract
+          summaries, action items, requirements, and decisions. All audio and transcripts stay
+          local — only Claude calls leave your machine.
         </p>
-        <p>First-run setup in <strong>Settings</strong>:</p>
+
+        <p className="font-medium mt-4">First-run setup — you need two tokens:</p>
+
+        <div className="rounded-md border bg-muted/40 p-4 space-y-3 text-sm">
+          <div>
+            <div className="font-medium">1. Anthropic API Key (powers AI extraction)</div>
+            <ol className="list-decimal pl-5 mt-1 space-y-0.5 text-muted-foreground">
+              <li>Sign up at <a href="https://console.anthropic.com" target="_blank" rel="noreferrer" className="text-primary hover:underline">console.anthropic.com</a></li>
+              <li>Billing → Buy credits → add $5-10 (~$0.05 per meeting on Haiku)</li>
+              <li><a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="text-primary hover:underline">Settings → API Keys</a> → Create Key</li>
+              <li>Copy the <code className="text-[11px]">sk-ant-api03-...</code> value</li>
+            </ol>
+          </div>
+          <div>
+            <div className="font-medium">2. HuggingFace Token (powers speaker identification)</div>
+            <ol className="list-decimal pl-5 mt-1 space-y-0.5 text-muted-foreground">
+              <li>Sign up at <a href="https://huggingface.co/join" target="_blank" rel="noreferrer" className="text-primary hover:underline">huggingface.co/join</a> (free)</li>
+              <li><a href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer" className="text-primary hover:underline">Settings → Access Tokens</a> → Create new token → Type: <strong>Read</strong></li>
+              <li>Copy the <code className="text-[11px]">hf_...</code> value</li>
+              <li>
+                <strong className="text-foreground">Critical:</strong> accept model terms on both pyannote pages, otherwise speaker diarization will 403:
+                <ul className="list-disc pl-5 mt-0.5">
+                  <li><a href="https://huggingface.co/pyannote/speaker-diarization-3.1" target="_blank" rel="noreferrer" className="text-primary hover:underline">pyannote/speaker-diarization-3.1</a></li>
+                  <li><a href="https://huggingface.co/pyannote/segmentation-3.0" target="_blank" rel="noreferrer" className="text-primary hover:underline">pyannote/segmentation-3.0</a></li>
+                </ul>
+              </li>
+            </ol>
+          </div>
+          <div>
+            <div className="font-medium">3. Paste both into Settings</div>
+            <p className="text-muted-foreground pl-5">
+              Click Save. Restart the app so the backend picks up the new keys and downloads the
+              pyannote models into cache (~200 MB, one-time, on first Process).
+            </p>
+          </div>
+        </div>
+
+        <p className="mt-4 font-medium">Then:</p>
         <ul className="list-disc pl-5 space-y-1">
-          <li>Paste your Anthropic API key and HuggingFace token</li>
-          <li>Select your microphone and a loopback device for System Audio</li>
+          <li>Select your microphone and a loopback device for System Audio (Record tab)</li>
+          <li>Pick a Whisper model (see &quot;Whisper Models&quot; section below)</li>
           <li>(Optional) Email recipient, auto-process toggles, retention policy</li>
+          <li>(Optional) Settings → Transcription Acceleration → enable GPU if you have an NVIDIA / AMD / Intel GPU (3-10× faster transcription)</li>
         </ul>
+
         <Tip>
           Requires <strong>Classic Outlook</strong> for calendar + email. New Outlook blocks COM
           automation.
+        </Tip>
+        <Tip>
+          The tokens are stored in <code>%LOCALAPPDATA%\MeetingRecorder\config.env</code> on
+          this machine only — they never roam to other laptops and never leave to the network
+          except when you actually make an AI extraction call.
         </Tip>
       </>
     ),
@@ -192,6 +238,70 @@ const SECTIONS: Section[] = [
           Click <strong>Clean up now</strong> to run retention immediately.
           Transcripts / summaries / action items / decisions / requirements are <strong>never</strong> deleted.
         </Tip>
+      </>
+    ),
+  },
+  {
+    id: "whisper-models",
+    title: "Whisper Models",
+    content: (
+      <>
+        <p>
+          Whisper transcribes your audio entirely on your machine — no cloud call, no data leaves.
+          Picking a model is a tradeoff between speed and transcript quality. Change in{" "}
+          <strong>Settings → AI Models → Whisper Model</strong>.
+        </p>
+        <table className="w-full text-xs mt-3 border-collapse">
+          <thead>
+            <tr className="border-b text-left">
+              <th className="py-1.5 pr-3">Model</th>
+              <th className="py-1.5 pr-3">Size</th>
+              <th className="py-1.5 pr-3">Speed (30-min on CPU)</th>
+              <th className="py-1.5">Quality</th>
+            </tr>
+          </thead>
+          <tbody className="text-muted-foreground">
+            <tr className="border-b">
+              <td className="py-1.5 pr-3"><code>tiny</code></td>
+              <td className="py-1.5 pr-3">~39 MB</td>
+              <td className="py-1.5 pr-3">~30s</td>
+              <td className="py-1.5">Rough — misses words, bad at names</td>
+            </tr>
+            <tr className="border-b">
+              <td className="py-1.5 pr-3"><code>base</code></td>
+              <td className="py-1.5 pr-3">~74 MB</td>
+              <td className="py-1.5 pr-3">~1 min</td>
+              <td className="py-1.5">Fair — noticeable errors</td>
+            </tr>
+            <tr className="border-b bg-primary/5">
+              <td className="py-1.5 pr-3"><code>small</code> <strong className="text-primary">(default)</strong></td>
+              <td className="py-1.5 pr-3">~244 MB</td>
+              <td className="py-1.5 pr-3">~2-3 min</td>
+              <td className="py-1.5 text-foreground">Good — the sweet spot for most meetings</td>
+            </tr>
+            <tr className="border-b">
+              <td className="py-1.5 pr-3"><code>medium</code></td>
+              <td className="py-1.5 pr-3">~769 MB</td>
+              <td className="py-1.5 pr-3">~5-7 min</td>
+              <td className="py-1.5">Very good — noisy rooms, phone audio, light accents</td>
+            </tr>
+            <tr>
+              <td className="py-1.5 pr-3"><code>large</code></td>
+              <td className="py-1.5 pr-3">~1.5 GB</td>
+              <td className="py-1.5 pr-3">~10-15 min</td>
+              <td className="py-1.5">Best — nails proper nouns, heavy accents, jargon</td>
+            </tr>
+          </tbody>
+        </table>
+        <Tip>
+          <strong>With GPU acceleration enabled</strong>, everything above is roughly 10× faster.
+          <code>large</code> becomes ~1-2 min for a 30-min meeting, which makes it essentially
+          free to use — jump straight to <code>large</code> if you&apos;ve enabled CUDA or DirectML.
+        </Tip>
+        <p className="mt-3">
+          Models are downloaded on first use into <code>%USERPROFILE%\.cache\huggingface</code>,
+          which is one-time per model. Switching models is just a Settings change + app restart.
+        </p>
       </>
     ),
   },
