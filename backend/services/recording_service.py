@@ -12,8 +12,6 @@ from typing import Callable, List, Optional
 
 import numpy as np
 import soundfile as sf
-from math import gcd
-from scipy.signal import resample_poly
 
 from config.settings import Settings
 from core.audio_capture import AudioCapture
@@ -21,7 +19,7 @@ from core.diarization import DiarizationEngine
 from core.transcription import TranscriptionEngine
 from models.segment import Segment
 from models.session import Session
-from utils.audio_utils import save_wav
+from utils.audio_utils import finalize_recording_streaming
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -29,16 +27,6 @@ logger = get_logger(__name__)
 SESSION_LOG_FMT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
 TARGET_SR = 16000
-
-
-def _resample(audio: np.ndarray, orig_sr: int) -> np.ndarray:
-    if orig_sr == TARGET_SR:
-        return audio.astype(np.float32)
-    divisor = gcd(TARGET_SR, orig_sr)
-    up = TARGET_SR // divisor
-    down = orig_sr // divisor
-    resampled = resample_poly(audio.astype(np.float64), up, down)
-    return np.clip(resampled, -1.0, 1.0).astype(np.float32)
 
 
 class RecordingService:
@@ -158,8 +146,6 @@ class RecordingService:
 
         self._recording = False
         self._capture.stop()
-
-        capture_sr = self._capture_sr
         self._capture = None
 
         # Close the streaming WAV file
@@ -169,63 +155,37 @@ class RecordingService:
                 self._wav_writer = None
 
         if self._session and self._chunk_count > 0 and self._wav_temp_path:
+            # Stream-merge mic + loopback into final WAV with bounded memory.
+            # Earlier versions sf.read() both files fully into RAM before
+            # mixing — a 36-minute 48kHz session allocates ~2-3 GB and can
+            # trigger a native STATUS_ACCESS_VIOLATION on stop (lost session).
+            loopback_path = getattr(self, '_loopback_temp_path', None)
+            final_path = self._build_audio_path(self._session.session_id)
             try:
-                # Read mic recording and resample to TARGET_SR
-                mic_audio, _ = sf.read(self._wav_temp_path, dtype="float32")
-                if mic_audio.ndim == 2:
-                    mic_audio = mic_audio.mean(axis=1)
-                mic_audio = _resample(mic_audio, capture_sr)
-
-                # Mix in loopback audio if available
-                loopback_path = getattr(self, '_loopback_temp_path', None)
-                if loopback_path and Path(loopback_path).exists():
-                    try:
-                        lb_audio, lb_sr = sf.read(loopback_path, dtype="float32")
-                        if lb_audio.ndim == 2:
-                            lb_audio = lb_audio.mean(axis=1)
-                        if len(lb_audio) > 0:
-                            lb_audio = _resample(lb_audio, lb_sr)
-                            # Right-align loopback (it starts later due to
-                            # WASAPI blocking until audio plays)
-                            if len(lb_audio) < len(mic_audio):
-                                padded = np.zeros(len(mic_audio), dtype=np.float32)
-                                padded[len(mic_audio) - len(lb_audio):] = lb_audio
-                                lb_audio = padded
-                            else:
-                                lb_audio = lb_audio[:len(mic_audio)]
-                            mixed = mic_audio + lb_audio
-                            # Normalize to prevent clipping
-                            peak = np.abs(mixed).max()
-                            if peak > 0.95:
-                                mixed = mixed * (0.95 / peak)
-                            mic_audio = mixed.astype(np.float32)
-                            logger.info(f"Mixed loopback audio ({len(lb_audio)/TARGET_SR:.1f}s) with mic")
-                        else:
-                            logger.warning("Loopback file was empty — no system audio captured")
-                    except Exception as e:
-                        logger.warning(f"Could not mix loopback audio: {e}")
-                    finally:
-                        try:
-                            Path(loopback_path).unlink()
-                        except OSError:
-                            pass
-
-                path = self._build_audio_path(self._session.session_id)
-                save_wav(path, mic_audio, TARGET_SR)
-                self._session.audio_path = path
+                duration_s, _ = finalize_recording_streaming(
+                    mic_wav_path=self._wav_temp_path,
+                    loopback_wav_path=loopback_path,
+                    output_wav_path=final_path,
+                    target_sr=TARGET_SR,
+                )
+                self._session.audio_path = final_path
                 self._session.ended_at = datetime.now()
-
-                # Remove the mic temp file
-                try:
-                    Path(self._wav_temp_path).unlink()
-                except OSError:
-                    pass
-
                 self._on_status("Recording saved. Ready to process.")
-                logger.info(f"Audio saved to {path} ({len(mic_audio)/TARGET_SR:.1f}s)")
+                logger.info(
+                    f"Audio saved to {final_path} ({duration_s:.1f}s)")
             except Exception as e:
-                logger.error(f"Failed to save audio: {e}")
+                logger.exception("Failed to save audio")
                 self._on_status(f"Error saving audio: {e}")
+            finally:
+                # Clean up temps whether or not merge succeeded; any failure
+                # leaves them on disk for startup recovery to retry.
+                if self._session.audio_path:
+                    for temp in (self._wav_temp_path, loopback_path):
+                        if temp and Path(temp).exists():
+                            try:
+                                Path(temp).unlink()
+                            except OSError:
+                                pass
         elif self._session and self._chunk_count == 0:
             logger.warning("Recording stopped with no audio chunks captured.")
             self._on_status("No audio was captured. Try again.")
