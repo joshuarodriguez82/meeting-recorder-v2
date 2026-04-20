@@ -2,6 +2,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::net::{Shutdown, TcpStream};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::Manager;
@@ -9,6 +10,11 @@ use tauri::Manager;
 struct BackendProcess(Mutex<Option<Child>>);
 
 const BACKEND_PORT: u16 = 17645;
+
+/// Set while bootstrap_app_venv is running (can take several minutes on
+/// first launch). The watchdog respects this so it doesn't try to
+/// "respawn" a backend that hasn't been spawned yet.
+static BOOTSTRAPPING: AtomicBool = AtomicBool::new(false);
 
 /// Where the backend zip is installed on disk by Tauri.
 fn resolve_bundle_zip() -> Option<std::path::PathBuf> {
@@ -197,19 +203,37 @@ fn resolve_backend_dir() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Locate pythonw.exe inside the extracted runtime or dev venv.
+/// Where the app-managed venv lives. Created by bootstrap_app_venv on
+/// first launch if no other Python is available.
+fn app_venv_dir() -> std::path::PathBuf {
+    let base = std::env::var("LOCALAPPDATA")
+        .or_else(|_| std::env::var("APPDATA"))
+        .unwrap_or_else(|_| std::env::var("USERPROFILE").unwrap_or_default());
+    std::path::PathBuf::from(base).join("MeetingRecorder").join(".venv")
+}
+
+/// Locate a working Python interpreter.
+///
+/// Note: the embeddable Python at `runtime/python/` is intentionally NOT
+/// checked here. The v2.1.x bundle ships a broken embeddable stdlib and
+/// the whole embeddable approach hit dead ends (speechbrain LazyModule
+/// recursion, missing DiagnosticOptions, etc — see HANDOFF.md bug #1,2).
+/// We rely on a real Python install + venv instead.
 fn resolve_python(backend_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    // Production: embeddable Python at backend/python/
-    let embed = [
-        backend_dir.join("python").join("pythonw.exe"),
-        backend_dir.join("python").join("python.exe"),
+    // 1. App-managed venv created by bootstrap (production path on
+    //    clean laptops: first launch creates this via `python -m venv`
+    //    against a detected system Python 3.13).
+    let app_venv = app_venv_dir();
+    let app_candidates = [
+        app_venv.join("Scripts").join("pythonw.exe"),
+        app_venv.join("Scripts").join("python.exe"),
     ];
-    for c in &embed {
+    for c in &app_candidates {
         if c.exists() {
             return Some(c.clone());
         }
     }
-    // Dev: venv
+    // 2. Dev checkout venv next to server.py.
     let venv = [
         backend_dir.join(".venv").join("Scripts").join("pythonw.exe"),
         backend_dir.join(".venv").join("Scripts").join("python.exe"),
@@ -219,7 +243,7 @@ fn resolve_python(backend_dir: &std::path::Path) -> Option<std::path::PathBuf> {
             return Some(c.clone());
         }
     }
-    // Legacy
+    // 3. Legacy v1 venv — only present on the original dev machine.
     let legacy = [
         std::path::PathBuf::from(r"C:\meeting_recorder\.venv\Scripts\pythonw.exe"),
     ];
@@ -229,6 +253,147 @@ fn resolve_python(backend_dir: &std::path::Path) -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+/// Try to find a system-installed Python 3.13 that we can use to create
+/// an app venv from. Checks py launcher, PATH, and common install paths.
+fn find_system_python_313() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    // 1. `py -3.13 -c "print(sys.executable)"`
+    let mut cmd = Command::new("py");
+    cmd.args(["-3.13", "-c", "import sys; print(sys.executable)"])
+        .stdout(Stdio::piped()).stderr(Stdio::null());
+    #[cfg(windows)] cmd.creation_flags(CREATE_NO_WINDOW);
+    if let Ok(out) = cmd.output() {
+        if out.status.success() {
+            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !path.is_empty() {
+                let p = std::path::PathBuf::from(&path);
+                if p.exists() { return Some(p); }
+            }
+        }
+    }
+
+    // 2. `python` on PATH — verify it's 3.13
+    let mut cmd = Command::new("python");
+    cmd.args(["-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}'); print(sys.executable)"])
+        .stdout(Stdio::piped()).stderr(Stdio::null());
+    #[cfg(windows)] cmd.creation_flags(CREATE_NO_WINDOW);
+    if let Ok(out) = cmd.output() {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout).to_string();
+            let mut lines = text.lines();
+            if let (Some(ver), Some(exe)) = (lines.next(), lines.next()) {
+                if ver.trim() == "3.13" {
+                    let p = std::path::PathBuf::from(exe.trim());
+                    if p.exists() { return Some(p); }
+                }
+            }
+        }
+    }
+
+    // 3. Common install paths.
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
+        candidates.push(std::path::PathBuf::from(&localappdata)
+            .join("Programs").join("Python").join("Python313").join("python.exe"));
+    }
+    candidates.push(std::path::PathBuf::from(r"C:\Program Files\Python313\python.exe"));
+    candidates.push(std::path::PathBuf::from(r"C:\Program Files (x86)\Python313\python.exe"));
+    for c in candidates {
+        if c.exists() { return Some(c); }
+    }
+
+    None
+}
+
+/// Create the app venv and pip install requirements into it. Blocks for
+/// several minutes on first launch while wheels download (~1.5 GB). All
+/// pip output goes to %LOCALAPPDATA%\MeetingRecorder\bootstrap.log so the
+/// user can tail it.
+fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let venv = app_venv_dir();
+    if venv.join("Scripts").join("python.exe").exists() {
+        rlog("App venv already exists — bootstrap skipped");
+        return Ok(venv);
+    }
+
+    let system_py = find_system_python_313().ok_or_else(|| {
+        "Python 3.13 not found on this machine. Install Python 3.13 from \
+         https://www.python.org/downloads/ (per-user install, no admin needed; \
+         check 'Add python.exe to PATH'), then restart Meeting Recorder.".to_string()
+    })?;
+    rlog(&format!("Bootstrap: system Python at {}", system_py.display()));
+
+    let reqs = runtime_dir.join("requirements-cpu.txt");
+    if !reqs.exists() {
+        return Err(format!(
+            "requirements-cpu.txt not found at {} — bundle may be corrupted",
+            reqs.display()));
+    }
+
+    let bootstrap_log_path = log_dir().join("bootstrap.log");
+    let open_log = || -> Result<(File, File), String> {
+        let f = OpenOptions::new().create(true).append(true)
+            .open(&bootstrap_log_path)
+            .map_err(|e| format!("opening bootstrap.log: {}", e))?;
+        let f2 = f.try_clone().map_err(|e| format!("cloning log fd: {}", e))?;
+        Ok((f, f2))
+    };
+
+    // Step 1: python -m venv
+    rlog(&format!("Bootstrap: creating venv at {}", venv.display()));
+    let (out, err) = open_log()?;
+    let mut c = Command::new(&system_py);
+    c.args(["-m", "venv"]).arg(&venv)
+        .stdout(Stdio::from(out)).stderr(Stdio::from(err));
+    #[cfg(windows)] c.creation_flags(CREATE_NO_WINDOW);
+    let status = c.status().map_err(|e| format!("venv cmd failed: {}", e))?;
+    if !status.success() {
+        return Err(format!("python -m venv exited with {} (see bootstrap.log)", status));
+    }
+
+    let venv_py = venv.join("Scripts").join("python.exe");
+    if !venv_py.exists() {
+        return Err(format!("venv python.exe missing after create: {}", venv_py.display()));
+    }
+
+    // Step 2: upgrade pip
+    rlog("Bootstrap: upgrading pip");
+    let (out, err) = open_log()?;
+    let mut c = Command::new(&venv_py);
+    c.args(["-m", "pip", "install", "--upgrade", "pip"])
+        .stdout(Stdio::from(out)).stderr(Stdio::from(err));
+    #[cfg(windows)] c.creation_flags(CREATE_NO_WINDOW);
+    let _ = c.status();
+
+    // Step 3: pip install -r requirements-cpu.txt — this is the slow part
+    rlog("Bootstrap: pip install -r requirements-cpu.txt (3-5 min, see bootstrap.log)");
+    let (out, err) = open_log()?;
+    let t0 = std::time::Instant::now();
+    let mut c = Command::new(&venv_py);
+    c.args(["-m", "pip", "install", "-r"]).arg(&reqs)
+        .stdout(Stdio::from(out)).stderr(Stdio::from(err));
+    #[cfg(windows)] c.creation_flags(CREATE_NO_WINDOW);
+    let status = c.status().map_err(|e| format!("pip install cmd failed: {}", e))?;
+    if !status.success() {
+        return Err(format!(
+            "pip install exited with {} after {:.0}s (see bootstrap.log)",
+            status, t0.elapsed().as_secs_f32()));
+    }
+    rlog(&format!("Bootstrap: pip install completed in {:.0}s",
+        t0.elapsed().as_secs_f32()));
+
+    Ok(venv)
 }
 
 /// Get the log directory. Use %LOCALAPPDATA% (non-roaming) — it's not
@@ -326,10 +491,23 @@ pub fn run() {
                         .build(),
                 )?;
             }
-            match spawn_python_backend(app.handle()) {
-                Ok(_) => rlog("Python backend sidecar spawn requested"),
-                Err(e) => rlog(&format!("ERROR: Backend startup failed: {}", e)),
-            }
+            // Spawn backend in a background thread. If this is a fresh
+            // install with no Python venv, bootstrap_app_venv may block
+            // for 3-5 minutes while pip downloads wheels; we don't want
+            // to block setup (the window wouldn't even appear until it
+            // finished). BOOTSTRAPPING covers the whole initial spawn
+            // so the watchdog doesn't try to respawn while extraction /
+            // venv creation / pip install is running.
+            let spawn_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                BOOTSTRAPPING.store(true, Ordering::Relaxed);
+                let result = spawn_python_backend(&spawn_handle);
+                BOOTSTRAPPING.store(false, Ordering::Relaxed);
+                match result {
+                    Ok(_) => rlog("Python backend sidecar spawn requested"),
+                    Err(e) => rlog(&format!("ERROR: Backend startup failed: {}", e)),
+                }
+            });
             // Watchdog: if the Python process dies unexpectedly (killed
             // by corporate AV, OOM, unhandled exception), respawn it
             // after a short delay. Corporate security agents like
@@ -341,6 +519,12 @@ pub fn run() {
                 let mut consecutive_restarts = 0;
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(5));
+                    // During bootstrap (first-launch pip install), no
+                    // child exists yet and we don't want to flap-respawn.
+                    if BOOTSTRAPPING.load(Ordering::Relaxed) {
+                        consecutive_restarts = 0;
+                        continue;
+                    }
                     let child_alive = if let Some(state) = app_handle.try_state::<BackendProcess>() {
                         if let Ok(mut guard) = state.0.lock() {
                             match guard.as_mut() {
@@ -446,9 +630,21 @@ fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
         "Could not find bundled backend/ directory. The installer may be \
          corrupted; reinstall from Releases.")?;
     let server_py = backend_dir.join("server.py");
-    let python_exe = resolve_python(&backend_dir).ok_or(
-        "Could not find Python venv inside the installed backend. The \
-         installer may be corrupted; reinstall from Releases.")?;
+    let python_exe = match resolve_python(&backend_dir) {
+        Some(p) => p,
+        None => {
+            // No usable Python — bootstrap an app venv from a system
+            // Python 3.13. This blocks for 3-5 minutes on first launch
+            // while pip downloads wheels.
+            rlog("No Python found — starting venv bootstrap");
+            bootstrap_app_venv(&backend_dir).map_err(|e| {
+                rlog(&format!("ERROR: bootstrap failed: {}", e));
+                e
+            })?;
+            resolve_python(&backend_dir).ok_or(
+                "Bootstrap reported success but Python still not found")?
+        }
+    };
 
     rlog(&format!("Backend dir: {}", backend_dir.display()));
     rlog(&format!("Spawning Python: {}", python_exe.display()));
