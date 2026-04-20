@@ -83,6 +83,7 @@ export interface RecordingStatus {
   models_ready: boolean;
   models_loading: boolean;
   models_error: string | null;
+  current_status?: string;
 }
 
 export interface SessionFull {

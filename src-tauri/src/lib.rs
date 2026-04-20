@@ -97,11 +97,14 @@ fn ensure_runtime_extracted(zip_path: &std::path::Path) -> Result<std::path::Pat
     let expected_version = zip_version(zip_path);
 
     // Essential files that MUST exist for the runtime to work. If any
-    // are missing, we re-extract. We don't re-extract purely on version
-    // mismatch because that destroys user-installed GPU torch wheels.
-    // Note: we no longer check for python/pythonw.exe here — the
-    // bundle doesn't ship an embeddable Python anymore (see
-    // HANDOFF.md bug #1,2 and bootstrap_app_venv below).
+    // are missing, we re-extract. v2.0.3+ ships a source-only bundle
+    // (no embeddable Python — we bootstrap an app venv from a real
+    // Python 3.13 install instead), so server.py is the only essential.
+    // DO NOT add pythonw.exe here: the source-only bundle has no Python,
+    // so checking for it would force re-extract on every launch (and
+    // every 5-second watchdog respawn), wiping the runtime dir while a
+    // crashing backend may still hold file handles → corrupt partial
+    // state → another crash → loop.
     let essentials = [
         runtime.join("server.py"),
     ];
@@ -110,10 +113,24 @@ fn ensure_runtime_extracted(zip_path: &std::path::Path) -> Result<std::path::Pat
         .map(|p| p.to_path_buf())
         .collect();
 
-    let needs_extract = !missing.is_empty();
+    // Re-extract when the bundled zip changes (installer upgrade) so
+    // new server.py / core / services actually land. Earlier versions
+    // silently updated the marker without re-extracting — that silently
+    // shipped old code after every upgrade. Don't do that.
+    let marker = std::fs::read_to_string(&version_file).unwrap_or_default();
+    let version_changed = marker != expected_version;
+    let needs_extract = !missing.is_empty() || version_changed;
 
     if needs_extract {
-        rlog(&format!("Runtime extraction needed (missing: {:?})", missing));
+        if version_changed && missing.is_empty() {
+            rlog(&format!(
+                "Bundled zip changed (was '{}', now '{}') — re-extracting so \
+                 the new backend code takes effect.",
+                if marker.is_empty() { "<none>" } else { &marker },
+                expected_version));
+        } else {
+            rlog(&format!("Runtime extraction needed (missing: {:?})", missing));
+        }
         // Clean slate — remove old runtime so stale .pyc files don't linger.
         let _ = std::fs::remove_dir_all(&runtime);
         std::fs::create_dir_all(&runtime).map_err(|e| format!("mkdir runtime: {}", e))?;
@@ -141,16 +158,6 @@ fn ensure_runtime_extracted(zip_path: &std::path::Path) -> Result<std::path::Pat
         std::fs::write(&version_file, &expected_version)
             .map_err(|e| format!("writing .version: {}", e))?;
         rlog(&format!("Extracted in {:.1}s", t0.elapsed().as_secs_f32()));
-    } else {
-        let marker = std::fs::read_to_string(&version_file).unwrap_or_default();
-        if marker != expected_version {
-            // Different zip shipped with this exe than what last
-            // extracted the runtime — but the runtime is still intact.
-            // Update the marker silently so we don't log this mismatch
-            // forever. User-installed GPU wheels are preserved.
-            let _ = std::fs::write(&version_file, &expected_version);
-            rlog("Runtime version marker updated without re-extract");
-        }
     }
 
     Ok(runtime)
@@ -628,8 +635,23 @@ fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
 
     // Redirect Python stdout+stderr to a log file so we can see what
     // happens if the server crashes or is slow to start.
-    let log_file = File::create(backend_log_path())
-        .map_err(|e| format!("Couldn't create backend log file: {}", e))?;
+    // IMPORTANT: open in APPEND mode, not truncate. If the backend
+    // crashes and the watchdog respawns, we want to keep the crash
+    // logs from the previous process so we can diagnose the cause.
+    // File::create() truncates; OpenOptions::append() does not.
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(backend_log_path())
+        .map_err(|e| format!("Couldn't open backend log file: {}", e))?;
+    // Write a separator so multiple spawn sessions are visible in the log.
+    {
+        let mut sep = log_file.try_clone()
+            .map_err(|e| format!("Couldn't clone log fd for separator: {}", e))?;
+        let _ = sep.write_all(
+            format!("\n=== backend spawn @ {} ===\n",
+                chrono_like_timestamp()).as_bytes());
+    }
     let log_file2 = log_file.try_clone()
         .map_err(|e| format!("Couldn't clone log fd: {}", e))?;
 
@@ -637,6 +659,17 @@ fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
     cmd.arg("-u")  // unbuffered stdout/stderr — critical so logs flush immediately
        .arg(&server_py)
        .env("PYTHONUNBUFFERED", "1")
+       // Intel Fortran runtime (shipped with numpy/scipy/torch MKL) installs
+       // a Windows console-close handler that aborts the Python process with
+       // exit code 200 when a transient console window attaches/detaches.
+       // That fires when pyannote.audio loads on pythonw.exe with no stable
+       // console, producing "forrtl: error (200): program aborting due to
+       // window-CLOSE event" and a visible cmd-window flash on every model
+       // load call. This env var tells the Fortran runtime to skip registering
+       // the handler entirely.
+       .env("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "1")
+       // Belt-and-suspenders: some MKL builds also install their own handler.
+       .env("FOR_DISABLE_STACK_TRACE", "1")
        .stdout(Stdio::from(log_file))
        .stderr(Stdio::from(log_file2));
 
