@@ -203,17 +203,31 @@ fn resolve_python(backend_dir: &std::path::Path) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Get the log directory. Use %LOCALAPPDATA% (not %APPDATA%) because
-/// corporate policies like TTEC's Known Folder Move redirect %APPDATA%
-/// into OneDrive, which locks/syncs our log files mid-write and causes
-/// the backend to silently fail on some operations. LOCALAPPDATA is
-/// per-machine and never redirected.
+/// Get the log directory. Use %LOCALAPPDATA% (non-roaming) — it's not
+/// subject to OneDrive Known Folder Move on corporate laptops and
+/// matches where other Windows desktop apps put their non-roaming data.
 fn log_dir() -> std::path::PathBuf {
     let localappdata = std::env::var("LOCALAPPDATA")
         .or_else(|_| std::env::var("APPDATA"))
         .unwrap_or_else(|_| std::env::var("USERPROFILE").unwrap_or_default());
     let dir = std::path::PathBuf::from(localappdata).join("MeetingRecorder");
     let _ = std::fs::create_dir_all(&dir);
+    // Migration breadcrumb: if we find stale logs from v2.1.1 under
+    // %APPDATA% (Roaming), drop a README next to them pointing to the
+    // new location so users who go hunting there see the redirect.
+    if let Ok(roaming) = std::env::var("APPDATA") {
+        let old = std::path::PathBuf::from(roaming).join("MeetingRecorder");
+        if old.exists() && old != dir {
+            let readme = old.join("LOGS_MOVED.txt");
+            if !readme.exists() {
+                let _ = std::fs::write(&readme,
+                    format!("Logs moved to {} in v2.1.2+.\n\
+                             Open %LOCALAPPDATA%\\MeetingRecorder in File Explorer \
+                             (paste in the address bar and press Enter).\n",
+                             dir.display()));
+            }
+        }
+    }
     dir
 }
 
