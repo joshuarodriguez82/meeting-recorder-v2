@@ -100,8 +100,27 @@ export interface SessionFull {
   client: string;
   project: string;
   attendees: string[];
+  notes: string;
   segments: Array<{ speaker_id: string; start: number; end: number; text: string }>;
   speakers: Record<string, { speaker_id: string; display_name: string }>;
+}
+
+export interface UnprocessedSession {
+  session_id: string;
+  display_name: string;
+  started_at: string | null;
+  duration_s: number;
+  client: string;
+  project: string;
+}
+
+export interface ProcessFullStages {
+  transcribe_diarize?: string;
+  summary?: string;
+  action_items?: string;
+  decisions?: string;
+  requirements?: string;
+  follow_up_drafts?: string;
 }
 
 export const api = {
@@ -153,6 +172,35 @@ export const api = {
       `/sessions/${id}/decisions`, { method: "POST" }
     ),
 
+  // One-shot pipeline — used by auto_process_after_stop. Runs transcribe,
+  // diarize, summary, action items, decisions, requirements sequentially.
+  // Each stage succeeds or fails independently; response.stages shows which.
+  processFull: (
+    id: string,
+    opts: { template?: string; follow_up_drafts?: boolean } = {},
+  ) =>
+    request<{ ok: boolean; stages: ProcessFullStages }>(
+      `/sessions/${id}/process_full`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          template: opts.template ?? "General",
+          follow_up_drafts: opts.follow_up_drafts ?? false,
+        }),
+      },
+    ),
+
+  followUpDrafts: (id: string, tone = "friendly-professional") =>
+    request<{ ok: boolean; drafts_created: number }>(
+      `/sessions/${id}/follow_up_drafts`,
+      { method: "POST", body: JSON.stringify({ tone }) },
+    ),
+
+  // Sessions with audio on disk but no transcript — polled by the UI so
+  // we can badge the sidebar and fire a Windows toast when the count rises.
+  listUnprocessed: () =>
+    request<UnprocessedSession[]>("/sessions/unprocessed"),
+
   getSessionFull: (id: string) =>
     request<SessionFull>(`/sessions/${id}`),
 
@@ -161,6 +209,7 @@ export const api = {
     client?: string;
     project?: string;
     template?: string;
+    notes?: string;
   }) =>
     request<{ ok: boolean }>(`/sessions/${id}`, {
       method: "PATCH",
