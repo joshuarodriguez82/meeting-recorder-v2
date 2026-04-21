@@ -18,6 +18,7 @@ import { PrepBriefView } from "@/components/prep-brief-view";
 import { UsageGuideView } from "@/components/usage-guide-view";
 import { CalendarMonitor } from "@/components/calendar-monitor";
 import { SessionDetailDialog } from "@/components/session-detail-dialog";
+import { useUnprocessedSessions } from "@/lib/useUnprocessedSessions";
 
 const NAV_ITEMS = [
   { id: "record", label: "Record", icon: Mic },
@@ -152,6 +153,11 @@ export default function Home() {
     if (backendReady) reloadSessions();
   }, [backendReady]);
 
+  // Notification system — polls /sessions/unprocessed every 60s and fires
+  // a Windows toast the first time a new unprocessed session appears. The
+  // count populates the sidebar badge on the Sessions nav item.
+  const { count: unprocessedCount } = useUnprocessedSessions(backendReady);
+
   if (!backendReady) {
     return (
       <div className="flex h-screen items-center justify-center p-8">
@@ -251,6 +257,9 @@ export default function Home() {
             {NAV_ITEMS.map((item) => {
               const Icon = item.icon;
               const active = nav === item.id;
+              const badge = item.id === "sessions" && unprocessedCount > 0
+                ? unprocessedCount
+                : 0;
               return (
                 <li key={item.id}>
                   <button
@@ -260,9 +269,17 @@ export default function Home() {
                         ? "bg-accent text-accent-foreground font-medium"
                         : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
                     }`}
+                    title={badge > 0
+                      ? `${badge} session${badge === 1 ? "" : "s"} awaiting processing`
+                      : undefined}
                   >
                     <Icon className="h-4 w-4" />
-                    {item.label}
+                    <span className="flex-1 text-left">{item.label}</span>
+                    {badge > 0 && (
+                      <span className="inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full bg-primary text-primary-foreground text-[10px] font-semibold">
+                        {badge}
+                      </span>
+                    )}
                   </button>
                 </li>
               );

@@ -8,6 +8,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
+import { ChevronDown, ChevronRight, ExternalLink } from "lucide-react";
 
 interface ActionItem {
   done: boolean;
@@ -145,33 +146,143 @@ export function FollowUpsView({ sessions, onOpenSession }: Props) {
               No action items yet. Extract them from a processed session.
             </p>
           ) : (
-            filtered.map((i, idx) => (
-              <button
-                key={idx}
-                onClick={() => onOpenSession(i.session_id, "actions")}
-                className="w-full text-left flex items-start gap-3 border-b last:border-b-0 p-4 hover:bg-muted/40 transition-colors"
-              >
-                <span className={`mt-0.5 text-lg ${i.done ? "text-green-600" : "text-muted-foreground"}`}>
-                  {i.done ? "✓" : "○"}
-                </span>
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm break-words">
-                    {i.owner && <span className="font-medium">[{i.owner}] </span>}
-                    {i.description}
-                    {i.due && <span className="text-muted-foreground"> (Due: {i.due})</span>}
-                  </div>
-                  <div className="text-xs text-muted-foreground mt-1 flex gap-2 items-center flex-wrap">
-                    {i.client && <Badge variant="outline" className="text-[10px]">{i.client}</Badge>}
-                    <span className="text-primary">{i.meeting}</span>
-                    <span>·</span>
-                    <span>{i.session_date}</span>
-                  </div>
-                </div>
-              </button>
-            ))
+            <FollowUpGroups items={filtered} onOpenSession={onOpenSession} />
           )}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+/**
+ * Collapse follow-ups into one card per (meeting, owner). Five tasks for
+ * the same person in one meeting = one expandable card, not five separate
+ * rows — so the view still tells you at-a-glance who owes what, without
+ * drowning the screen in duplicates.
+ */
+function FollowUpGroups({
+  items, onOpenSession,
+}: {
+  items: ActionItem[];
+  onOpenSession: (id: string, tab?: string) => void;
+}) {
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+
+  const groups = useMemo(() => {
+    const map = new Map<string, {
+      key: string;
+      owner: string;
+      session_id: string;
+      meeting: string;
+      client: string;
+      session_date: string;
+      items: ActionItem[];
+    }>();
+    for (const it of items) {
+      const ownerLabel = it.owner || "Unassigned";
+      const key = `${it.session_id}|${ownerLabel}`;
+      let g = map.get(key);
+      if (!g) {
+        g = {
+          key,
+          owner: ownerLabel,
+          session_id: it.session_id,
+          meeting: it.meeting,
+          client: it.client,
+          session_date: it.session_date,
+          items: [],
+        };
+        map.set(key, g);
+      }
+      g.items.push(it);
+    }
+    // Sort groups: newest meeting first, then owner alphabetical
+    return Array.from(map.values()).sort((a, b) => {
+      if (a.session_date !== b.session_date) {
+        return (b.session_date || "").localeCompare(a.session_date || "");
+      }
+      return a.owner.localeCompare(b.owner);
+    });
+  }, [items]);
+
+  return (
+    <div>
+      {groups.map((g) => {
+        const isOpen = expanded[g.key] ?? (groups.length <= 3);
+        const openCount = g.items.filter((i) => !i.done).length;
+        const doneCount = g.items.length - openCount;
+        return (
+          <div
+            key={g.key}
+            className="border-b last:border-b-0"
+          >
+            <button
+              onClick={() =>
+                setExpanded((prev) => ({ ...prev, [g.key]: !isOpen }))
+              }
+              className="w-full text-left flex items-center gap-3 p-4 hover:bg-muted/40 transition-colors"
+            >
+              {isOpen ? (
+                <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
+              ) : (
+                <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+              )}
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-medium">
+                  {g.owner}
+                  <span className="text-muted-foreground font-normal">
+                    {" "}· {openCount} open
+                    {doneCount > 0 && ` · ${doneCount} done`}
+                  </span>
+                </div>
+                <div className="text-xs text-muted-foreground mt-1 flex items-center gap-2 flex-wrap">
+                  {g.client && (
+                    <Badge variant="outline" className="text-[10px]">{g.client}</Badge>
+                  )}
+                  <span className="text-primary truncate">{g.meeting}</span>
+                  <span>·</span>
+                  <span>{g.session_date}</span>
+                </div>
+              </div>
+              <span
+                role="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenSession(g.session_id, "actions");
+                }}
+                className="h-7 w-7 inline-flex items-center justify-center rounded-md hover:bg-accent text-muted-foreground hover:text-foreground shrink-0"
+                title="Open meeting"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+              </span>
+            </button>
+            {isOpen && (
+              <div className="px-6 pb-3 space-y-1.5">
+                {g.items.map((it, idx) => (
+                  <div
+                    key={idx}
+                    className="flex items-start gap-3 text-sm py-1.5"
+                  >
+                    <span
+                      className={`text-lg shrink-0 ${it.done ? "text-green-600" : "text-muted-foreground"}`}
+                    >
+                      {it.done ? "✓" : "○"}
+                    </span>
+                    <div className="flex-1 min-w-0 break-words">
+                      {it.description}
+                      {it.due && (
+                        <span className="text-muted-foreground">
+                          {" "}(Due: {it.due})
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
