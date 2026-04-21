@@ -67,10 +67,16 @@ def enable() -> bool:
     ps_file = app_root / "_startup_shortcut.ps1"
     ps_file.write_text(ps_content, encoding="utf-8")
     try:
+        # CREATE_NO_WINDOW (0x08000000) suppresses the black PowerShell
+        # console flash — without this the user sees a split-second prompt
+        # every time the startup shortcut setting is applied (app launch +
+        # every settings save while LAUNCH_ON_STARTUP is on).
         r = subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
              "-File", str(ps_file)],
-            capture_output=True, text=True, timeout=15)
+            capture_output=True, text=True, timeout=15,
+            creationflags=0x08000000 if os.name == "nt" else 0,
+        )
         if r.returncode == 0 and lnk.exists():
             logger.info(f"Startup shortcut installed: {lnk}")
             return True

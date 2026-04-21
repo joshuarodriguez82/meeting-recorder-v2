@@ -19,7 +19,7 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Loader2, Cog, Sparkles, ClipboardList, FileText, Target,
-  Users, Save, X, Pencil, Check,
+  Users, Save, X, Pencil, Check, StickyNote, Mail,
 } from "lucide-react";
 
 interface Props {
@@ -79,6 +79,7 @@ export function SessionDetailDialog({
   const [client, setClient] = useState("");
   const [project, setProject] = useState("");
   const [template, setTemplate] = useState("General");
+  const [notes, setNotes] = useState("");
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
@@ -95,6 +96,7 @@ export function SessionDetailDialog({
         setClient(s.client || "");
         setProject(s.project || "");
         setTemplate(s.template || "General");
+        setNotes(s.notes || "");
         setDirty(false);
       })
       .catch((e) => toast.error(`Could not load session: ${e}`))
@@ -174,7 +176,7 @@ export function SessionDetailDialog({
     try {
       await api.patchSession(sessionId, {
         display_name: displayName,
-        client, project, template,
+        client, project, template, notes,
       });
       toast.success("Saved");
       setDirty(false);
@@ -182,6 +184,25 @@ export function SessionDetailDialog({
       onChanged?.();
     } catch (e) {
       toast.error(`Save failed: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  const runFollowUpDrafts = async () => {
+    if (!sessionId) return;
+    setProcessing("follow_up_drafts");
+    try {
+      const r = await api.followUpDrafts(sessionId);
+      toast.success(
+        r.drafts_created > 0
+          ? `${r.drafts_created} Outlook draft${r.drafts_created === 1 ? "" : "s"} created`
+          : "No owner-attributed action items to draft from",
+      );
+    } catch (e) {
+      toast.error(
+        `Follow-up drafts failed: ${e instanceof Error ? e.message : e}`,
+      );
+    } finally {
+      setProcessing(null);
     }
   };
 
@@ -224,6 +245,10 @@ export function SessionDetailDialog({
             <div className="px-6 pt-3 border-b">
               <TabsList className="bg-transparent p-0 h-auto">
                 <TabsTrigger value="overview" className="data-[state=active]:bg-accent">Overview</TabsTrigger>
+                <TabsTrigger value="notes">
+                  <StickyNote className="h-3.5 w-3.5 mr-1" />
+                  Notes {notes && <span className="ml-1 text-[10px] text-muted-foreground">•</span>}
+                </TabsTrigger>
                 <TabsTrigger value="transcript" disabled={!hasTranscript}>
                   Transcript {hasTranscript && <span className="ml-1 text-muted-foreground">({session.segments.length})</span>}
                 </TabsTrigger>
@@ -335,6 +360,19 @@ export function SessionDetailDialog({
                         {processing === "requirements" ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <FileText className="h-3.5 w-3.5 mr-2" />}
                         Requirements
                       </Button>
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={runFollowUpDrafts}
+                        disabled={!session.action_items || processing !== null}
+                        title={session.action_items
+                          ? "Create an Outlook draft email per attendee with their action items"
+                          : "Run Action Items first — drafts are built from them"}
+                      >
+                        {processing === "follow_up_drafts"
+                          ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" />
+                          : <Mail className="h-3.5 w-3.5 mr-2" />}
+                        Draft follow-up emails
+                      </Button>
                     </div>
                     {processing && (
                       <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -344,6 +382,36 @@ export function SessionDetailDialog({
                         </span>
                       </div>
                     )}
+                  </div>
+                </TabsContent>
+
+                <TabsContent value="notes" className="mt-0 space-y-3">
+                  <div className="space-y-2">
+                    <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+                      Your session notes
+                    </Label>
+                    <p className="text-xs text-muted-foreground">
+                      Things the transcript doesn&apos;t capture — hallway context,
+                      reminders to yourself, commitments you made off-mic, follow-ups
+                      you don&apos;t want to forget. Claude reads these when it generates
+                      the summary, action items, decisions, and requirements. Re-run
+                      any extraction to pick up edits.
+                    </p>
+                    <textarea
+                      value={notes}
+                      onChange={(e) => { setNotes(e.target.value); setDirty(true); }}
+                      placeholder="e.g. Jane mentioned off-call that legal needs the SOW by Friday. I need to circle back with Ricoh on pricing next week."
+                      className="w-full min-h-[320px] rounded-md border border-input bg-background px-3 py-2 text-sm font-mono leading-relaxed focus:outline-none focus:ring-1 focus:ring-ring resize-y"
+                    />
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span>{notes.length.toLocaleString()} characters</span>
+                      {dirty && (
+                        <Button size="sm" onClick={saveTags}>
+                          <Save className="h-3.5 w-3.5 mr-2" />
+                          Save notes
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 </TabsContent>
 

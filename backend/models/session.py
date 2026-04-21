@@ -23,6 +23,11 @@ class Session:
         self.project: str = ""
         self.attendees: List[str] = []
         self.decisions: Optional[str] = None
+        # Free-form notes the user adds to the session — personal reminders,
+        # off-audio context, follow-ups they want to remember. Fed into the
+        # summarizer prompt so AI extractions reflect the user's own
+        # context, not just the transcript.
+        self.notes: str = ""
 
     def get_or_create_speaker(self, speaker_id: str) -> Speaker:
         if speaker_id not in self.speakers:
@@ -62,6 +67,7 @@ class Session:
             "project": self.project,
             "attendees": self.attendees,
             "decisions": self.decisions,
+            "notes": self.notes,
         }
 
     @classmethod
@@ -90,6 +96,7 @@ class Session:
         session.project = data.get("project", "") or ""
         session.attendees = list(data.get("attendees") or [])
         session.decisions = data.get("decisions")
+        session.notes = data.get("notes") or ""
 
         # Rebuild speakers
         speakers_data = data.get("speakers") or {}

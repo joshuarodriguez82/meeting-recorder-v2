@@ -10,15 +10,21 @@ import { Zap, Cpu, Loader2, RefreshCw } from "lucide-react";
 
 type GpuStatus = Awaited<ReturnType<typeof api.getGpuStatus>>;
 
-// DirectML intentionally omitted: torch-directml only publishes wheels for
-// Python 3.10 and the bundled runtime is 3.13. Re-add once Microsoft ships
-// a compatible wheel — see https://pypi.org/project/torch-directml/#files
+// AMD / DirectML backend is kept visible even though it's not installable
+// yet — torch-directml only publishes Python 3.10 wheels, our bundled
+// runtime is 3.13. The card shown as "Not available yet" so SAs with AMD
+// hardware know this is coming + understand it's on us, not on them.
+// Re-enable the install path by flipping `disabled` + removing the
+// 400 response in server.py when Microsoft ships a 3.13 wheel:
+// https://pypi.org/project/torch-directml/#files
 const BACKENDS: {
-  id: "cpu" | "cuda";
+  id: "cpu" | "cuda" | "directml";
   title: string;
   subtitle: string;
   bytes: string;
   when: string;
+  disabled?: boolean;
+  disabledReason?: string;
 }[] = [
   {
     id: "cpu",
@@ -33,6 +39,17 @@ const BACKENDS: {
     subtitle: "10× faster transcription on NVIDIA GTX / RTX / Quadro GPUs.",
     bytes: "~2.2 GB download",
     when: "Recommended if your machine has an NVIDIA GPU with CUDA 12 support.",
+  },
+  {
+    id: "directml",
+    title: "AMD / DirectML",
+    subtitle: "Hardware-accelerated whisper on discrete AMD GPUs (Radeon RX 6000/7000).",
+    bytes: "Install disabled on this build",
+    when: "Waiting on Microsoft to ship a torch-directml wheel for Python 3.13.",
+    disabled: true,
+    disabledReason:
+      "torch-directml only publishes Python 3.10 wheels; the bundled runtime is 3.13. "
+      + "This card will re-enable automatically once a compatible wheel is released.",
   },
 ];
 
@@ -210,27 +227,32 @@ export function GpuAccelerationCard() {
             const thisInstalling = task.running && installing === b.id;
             const isPendingTarget = pendingRestartTarget === b.id;
             const anyInstallBlocked =
-              active || task.running || Boolean(pendingRestartTarget);
+              active || task.running || Boolean(pendingRestartTarget) || b.disabled;
             return (
               <div
                 key={b.id}
-                className={`rounded-lg border p-3 ${active ? "border-primary bg-primary/5" : ""}`}
+                className={`rounded-lg border p-3 ${active ? "border-primary bg-primary/5" : ""} ${b.disabled ? "opacity-70" : ""}`}
               >
                 <div className="flex items-start gap-3">
                   <div className="mt-1">
                     {b.id === "cpu" ? <Cpu className="h-4 w-4 text-primary" />
-                      : <Zap className="h-4 w-4 text-primary" />}
+                      : <Zap className={`h-4 w-4 ${b.disabled ? "text-muted-foreground" : "text-primary"}`} />}
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-medium text-sm">{b.title}</span>
                       {active && <Badge variant="default" className="text-[10px]">Active</Badge>}
+                      {b.disabled && (
+                        <Badge variant="outline" className="text-[10px] border-muted-foreground text-muted-foreground">
+                          Not available yet
+                        </Badge>
+                      )}
                       {isPendingTarget && (
                         <Badge variant="outline" className="text-[10px] border-primary text-primary">
                           Installed — restart pending
                         </Badge>
                       )}
-                      {recommended && !active && !isPendingTarget && (
+                      {recommended && !active && !isPendingTarget && !b.disabled && (
                         <Badge variant="outline" className="text-[10px] border-primary text-primary">
                           Recommended for you
                         </Badge>
@@ -240,15 +262,22 @@ export function GpuAccelerationCard() {
                     <p className="text-xs text-muted-foreground mt-0.5">
                       {b.bytes} · {b.when}
                     </p>
+                    {b.disabled && b.disabledReason && (
+                      <p className="text-[11px] text-muted-foreground mt-2 italic">
+                        {b.disabledReason}
+                      </p>
+                    )}
                   </div>
                   <Button
                     size="sm"
                     variant={active ? "outline" : "default"}
                     disabled={anyInstallBlocked}
                     onClick={() => install(b.id)}
+                    title={b.disabled ? b.disabledReason : undefined}
                   >
                     {thisInstalling ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : null}
-                    {active ? "Active"
+                    {b.disabled ? "Unavailable"
+                      : active ? "Active"
                       : isPendingTarget ? "Pending restart"
                       : thisInstalling ? "Installing…"
                       : "Use This"}

@@ -146,13 +146,33 @@ MEETING_TEMPLATES = {
 DEFAULT_MODEL = "claude-haiku-4-5"
 
 
+def _with_user_notes(instruction: str, transcript: str, notes: str = "") -> str:
+    """
+    Compose the final prompt by prepending the user's own session notes —
+    things that aren't on the audio (off-call context, hallway conversation,
+    reminders, implicit follow-ups). Claude is told to weight these heavily
+    so AI extractions reflect the SA's perspective, not just the transcript.
+    """
+    notes = (notes or "").strip()
+    if not notes:
+        return f"{instruction}\n\n{transcript}"
+    return (
+        f"{instruction}\n\n"
+        f"=== USER NOTES (important context from the recorder — "
+        f"treat these as fact, they know things the transcript doesn't "
+        f"capture) ===\n{notes}\n\n"
+        f"=== MEETING TRANSCRIPT ===\n{transcript}"
+    )
+
+
 class Summarizer:
 
     def __init__(self, api_key: str, model: str = DEFAULT_MODEL):
         self._client = AsyncAnthropic(api_key=api_key)
         self._model = model or DEFAULT_MODEL
 
-    async def summarize(self, transcript: str, template: str = "General") -> str:
+    async def summarize(self, transcript: str, template: str = "General",
+                         notes: str = "") -> str:
         prompt = MEETING_TEMPLATES.get(template, MEETING_TEMPLATES["General"])
         logger.info(f"Requesting meeting summary (template={template}) from Claude...")
         try:
@@ -162,7 +182,7 @@ class Summarizer:
                     max_tokens=1024,
                     messages=[{
                         "role": "user",
-                        "content": f"{prompt}\n\n{transcript}"
+                        "content": _with_user_notes(prompt, transcript, notes),
                     }]
                 ),
                 timeout=60.0
@@ -173,8 +193,24 @@ class Summarizer:
         except Exception as e:
             raise RuntimeError(f"Summarization API call failed: {e}") from e
 
-    async def extract_action_items(self, transcript: str) -> str:
+    async def extract_action_items(self, transcript: str, notes: str = "") -> str:
         logger.info("Extracting action items from Claude...")
+        instruction = (
+            "Analyze this meeting transcript and extract the following "
+            "in clearly structured markdown:\n\n"
+            "## Action Items\n"
+            "List each action item with: who is responsible, what they "
+            "need to do, and by when (if mentioned). Use checkboxes.\n"
+            "Format: - [ ] **[Owner]**: Action description (Due: date if mentioned)\n\n"
+            "## Decisions Made\n"
+            "List each decision that was agreed upon in the meeting.\n\n"
+            "## Open Questions\n"
+            "List questions that were raised but not resolved.\n\n"
+            "If a section has no items, write 'None identified.'\n\n"
+            "If the USER NOTES mention action items the user has committed "
+            "to (things like 'need to follow up on X', 'reminder to send Y'), "
+            "include those as action items owned by the user."
+        )
         try:
             message = await asyncio.wait_for(
                 self._client.messages.create(
@@ -182,20 +218,7 @@ class Summarizer:
                     max_tokens=1024,
                     messages=[{
                         "role": "user",
-                        "content": (
-                            "Analyze this meeting transcript and extract the following "
-                            "in clearly structured markdown:\n\n"
-                            "## Action Items\n"
-                            "List each action item with: who is responsible, what they "
-                            "need to do, and by when (if mentioned). Use checkboxes.\n"
-                            "Format: - [ ] **[Owner]**: Action description (Due: date if mentioned)\n\n"
-                            "## Decisions Made\n"
-                            "List each decision that was agreed upon in the meeting.\n\n"
-                            "## Open Questions\n"
-                            "List questions that were raised but not resolved.\n\n"
-                            "If a section has no items, write 'None identified.'\n\n"
-                            f"{transcript}"
-                        )
+                        "content": _with_user_notes(instruction, transcript, notes),
                     }]
                 ),
                 timeout=60.0
@@ -206,9 +229,28 @@ class Summarizer:
         except Exception as e:
             raise RuntimeError(f"Action items extraction failed: {e}") from e
 
-    async def extract_decisions(self, transcript: str) -> str:
+    async def extract_decisions(self, transcript: str, notes: str = "") -> str:
         """Extract decisions made with rationale — an auto-generated ADR log."""
         logger.info("Extracting decisions from Claude...")
+        instruction = (
+            "Analyze this meeting transcript and extract every DECISION "
+            "made. Return structured markdown with one entry per decision "
+            "in this format:\n\n"
+            "## Decision: [short title]\n"
+            "- **Decided:** what was agreed upon\n"
+            "- **Rationale:** why (context, drivers)\n"
+            "- **Alternatives considered:** options that were rejected "
+            "(if any mentioned)\n"
+            "- **Owner:** who made the call (if identifiable)\n"
+            "- **Impact:** systems/teams/clients affected\n\n"
+            "Only include decisions that were actually MADE, not just "
+            "discussed. Skip discussions without conclusions. If the USER "
+            "NOTES record additional decisions made off-audio (in hallway "
+            "chat, private chat, follow-up email), include those too and "
+            "annotate with **Source:** user notes.\n\n"
+            "If no decisions were made, write: 'No decisions made in this "
+            "meeting.'"
+        )
         try:
             message = await asyncio.wait_for(
                 self._client.messages.create(
@@ -216,23 +258,7 @@ class Summarizer:
                     max_tokens=1024,
                     messages=[{
                         "role": "user",
-                        "content": (
-                            "Analyze this meeting transcript and extract every DECISION "
-                            "made. Return structured markdown with one entry per decision "
-                            "in this format:\n\n"
-                            "## Decision: [short title]\n"
-                            "- **Decided:** what was agreed upon\n"
-                            "- **Rationale:** why (context, drivers)\n"
-                            "- **Alternatives considered:** options that were rejected "
-                            "(if any mentioned)\n"
-                            "- **Owner:** who made the call (if identifiable)\n"
-                            "- **Impact:** systems/teams/clients affected\n\n"
-                            "Only include decisions that were actually MADE, not just "
-                            "discussed. Skip discussions without conclusions.\n\n"
-                            "If no decisions were made, write: 'No decisions made in this "
-                            "meeting.'\n\n"
-                            f"{transcript}"
-                        )
+                        "content": _with_user_notes(instruction, transcript, notes),
                     }]
                 ),
                 timeout=60.0
@@ -282,8 +308,27 @@ class Summarizer:
         except Exception as e:
             raise RuntimeError(f"Prep brief generation failed: {e}") from e
 
-    async def extract_requirements(self, transcript: str) -> str:
+    async def extract_requirements(self, transcript: str, notes: str = "") -> str:
         logger.info("Extracting requirements from Claude...")
+        instruction = (
+            "Analyze this meeting transcript and extract all requirements "
+            "discussed. Return structured markdown with:\n\n"
+            "## Functional Requirements\n"
+            "| ID | Requirement | Priority | Owner |\n"
+            "|---|---|---|---|\n"
+            "| FR-001 | Description | High/Med/Low | Person if mentioned |\n\n"
+            "## Non-Functional Requirements\n"
+            "Same table format with IDs like NFR-001.\n\n"
+            "## Constraints\n"
+            "List any technical, business, or timeline constraints mentioned.\n\n"
+            "## Assumptions\n"
+            "List assumptions made during the discussion.\n\n"
+            "Assign priority based on context clues (urgency, emphasis, "
+            "stakeholder tone). If the USER NOTES list additional requirements "
+            "or constraints the transcript doesn't capture, include those — "
+            "annotate their source in the Owner column as 'user notes'.\n"
+            "If a section has no items, write 'None identified.'"
+        )
         try:
             message = await asyncio.wait_for(
                 self._client.messages.create(
@@ -291,23 +336,7 @@ class Summarizer:
                     max_tokens=2048,
                     messages=[{
                         "role": "user",
-                        "content": (
-                            "Analyze this meeting transcript and extract all requirements "
-                            "discussed. Return structured markdown with:\n\n"
-                            "## Functional Requirements\n"
-                            "| ID | Requirement | Priority | Owner |\n"
-                            "|---|---|---|---|\n"
-                            "| FR-001 | Description | High/Med/Low | Person if mentioned |\n\n"
-                            "## Non-Functional Requirements\n"
-                            "Same table format with IDs like NFR-001.\n\n"
-                            "## Constraints\n"
-                            "List any technical, business, or timeline constraints mentioned.\n\n"
-                            "## Assumptions\n"
-                            "List assumptions made during the discussion.\n\n"
-                            "Assign priority based on context clues (urgency, emphasis, "
-                            "stakeholder tone). If a section has no items, write 'None identified.'\n\n"
-                            f"{transcript}"
-                        )
+                        "content": _with_user_notes(instruction, transcript, notes),
                     }]
                 ),
                 timeout=90.0

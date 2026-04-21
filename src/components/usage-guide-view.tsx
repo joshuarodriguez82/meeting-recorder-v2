@@ -158,14 +158,45 @@ const SECTIONS: Section[] = [
     ),
   },
   {
+    id: "notes",
+    title: "Session Notes",
+    content: (
+      <>
+        <p>
+          Every session has a <strong>Notes</strong> tab (next to Overview in the session dialog).
+          Use it for everything the transcript can&apos;t capture on its own:
+        </p>
+        <ul className="list-disc pl-5 space-y-1">
+          <li>Off-call context — what was said in the hallway after the call ended, what someone
+            told you in a private chat, decisions that happened over email.</li>
+          <li>Reminders to yourself — &quot;call Ricoh Friday about pricing&quot;, &quot;don&apos;t forget
+            the SOW needs legal review before sending.&quot;</li>
+          <li>Your own follow-ups — commitments you made that weren&apos;t verbalized on-mic.</li>
+          <li>Corrections — if the transcript mis-heard a proper noun or decision, note the truth
+            and Claude will weight it over the transcript.</li>
+        </ul>
+        <p className="mt-3">
+          Notes are fed into every AI extraction — summary, action items, decisions, requirements.
+          Claude treats them as <strong>authoritative context</strong> since you know things the audio
+          doesn&apos;t. Re-run any extraction after editing notes to pick up the update.
+        </p>
+        <Tip>
+          You can edit notes <strong>before or after</strong> processing. If you edit after, hit
+          <strong> Re-process</strong> (or just re-run the specific extraction) to regenerate with
+          the new context.
+        </Tip>
+      </>
+    ),
+  },
+  {
     id: "knowledge",
     title: "Knowledge Base",
     content: (
       <>
         <p>Every recording becomes part of a searchable knowledge base:</p>
         <ul className="list-disc pl-5 space-y-1">
-          <li><strong>Sessions</strong> — full history, filter by name/client/project, bulk-process, click any row to open.</li>
-          <li><strong>Follow-Ups</strong> — all action items across every meeting. Filter by status/client/owner. Click → opens the source meeting on its Actions tab.</li>
+          <li><strong>Sessions</strong> — full history, filter by name/client/project, bulk-process, click any row to open. Hover a row to see a pencil icon for inline rename.</li>
+          <li><strong>Follow-Ups</strong> — action items grouped by (meeting, owner). Five tasks for one person from one meeting = one expandable card. Click the external-link icon to jump to the source session&apos;s Actions tab.</li>
           <li><strong>Decisions</strong> — ADR log, click a decision to see full context. &quot;Open Meeting →&quot; to jump in.</li>
           <li><strong>Search</strong> — type a phrase, it searches every transcript + summary + extraction. Click a result to open that session.</li>
           <li><strong>Clients</strong> — create clients, nest projects inside each one, tag meetings manually or via <strong>AI Suggest</strong>. Each client has a dashboard with stats, meetings, and a chip row for drilling into individual projects.</li>
@@ -213,10 +244,56 @@ const SECTIONS: Section[] = [
       <>
         <p>In <strong>Settings &gt; Workflow</strong>:</p>
         <ul className="list-disc pl-5 space-y-1">
-          <li><strong>Auto-process after stop</strong> — transcribe → summarize → action items → decisions → requirements all runs automatically when you stop recording.</li>
-          <li><strong>Auto-draft follow-up email</strong> — after processing, drafts an Outlook email to the meeting attendees with your summary, action items, and decisions.</li>
-          <li><strong>Launch on Windows startup</strong> — adds a shortcut to the Startup folder.</li>
+          <li><strong>Auto-process after stop</strong> — transcribe → speaker-diarize → summary → action items → decisions → requirements all run automatically when you stop recording. Each stage is independent; a failure on one (rate-limit on Claude, etc.) doesn&apos;t stop the others.</li>
+          <li><strong>Auto-draft follow-up email</strong> — after processing, Claude generates a per-attendee follow-up email with their specific action items and meeting context, then creates Outlook drafts (one per person) in your Drafts folder. You review and hit Send. Requires Classic Outlook.</li>
+          <li><strong>Launch on Windows startup</strong> — adds a shortcut to the Startup folder (PowerShell is spawned invisibly — no black console flash since v2.0.12).</li>
         </ul>
+        <Tip>
+          You can also trigger follow-up drafts manually from the Session Overview tab — click
+          <strong> Draft follow-up emails</strong>. This is the best path if you want to review
+          action items before Claude drafts the emails.
+        </Tip>
+      </>
+    ),
+  },
+  {
+    id: "notifications",
+    title: "Notifications & Reliability",
+    content: (
+      <>
+        <p className="font-medium">Unprocessed session alerts</p>
+        <p>
+          If you record a meeting but don&apos;t process it (or auto-process is off), the sidebar
+          shows a badge with the unprocessed count. On the first time a new unprocessed session
+          appears, Windows fires a toast notification so you don&apos;t forget — click it to jump
+          straight to the Sessions list.
+        </p>
+        <p className="font-medium mt-4">Crash recovery (v2.0.10+)</p>
+        <p>
+          If the backend dies mid-stop (power loss, force-quit, OS kill), the next backend start
+          scans for orphan <code>_recording_&lt;ID&gt;.wav</code> / <code>_loopback_&lt;ID&gt;.wav</code>
+          temp files and merges them into proper sessions labeled &quot;Recovered Session &lt;ID&gt;&quot;.
+          Transcribe them like any other session. The audio is intact.
+        </p>
+        <p className="font-medium mt-4">Streaming merge (v2.0.10+)</p>
+        <p>
+          The stop handler streams mic + loopback through a 10-second-block merge pipeline instead of
+          loading both WAVs fully into RAM. Peak memory is ~10 MB regardless of recording length — a
+          3-hour meeting is no more memory-intensive than a 3-minute one. The access-violation crashes
+          on long recordings are gone.
+        </p>
+        <p className="font-medium mt-4">GPU transcription (v2.0.11+)</p>
+        <p>
+          When CUDA torch is installed and a CUDA-capable GPU is detected, <code>faster-whisper</code>
+          runs on GPU with <code>float16</code> precision — 36-minute meetings transcribe in under a
+          minute on an RTX 2070 SUPER. CPU-only machines are unchanged: <code>int8</code> on CPU, same
+          behaviour as ever.
+        </p>
+        <Tip>
+          Check <code>%LOCALAPPDATA%\MeetingRecorder\backend.log</code> for the device the backend
+          actually picked — the line reads <code>faster-whisper model loaded on cuda (float16)</code>
+          or <code>... on cpu (int8)</code>.
+        </Tip>
       </>
     ),
   },
