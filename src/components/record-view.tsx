@@ -69,10 +69,17 @@ export function RecordView({ onSessionsChanged, onOpenSession }: Props) {
         setInputDevices(devices.input);
         setOutputDevices(devices.output);
         setTemplates(tpls);
-        // Slow-path: calendar fires in parallel, updates when ready
+        // Slow-path: calendar fires in parallel, updates when ready.
+        // IMPORTANT: on fetch failure we keep whatever list was already
+        // there (usually from a previous successful fetch) rather than
+        // blanking it — Outlook COM transient failures were making the
+        // panel flicker empty every few minutes, forcing users to hit
+        // Refresh manually to get their own meetings back.
         api.getUpcomingMeetings(36)
           .then((cal) => setMeetings(cal))
-          .catch(() => setMeetings([]));
+          .catch((e) => {
+            console.warn("Calendar fetch failed — keeping last list:", e);
+          });
         // Gather unique clients and projects from existing sessions for autocomplete
         const clients = Array.from(new Set(
           sessionsList.map((s) => s.client).filter(Boolean)
@@ -200,25 +207,94 @@ export function RecordView({ onSessionsChanged, onOpenSession }: Props) {
       const s = await api.getSessionFull(res.session_id);
       setSession(s);
       onSessionsChanged();
+
+      // Auto-process hook: if the user enabled "Auto-process after stop" in
+      // Settings, run the full pipeline now (transcribe → diarize → summary
+      // → action items → decisions → requirements). Fire-and-forget from
+      // the UI thread — the toast updates when each stage lands.
+      try {
+        const settings = await api.getSettings();
+        if (settings.auto_process_after_stop) {
+          const toastId = toast.loading("Auto-processing…", {
+            description: "Transcribing + extracting (can take several minutes)",
+          });
+          api.processFull(res.session_id, {
+            template,
+            follow_up_drafts: settings.auto_follow_up_email,
+          })
+            .then((r) => {
+              const stageLines = Object.entries(r.stages)
+                .map(([k, v]) => `${k}: ${v}`)
+                .join(" · ");
+              toast.success("Auto-processing complete", {
+                id: toastId,
+                description: stageLines || "All stages finished",
+              });
+              onSessionsChanged();
+              // Reload this session's data so the UI shows freshly extracted
+              // summary / action items / decisions without the user having
+              // to re-open the dialog.
+              api.getSessionFull(res.session_id)
+                .then(setSession)
+                .catch(() => {});
+            })
+            .catch((err) => {
+              toast.error("Auto-processing failed", {
+                id: toastId,
+                description: err instanceof Error ? err.message : String(err),
+              });
+            });
+        }
+      } catch {
+        // Couldn't read settings — skip auto-process silently. The user
+        // can still click Process manually from the session dialog.
+      }
     } catch (e) {
       toast.error(`Stop failed: ${e instanceof Error ? e.message : e}`);
     }
   };
 
-  const refreshCal = async () => {
+  const refreshCal = async (silent = false) => {
     setLoadingCal(true);
     try {
       // User-initiated refresh always bypasses the 5-minute cache so a
       // meeting that was just added in Outlook shows up immediately.
       const cal = await api.getUpcomingMeetings(36, true);
       setMeetings(cal);
-      toast.success(`Loaded ${cal.length} upcoming meetings`);
+      if (!silent) {
+        toast.success(`Loaded ${cal.length} upcoming meetings`);
+      }
     } catch (e) {
-      toast.error(`Calendar: ${e instanceof Error ? e.message : e}`);
+      if (!silent) {
+        toast.error(`Calendar: ${e instanceof Error ? e.message : e}`);
+      } else {
+        // Silent failure — keep the last known list. A transient Outlook
+        // COM glitch shouldn't wipe the panel; the user will see the
+        // stale list + can retry manually.
+        console.warn("Silent calendar refresh failed:", e);
+      }
     } finally {
       setLoadingCal(false);
     }
   };
+
+  // Silent auto-refresh when the app window regains focus. When the user
+  // tabs back from Outlook after accepting a new meeting, the calendar
+  // panel updates without them having to click Refresh. Debounced at
+  // 30 seconds so bouncing focus doesn't thrash Outlook COM.
+  useEffect(() => {
+    let lastRefreshed = Date.now();
+    const onFocus = () => {
+      const now = Date.now();
+      if (now - lastRefreshed < 30_000) return;
+      lastRefreshed = now;
+      refreshCal(true);
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+    // refreshCal is stable enough; we don't want this re-binding on each render
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const useMeeting = (m: Meeting) => {
     const date = new Date(m.start).toISOString().slice(0, 10);
@@ -397,7 +473,7 @@ export function RecordView({ onSessionsChanged, onOpenSession }: Props) {
             Upcoming Meetings
           </CardTitle>
           <CardAction>
-            <Button size="sm" variant="outline" onClick={refreshCal} disabled={loadingCal}>
+            <Button size="sm" variant="outline" onClick={() => refreshCal()} disabled={loadingCal}>
               {loadingCal ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Refresh"}
             </Button>
           </CardAction>

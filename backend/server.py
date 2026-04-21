@@ -765,11 +765,12 @@ class SessionPatchRequest(BaseModel):
     client: Optional[str] = None
     project: Optional[str] = None
     template: Optional[str] = None
+    notes: Optional[str] = None
 
 
 @app.patch("/sessions/{session_id}")
 async def patch_session(session_id: str, req: SessionPatchRequest):
-    """Update editable session metadata (name, tags, template)."""
+    """Update editable session metadata (name, tags, template, notes)."""
     svc.load_settings()
     session = svc.session_svc.load_full(session_id)
     if not session:
@@ -782,6 +783,8 @@ async def patch_session(session_id: str, req: SessionPatchRequest):
         session.project = req.project
     if req.template is not None:
         session.template = req.template
+    if req.notes is not None:
+        session.notes = req.notes
     svc.session_svc.save(session)
     return {"ok": True}
 
@@ -973,12 +976,13 @@ async def _run_extraction(session_id: str, extractor_name: str, field_name: str,
         raise HTTPException(status_code=400,
                             detail="Session has no transcript (run /process first)")
     transcript = session.full_transcript()
+    user_notes = session.notes or ""
     try:
         method = getattr(svc.summarizer, extractor_name)
         if extra_arg is not None:
-            result = await method(transcript, extra_arg)
+            result = await method(transcript, extra_arg, notes=user_notes)
         else:
-            result = await method(transcript)
+            result = await method(transcript, notes=user_notes)
         setattr(session, field_name, result)
         await asyncio.to_thread(svc.session_svc.save, session)
         try:
@@ -1005,8 +1009,11 @@ async def summarize_session(session_id: str, req: TemplateRequest):
     if not session or not session.segments:
         raise HTTPException(status_code=400, detail="Session has no transcript")
     try:
-        result = await svc.summarizer.summarize(session.full_transcript(),
-                                                  template=req.template)
+        result = await svc.summarizer.summarize(
+            session.full_transcript(),
+            template=req.template,
+            notes=session.notes or "",
+        )
         session.summary = result
         session.template = req.template
         await asyncio.to_thread(svc.session_svc.save, session)
@@ -1038,6 +1045,154 @@ async def requirements(session_id: str):
 async def decisions(session_id: str):
     return await _run_extraction(
         session_id, "extract_decisions", "decisions", "export_decisions")
+
+
+class ProcessFullRequest(BaseModel):
+    template: str = "General"
+    follow_up_drafts: bool = False
+
+
+@app.post("/sessions/{session_id}/process_full")
+async def process_full(session_id: str, req: ProcessFullRequest):
+    """
+    One-shot pipeline: transcribe + diarize + summary + action items +
+    decisions + requirements. Used by auto_process_after_stop so SAs don't
+    have to click four separate extract buttons per session.
+
+    Each extraction is best-effort and wrapped in its own try — if Claude
+    rate-limits or times out on one extraction, the others still run and
+    the session is saved with partial results. The response lists which
+    stages succeeded so the UI can show a toast with the exact state.
+    """
+    svc.load_settings()
+    if not svc.settings or not svc.settings.is_configured:
+        raise HTTPException(
+            status_code=400,
+            detail="API keys not configured. Open Settings → save tokens → retry.",
+        )
+
+    await asyncio.to_thread(svc.ensure_models_loaded)
+
+    stages: dict[str, str] = {}
+
+    # 1. Transcribe + diarize (only if not already done)
+    session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not session.segments:
+        svc.recording_svc.set_session(session)
+        svc.current_session = session
+        try:
+            session = await svc.recording_svc.process_session()
+            await asyncio.to_thread(svc.session_svc.save, session)
+            stages["transcribe_diarize"] = "ok"
+        except Exception as e:
+            logger.exception("process_full: transcribe/diarize failed")
+            stages["transcribe_diarize"] = f"failed: {e}"
+            return {"ok": False, "stages": stages}
+    else:
+        stages["transcribe_diarize"] = "skipped (already processed)"
+
+    # 2-5. Run the four Claude extractions in parallel — independent failures.
+    async def _safe(coro, label):
+        try:
+            await coro
+            stages[label] = "ok"
+        except Exception as e:
+            logger.exception(f"process_full: {label} failed")
+            stages[label] = f"failed: {e}"
+
+    await asyncio.gather(
+        _safe(_extract_and_save(
+            session_id, "summarize", "summary",
+            template=req.template), "summary"),
+        _safe(_extract_and_save(
+            session_id, "extract_action_items", "action_items"), "action_items"),
+        _safe(_extract_and_save(
+            session_id, "extract_decisions", "decisions"), "decisions"),
+        _safe(_extract_and_save(
+            session_id, "extract_requirements", "requirements"), "requirements"),
+    )
+
+    # 6. Optional follow-up email drafts — only when requested explicitly.
+    if req.follow_up_drafts:
+        try:
+            from services.follow_up_email import draft_follow_up_emails
+            count = await asyncio.to_thread(
+                draft_follow_up_emails, svc, session_id)
+            stages["follow_up_drafts"] = f"ok ({count} drafts)"
+        except Exception as e:
+            logger.exception("process_full: follow_up_drafts failed")
+            stages["follow_up_drafts"] = f"failed: {e}"
+
+    return {"ok": True, "stages": stages}
+
+
+async def _extract_and_save(
+    session_id: str, method_name: str, field_name: str,
+    template: str = "General",
+):
+    """Helper used by process_full — runs one extraction and persists it."""
+    session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+    if not session or not session.segments:
+        raise RuntimeError("no transcript")
+    transcript = session.full_transcript()
+    notes = session.notes or ""
+    method = getattr(svc.summarizer, method_name)
+    if method_name == "summarize":
+        result = await method(transcript, template=template, notes=notes)
+        session.template = template
+    else:
+        result = await method(transcript, notes=notes)
+    setattr(session, field_name, result)
+    await asyncio.to_thread(svc.session_svc.save, session)
+
+
+@app.get("/sessions/unprocessed")
+async def unprocessed_sessions():
+    """
+    Return sessions that have audio on disk but no transcript yet. Frontend
+    polls this to show an "X sessions awaiting processing" badge + a Windows
+    toast notification when the count goes up.
+    """
+    def _do():
+        svc.load_settings()
+        results = []
+        for s in svc.session_svc.list_sessions():
+            if s.get("audio_exists") and not s.get("has_transcript"):
+                results.append({
+                    "session_id": s["session_id"],
+                    "display_name": s["display_name"],
+                    "started_at": s.get("started_at"),
+                    "duration_s": s.get("duration_s", 0),
+                    "client": s.get("client", ""),
+                    "project": s.get("project", ""),
+                })
+        return results
+    return await asyncio.to_thread(_do)
+
+
+class FollowUpDraftsRequest(BaseModel):
+    # Optional override for the sender's tone / context
+    tone: str = "friendly-professional"
+
+
+@app.post("/sessions/{session_id}/follow_up_drafts")
+async def create_follow_up_drafts(session_id: str, req: FollowUpDraftsRequest):
+    """Create per-attendee Outlook email drafts with their action items."""
+    svc.load_settings()
+    if not svc.summarizer:
+        raise HTTPException(status_code=400, detail="Anthropic API key required")
+    try:
+        from services.follow_up_email import draft_follow_up_emails
+        count = await asyncio.to_thread(
+            draft_follow_up_emails, svc, session_id, tone=req.tone)
+        return {"ok": True, "drafts_created": count}
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception("Follow-up drafts failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 class PrepBriefRequest(BaseModel):
