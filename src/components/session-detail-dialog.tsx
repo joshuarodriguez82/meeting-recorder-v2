@@ -188,18 +188,39 @@ export function SessionDetailDialog({
   };
 
   const runFollowUpDrafts = async () => {
-    if (!sessionId) return;
+    if (!sessionId || !session) return;
     setProcessing("follow_up_drafts");
+    const toastId = toast.loading("Preparing follow-up drafts…");
     try {
+      // If action items haven't been extracted yet, do that first — the
+      // drafter parses per-owner tasks from the action_items markdown, so
+      // it can't produce anything useful without them. Running it inline
+      // means one click does the whole thing.
+      if (!session.action_items) {
+        toast.loading("Extracting action items…", { id: toastId });
+        await api.actionItems(sessionId);
+        await reload();
+        onChanged?.();
+      }
+
+      toast.loading("Drafting emails with Claude + creating Outlook drafts…",
+                    { id: toastId });
       const r = await api.followUpDrafts(sessionId);
-      toast.success(
-        r.drafts_created > 0
-          ? `${r.drafts_created} Outlook draft${r.drafts_created === 1 ? "" : "s"} created`
-          : "No owner-attributed action items to draft from",
-      );
+      if (r.drafts_created > 0) {
+        toast.success(
+          `${r.drafts_created} Outlook draft${r.drafts_created === 1 ? "" : "s"} created`,
+          { id: toastId, description: "Check your Drafts folder in Classic Outlook" },
+        );
+      } else {
+        toast.info("No owner-attributed action items to draft from", {
+          id: toastId,
+          description: "Claude didn't attribute any items to a specific person",
+        });
+      }
     } catch (e) {
       toast.error(
         `Follow-up drafts failed: ${e instanceof Error ? e.message : e}`,
+        { id: toastId },
       );
     } finally {
       setProcessing(null);
@@ -363,10 +384,12 @@ export function SessionDetailDialog({
                       <Button
                         variant="outline" size="sm"
                         onClick={runFollowUpDrafts}
-                        disabled={!session.action_items || processing !== null}
-                        title={session.action_items
-                          ? "Create an Outlook draft email per attendee with their action items"
-                          : "Run Action Items first — drafts are built from them"}
+                        disabled={!hasTranscript || processing !== null}
+                        title={hasTranscript
+                          ? (session.action_items
+                              ? "Create an Outlook draft email per attendee with their action items"
+                              : "Extract action items + create Outlook drafts (one click)")
+                          : "Run Process first — need a transcript before drafting emails"}
                       >
                         {processing === "follow_up_drafts"
                           ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" />
