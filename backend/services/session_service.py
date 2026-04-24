@@ -138,6 +138,10 @@ class SessionService:
                 "summary": data.get("summary", "") or "",
                 "decisions": data.get("decisions", "") or "",
                 "requirements": data.get("requirements", "") or "",
+                # Attendees are lightweight (email strings) and let the
+                # Record view auto-tag client from the current calendar
+                # meeting's attendees without an extra per-session fetch.
+                "attendees": list(data.get("attendees") or []),
                 "json_path": str(path),
             })
 

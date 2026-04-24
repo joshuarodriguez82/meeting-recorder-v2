@@ -36,7 +36,10 @@ interface Props {
   projectsByClient?: Record<string, string[]>;
 }
 
-const TEMPLATES = [
+// Fallback list used only when the backend is unreachable (dialog opens
+// during a backend restart, etc.). Normally the real list comes from
+// /templates and includes any custom templates the user has added.
+const FALLBACK_TEMPLATES = [
   "General",
   "Requirements Gathering",
   "Design Review",
@@ -48,6 +51,13 @@ export function SessionDetailDialog({
   sessionId, open, onOpenChange, onChanged,
   initialTab = "overview", existingClients = [], projectsByClient = {},
 }: Props) {
+  const [templateNames, setTemplateNames] = useState<string[]>(FALLBACK_TEMPLATES);
+  useEffect(() => {
+    if (!open) return;
+    api.getTemplates()
+      .then((ts) => setTemplateNames(ts.map((t) => t.name)))
+      .catch(() => { /* keep fallback */ });
+  }, [open]);
   const [session, setSession] = useState<SessionFull | null>(null);
   const [loading, setLoading] = useState(false);
   const [processing, setProcessing] = useState<string | null>(null);
@@ -316,7 +326,7 @@ export function SessionDetailDialog({
                     <Select value={template} onValueChange={(v) => { if (v) { setTemplate(v); setDirty(true); } }}>
                       <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        {TEMPLATES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+                        {templateNames.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
                       </SelectContent>
                     </Select>
                   </div>

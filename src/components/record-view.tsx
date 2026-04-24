@@ -79,7 +79,10 @@ export function RecordView({
         ]);
         setInputDevices(devices.input);
         setOutputDevices(devices.output);
-        setTemplates(tpls);
+        // Templates endpoint now returns full {name, prompt, ...} entries
+        // so the Settings editor can work; the Record-view dropdown only
+        // needs the names, so we drop the rest here.
+        setTemplates(tpls.map((t) => t.name));
         setAllSessions(sessionsList);
 
         // Restore saved device selection by NAME (indices can shift
@@ -299,7 +302,20 @@ export function RecordView({
     const date = new Date(m.start).toISOString().slice(0, 10);
     setMeetingName(`${m.subject} - ${date}`);
     setAttendees(m.attendees || []);
-    toast.info(`Meeting loaded: ${m.subject}`);
+
+    // Auto-tag Client from attendee email domains using your own
+    // tagging history. Intentionally no config — it just learns from
+    // whatever you've already tagged. If you tag two meetings with
+    // @acme.com attendees to "Acme", the third one auto-fills.
+    const suggestion = suggestClientFromAttendees(m.attendees || [], allSessions, client);
+    if (suggestion && suggestion !== client) {
+      setClient(suggestion);
+      toast.info(`Meeting loaded: ${m.subject}`, {
+        description: `Auto-tagged client: ${suggestion}`,
+      });
+    } else {
+      toast.info(`Meeting loaded: ${m.subject}`);
+    }
   };
 
   return (
@@ -568,4 +584,78 @@ function formatDur(seconds: number): string {
   const s = seconds % 60;
   if (h) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+/**
+ * Pick a client for a new calendar meeting based on attendee email
+ * domains that have historically been tagged to an existing client.
+ *
+ * Strategy: for each existing session, match on *external* email
+ * domains (anything that isn't the user's own domain — more below).
+ * Sum up per-client matches across all sessions, pick the winner.
+ *
+ * Why external only: every session the user is in includes their own
+ * work email (e.g. @ttecdigital.com). Counting that would make every
+ * meeting "look like" every client the user has worked with. Internal
+ * domains are detected as "the domain that appears most across ALL
+ * sessions" — your own email — and filtered out.
+ *
+ * Returns null when there's no clear match (no overlapping domains,
+ * or a tie) — in that case the user types the client manually like
+ * they always have.
+ */
+function suggestClientFromAttendees(
+  meetingAttendees: string[],
+  allSessions: SessionSummary[],
+  currentClient: string,
+): string | null {
+  if (currentClient.trim()) return null; // don't override an existing pick
+  const meetingDomains = extractDomains(meetingAttendees);
+  if (meetingDomains.size === 0) return null;
+
+  // Detect the user's own domain as the one that shows up in the most
+  // sessions overall. This is self-calibrating — works regardless of
+  // company, no config needed.
+  const sessionsWithDomain = new Map<string, number>();
+  for (const s of allSessions) {
+    const d = extractDomains(s.attendees || []);
+    for (const dom of d) {
+      sessionsWithDomain.set(dom, (sessionsWithDomain.get(dom) ?? 0) + 1);
+    }
+  }
+  const ownDomain = [...sessionsWithDomain.entries()]
+    .sort((a, b) => b[1] - a[1])[0]?.[0];
+
+  // Score each client by how many prior sessions share an external
+  // domain with the new meeting.
+  const scores = new Map<string, number>();
+  for (const s of allSessions) {
+    if (!s.client) continue;
+    const sessionDomains = extractDomains(s.attendees || []);
+    let overlap = 0;
+    for (const d of meetingDomains) {
+      if (d === ownDomain) continue;
+      if (sessionDomains.has(d)) overlap++;
+    }
+    if (overlap > 0) {
+      scores.set(s.client, (scores.get(s.client) ?? 0) + overlap);
+    }
+  }
+
+  if (scores.size === 0) return null;
+  const ranked = [...scores.entries()].sort((a, b) => b[1] - a[1]);
+  // Tie → punt, let the user pick. Clear winner → use it.
+  if (ranked.length > 1 && ranked[0][1] === ranked[1][1]) return null;
+  return ranked[0][0];
+}
+
+function extractDomains(addresses: string[]): Set<string> {
+  const out = new Set<string>();
+  for (const a of addresses) {
+    const at = a.lastIndexOf("@");
+    if (at < 0) continue;
+    const domain = a.slice(at + 1).trim().toLowerCase();
+    if (domain) out.add(domain);
+  }
+  return out;
 }

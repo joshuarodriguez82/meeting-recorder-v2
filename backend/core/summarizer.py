@@ -114,49 +114,9 @@ def _inline_markdown(text: str) -> str:
     return text
 
 
-MEETING_TEMPLATES = {
-    "General": (
-        "Please summarize this meeting transcript. "
-        "Include: key topics discussed, decisions made, "
-        "action items, and any follow-ups needed."
-    ),
-    "Requirements Gathering": (
-        "This is a requirements gathering meeting. Summarize with focus on: "
-        "1) Business context and problem statement discussed, "
-        "2) Functional requirements identified (what the system should do), "
-        "3) Non-functional requirements (performance, security, scalability), "
-        "4) Constraints and assumptions mentioned, "
-        "5) Open questions that need follow-up, "
-        "6) Stakeholder priorities and any conflicts between requirements."
-    ),
-    "Design Review": (
-        "This is a design/architecture review meeting. Summarize with focus on: "
-        "1) Solution overview and architecture discussed, "
-        "2) Design decisions made and their rationale, "
-        "3) Trade-offs considered, "
-        "4) Risks and concerns raised, "
-        "5) Feedback and requested changes, "
-        "6) Next steps and action items."
-    ),
-    "Sprint Planning": (
-        "This is a sprint planning meeting. Summarize with focus on: "
-        "1) Sprint goal agreed upon, "
-        "2) Stories/tasks committed to with owners, "
-        "3) Capacity concerns or blockers raised, "
-        "4) Dependencies identified, "
-        "5) Carry-over items from previous sprint, "
-        "6) Key risks to sprint delivery."
-    ),
-    "Stakeholder Update": (
-        "This is a stakeholder update meeting. Summarize with focus on: "
-        "1) Project status and progress reported, "
-        "2) Milestones achieved or missed, "
-        "3) Risks and issues escalated, "
-        "4) Decisions requested from stakeholders, "
-        "5) Decisions made by stakeholders, "
-        "6) Next steps and timeline updates."
-    ),
-}
+# Note: the prompt library has moved to `services.template_service` —
+# the server reads it at request time so the user can edit templates
+# without restarting the backend. This module no longer owns the dict.
 
 
 DEFAULT_MODEL = "claude-haiku-4-5"
@@ -266,10 +226,16 @@ class Summarizer:
         )
         return resp.choices[0].message.content or ""
 
-    async def summarize(self, transcript: str, template: str = "General",
-                         notes: str = "") -> str:
-        prompt = MEETING_TEMPLATES.get(template, MEETING_TEMPLATES["General"])
-        logger.info(f"Requesting meeting summary (template={template}) via {self._provider}/{self._model}")
+    async def summarize(self, transcript: str, prompt: str,
+                         notes: str = "", template_name: str = "") -> str:
+        """
+        Summarize a transcript against a caller-supplied prompt. The
+        server-side templates service resolves the template name into
+        a prompt so this class stays free of template storage concerns.
+        `template_name` is accepted only for logging clarity.
+        """
+        label = template_name or "custom"
+        logger.info(f"Requesting meeting summary (template={label}) via {self._provider}/{self._model}")
         try:
             summary = await self._chat(
                 _with_user_notes(prompt, transcript, notes),

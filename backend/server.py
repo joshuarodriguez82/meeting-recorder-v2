@@ -97,7 +97,7 @@ from pydantic import BaseModel
 
 from config.settings import Settings
 from core.audio_capture import list_input_devices, list_output_devices
-from core.summarizer import MEETING_TEMPLATES
+from services.template_service import TemplateService
 from models.session import Session
 from services.calendar_service import (
     get_todays_meetings, get_upcoming_meetings, is_outlook_available,
@@ -137,6 +137,7 @@ class Services:
         self.session_svc: Optional[SessionService] = None
         self.export_svc: Optional[ExportService] = None
         self.client_cfg_svc: Optional[ClientConfigService] = None
+        self.template_svc: Optional[TemplateService] = None
         self.recording_svc: Optional[RecordingService] = None
         self.transcription: Optional[TranscriptionEngine] = None
         self.diarization: Optional[DiarizationEngine] = None
@@ -180,6 +181,7 @@ class Services:
             # roam with the user profile, not under `recordings/`.
             from config.settings import USER_DATA_DIR
             self.client_cfg_svc = ClientConfigService(USER_DATA_DIR)
+            self.template_svc = TemplateService(USER_DATA_DIR)
             self.recording_svc = RecordingService(
                 settings=self.settings,
                 on_status=self._record_status,
@@ -1241,10 +1243,16 @@ async def summarize_session(session_id: str, req: TemplateRequest):
     if not session or not session.segments:
         raise HTTPException(status_code=400, detail="Session has no transcript")
     try:
+        # Resolve the template name to its current prompt via the template
+        # service. Users can edit default prompts or add their own, so we
+        # can't bake a prompt into the summarizer anymore.
+        prompt_text = await asyncio.to_thread(
+            svc.template_svc.get_prompt, req.template)
         result = await svc.summarizer.summarize(
             session.full_transcript(),
-            template=req.template,
+            prompt=prompt_text,
             notes=session.notes or "",
+            template_name=req.template,
         )
         session.summary = result
         session.template = req.template
@@ -1497,9 +1505,81 @@ async def retention_cleanup(processed_days: int = 7, unprocessed_days: int = 30)
 
 
 # ── Templates ────────────────────────────────────────────────────────
+class TemplateDTO(BaseModel):
+    name: str
+    prompt: str
+    is_default: bool = False
+    # Only populated for defaults; null for user-created templates.
+    default_prompt: Optional[str] = None
+
+
 @app.get("/templates")
 async def get_templates():
-    return list(MEETING_TEMPLATES.keys())
+    """
+    Full template list with prompts. The frontend Record view + Session
+    Detail use only the `name` field for the dropdown; the Settings page
+    Templates editor renders the full entry.
+    """
+    svc.load_settings()
+    def _do():
+        return [
+            {
+                "name": t.name,
+                "prompt": t.prompt,
+                "is_default": t.is_default,
+                "default_prompt": t.default_prompt,
+            }
+            for t in svc.template_svc.list_all()
+        ]
+    return await asyncio.to_thread(_do)
+
+
+class TemplateUpsertRequest(BaseModel):
+    prompt: str
+
+
+@app.put("/templates/{name}")
+async def put_template(name: str, req: TemplateUpsertRequest):
+    svc.load_settings()
+    def _do():
+        return svc.template_svc.upsert(name, req.prompt)
+    try:
+        t = await asyncio.to_thread(_do)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "name": t.name,
+        "prompt": t.prompt,
+        "is_default": t.is_default,
+        "default_prompt": t.default_prompt,
+    }
+
+
+@app.delete("/templates/{name}")
+async def delete_template(name: str):
+    svc.load_settings()
+    await asyncio.to_thread(svc.template_svc.delete, name)
+    return {"ok": True}
+
+
+@app.post("/templates/{name}/reset")
+async def reset_template(name: str):
+    """Restore a default template's prompt to its shipped text."""
+    svc.load_settings()
+    def _do():
+        return svc.template_svc.reset(name)
+    t = await asyncio.to_thread(_do)
+    if not t:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{name}' isn't a default template — nothing to reset to.",
+        )
+    return {
+        "name": t.name,
+        "prompt": t.prompt,
+        "is_default": t.is_default,
+        "default_prompt": t.default_prompt,
+    }
 
 
 # ── Startup ──────────────────────────────────────────────────────────
