@@ -21,6 +21,12 @@ export interface Settings {
   retention_processed_days: number;
   retention_unprocessed_days: number;
   is_configured: boolean;
+  // AI provider selection. "anthropic" uses claude_model + anthropic_api_key;
+  // "openai" uses claude_model (reused as the model id), openai_api_key,
+  // and openai_base_url (for OpenRouter / Ollama / LM Studio / etc.).
+  ai_provider: string;
+  openai_api_key: string;
+  openai_base_url: string;
 }
 
 export interface AudioDevice {
@@ -286,7 +292,7 @@ export const api = {
 
   // Calendar
   getCalendarToday: () => request<Meeting[]>("/calendar/today"),
-  getUpcomingMeetings: (hours: number = 36, refresh = false) =>
+  getUpcomingMeetings: (hours: number = 168, refresh = false) =>
     request<Meeting[]>(
       `/calendar/upcoming?hours=${hours}${refresh ? "&refresh=true" : ""}`
     ),

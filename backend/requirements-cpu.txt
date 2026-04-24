@@ -16,6 +16,11 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 pydantic>=2.0
 anthropic
+# Required whenever the user picks an OpenAI-compatible provider
+# (OpenRouter, Ollama, LM Studio, vLLM, LocalAI). Hard-dep so the venv
+# bootstrap always has it — the summarizer imports lazily so no runtime
+# cost for Anthropic-only users.
+openai
 python-dotenv
 sounddevice
 soundfile
