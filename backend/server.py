@@ -21,19 +21,27 @@ os.chdir(Path(__file__).resolve().parent)
 # import cleanly even if launched with an odd CWD.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# Suppress Windows Error Reporting (WER) pop-ups for this process. Without
-# this, an access-violation crash in a loaded DLL — e.g. torch / CUDA /
-# pyannote DLLs getting mid-load scan-interrupted by corporate EDR — pops
-# up Windows' "A problem caused the program to stop working" dialog,
-# attached to pythonw.exe. The user sees a visible window, closes it, the
-# Rust watchdog respawns Python, the next crash pops the same dialog,
-# repeat. The crash itself is benign (watchdog's second spawn succeeds
-# almost always) — we just don't want the dialog.
-#   SEM_FAILCRITICALERRORS  (0x0001) — no "Fatal error" dialogs
-#   SEM_NOGPFAULTERRORBOX   (0x0002) — no access-violation dialogs
-# The combined mask silences the WER dialog chain entirely while still
-# letting the process exit with the original error code so the watchdog
-# can see the crash and respawn.
+# Windows-specific hardening to stop pythonw.exe from ever showing a
+# visible window. We hit two distinct problems in the wild:
+#
+# 1. WER dialog on crash. Certain access-violation crashes during DLL
+#    load (corporate EDR scanning torch/CUDA DLLs mid-load) pop up the
+#    classic "pythonw.exe stopped working" dialog. SetErrorMode with
+#    SEM_NOGPFAULTERRORBOX suppresses it; the process still exits with
+#    the error code so the Rust watchdog can respawn.
+#
+# 2. Phantom console window (the "black cmd window with pythonw.exe in
+#    the tab" users report). CREATE_NO_WINDOW on the Rust side only
+#    prevents a console at spawn time. Several native libraries
+#    (certain Intel MKL / OpenMP runtime versions, some CUDA runtime
+#    builds) call AllocConsole() at runtime to install a console
+#    control handler. AllocConsole creates a visible conhost-hosted
+#    window titled with the parent EXE name — "pythonw.exe". Closing
+#    it only kills conhost; any next call to AllocConsole reopens one.
+#    Fix: call FreeConsole() once up front, then every 2 seconds
+#    forever in a background thread — any console a library sneaks in
+#    gets detached almost immediately. pythonw is the only client, so
+#    conhost exits with it and the window closes.
 if os.name == "nt":
     try:
         import ctypes
@@ -44,6 +52,44 @@ if os.name == "nt":
     except Exception:
         # Don't let SetErrorMode failure stop the backend from coming up —
         # worst case the WER dialog still shows on a rare crash.
+        pass
+
+    try:
+        import ctypes
+        import threading as _threading_for_console_watchdog
+        _k32 = ctypes.windll.kernel32
+        # Detach from any console we might have (spawned or inherited).
+        # Safe to call when no console is attached — returns 0 and sets
+        # last-error, which we ignore.
+        _k32.FreeConsole()
+
+        def _console_watchdog():
+            """
+            Poll for a console window allocated by native libs and detach.
+
+            Intel MKL / OpenMP / CUDA runtimes in some configurations call
+            AllocConsole() during their first real use (not just import),
+            so a one-shot FreeConsole at startup isn't enough. 2-second
+            polling is frequent enough that any console that appears is
+            gone before the user notices.
+            """
+            import time as _time
+            while True:
+                try:
+                    if _k32.GetConsoleWindow() != 0:
+                        _k32.FreeConsole()
+                except Exception:
+                    # Never let this thread die — a bad call is better than
+                    # a phantom console window we can't close.
+                    pass
+                _time.sleep(2)
+
+        _t = _threading_for_console_watchdog.Thread(
+            target=_console_watchdog, daemon=True, name="console-watchdog")
+        _t.start()
+    except Exception:
+        # Console-hiding is best-effort. If it fails the user may still
+        # see a phantom console in rare cases but the backend still runs.
         pass
 
 # Intel Fortran runtime (shipped with numpy/scipy/torch's MKL) installs a

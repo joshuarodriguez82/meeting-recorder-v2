@@ -632,16 +632,26 @@ const SECTIONS: Section[] = [
             </dd>
           </div>
           <div>
+            <dt className="font-medium text-sm">A black console window with &quot;pythonw.exe&quot; in the tab keeps opening</dt>
+            <dd className="text-sm text-muted-foreground mt-1">
+              Fixed in v2.0.19 — caused by certain Intel MKL / OpenMP / CUDA runtimes calling
+              <code> AllocConsole()</code> during their init to install a console control handler.
+              That creates a visible conhost window titled with the process name. The backend now
+              calls <code>FreeConsole()</code> at startup and runs a 2-second watchdog that
+              detaches any console a library sneaks in later — the window disappears before you
+              see it. If you still see one in v2.0.19+, screenshot it and note the title bar text
+              so we can find which DLL is doing it.
+            </dd>
+          </div>
+          <div>
             <dt className="font-medium text-sm">A Windows &quot;pythonw.exe stopped working&quot; dialog pops up</dt>
             <dd className="text-sm text-muted-foreground mt-1">
-              Fixed in v2.0.18 — the backend now calls <code>SetErrorMode</code> at startup to
-              suppress Windows Error Reporting dialogs. If you still see the dialog: the crash
-              happens before our <code>SetErrorMode</code> call runs (very rare, would have to
-              be in Python&apos;s own startup). The Rust watchdog respawns the backend
-              automatically either way; you can usually just ignore the dialog, and the next
-              launch picks up right after. Check <code>%LOCALAPPDATA%\MeetingRecorder\rust.log</code>
-              for the exit code — <code>3221225477</code> / <code>0xC0000005</code> means
-              access violation (typically corporate AV / EDR scanning a loading DLL).
+              Different from the black-console issue above — this one is a Windows Error
+              Reporting dialog after a crash. Fixed in v2.0.18: <code>SetErrorMode</code>
+              suppresses WER dialogs at startup. The Rust watchdog respawns the backend
+              automatically. Check <code>%LOCALAPPDATA%\MeetingRecorder\rust.log</code> for the
+              exit code — <code>3221225477</code> / <code>0xC0000005</code> means access
+              violation (typically corporate AV / EDR scanning a loading DLL).
             </dd>
           </div>
           <div>
