@@ -28,6 +28,11 @@ class Session:
         # summarizer prompt so AI extractions reflect the user's own
         # context, not just the transcript.
         self.notes: str = ""
+        # Copies of the audio file that live outside recordings_dir (e.g.
+        # the WAV we auto-copy into a client's Designated Folder on stop).
+        # Tracked here so retention can clean them up alongside the main
+        # file — without this list the copies would stick around forever.
+        self.exported_audio_paths: List[str] = []
 
     def get_or_create_speaker(self, speaker_id: str) -> Speaker:
         if speaker_id not in self.speakers:
@@ -68,6 +73,7 @@ class Session:
             "attendees": self.attendees,
             "decisions": self.decisions,
             "notes": self.notes,
+            "exported_audio_paths": list(self.exported_audio_paths),
         }
 
     @classmethod
@@ -97,6 +103,7 @@ class Session:
         session.attendees = list(data.get("attendees") or [])
         session.decisions = data.get("decisions")
         session.notes = data.get("notes") or ""
+        session.exported_audio_paths = list(data.get("exported_audio_paths") or [])
 
         # Rebuild speakers
         speakers_data = data.get("speakers") or {}

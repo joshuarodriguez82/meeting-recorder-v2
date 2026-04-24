@@ -987,14 +987,36 @@ def _auto_export_to_client(session: Session, copy_audio: bool = False) -> None:
     content (processing, summarize, action items, decisions, requirements,
     and on stop_recording for the audio copy). Best-effort — never blocks
     the main flow on an export failure.
+
+    Audio copies are recorded on the session's `exported_audio_paths` so
+    retention can clean them up later. We don't track the text artifacts
+    (transcript.txt, summary.txt, etc.) — they're KB-sized, keeping them
+    as the archival copy is exactly the point of the Designated Folder.
     """
     folder = _client_export_folder(session)
     if not folder:
         return
     try:
-        svc.export_svc.export_all(
+        paths = svc.export_svc.export_all(
             session, target_dir=folder, copy_audio=copy_audio)
         logger.info(f"Auto-exported session {session.session_id} to {folder}")
+        # Track audio copies so retention can reach them later.
+        AUDIO_EXTS = (".wav", ".mp3", ".m4a", ".flac")
+        new_audio = [p for p in paths if p.lower().endswith(AUDIO_EXTS)]
+        if new_audio:
+            existing = set(session.exported_audio_paths)
+            for p in new_audio:
+                if p not in existing:
+                    session.exported_audio_paths.append(p)
+                    existing.add(p)
+            # Persist the list so a crash between here and the next save
+            # doesn't orphan the copy from retention's view.
+            try:
+                svc.session_svc.save(session)
+            except Exception as save_err:
+                logger.warning(
+                    f"Could not persist exported_audio_paths for "
+                    f"{session.session_id}: {save_err}")
     except Exception as e:
         logger.warning(
             f"Auto-export to '{folder}' failed for session "
