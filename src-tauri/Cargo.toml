@@ -1,6 +1,6 @@
 [package]
 name = "meeting-recorder"
-version = "2.0.14"
+version = "2.0.15"
 description = "AI-powered meeting recorder, transcription, and summarizer"
 authors = ["Joshua Rodriguez"]
 license = "MIT"
