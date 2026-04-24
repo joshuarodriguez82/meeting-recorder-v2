@@ -5,6 +5,20 @@
 
 const BASE_URL = "http://127.0.0.1:17645";
 
+export interface TemplateEntry {
+  name: string;
+  prompt: string;
+  // True for templates that shipped as built-ins (General, Requirements
+  // Gathering, Design Review, Sprint Planning, Stakeholder Update). The
+  // UI shows a "Reset to default" button only for these, and delete
+  // hides rather than erases so they can be restored.
+  is_default: boolean;
+  // Original prompt for defaults; null for user-created. Used by the
+  // Settings UI to offer "Reset" and to indicate when the current prompt
+  // has been edited away from its shipped version.
+  default_prompt: string | null;
+}
+
 export interface Settings {
   anthropic_api_key: string;
   hf_token: string;
@@ -67,6 +81,10 @@ export interface SessionSummary {
   summary: string;
   decisions: string;
   requirements: string;
+  // Attendee emails from the calendar meeting this session was recorded
+  // against (if any). Used for the auto-tag-client-from-attendees
+  // heuristic in the Record view.
+  attendees: string[];
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -131,7 +149,21 @@ export interface ProcessFullStages {
 
 export const api = {
   health: () => request<{ status: string; version: string }>("/health"),
-  getTemplates: () => request<string[]>("/templates"),
+  // Templates
+  getTemplates: () => request<TemplateEntry[]>("/templates"),
+  upsertTemplate: (name: string, prompt: string) =>
+    request<TemplateEntry>(`/templates/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      body: JSON.stringify({ prompt }),
+    }),
+  deleteTemplate: (name: string) =>
+    request<{ ok: boolean }>(`/templates/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+  resetTemplate: (name: string) =>
+    request<TemplateEntry>(`/templates/${encodeURIComponent(name)}/reset`, {
+      method: "POST",
+    }),
 
   // Recording
   recordingStatus: () => request<RecordingStatus>("/recording/status"),
