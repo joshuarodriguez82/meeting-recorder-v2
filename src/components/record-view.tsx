@@ -455,7 +455,7 @@ export function RecordView({
         <CardContent>
           {meetings.length === 0 ? (
             <p className="text-sm text-muted-foreground text-center py-8">
-              No upcoming meetings in the next 36 hours, or Outlook not connected.
+              No upcoming meetings in the next 7 days, or Outlook not connected.
             </p>
           ) : (
             <div className="space-y-2">

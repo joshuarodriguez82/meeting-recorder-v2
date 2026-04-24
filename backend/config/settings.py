@@ -119,6 +119,17 @@ class Settings:
     retention_enabled: bool
     retention_processed_days: int
     retention_unprocessed_days: int
+    # Which LLM family powers summaries/extractions.
+    #   "anthropic"         → native Anthropic SDK, uses anthropic_api_key +
+    #                         claude_model (e.g. claude-haiku-4-5)
+    #   "openai"            → OpenAI-compatible endpoint (OpenRouter, Ollama,
+    #                         LM Studio, vLLM) via openai_base_url +
+    #                         openai_api_key + claude_model (reused as the
+    #                         model id — e.g. "meta-llama/llama-3.3-70b-
+    #                         instruct:free" on OpenRouter, "llama3" on Ollama)
+    ai_provider: str
+    openai_api_key: str
+    openai_base_url: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -187,12 +198,32 @@ class Settings:
             retention_enabled=_get_bool("RETENTION_ENABLED", False),
             retention_processed_days=_get_int("RETENTION_PROCESSED_DAYS", 7),
             retention_unprocessed_days=_get_int("RETENTION_UNPROCESSED_DAYS", 30),
+            ai_provider=_get("AI_PROVIDER", "anthropic"),
+            openai_api_key=_get("OPENAI_API_KEY", ""),
+            openai_base_url=_get("OPENAI_BASE_URL", ""),
         )
 
     @property
     def is_configured(self) -> bool:
-        """True if both required API keys are set."""
-        return bool(self.anthropic_api_key) and bool(self.hf_token)
+        """
+        True if required keys are set for the active provider.
+
+        HF token is always required (pyannote speaker diarization). The LLM
+        credential depends on provider: Anthropic needs anthropic_api_key;
+        OpenAI-compatible needs openai_api_key unless the user has set up
+        a local Ollama endpoint, in which case no real key is needed (the
+        SDK just needs something non-empty, and we supply a placeholder).
+        """
+        if not self.hf_token:
+            return False
+        if self.ai_provider == "openai":
+            # Ollama / LocalAI endpoints don't need a real key — detect by
+            # URL so we don't block the user on a field they don't need.
+            if self.openai_api_key:
+                return True
+            base = (self.openai_base_url or "").lower()
+            return "localhost" in base or "127.0.0.1" in base
+        return bool(self.anthropic_api_key)
 
     @staticmethod
     def _write_env_file(target: Path, content: str) -> bool:
@@ -222,6 +253,9 @@ class Settings:
         retention_enabled: bool = False,
         retention_processed_days: int = 7,
         retention_unprocessed_days: int = 30,
+        ai_provider: str = "anthropic",
+        openai_api_key: str = "",
+        openai_base_url: str = "",
     ) -> None:
         """Write settings back to the .env file."""
         content = (
@@ -239,6 +273,9 @@ class Settings:
             f"RETENTION_ENABLED={'true' if retention_enabled else 'false'}\n"
             f"RETENTION_PROCESSED_DAYS={retention_processed_days}\n"
             f"RETENTION_UNPROCESSED_DAYS={retention_unprocessed_days}\n"
+            f"AI_PROVIDER={ai_provider}\n"
+            f"OPENAI_API_KEY={openai_api_key}\n"
+            f"OPENAI_BASE_URL={openai_base_url}\n"
         )
         # Write to the canonical LOCALAPPDATA location first. In rare cases
         # a Tauri-spawned Python child cannot open files under LOCALAPPDATA

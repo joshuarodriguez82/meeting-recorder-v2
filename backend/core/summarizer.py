@@ -1,11 +1,27 @@
 """
-Claude-powered meeting summarizer and speaker identifier.
+Provider-agnostic meeting summarizer and speaker identifier.
+
+Supports two provider families:
+
+- **Anthropic** (native SDK): Claude Haiku / Sonnet / Opus. Requires an
+  `anthropic_api_key`.
+- **OpenAI-compatible** (via `openai` SDK): any service that speaks the
+  OpenAI Chat Completions protocol. Covers:
+    * OpenRouter (https://openrouter.ai/api/v1) — gateway that exposes
+      free-tier Llama/Qwen/Gemini/Mistral models among paid options.
+    * Ollama (http://localhost:11434/v1) — local-only, no API key needed.
+    * LM Studio, LocalAI, self-hosted vLLM, etc.
+
+The active provider is selected via the `ai_provider` setting. For
+OpenAI-compatible targets, `openai_base_url` points at the server and
+`openai_api_key` carries the credential (Ollama accepts any non-empty
+string — "ollama" by convention).
 """
 
 import asyncio
 import json
 import re
-from typing import Dict
+from typing import Dict, Optional
 from anthropic import AsyncAnthropic
 from utils.logger import get_logger
 
@@ -167,34 +183,105 @@ def _with_user_notes(instruction: str, transcript: str, notes: str = "") -> str:
 
 class Summarizer:
 
-    def __init__(self, api_key: str, model: str = DEFAULT_MODEL):
-        self._client = AsyncAnthropic(api_key=api_key)
+    def __init__(
+        self,
+        api_key: str,
+        model: str = DEFAULT_MODEL,
+        provider: str = "anthropic",
+        base_url: str = "",
+        openai_api_key: str = "",
+    ):
+        """
+        Args:
+            api_key: Anthropic API key (used when provider == "anthropic").
+            model: Model identifier. Interpretation depends on provider —
+                e.g. "claude-haiku-4-5" for Anthropic,
+                "meta-llama/llama-3.3-70b-instruct:free" for OpenRouter,
+                "llama3" for Ollama.
+            provider: "anthropic" (default) or "openai" (OpenAI-compatible).
+            base_url: Override endpoint for OpenAI-compatible providers.
+                Ignored when provider == "anthropic".
+            openai_api_key: Credential for OpenAI-compatible providers.
+                For Ollama any non-empty string works.
+        """
+        self._provider = (provider or "anthropic").strip().lower()
         self._model = model or DEFAULT_MODEL
+        self._anthropic_client: Optional[AsyncAnthropic] = None
+        self._openai_client = None  # lazily imported so the openai SDK
+        # isn't a hard dep when the user stays on Anthropic
+        if self._provider == "anthropic":
+            self._anthropic_client = AsyncAnthropic(api_key=api_key)
+        else:
+            # Import here so users who never switch off Anthropic don't
+            # need the openai wheel installed. Any error surfaces at
+            # first call rather than at Summarizer construction.
+            try:
+                from openai import AsyncOpenAI
+            except ImportError as e:
+                raise RuntimeError(
+                    "The 'openai' package is required for non-Anthropic "
+                    "providers. Install with: pip install openai"
+                ) from e
+            # Default to OpenRouter if nothing was configured, since that's
+            # the easiest "free models" entry point and doesn't require
+            # anything running on the user's machine.
+            effective_base = (base_url or "").strip() or "https://openrouter.ai/api/v1"
+            # Ollama accepts any non-empty key. OpenRouter / OpenAI need a
+            # real one. We pass a literal placeholder so the client can
+            # construct even when the user forgot to paste a key — the
+            # HTTP 401 surface message is clearer than a ValueError.
+            effective_key = (openai_api_key or "").strip() or "MISSING_KEY"
+            self._openai_client = AsyncOpenAI(
+                api_key=effective_key,
+                base_url=effective_base,
+            )
+
+    async def _chat(self, prompt: str, max_tokens: int = 1024,
+                    timeout: float = 60.0) -> str:
+        """
+        Provider-agnostic "one-shot user prompt → assistant text" helper.
+
+        Both Anthropic and OpenAI-compat providers get the same user
+        content string; the SDK differences are isolated to this method
+        so the extractors above stay identical.
+        """
+        if self._provider == "anthropic":
+            msg = await asyncio.wait_for(
+                self._anthropic_client.messages.create(
+                    model=self._model,
+                    max_tokens=max_tokens,
+                    messages=[{"role": "user", "content": prompt}],
+                ),
+                timeout=timeout,
+            )
+            return msg.content[0].text
+        # OpenAI-compatible (OpenRouter / Ollama / LM Studio / ...)
+        resp = await asyncio.wait_for(
+            self._openai_client.chat.completions.create(
+                model=self._model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            ),
+            timeout=timeout,
+        )
+        return resp.choices[0].message.content or ""
 
     async def summarize(self, transcript: str, template: str = "General",
                          notes: str = "") -> str:
         prompt = MEETING_TEMPLATES.get(template, MEETING_TEMPLATES["General"])
-        logger.info(f"Requesting meeting summary (template={template}) from Claude...")
+        logger.info(f"Requesting meeting summary (template={template}) via {self._provider}/{self._model}")
         try:
-            message = await asyncio.wait_for(
-                self._client.messages.create(
-                    model=self._model,
-                    max_tokens=1024,
-                    messages=[{
-                        "role": "user",
-                        "content": _with_user_notes(prompt, transcript, notes),
-                    }]
-                ),
-                timeout=60.0
+            summary = await self._chat(
+                _with_user_notes(prompt, transcript, notes),
+                max_tokens=1024, timeout=60.0,
             )
-            summary = message.content[0].text
             logger.info("Summary received.")
             return summary
         except Exception as e:
             raise RuntimeError(f"Summarization API call failed: {e}") from e
 
     async def extract_action_items(self, transcript: str, notes: str = "") -> str:
-        logger.info("Extracting action items from Claude...")
+        logger.info(f"Extracting action items via {self._provider}/{self._model}")
         instruction = (
             "Analyze this meeting transcript and extract the following "
             "in clearly structured markdown:\n\n"
@@ -212,18 +299,10 @@ class Summarizer:
             "include those as action items owned by the user."
         )
         try:
-            message = await asyncio.wait_for(
-                self._client.messages.create(
-                    model=self._model,
-                    max_tokens=1024,
-                    messages=[{
-                        "role": "user",
-                        "content": _with_user_notes(instruction, transcript, notes),
-                    }]
-                ),
-                timeout=60.0
+            result = await self._chat(
+                _with_user_notes(instruction, transcript, notes),
+                max_tokens=1024, timeout=60.0,
             )
-            result = message.content[0].text
             logger.info("Action items extracted.")
             return result
         except Exception as e:
@@ -231,7 +310,7 @@ class Summarizer:
 
     async def extract_decisions(self, transcript: str, notes: str = "") -> str:
         """Extract decisions made with rationale — an auto-generated ADR log."""
-        logger.info("Extracting decisions from Claude...")
+        logger.info(f"Extracting decisions via {self._provider}/{self._model}")
         instruction = (
             "Analyze this meeting transcript and extract every DECISION "
             "made. Return structured markdown with one entry per decision "
@@ -252,18 +331,10 @@ class Summarizer:
             "meeting.'"
         )
         try:
-            message = await asyncio.wait_for(
-                self._client.messages.create(
-                    model=self._model,
-                    max_tokens=1024,
-                    messages=[{
-                        "role": "user",
-                        "content": _with_user_notes(instruction, transcript, notes),
-                    }]
-                ),
-                timeout=60.0
+            result = await self._chat(
+                _with_user_notes(instruction, transcript, notes),
+                max_tokens=1024, timeout=60.0,
             )
-            result = message.content[0].text
             logger.info("Decisions extracted.")
             return result
         except Exception as e:
@@ -271,45 +342,37 @@ class Summarizer:
 
     async def meeting_prep_brief(self, prior_notes: str, upcoming_subject: str) -> str:
         """Generate a prep brief from prior meeting notes for an upcoming meeting."""
-        logger.info(f"Generating prep brief for: {upcoming_subject}")
+        logger.info(f"Generating prep brief for: {upcoming_subject} via {self._provider}/{self._model}")
         try:
-            message = await asyncio.wait_for(
-                self._client.messages.create(
-                    model=self._model,
-                    max_tokens=1024,
-                    messages=[{
-                        "role": "user",
-                        "content": (
-                            "You're preparing a Solutions Architect for an upcoming meeting. "
-                            "Based on the summaries, decisions, action items, and requirements "
-                            "from previous related meetings, generate a concise pre-meeting "
-                            "brief in markdown with these sections:\n\n"
-                            "## Recent Context\n"
-                            "Key topics discussed in recent meetings — 3-5 bullets.\n\n"
-                            "## Open Action Items\n"
-                            "Outstanding action items (especially for this person). "
-                            "Status and owner.\n\n"
-                            "## Open Questions / Risks\n"
-                            "Unresolved questions or risks raised previously.\n\n"
-                            "## Suggested Discussion Points\n"
-                            "What you should raise or follow up on in this meeting.\n\n"
-                            "Keep it tight and actionable. If a section has no content, "
-                            "write 'None.'\n\n"
-                            f"Upcoming meeting: {upcoming_subject}\n\n"
-                            f"=== PRIOR MEETING NOTES ===\n{prior_notes}"
-                        )
-                    }]
+            result = await self._chat(
+                (
+                    "You're preparing a Solutions Architect for an upcoming meeting. "
+                    "Based on the summaries, decisions, action items, and requirements "
+                    "from previous related meetings, generate a concise pre-meeting "
+                    "brief in markdown with these sections:\n\n"
+                    "## Recent Context\n"
+                    "Key topics discussed in recent meetings — 3-5 bullets.\n\n"
+                    "## Open Action Items\n"
+                    "Outstanding action items (especially for this person). "
+                    "Status and owner.\n\n"
+                    "## Open Questions / Risks\n"
+                    "Unresolved questions or risks raised previously.\n\n"
+                    "## Suggested Discussion Points\n"
+                    "What you should raise or follow up on in this meeting.\n\n"
+                    "Keep it tight and actionable. If a section has no content, "
+                    "write 'None.'\n\n"
+                    f"Upcoming meeting: {upcoming_subject}\n\n"
+                    f"=== PRIOR MEETING NOTES ===\n{prior_notes}"
                 ),
-                timeout=60.0
+                max_tokens=1024, timeout=60.0,
             )
-            result = message.content[0].text
             logger.info("Prep brief generated.")
             return result
         except Exception as e:
             raise RuntimeError(f"Prep brief generation failed: {e}") from e
 
     async def extract_requirements(self, transcript: str, notes: str = "") -> str:
-        logger.info("Extracting requirements from Claude...")
+        logger.info(f"Extracting requirements via {self._provider}/{self._model}")
         instruction = (
             "Analyze this meeting transcript and extract all requirements "
             "discussed. Return structured markdown with:\n\n"
@@ -330,49 +393,33 @@ class Summarizer:
             "If a section has no items, write 'None identified.'"
         )
         try:
-            message = await asyncio.wait_for(
-                self._client.messages.create(
-                    model=self._model,
-                    max_tokens=2048,
-                    messages=[{
-                        "role": "user",
-                        "content": _with_user_notes(instruction, transcript, notes),
-                    }]
-                ),
-                timeout=90.0
+            result = await self._chat(
+                _with_user_notes(instruction, transcript, notes),
+                max_tokens=2048, timeout=90.0,
             )
-            result = message.content[0].text
             logger.info("Requirements extracted.")
             return result
         except Exception as e:
             raise RuntimeError(f"Requirements extraction failed: {e}") from e
 
     async def identify_speakers(self, transcript: str) -> Dict[str, str]:
-        logger.info("Requesting speaker identification from Claude...")
+        logger.info(f"Requesting speaker identification via {self._provider}/{self._model}")
         try:
-            message = await asyncio.wait_for(
-                self._client.messages.create(
-                    model=self._model,
-                    max_tokens=512,
-                    messages=[{
-                        "role": "user",
-                        "content": (
-                            "Analyze this meeting transcript and identify any speakers "
-                            "who introduced themselves by name. Return ONLY a JSON object "
-                            "mapping speaker IDs to their real names. "
-                            "Only include speakers where you are confident of their name "
-                            "from an explicit introduction like 'Hi I'm X', 'My name is X', "
-                            "'This is X speaking', etc. "
-                            "If no introductions are found, return an empty JSON object {}.\n\n"
-                            "Example response: "
-                            "{\"SPEAKER_00\": \"John Smith\", \"SPEAKER_02\": \"Sarah Jones\"}\n\n"
-                            f"Transcript:\n{transcript}"
-                        )
-                    }]
+            raw = (await self._chat(
+                (
+                    "Analyze this meeting transcript and identify any speakers "
+                    "who introduced themselves by name. Return ONLY a JSON object "
+                    "mapping speaker IDs to their real names. "
+                    "Only include speakers where you are confident of their name "
+                    "from an explicit introduction like 'Hi I'm X', 'My name is X', "
+                    "'This is X speaking', etc. "
+                    "If no introductions are found, return an empty JSON object {}.\n\n"
+                    "Example response: "
+                    "{\"SPEAKER_00\": \"John Smith\", \"SPEAKER_02\": \"Sarah Jones\"}\n\n"
+                    f"Transcript:\n{transcript}"
                 ),
-                timeout=30.0
-            )
-            raw = message.content[0].text.strip()
+                max_tokens=512, timeout=30.0,
+            )).strip()
             logger.info(f"Speaker identification response: {raw}")
 
             if raw.startswith("```"):

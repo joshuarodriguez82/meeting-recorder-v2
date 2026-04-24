@@ -1014,6 +1014,27 @@ function DesignatedFolderCard({
     }
   };
 
+  // Native folder picker (Tauri dialog plugin). Falls back silently if
+  // the plugin isn't available — in dev-browser or if someone removes
+  // the plugin — so the text field still works as a manual fallback.
+  const pickFolder = async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const picked = await open({
+        directory: true,
+        multiple: false,
+        title: `Pick designated folder for ${client}`,
+        defaultPath: value || undefined,
+      });
+      if (typeof picked === "string") {
+        setValue(picked);
+      }
+    } catch (e) {
+      console.warn("Folder picker unavailable:", e);
+      toast.error("Folder picker unavailable — paste the path manually");
+    }
+  };
+
   return (
     <Card>
       <CardHeader className="py-3">
@@ -1032,9 +1053,12 @@ function DesignatedFolderCard({
           <Input
             value={value}
             onChange={(e) => setValue(e.target.value)}
-            placeholder="e.g. C:\Users\joshu\OneDrive - TTEC\Clients\Acme"
+            placeholder="Click Browse to pick a folder, or paste a path"
             autoComplete="off"
           />
+          <Button variant="outline" onClick={pickFolder} title="Browse for folder">
+            Browse…
+          </Button>
           {folder && (
             <Button variant="outline" onClick={openFolder} title="Open folder in Explorer">
               <FolderOpen className="h-4 w-4" />

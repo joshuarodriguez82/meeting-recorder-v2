@@ -175,7 +175,7 @@ export default function Home() {
     const silent = !!opts?.silent;
     setMeetingsLoading(true);
     try {
-      const cal = await api.getUpcomingMeetings(36, force);
+      const cal = await api.getUpcomingMeetings(168, force);
       setMeetings((prev) => {
         // Backend returned nothing but we already had meetings — keep
         // the prior list. Specifically guards the Outlook-COM-timeout

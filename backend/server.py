@@ -184,15 +184,36 @@ class Services:
                 settings=self.settings,
                 on_status=self._record_status,
             )
-            if self.settings.anthropic_api_key:
-                # Lazy import Summarizer (pulls in anthropic SDK)
+            # The summarizer is constructed whenever an LLM is configured
+            # — either Anthropic (anthropic_api_key) or an OpenAI-compatible
+            # endpoint (openai_base_url / openai_api_key, or a local Ollama
+            # URL which needs no real key).
+            s = self.settings
+            have_llm = False
+            if s.ai_provider == "openai":
+                have_llm = bool(s.openai_api_key) or bool(s.openai_base_url)
+            else:
+                have_llm = bool(s.anthropic_api_key)
+            if have_llm:
+                # Lazy import Summarizer (pulls in anthropic / openai SDKs)
                 global Summarizer
                 if Summarizer is None:
                     from core.summarizer import Summarizer as _Summarizer
                     Summarizer = _Summarizer
-                self.summarizer = Summarizer(
-                    self.settings.anthropic_api_key,
-                    model=self.settings.claude_model)
+                try:
+                    self.summarizer = Summarizer(
+                        api_key=s.anthropic_api_key,
+                        model=s.claude_model,
+                        provider=s.ai_provider,
+                        base_url=s.openai_base_url,
+                        openai_api_key=s.openai_api_key,
+                    )
+                except Exception as e:
+                    # Missing openai package etc. shouldn't prevent other
+                    # endpoints from loading — leave summarizer None and
+                    # surface the error at first use.
+                    logger.warning(f"Summarizer init failed: {e}")
+                    self.summarizer = None
         return self.settings
 
     def ensure_models_loaded(self):
@@ -251,6 +272,12 @@ class SettingsDTO(BaseModel):
     retention_processed_days: int
     retention_unprocessed_days: int
     is_configured: bool
+    # AI provider selection. Defaults preserve existing behavior for
+    # clients that predate this field — they'll just round-trip empty
+    # strings and stay on Anthropic.
+    ai_provider: str = "anthropic"
+    openai_api_key: str = ""
+    openai_base_url: str = ""
 
 
 class StartRecordingRequest(BaseModel):
@@ -304,6 +331,9 @@ async def get_settings():
         retention_processed_days=s.retention_processed_days,
         retention_unprocessed_days=s.retention_unprocessed_days,
         is_configured=s.is_configured,
+        ai_provider=s.ai_provider or "anthropic",
+        openai_api_key=s.openai_api_key,
+        openai_base_url=s.openai_base_url,
     )
 
 
@@ -324,6 +354,9 @@ async def save_settings(payload: SettingsDTO):
         retention_enabled=payload.retention_enabled,
         retention_processed_days=payload.retention_processed_days,
         retention_unprocessed_days=payload.retention_unprocessed_days,
+        ai_provider=payload.ai_provider or "anthropic",
+        openai_api_key=payload.openai_api_key,
+        openai_base_url=payload.openai_base_url,
     )
     # Force reload
     svc.settings = None
@@ -585,10 +618,12 @@ async def get_calendar_today():
 
 
 @app.get("/calendar/upcoming")
-async def get_calendar_upcoming(hours: int = 36, refresh: bool = False):
+async def get_calendar_upcoming(hours: int = 168, refresh: bool = False):
     """
     Meetings from now through N hours ahead.
-    Default 36h covers the rest of today + all of tomorrow.
+    Default 168h (7 days) — bumped from 36h because the narrower window
+    left the panel empty late-Friday and all weekend, which looks broken
+    even though nothing's wrong.
     Pass refresh=true to bypass the 5-minute cache (triggered by the
     Refresh button in the UI when the user added a meeting in Outlook
     and needs it reflected immediately).
