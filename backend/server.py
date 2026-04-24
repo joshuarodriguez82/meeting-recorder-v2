@@ -102,6 +102,7 @@ from models.session import Session
 from services.calendar_service import (
     get_todays_meetings, get_upcoming_meetings, is_outlook_available,
 )
+from services.client_config_service import ClientConfig, ClientConfigService
 from services.export_service import ExportService
 from services.recording_service import RecordingService
 from services.retention_service import cleanup as run_retention_cleanup, folder_stats
@@ -135,6 +136,7 @@ class Services:
         self.settings: Optional[Settings] = None
         self.session_svc: Optional[SessionService] = None
         self.export_svc: Optional[ExportService] = None
+        self.client_cfg_svc: Optional[ClientConfigService] = None
         self.recording_svc: Optional[RecordingService] = None
         self.transcription: Optional[TranscriptionEngine] = None
         self.diarization: Optional[DiarizationEngine] = None
@@ -174,6 +176,10 @@ class Services:
             self.settings = Settings.from_env()
             self.session_svc = SessionService(self.settings.recordings_dir)
             self.export_svc = ExportService(self.settings.recordings_dir)
+            # Per-client configs live next to config.env / logs so they
+            # roam with the user profile, not under `recordings/`.
+            from config.settings import USER_DATA_DIR
+            self.client_cfg_svc = ClientConfigService(USER_DATA_DIR)
             self.recording_svc = RecordingService(
                 settings=self.settings,
                 on_status=self._record_status,
@@ -693,6 +699,10 @@ def _stop_recording_sync():
     if session:
         svc.current_session = session
         svc.session_svc.save(session)
+        # Copy the fresh WAV into the client's designated folder right
+        # away so the user doesn't have to wait for transcription to
+        # finish before seeing the file in Explorer.
+        _auto_export_to_client(session, copy_audio=True)
     return session
 
 
@@ -923,6 +933,191 @@ async def suggest_tagging(req: SuggestTaggingRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _client_export_folder(session: Session) -> Optional[str]:
+    """Return the user-designated folder for this session's client, or None."""
+    if not session.client or not svc.client_cfg_svc:
+        return None
+    cfg = svc.client_cfg_svc.get(session.client)
+    if cfg and cfg.export_folder:
+        return cfg.export_folder
+    return None
+
+
+def _auto_export_to_client(session: Session, copy_audio: bool = False) -> None:
+    """
+    If this session's client has a designated export folder, drop every
+    available artifact there. Called after any step that adds new
+    content (processing, summarize, action items, decisions, requirements,
+    and on stop_recording for the audio copy). Best-effort — never blocks
+    the main flow on an export failure.
+    """
+    folder = _client_export_folder(session)
+    if not folder:
+        return
+    try:
+        svc.export_svc.export_all(
+            session, target_dir=folder, copy_audio=copy_audio)
+        logger.info(f"Auto-exported session {session.session_id} to {folder}")
+    except Exception as e:
+        logger.warning(
+            f"Auto-export to '{folder}' failed for session "
+            f"{session.session_id}: {e}")
+
+
+# ── Client configs (per-client designated export folder) ──────────────
+@app.get("/clients/config")
+async def get_client_configs():
+    svc.load_settings()
+    def _do():
+        return {
+            name: {"export_folder": cfg.export_folder}
+            for name, cfg in svc.client_cfg_svc.get_all().items()
+        }
+    return await asyncio.to_thread(_do)
+
+
+class ClientConfigDTO(BaseModel):
+    export_folder: str = ""
+
+
+@app.put("/clients/config/{client_name}")
+async def put_client_config(client_name: str, payload: ClientConfigDTO):
+    svc.load_settings()
+    folder = payload.export_folder.strip()
+    # Validate a non-empty folder path so the user catches typos up front
+    # rather than at the next recording when nothing shows up there.
+    if folder:
+        p = Path(folder).expanduser()
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Can't create or access '{folder}': {e}",
+            )
+        folder = str(p)
+    def _do():
+        svc.client_cfg_svc.set(
+            client_name, ClientConfig(export_folder=folder))
+    await asyncio.to_thread(_do)
+    return {"ok": True, "export_folder": folder}
+
+
+@app.post("/sessions/{session_id}/export")
+async def export_session(session_id: str):
+    """
+    Manually export a session's artifacts. Routes to the session's
+    client's designated folder if one is set, otherwise falls back to
+    the recordings dir.
+    """
+    svc.load_settings()
+    session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    target = _client_export_folder(session)
+
+    def _do():
+        return svc.export_svc.export_all(
+            session, target_dir=target, copy_audio=bool(target))
+
+    paths = await asyncio.to_thread(_do)
+    return {"ok": True, "target_dir": target or svc.settings.recordings_dir,
+            "paths": paths}
+
+
+# ── System / filesystem helpers ──────────────────────────────────────
+class OpenFolderRequest(BaseModel):
+    # Keys: "recordings" opens the configured recordings dir, "client"
+    # opens the designated folder for a client, or explicit "path".
+    kind: str = "recordings"
+    client: Optional[str] = None
+    path: Optional[str] = None
+
+
+@app.post("/system/open-folder")
+async def open_folder(req: OpenFolderRequest):
+    """
+    Opens a folder in Windows Explorer. Uses os.startfile (ShellExecute
+    under the hood) so there's no console flash — unlike the old
+    powershell-spawning shortcut path.
+    """
+    svc.load_settings()
+    target: Optional[str] = None
+    if req.kind == "recordings":
+        target = svc.settings.recordings_dir
+    elif req.kind == "client":
+        if not req.client:
+            raise HTTPException(status_code=400, detail="client required")
+        cfg = svc.client_cfg_svc.get(req.client)
+        if not cfg or not cfg.export_folder:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No designated folder set for '{req.client}'")
+        target = cfg.export_folder
+    elif req.kind == "path":
+        target = req.path
+    if not target:
+        raise HTTPException(status_code=400, detail="path required")
+    p = Path(target)
+    if not p.exists():
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    try:
+        if os.name == "nt":
+            os.startfile(str(p))  # type: ignore[attr-defined]
+        else:
+            # macOS / Linux fallback for completeness (not the primary target).
+            import webbrowser
+            webbrowser.open(p.as_uri())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not open folder: {e}")
+    return {"ok": True, "path": str(p)}
+
+
+class ImportSessionRequest(BaseModel):
+    file_path: str
+    display_name: str = ""
+    client: str = ""
+    project: str = ""
+
+
+@app.post("/sessions/import")
+async def import_session(req: ImportSessionRequest):
+    """
+    Import an audio file sitting somewhere on disk as a new session. The
+    file is copied into the recordings directory and a session JSON is
+    written. Transcription/summary are NOT run automatically — the user
+    triggers those from the session detail dialog like any other session.
+    """
+    svc.load_settings()
+
+    def _do():
+        session = svc.session_svc.import_from_file(
+            source_path=req.file_path,
+            display_name=req.display_name,
+            client=req.client,
+            project=req.project,
+        )
+        # If the client has a designated folder, copy the audio over now
+        # so the user sees it there immediately. Transcripts etc. will
+        # follow once processing runs.
+        _auto_export_to_client(session, copy_audio=True)
+        return session.session_id
+
+    try:
+        session_id = await asyncio.to_thread(_do)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("Import session failed")
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"ok": True, "session_id": session_id}
+
+
 @app.post("/sessions/{session_id}/process")
 async def process_session(session_id: str):
     svc.load_settings()
@@ -956,6 +1151,7 @@ async def process_session(session_id: str):
     try:
         result = await svc.recording_svc.process_session()
         await asyncio.to_thread(svc.session_svc.save, result)
+        _auto_export_to_client(result, copy_audio=False)
         return {"ok": True, "segments": len(result.segments),
                 "speakers": len(result.speakers)}
     except Exception as e:
@@ -990,6 +1186,7 @@ async def _run_extraction(session_id: str, extractor_name: str, field_name: str,
             await asyncio.to_thread(export_fn, session)
         except Exception as ex:
             logger.warning(f"Export failed: {ex}")
+        _auto_export_to_client(session, copy_audio=False)
         return {"ok": True, field_name: result}
     except Exception as e:
         logger.exception(f"{extractor_name} failed")
@@ -1021,6 +1218,7 @@ async def summarize_session(session_id: str, req: TemplateRequest):
             await asyncio.to_thread(svc.export_svc.export_summary, session)
         except Exception:
             pass
+        _auto_export_to_client(session, copy_audio=False)
         return {"ok": True, "summary": result}
     except Exception as e:
         logger.exception("Summarize failed")
