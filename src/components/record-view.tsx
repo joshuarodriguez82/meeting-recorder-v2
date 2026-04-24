@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { api, type AudioDevice, type Meeting, type SessionFull } from "@/lib/api";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { api, type AudioDevice, type Meeting, type SessionFull, type SessionSummary } from "@/lib/api";
 import { toast } from "sonner";
 import {
   Calendar as CalendarIcon,
@@ -46,8 +46,10 @@ export function RecordView({
   const [templates, setTemplates] = useState<string[]>([]);
   const [inputDevices, setInputDevices] = useState<AudioDevice[]>([]);
   const [outputDevices, setOutputDevices] = useState<AudioDevice[]>([]);
-  const [existingClients, setExistingClients] = useState<string[]>([]);
-  const [existingProjects, setExistingProjects] = useState<string[]>([]);
+  // Keep the whole session list in state so we can filter projects by
+  // the currently-selected client (rather than showing every project
+  // anyone's ever used, regardless of customer).
+  const [allSessions, setAllSessions] = useState<SessionSummary[]>([]);
 
   const [meetingName, setMeetingName] = useState("");
   const [template, setTemplate] = useState("General");
@@ -78,15 +80,7 @@ export function RecordView({
         setInputDevices(devices.input);
         setOutputDevices(devices.output);
         setTemplates(tpls);
-        // Gather unique clients and projects from existing sessions for autocomplete
-        const clients = Array.from(new Set(
-          sessionsList.map((s) => s.client).filter(Boolean)
-        )).sort();
-        const projects = Array.from(new Set(
-          sessionsList.map((s) => s.project).filter(Boolean)
-        )).sort();
-        setExistingClients(clients);
-        setExistingProjects(projects);
+        setAllSessions(sessionsList);
 
         // Restore saved device selection by NAME (indices can shift
         // between reboots when devices are plugged in/out, so we match
@@ -130,6 +124,37 @@ export function RecordView({
       }
     })();
   }, []);
+
+  // Autocomplete data: clients are all unique client names, projects are
+  // filtered to only those tagged under the currently-selected client.
+  // When no client is chosen we fall back to every project — so you can
+  // still pick a project first and have the client auto-fill on the next
+  // render once you've typed it.
+  const existingClients = useMemo(
+    () => Array.from(new Set(allSessions.map((s) => s.client).filter(Boolean))).sort(),
+    [allSessions],
+  );
+  const existingProjects = useMemo(() => {
+    const target = (client || "").trim().toLowerCase();
+    const scoped = target
+      ? allSessions.filter((s) => (s.client || "").trim().toLowerCase() === target)
+      : allSessions;
+    return Array.from(new Set(scoped.map((s) => s.project).filter(Boolean))).sort();
+  }, [allSessions, client]);
+
+  // Clear the project field when the client changes — keeping a project
+  // from a different customer around only invites mis-tagged sessions.
+  // Skip the effect on mount (no prior client) so we don't nuke a
+  // template restore down the line.
+  const prevClientRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = prevClientRef.current;
+    prevClientRef.current = client;
+    if (prev === null) return;
+    if (prev === client) return;
+    if (project) setProject("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client]);
 
   // Persist device selection by name whenever it changes.
   useEffect(() => {
