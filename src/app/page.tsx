@@ -60,7 +60,18 @@ export default function Home() {
   };
 
   const existingClients = Array.from(new Set(sessions.map((s) => s.client).filter(Boolean))).sort();
-  const existingProjects = Array.from(new Set(sessions.map((s) => s.project).filter(Boolean))).sort();
+  // Scope projects to the client they were tagged under so the detail
+  // dialog's Project dropdown doesn't offer a project from a different
+  // customer (which would silently mis-tag the session on save).
+  const projectsByClient: Record<string, string[]> = {};
+  for (const s of sessions) {
+    const c = (s.client || "").trim().toLowerCase();
+    const p = (s.project || "").trim();
+    if (!c || !p) continue;
+    if (!projectsByClient[c]) projectsByClient[c] = [];
+    if (!projectsByClient[c].includes(p)) projectsByClient[c].push(p);
+  }
+  for (const k of Object.keys(projectsByClient)) projectsByClient[k].sort();
 
   const [backendAttempts, setBackendAttempts] = useState(0);
   const [backendError, setBackendError] = useState<string | null>(null);
@@ -433,7 +444,7 @@ export default function Home() {
         onChanged={reloadSessions}
         initialTab={detailInitialTab}
         existingClients={existingClients}
-        existingProjects={existingProjects}
+        projectsByClient={projectsByClient}
       />
     </div>
   );
