@@ -353,7 +353,7 @@ def get_todays_meetings() -> List[dict]:
     return get_meetings_for_date(datetime.datetime.now().date())
 
 
-def get_upcoming_meetings(hours_ahead: int = 36) -> List[dict]:
+def get_upcoming_meetings(hours_ahead: int = 168) -> List[dict]:
     """
     Return meetings from now through `hours_ahead` hours ahead.
     ONE Outlook connection. ONE pass per folder. Cached 5 min so polling

@@ -19,11 +19,53 @@ import {
 } from "@/components/ui/select";
 
 const WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"];
-const CLAUDE_MODELS = [
-  { value: "claude-haiku-4-5", label: "Haiku 4.5 (cheap, good for summaries)" },
-  { value: "claude-sonnet-4-5", label: "Sonnet 4.5 (premium, ~4× cost)" },
-  { value: "claude-3-5-haiku-latest", label: "Haiku 3.5 (legacy)" },
+
+// Preset model options per provider. Picking a preset writes the value
+// into `claude_model` (the backend reuses that field as the model id
+// across providers). The "Custom…" option lets the user type any string,
+// so niche models (new OpenRouter releases, fine-tuned Ollama tags) work
+// even when they're not on the shortlist.
+const ANTHROPIC_MODELS = [
+  { value: "claude-haiku-4-5", label: "Claude Haiku 4.5 — cheap, great for summaries" },
+  { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 — premium (~4× cost)" },
+  { value: "claude-opus-4-7", label: "Claude Opus 4.7 — max quality, ~15× cost" },
+  { value: "claude-3-5-haiku-latest", label: "Claude Haiku 3.5 — legacy" },
 ];
+
+// Free-tier selections from OpenRouter as of early 2026. The ":free"
+// suffix is required — without it OpenRouter routes to the paid tier.
+const OPENROUTER_MODELS = [
+  { value: "meta-llama/llama-3.3-70b-instruct:free", label: "Llama 3.3 70B (free)" },
+  { value: "google/gemini-2.0-flash-exp:free", label: "Gemini 2.0 Flash (free)" },
+  { value: "qwen/qwen-2.5-72b-instruct:free", label: "Qwen 2.5 72B (free)" },
+  { value: "deepseek/deepseek-r1:free", label: "DeepSeek R1 (free, reasoning)" },
+  { value: "mistralai/mistral-small-3.1-24b-instruct:free", label: "Mistral Small 3.1 (free)" },
+  { value: "anthropic/claude-haiku-4-5", label: "Claude Haiku 4.5 (paid pass-through)" },
+  { value: "openai/gpt-4o-mini", label: "GPT-4o mini (paid pass-through)" },
+];
+
+// Common local models via Ollama. The user still has to pull them with
+// `ollama pull <name>` — we can't detect installed ones from here.
+const OLLAMA_MODELS = [
+  { value: "llama3.1", label: "Llama 3.1 8B (default)" },
+  { value: "llama3.3", label: "Llama 3.3 70B" },
+  { value: "qwen2.5", label: "Qwen 2.5 7B" },
+  { value: "mistral", label: "Mistral 7B" },
+  { value: "phi3", label: "Phi-3 3.8B — small + fast" },
+];
+
+type ProviderPreset = "anthropic" | "openrouter" | "ollama" | "custom";
+
+function presetFromSettings(s: Settings): ProviderPreset {
+  if (s.ai_provider !== "openai") return "anthropic";
+  const base = (s.openai_base_url || "").toLowerCase();
+  if (base.includes("openrouter")) return "openrouter";
+  if (base.includes("localhost") || base.includes("127.0.0.1")) return "ollama";
+  return "custom";
+}
+
+const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+const OLLAMA_BASE = "http://localhost:11434/v1";
 
 export function SettingsView() {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -235,22 +277,7 @@ export function SettingsView() {
               />
             </div>
           </div>
-          <div className="space-y-2">
-            <Label>Claude Model</Label>
-            <Select
-              value={settings.claude_model}
-              onValueChange={(v) => v && update("claude_model", v)}
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {CLAUDE_MODELS.map((m) => (
-                  <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+          <AIProviderSection settings={settings} update={update} />
         </CardContent>
       </Card>
 
@@ -400,6 +427,176 @@ function Toggle({
       <div>
         <div className="text-sm font-medium">{label}</div>
         {description && <div className="text-xs text-muted-foreground mt-0.5">{description}</div>}
+      </div>
+    </div>
+  );
+}
+
+function AIProviderSection({
+  settings, update,
+}: {
+  settings: Settings;
+  update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
+}) {
+  const preset = presetFromSettings(settings);
+
+  // Apply a preset: sets ai_provider, openai_base_url, and (when a
+  // sensible default exists) claude_model. Touching the API-key field
+  // is avoided — users may already have one pasted for a different
+  // provider they'll switch back to.
+  const applyPreset = (next: ProviderPreset) => {
+    if (next === "anthropic") {
+      update("ai_provider", "anthropic");
+      update("openai_base_url", "");
+      if (!ANTHROPIC_MODELS.find((m) => m.value === settings.claude_model)) {
+        update("claude_model", ANTHROPIC_MODELS[0].value);
+      }
+      return;
+    }
+    update("ai_provider", "openai");
+    if (next === "openrouter") {
+      update("openai_base_url", OPENROUTER_BASE);
+      if (!OPENROUTER_MODELS.find((m) => m.value === settings.claude_model)) {
+        update("claude_model", OPENROUTER_MODELS[0].value);
+      }
+    } else if (next === "ollama") {
+      update("openai_base_url", OLLAMA_BASE);
+      if (!OLLAMA_MODELS.find((m) => m.value === settings.claude_model)) {
+        update("claude_model", OLLAMA_MODELS[0].value);
+      }
+    } else {
+      // Custom — leave URL and model alone so the user can fill them in.
+      if (!settings.openai_base_url) update("openai_base_url", "");
+    }
+  };
+
+  // Which preset list (if any) this provider uses. Custom gets no list —
+  // the user types a model id directly.
+  const presetModels = preset === "anthropic" ? ANTHROPIC_MODELS
+    : preset === "openrouter" ? OPENROUTER_MODELS
+    : preset === "ollama" ? OLLAMA_MODELS
+    : null;
+  const modelIsPreset = presetModels
+    ? presetModels.some((m) => m.value === settings.claude_model)
+    : false;
+
+  return (
+    <div className="space-y-4 border-t pt-4">
+      <div className="space-y-2">
+        <Label>AI Provider</Label>
+        <Select value={preset} onValueChange={(v) => v && applyPreset(v as ProviderPreset)}>
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="anthropic">Anthropic — Claude (uses Anthropic API key above)</SelectItem>
+            <SelectItem value="openrouter">OpenRouter — free-tier Llama / Gemini / Qwen / DeepSeek</SelectItem>
+            <SelectItem value="ollama">Ollama (local) — free, runs on your machine</SelectItem>
+            <SelectItem value="custom">Custom OpenAI-compatible endpoint</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-[11px] text-muted-foreground">
+          {preset === "anthropic" && (
+            <>Uses Claude directly. Best quality, but each extraction costs a few cents per meeting.</>
+          )}
+          {preset === "openrouter" && (
+            <>
+              Get a free API key at{" "}
+              <a href="https://openrouter.ai/settings/keys" className="underline" target="_blank" rel="noreferrer">
+                openrouter.ai
+              </a>
+              . Free-tier models have rate limits (~50 requests/day) but cost $0.
+            </>
+          )}
+          {preset === "ollama" && (
+            <>
+              Install Ollama from{" "}
+              <a href="https://ollama.com/download" className="underline" target="_blank" rel="noreferrer">
+                ollama.com
+              </a>{" "}
+              and run <code className="text-[11px]">ollama pull llama3.1</code> (or your preferred model)
+              before saving. Everything stays on your machine. No API key needed.
+            </>
+          )}
+          {preset === "custom" && (
+            <>Any service that speaks the OpenAI Chat Completions protocol — LM Studio, vLLM, LocalAI, Together.ai, Groq, etc.</>
+          )}
+        </p>
+      </div>
+
+      {(preset === "openrouter" || preset === "custom") && (
+        <div className="space-y-2">
+          <Label>
+            {preset === "openrouter" ? "OpenRouter API Key" : "API Key"}
+          </Label>
+          <Input
+            type="password"
+            value={settings.openai_api_key}
+            onChange={(e) => update("openai_api_key", e.target.value)}
+            placeholder={preset === "openrouter" ? "sk-or-v1-..." : "Your provider's API key"}
+            autoComplete="off"
+          />
+        </div>
+      )}
+
+      {(preset === "ollama" || preset === "custom") && (
+        <div className="space-y-2">
+          <Label>Base URL</Label>
+          <Input
+            value={settings.openai_base_url}
+            onChange={(e) => update("openai_base_url", e.target.value)}
+            placeholder={preset === "ollama" ? OLLAMA_BASE : "https://your-endpoint/v1"}
+            autoComplete="off"
+          />
+          <p className="text-[11px] text-muted-foreground">
+            {preset === "ollama"
+              ? "Ollama's default. Change only if you run Ollama on a different port."
+              : "Must end in /v1 and expose OpenAI-compatible /chat/completions."}
+          </p>
+        </div>
+      )}
+
+      <div className="space-y-2">
+        <Label>Model</Label>
+        {presetModels && modelIsPreset ? (
+          <Select
+            value={settings.claude_model}
+            onValueChange={(v) => v && update("claude_model", v)}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {presetModels.map((m) => (
+                <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+              ))}
+              <SelectItem value="__custom__">Custom (type your own below)</SelectItem>
+            </SelectContent>
+          </Select>
+        ) : (
+          <>
+            <Input
+              value={settings.claude_model}
+              onChange={(e) => update("claude_model", e.target.value)}
+              placeholder={
+                preset === "anthropic" ? "claude-haiku-4-5" :
+                preset === "openrouter" ? "meta-llama/llama-3.3-70b-instruct:free" :
+                preset === "ollama" ? "llama3.1" :
+                "model-id"
+              }
+              autoComplete="off"
+            />
+            {presetModels && (
+              <button
+                type="button"
+                onClick={() => update("claude_model", presetModels[0].value)}
+                className="text-[11px] text-primary hover:underline"
+              >
+                ← Back to preset list
+              </button>
+            )}
+          </>
+        )}
       </div>
     </div>
   );
