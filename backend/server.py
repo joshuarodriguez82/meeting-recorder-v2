@@ -21,6 +21,31 @@ os.chdir(Path(__file__).resolve().parent)
 # import cleanly even if launched with an odd CWD.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# Suppress Windows Error Reporting (WER) pop-ups for this process. Without
+# this, an access-violation crash in a loaded DLL — e.g. torch / CUDA /
+# pyannote DLLs getting mid-load scan-interrupted by corporate EDR — pops
+# up Windows' "A problem caused the program to stop working" dialog,
+# attached to pythonw.exe. The user sees a visible window, closes it, the
+# Rust watchdog respawns Python, the next crash pops the same dialog,
+# repeat. The crash itself is benign (watchdog's second spawn succeeds
+# almost always) — we just don't want the dialog.
+#   SEM_FAILCRITICALERRORS  (0x0001) — no "Fatal error" dialogs
+#   SEM_NOGPFAULTERRORBOX   (0x0002) — no access-violation dialogs
+# The combined mask silences the WER dialog chain entirely while still
+# letting the process exit with the original error code so the watchdog
+# can see the crash and respawn.
+if os.name == "nt":
+    try:
+        import ctypes
+        SEM_FAILCRITICALERRORS = 0x0001
+        SEM_NOGPFAULTERRORBOX = 0x0002
+        ctypes.windll.kernel32.SetErrorMode(
+            SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX)
+    except Exception:
+        # Don't let SetErrorMode failure stop the backend from coming up —
+        # worst case the WER dialog still shows on a rare crash.
+        pass
+
 # Intel Fortran runtime (shipped with numpy/scipy/torch's MKL) installs a
 # Windows console-close handler that aborts the Python process with exit
 # code 200 ("forrtl: error (200): program aborting due to window-CLOSE
