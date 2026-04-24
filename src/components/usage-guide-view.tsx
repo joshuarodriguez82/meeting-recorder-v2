@@ -13,25 +13,18 @@ const SECTIONS: Section[] = [
       <>
         <p>
           Meeting Recorder captures meetings, transcribes them with Whisper (on your machine),
-          identifies speakers with Pyannote (on your machine), and uses Claude to extract
-          summaries, action items, requirements, and decisions. All audio and transcripts stay
-          local — only Claude calls leave your machine.
+          identifies speakers with Pyannote (on your machine), and sends the transcript to an
+          LLM (Claude by default, but also OpenRouter / Ollama / any OpenAI-compatible endpoint)
+          to extract summaries, action items, requirements, and decisions. All audio and
+          transcripts stay local — only the LLM call leaves your machine, and with Ollama even
+          that stays local.
         </p>
 
-        <p className="font-medium mt-4">First-run setup — you need two tokens:</p>
+        <p className="font-medium mt-4">First-run setup:</p>
 
         <div className="rounded-md border bg-muted/40 p-4 space-y-3 text-sm">
           <div>
-            <div className="font-medium">1. Anthropic API Key (powers AI extraction)</div>
-            <ol className="list-decimal pl-5 mt-1 space-y-0.5 text-muted-foreground">
-              <li>Sign up at <a href="https://console.anthropic.com" target="_blank" rel="noreferrer" className="text-primary hover:underline">console.anthropic.com</a></li>
-              <li>Billing → Buy credits → add $5-10 (~$0.05 per meeting on Haiku)</li>
-              <li><a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="text-primary hover:underline">Settings → API Keys</a> → Create Key</li>
-              <li>Copy the <code className="text-[11px]">sk-ant-api03-...</code> value</li>
-            </ol>
-          </div>
-          <div>
-            <div className="font-medium">2. HuggingFace Token (powers speaker identification)</div>
+            <div className="font-medium">1. HuggingFace Token (required — powers speaker identification)</div>
             <ol className="list-decimal pl-5 mt-1 space-y-0.5 text-muted-foreground">
               <li>Sign up at <a href="https://huggingface.co/join" target="_blank" rel="noreferrer" className="text-primary hover:underline">huggingface.co/join</a> (free)</li>
               <li><a href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer" className="text-primary hover:underline">Settings → Access Tokens</a> → Create new token → Type: <strong>Read</strong></li>
@@ -46,9 +39,31 @@ const SECTIONS: Section[] = [
             </ol>
           </div>
           <div>
-            <div className="font-medium">3. Paste both into Settings</div>
+            <div className="font-medium">2. Pick an AI Provider (for summaries + extractions)</div>
+            <p className="text-muted-foreground pl-5 mb-2">
+              In Settings you&apos;ll see a provider dropdown. Pick one and fill in just the fields it
+              shows — the others disappear.
+            </p>
+            <ul className="list-disc pl-5 space-y-1 text-muted-foreground">
+              <li><strong>Anthropic</strong> (paid) — best quality. Get a key at{" "}
+                <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="text-primary hover:underline">console.anthropic.com</a> +
+                add ~$5-10 credit. Paste into &quot;Anthropic API Key&quot;.</li>
+              <li><strong>OpenRouter</strong> (free tier!) — Llama 3.3 70B, Gemini 2.0 Flash,
+                Qwen 2.5 72B, DeepSeek R1, and more, all free (rate-limited to ~50 requests/day).
+                Get a key at{" "}
+                <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noreferrer" className="text-primary hover:underline">openrouter.ai/settings/keys</a>.</li>
+              <li><strong>Ollama</strong> (local, free, offline) — install{" "}
+                <a href="https://ollama.com/download" target="_blank" rel="noreferrer" className="text-primary hover:underline">ollama.com</a>,
+                run <code className="text-[11px]">ollama pull llama3.1</code> (or any model), pick
+                Ollama in the dropdown. No API key needed, nothing leaves your machine.</li>
+              <li><strong>Custom OpenAI-compatible</strong> — any LM Studio / vLLM / Groq /
+                Together / LocalAI / self-hosted endpoint.</li>
+            </ul>
+          </div>
+          <div>
+            <div className="font-medium">3. Click Save</div>
             <p className="text-muted-foreground pl-5">
-              Click Save. Restart the app so the backend picks up the new keys and downloads the
+              Restart the app so the backend picks up the new provider + key and downloads the
               pyannote models into cache (~200 MB, one-time, on first Process).
             </p>
           </div>
@@ -80,13 +95,22 @@ const SECTIONS: Section[] = [
     content: (
       <>
         <ol className="list-decimal pl-5 space-y-2">
-          <li>Pick a meeting from <strong>Upcoming Meetings</strong> or type a name manually.</li>
-          <li>Tag it with Client and Project (autocompletes from previously-used tags).</li>
+          <li>Pick a meeting from <strong>Upcoming Meetings</strong> (shows the next 7 days from
+            your Classic Outlook calendar) or type a name manually.</li>
+          <li>Tag with Client, then Project. <strong>Project autocomplete is scoped to the
+            selected client</strong> — you&apos;ll only see projects that were previously tagged
+            under that client, so you can&apos;t accidentally cross-tag. Changing the Client clears
+            the Project field.</li>
           <li>Pick a Template: General, Requirements Gathering, Design Review, Sprint Planning, Stakeholder Update.</li>
           <li>Select your mic + System Audio loopback device.</li>
           <li>Click <strong>Start Recording</strong> (bottom of the Audio Devices card).</li>
           <li>When done, <strong>Stop</strong>. A &quot;Just Recorded&quot; card appears with an <strong>Open Session</strong> button.</li>
         </ol>
+        <Tip>
+          <strong>Calendar list survives nav switches.</strong> Clicking between Record / Sessions /
+          Clients won&apos;t drop the loaded meetings. Silent auto-refresh kicks in when the window
+          regains focus — useful if you just accepted a meeting in Outlook.
+        </Tip>
         <Tip>
           <strong>Audio device selection is persistent.</strong> Your mic + loopback choices are
           saved by device name (not index) so they survive reboots, USB re-plugs, and index
@@ -195,7 +219,7 @@ const SECTIONS: Section[] = [
       <>
         <p>Every recording becomes part of a searchable knowledge base:</p>
         <ul className="list-disc pl-5 space-y-1">
-          <li><strong>Sessions</strong> — full history, filter by name/client/project, bulk-process, click any row to open. Hover a row to see a pencil icon for inline rename.</li>
+          <li><strong>Sessions</strong> — full history, filter by name/client/project, bulk-process, click any row to open. Hover a row to see a pencil icon for inline rename. Top-right has two utilities: <strong>Open Recordings Folder</strong> (jumps to <code>%LOCALAPPDATA%\MeetingRecorder\recordings</code> in Explorer) and <strong>Load Session</strong> (imports an external <code>.wav</code> / <code>.mp3</code> / <code>.m4a</code> / <code>.flac</code> file — it&apos;s copied into the recordings folder and becomes a session you can transcribe like any other).</li>
           <li><strong>Follow-Ups</strong> — action items grouped by (meeting, owner). Five tasks for one person from one meeting = one expandable card. Click the external-link icon to jump to the source session&apos;s Actions tab.</li>
           <li><strong>Decisions</strong> — ADR log, click a decision to see full context. &quot;Open Meeting →&quot; to jump in.</li>
           <li><strong>Search</strong> — type a phrase, it searches every transcript + summary + extraction. Click a result to open that session.</li>
@@ -234,6 +258,88 @@ const SECTIONS: Section[] = [
           Overview tab, or when stopping a recording — all three converge on the same session
           metadata.
         </Tip>
+
+        <p className="mt-4 font-medium">Designated Folder (per client auto-export):</p>
+        <p>
+          Each client has a <strong>Designated Folder</strong> card. Click <strong>Browse…</strong>
+          to pick a folder (opens a native Windows folder picker), or paste a path. Once set,
+          every session tagged to that client auto-copies its artifacts there after processing:
+          WAV (on stop or import), transcript, summary, action items, decisions, and requirements.
+          No more manually shuffling files into client folders.
+        </p>
+        <Tip>
+          The copy happens in the background — failures are logged but never block the main
+          flow, so a missing network share or a permission glitch won&apos;t stop a recording
+          from saving. Leave the field blank to disable auto-routing for that client.
+        </Tip>
+      </>
+    ),
+  },
+  {
+    id: "ai-provider",
+    title: "AI Provider & Models",
+    content: (
+      <>
+        <p>
+          <strong>Settings → AI Models → AI Provider</strong> picks which LLM family handles
+          summaries, action items, decisions, requirements, speaker identification, and prep
+          briefs. Pick one, set the model, click Save.
+        </p>
+
+        <div className="rounded-md border bg-muted/40 p-4 space-y-3 text-sm mt-3">
+          <div>
+            <div className="font-medium">Anthropic — Claude (paid, best quality)</div>
+            <p className="text-muted-foreground pl-3">
+              Uses the native Anthropic SDK and your <code>sk-ant-api03-...</code> key. Model
+              presets: Haiku 4.5 (default, ~$0.05/meeting), Sonnet 4.6 (~4× cost), Opus 4.7
+              (~15× cost), Haiku 3.5 (legacy). Pick Haiku unless you have a specific quality
+              need.
+            </p>
+          </div>
+          <div>
+            <div className="font-medium">OpenRouter — free-tier large models</div>
+            <p className="text-muted-foreground pl-3">
+              Gateway that exposes free-tier quotas for Llama 3.3 70B, Gemini 2.0 Flash, Qwen
+              2.5 72B, DeepSeek R1, and Mistral Small. Get a free key at{" "}
+              <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noreferrer" className="text-primary hover:underline">openrouter.ai/settings/keys</a>.
+              Free-tier models have rate limits (roughly 50 requests/day across all free models
+              combined) but cost $0. Paid models (Claude pass-through, GPT-4o, etc.) are also
+              available if you add credits.
+            </p>
+          </div>
+          <div>
+            <div className="font-medium">Ollama — local, offline, zero cost</div>
+            <p className="text-muted-foreground pl-3">
+              Runs a model on your machine. Install Ollama from{" "}
+              <a href="https://ollama.com/download" target="_blank" rel="noreferrer" className="text-primary hover:underline">ollama.com</a>,
+              run <code className="text-[11px]">ollama pull llama3.1</code> (or any model
+              you&apos;ve seen listed on <a href="https://ollama.com/library" target="_blank" rel="noreferrer" className="text-primary hover:underline">ollama.com/library</a>),
+              confirm it&apos;s serving on <code>http://localhost:11434</code>, then in Settings
+              pick Ollama and type the model tag (e.g. <code>llama3.1</code>, <code>phi3</code>).
+              No API key. Nothing leaves your machine. Quality is lower than Claude/GPT-4 but
+              zero-friction for sensitive recordings.
+            </p>
+          </div>
+          <div>
+            <div className="font-medium">Custom OpenAI-compatible</div>
+            <p className="text-muted-foreground pl-3">
+              Any service that implements the OpenAI Chat Completions protocol: LM Studio, vLLM,
+              LocalAI, Groq, Together.ai, Cerebras, self-hosted. Paste the <code>.../v1</code>
+              base URL, the API key the provider gave you, and the model id.
+            </p>
+          </div>
+        </div>
+
+        <Tip>
+          <strong>Changing provider doesn&apos;t rewrite old sessions.</strong> Summaries and
+          extractions are saved as-is. To re-process an old session with a new provider, open
+          it and click the AI Action button again — it&apos;ll overwrite with the new output.
+        </Tip>
+        <Tip>
+          The <strong>Model</strong> field always accepts a free-form value. If a model isn&apos;t
+          in the preset dropdown (new OpenRouter release, custom fine-tune, niche Ollama tag),
+          pick &quot;Custom (type your own)&quot; from the dropdown and paste the exact model id.
+        </Tip>
       </>
     ),
   },
@@ -246,7 +352,7 @@ const SECTIONS: Section[] = [
         <ul className="list-disc pl-5 space-y-1">
           <li><strong>Auto-process after stop</strong> — transcribe → speaker-diarize → summary → action items → decisions → requirements all run automatically when you stop recording. Each stage is independent; a failure on one (rate-limit on Claude, etc.) doesn&apos;t stop the others.</li>
           <li><strong>Auto-draft follow-up email</strong> — after processing, Claude generates a per-attendee follow-up email with their specific action items and meeting context, then creates Outlook drafts (one per person) in your Drafts folder. You review and hit Send. Requires Classic Outlook.</li>
-          <li><strong>Launch on Windows startup</strong> — adds a shortcut to the Startup folder (PowerShell is spawned invisibly — no black console flash since v2.0.12).</li>
+          <li><strong>Launch on Windows startup</strong> — adds a shortcut to the Startup folder via in-process COM (no subprocess at all since v2.0.14 — eliminates the occasional CMD flash and the AV-kill risk on locked-down laptops).</li>
         </ul>
         <Tip>
           You can also trigger follow-up drafts manually from the Session Overview tab — click
@@ -388,13 +494,24 @@ const SECTIONS: Section[] = [
     content: (
       <>
         <p>
-          Default Claude model is <strong>Haiku 4.5</strong> (~$1/M input, $5/M output). A full
-          extraction pipeline for a typical meeting costs under $0.05. Hundreds of meetings per
-          year for a few dollars.
+          Cost depends on the AI Provider you pick (Settings → AI Provider).
         </p>
+        <ul className="list-disc pl-5 space-y-1">
+          <li><strong>Anthropic / Claude Haiku 4.5</strong> (default) — ~$1/M input, $5/M output.
+            A full extraction pipeline for a typical meeting costs under $0.05. Hundreds of
+            meetings per year for a few dollars.</li>
+          <li><strong>Anthropic / Claude Sonnet 4.6</strong> — ~4× Haiku cost, higher quality.
+            Worth it for dense design reviews where nuance matters.</li>
+          <li><strong>OpenRouter free-tier</strong> (Llama 3.3 70B, Gemini 2.0 Flash, Qwen 2.5
+            72B, DeepSeek R1, Mistral Small) — $0. Rate-limited to ~50 requests/day across
+            free models; you&apos;ll hit the limit if you bulk-process many meetings in one sitting.</li>
+          <li><strong>Ollama</strong> (local) — $0, no rate limit, runs on your CPU/GPU. Quality
+            varies by model but for summaries of your own meetings it&apos;s typically fine.</li>
+        </ul>
         <Tip>
-          For dense design reviews where nuance matters, switch to Sonnet 4.5 in Settings. ~4× the
-          cost, but higher quality. Switch back for routine meetings.
+          Transcription (Whisper) and speaker diarization (Pyannote) are already 100% local —
+          they don&apos;t cost anything regardless of AI Provider. Only the summary/extraction
+          calls route through the chosen provider.
         </Tip>
       </>
     ),
@@ -415,7 +532,20 @@ const SECTIONS: Section[] = [
           <div>
             <dt className="font-medium text-sm">Calendar shows no meetings</dt>
             <dd className="text-sm text-muted-foreground mt-1">
-              Requires Classic Outlook (New Outlook doesn&apos;t support COM). Switch in Outlook settings.
+              The Upcoming Meetings panel shows the next 7 days. If you genuinely have nothing
+              scheduled in that window (common late Friday through Sunday), that&apos;s the
+              expected empty state. Otherwise: requires Classic Outlook — New Outlook doesn&apos;t
+              support the COM API we use. Switch in Outlook settings → File → Info → Toggle off
+              &quot;Try the new Outlook&quot;, then restart.
+            </dd>
+          </div>
+          <div>
+            <dt className="font-medium text-sm">&quot;Summarization API call failed&quot; error</dt>
+            <dd className="text-sm text-muted-foreground mt-1">
+              Check Settings → AI Provider. Common causes: empty / invalid API key, wrong
+              base URL for custom endpoints, Ollama not running, or OpenRouter free-tier daily
+              quota hit. The error toast includes the underlying HTTP status and provider
+              message — 401 = bad key, 429 = rate-limited, 404 = model id doesn&apos;t exist.
             </dd>
           </div>
           <div>
