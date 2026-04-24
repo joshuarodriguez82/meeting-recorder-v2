@@ -632,6 +632,19 @@ const SECTIONS: Section[] = [
             </dd>
           </div>
           <div>
+            <dt className="font-medium text-sm">A Windows &quot;pythonw.exe stopped working&quot; dialog pops up</dt>
+            <dd className="text-sm text-muted-foreground mt-1">
+              Fixed in v2.0.18 — the backend now calls <code>SetErrorMode</code> at startup to
+              suppress Windows Error Reporting dialogs. If you still see the dialog: the crash
+              happens before our <code>SetErrorMode</code> call runs (very rare, would have to
+              be in Python&apos;s own startup). The Rust watchdog respawns the backend
+              automatically either way; you can usually just ignore the dialog, and the next
+              launch picks up right after. Check <code>%LOCALAPPDATA%\MeetingRecorder\rust.log</code>
+              for the exit code — <code>3221225477</code> / <code>0xC0000005</code> means
+              access violation (typically corporate AV / EDR scanning a loading DLL).
+            </dd>
+          </div>
+          <div>
             <dt className="font-medium text-sm">Stop button says &quot;fetch failed&quot;</dt>
             <dd className="text-sm text-muted-foreground mt-1">
               Every stream close/terminate call is now wrapped with a 2-3s timeout. If a driver
