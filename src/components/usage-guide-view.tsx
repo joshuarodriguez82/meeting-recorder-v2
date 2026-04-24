@@ -470,6 +470,13 @@ const SECTIONS: Section[] = [
           Click <strong>Clean up now</strong> to run retention immediately.
           Transcripts / summaries / action items / decisions / requirements are <strong>never</strong> deleted.
         </Tip>
+        <Tip>
+          <strong>Retention also sweeps the WAV copies in client Designated Folders.</strong>
+          When a recording is processed and exported to <code>C:\Users\...\Clients\Acme</code>,
+          both the original under <code>recordings\</code> and the copy in the client folder age
+          out on the same schedule. Text exports (transcript, summary, action items) stay behind
+          in the client folder so you keep a permanent archive — only the bulky audio goes.
+        </Tip>
       </>
     ),
   },

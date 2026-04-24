@@ -147,6 +147,40 @@ def cleanup(
         except OSError as e:
             logger.warning(f"Retention: could not delete {audio_path}: {e}")
 
+        # Audio copies that landed in a client's Designated Folder are
+        # tracked on the session. They age out on the same schedule as
+        # the primary file — "processed" sessions have their transcript
+        # + summary exported alongside, so retention only removes the
+        # big WAV and leaves the text artifacts in place. Missing paths
+        # (user renamed or moved the copy) are silently skipped.
+        for extra_path_str in data.get("exported_audio_paths") or []:
+            try:
+                extra = Path(extra_path_str)
+            except Exception:
+                continue
+            if not extra.exists():
+                continue
+            try:
+                size = extra.stat().st_size
+                if not dry_run:
+                    extra.unlink()
+                bytes_freed += size
+                deleted_count += 1
+                # Count under the same processed/unprocessed bucket the
+                # primary file was in so the user can see what age policy
+                # removed them.
+                if processed:
+                    processed_deleted += 1
+                else:
+                    unprocessed_deleted += 1
+                logger.info(
+                    f"Retention: {'(dry run) ' if dry_run else ''}deleted "
+                    f"client-folder copy {extra} "
+                    f"({age_days:.1f} days old, {format_bytes(size)})"
+                )
+            except OSError as e:
+                logger.warning(f"Retention: could not delete {extra}: {e}")
+
     # 2. Orphaned temp files older than 1 day
     for pattern in ("_recording_*.wav", "_loopback_*.wav"):
         for orphan in path.glob(pattern):
