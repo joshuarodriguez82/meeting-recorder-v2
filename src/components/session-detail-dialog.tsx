@@ -29,7 +29,11 @@ interface Props {
   onChanged?: () => void;
   initialTab?: string;
   existingClients?: string[];
-  existingProjects?: string[];
+  // Map of normalized-client-name → list of projects tagged under that
+  // client. When the user changes the Client field in the dialog, the
+  // Project dropdown narrows to projects under THAT client rather than
+  // listing projects from every customer.
+  projectsByClient?: Record<string, string[]>;
 }
 
 const TEMPLATES = [
@@ -42,7 +46,7 @@ const TEMPLATES = [
 
 export function SessionDetailDialog({
   sessionId, open, onOpenChange, onChanged,
-  initialTab = "overview", existingClients = [], existingProjects = [],
+  initialTab = "overview", existingClients = [], projectsByClient = {},
 }: Props) {
   const [session, setSession] = useState<SessionFull | null>(null);
   const [loading, setLoading] = useState(false);
@@ -338,7 +342,9 @@ export function SessionDetailDialog({
                         autoComplete="off"
                       />
                       <datalist id="detail-projects-list">
-                        {existingProjects.map((p) => <option key={p} value={p} />)}
+                        {(projectsByClient[client.trim().toLowerCase()] || []).map((p) => (
+                          <option key={p} value={p} />
+                        ))}
                       </datalist>
                     </div>
                   </div>
