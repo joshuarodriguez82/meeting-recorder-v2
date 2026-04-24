@@ -3,17 +3,29 @@
 import { useEffect, useRef, useState } from "react";
 import { api, formatDuration, type SessionSummary } from "@/lib/api";
 import { toast } from "sonner";
-import { Loader2, Trash2, FolderOpen, Pencil, Check, X } from "lucide-react";
+import { Loader2, Trash2, FolderOpen, Upload, Pencil, Check, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+} from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 interface Props {
   sessions: SessionSummary[];
   onReload: () => void;
   onOpenSession: (id: string) => void;
+}
+
+async function openRecordingsFolder(): Promise<void> {
+  try {
+    await api.openFolder({ kind: "recordings" });
+  } catch (e) {
+    toast.error(`Could not open folder: ${e instanceof Error ? e.message : e}`);
+  }
 }
 
 /**
@@ -141,6 +153,7 @@ export function StatusIcons({ session }: { session: SessionSummary }) {
 export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
   const [filter, setFilter] = useState("");
   const [bulkRunning, setBulkRunning] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
 
   const filtered = sessions.filter((s) => {
     if (!filter) return true;
@@ -186,20 +199,39 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
 
   return (
     <div className="mx-auto max-w-6xl space-y-4">
-      <div className="flex gap-3">
+      <div className="flex gap-3 flex-wrap">
         <Input
           placeholder="Filter by name, client, project..."
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           className="max-w-md"
         />
-        {unprocessed.length > 0 && (
-          <Button onClick={bulkProcess} disabled={bulkRunning}>
-            {bulkRunning ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
-            Bulk Process ({unprocessed.length})
+        <div className="flex gap-2 ml-auto">
+          <Button variant="outline" onClick={openRecordingsFolder}>
+            <FolderOpen className="h-4 w-4 mr-2" />
+            Open Recordings Folder
           </Button>
-        )}
+          <Button variant="outline" onClick={() => setImportOpen(true)}>
+            <Upload className="h-4 w-4 mr-2" />
+            Load Session
+          </Button>
+          {unprocessed.length > 0 && (
+            <Button onClick={bulkProcess} disabled={bulkRunning}>
+              {bulkRunning ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+              Bulk Process ({unprocessed.length})
+            </Button>
+          )}
+        </div>
       </div>
+
+      <ImportSessionDialog
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        onImported={(id) => {
+          onReload();
+          onOpenSession(id);
+        }}
+      />
 
       <Card>
         <CardContent className="p-0">
@@ -247,5 +279,101 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+function ImportSessionDialog({
+  open, onOpenChange, onImported,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  onImported: (sessionId: string) => void;
+}) {
+  const [path, setPath] = useState("");
+  const [name, setName] = useState("");
+  const [client, setClient] = useState("");
+  const [project, setProject] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const handleImport = async () => {
+    const p = path.trim();
+    if (!p) return;
+    setBusy(true);
+    try {
+      const res = await api.importSession({
+        file_path: p,
+        display_name: name.trim(),
+        client: client.trim(),
+        project: project.trim(),
+      });
+      toast.success("Session loaded");
+      onOpenChange(false);
+      setPath(""); setName(""); setClient(""); setProject("");
+      onImported(res.session_id);
+    } catch (e) {
+      toast.error(`Load failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Load Session from Audio File</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3 py-2">
+          <div className="space-y-2">
+            <Label>Audio file path</Label>
+            <Input
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              placeholder="C:\Users\joshu\Downloads\teams-recording.m4a"
+              autoFocus
+              autoComplete="off"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Accepts .wav, .mp3, .m4a, or .flac. The file is copied into your
+              recordings folder — the original stays where it is.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="space-y-2">
+              <Label>Meeting name (optional)</Label>
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Defaults to the filename"
+                autoComplete="off"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Client (optional)</Label>
+              <Input
+                value={client}
+                onChange={(e) => setClient(e.target.value)}
+                autoComplete="off"
+              />
+            </div>
+          </div>
+          <div className="space-y-2">
+            <Label>Project (optional)</Label>
+            <Input
+              value={project}
+              onChange={(e) => setProject(e.target.value)}
+              autoComplete="off"
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button onClick={handleImport} disabled={!path.trim() || busy}>
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : null}
+            Load
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

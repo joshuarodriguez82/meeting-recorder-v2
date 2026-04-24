@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { api, type AudioDevice, type Meeting, type SessionFull } from "@/lib/api";
 import { toast } from "sonner";
 import {
@@ -28,14 +28,24 @@ import { Badge } from "@/components/ui/badge";
 interface Props {
   onSessionsChanged: () => void;
   onOpenSession: (id: string, tab?: string) => void;
+  meetings: Meeting[];
+  meetingsLoading: boolean;
+  // Pass `silent=true` for background refreshes (focus-triggered, etc.)
+  // where an Outlook hiccup should keep the current list instead of
+  // flashing to empty. Silent mode also suppresses toast feedback.
+  onRefreshCalendar: (silent?: boolean) => void;
 }
 
-export function RecordView({ onSessionsChanged, onOpenSession }: Props) {
+export function RecordView({
+  onSessionsChanged,
+  onOpenSession,
+  meetings,
+  meetingsLoading,
+  onRefreshCalendar,
+}: Props) {
   const [templates, setTemplates] = useState<string[]>([]);
   const [inputDevices, setInputDevices] = useState<AudioDevice[]>([]);
   const [outputDevices, setOutputDevices] = useState<AudioDevice[]>([]);
-  const [meetings, setMeetings] = useState<Meeting[]>([]);
-  const [loadingCal, setLoadingCal] = useState(false);
   const [existingClients, setExistingClients] = useState<string[]>([]);
   const [existingProjects, setExistingProjects] = useState<string[]>([]);
 
@@ -53,9 +63,8 @@ export function RecordView({ onSessionsChanged, onOpenSession }: Props) {
 
   const [session, setSession] = useState<SessionFull | null>(null);
 
-  // Load initial data. CRITICAL: we don't Promise.all the calendar in
-  // because Outlook COM can take 5-15s on cold start and we don't want
-  // that blocking the audio dropdown / templates from rendering.
+  // Load initial data. Calendar data is owned by the parent (page.tsx)
+  // so it survives nav switches; we only load local things here.
   useEffect(() => {
     (async () => {
       try {
@@ -69,17 +78,6 @@ export function RecordView({ onSessionsChanged, onOpenSession }: Props) {
         setInputDevices(devices.input);
         setOutputDevices(devices.output);
         setTemplates(tpls);
-        // Slow-path: calendar fires in parallel, updates when ready.
-        // IMPORTANT: on fetch failure we keep whatever list was already
-        // there (usually from a previous successful fetch) rather than
-        // blanking it — Outlook COM transient failures were making the
-        // panel flicker empty every few minutes, forcing users to hit
-        // Refresh manually to get their own meetings back.
-        api.getUpcomingMeetings(36)
-          .then((cal) => setMeetings(cal))
-          .catch((e) => {
-            console.warn("Calendar fetch failed — keeping last list:", e);
-          });
         // Gather unique clients and projects from existing sessions for autocomplete
         const clients = Array.from(new Set(
           sessionsList.map((s) => s.client).filter(Boolean)
@@ -254,47 +252,23 @@ export function RecordView({ onSessionsChanged, onOpenSession }: Props) {
     }
   };
 
-  const refreshCal = async (silent = false) => {
-    setLoadingCal(true);
-    try {
-      // User-initiated refresh always bypasses the 5-minute cache so a
-      // meeting that was just added in Outlook shows up immediately.
-      const cal = await api.getUpcomingMeetings(36, true);
-      setMeetings(cal);
-      if (!silent) {
-        toast.success(`Loaded ${cal.length} upcoming meetings`);
-      }
-    } catch (e) {
-      if (!silent) {
-        toast.error(`Calendar: ${e instanceof Error ? e.message : e}`);
-      } else {
-        // Silent failure — keep the last known list. A transient Outlook
-        // COM glitch shouldn't wipe the panel; the user will see the
-        // stale list + can retry manually.
-        console.warn("Silent calendar refresh failed:", e);
-      }
-    } finally {
-      setLoadingCal(false);
-    }
-  };
-
   // Silent auto-refresh when the app window regains focus. When the user
   // tabs back from Outlook after accepting a new meeting, the calendar
   // panel updates without them having to click Refresh. Debounced at
-  // 30 seconds so bouncing focus doesn't thrash Outlook COM.
+  // 30 seconds so bouncing focus doesn't thrash Outlook COM. The actual
+  // fetch + state update lives in the parent (page.tsx) so nav switches
+  // don't drop the list.
   useEffect(() => {
     let lastRefreshed = Date.now();
     const onFocus = () => {
       const now = Date.now();
       if (now - lastRefreshed < 30_000) return;
       lastRefreshed = now;
-      refreshCal(true);
+      onRefreshCalendar(true);
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-    // refreshCal is stable enough; we don't want this re-binding on each render
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [onRefreshCalendar]);
 
   const useMeeting = (m: Meeting) => {
     const date = new Date(m.start).toISOString().slice(0, 10);
@@ -473,8 +447,8 @@ export function RecordView({ onSessionsChanged, onOpenSession }: Props) {
             Upcoming Meetings
           </CardTitle>
           <CardAction>
-            <Button size="sm" variant="outline" onClick={() => refreshCal()} disabled={loadingCal}>
-              {loadingCal ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Refresh"}
+            <Button size="sm" variant="outline" onClick={() => onRefreshCalendar(false)} disabled={meetingsLoading}>
+              {meetingsLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Refresh"}
             </Button>
           </CardAction>
         </CardHeader>

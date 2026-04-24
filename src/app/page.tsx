@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { api, formatBytes, type SessionSummary } from "@/lib/api";
+import { useEffect, useState, useCallback } from "react";
+import { toast } from "sonner";
+import { api, formatBytes, type Meeting, type SessionSummary } from "@/lib/api";
 import {
   Mic, History, CheckSquare, Target, Search,
   LayoutDashboard, Settings as SettingsIcon, HelpCircle, Loader2,
@@ -43,6 +44,14 @@ export default function Home() {
   const [detailSessionId, setDetailSessionId] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailInitialTab, setDetailInitialTab] = useState("overview");
+
+  // Calendar state lives here (not in RecordView) so switching nav and
+  // coming back doesn't drop the already-loaded meetings. RecordView
+  // unmounts on nav change; anything local to it is lost. The user
+  // noticed the list "flashing away" — that was the empty-initial render
+  // on remount before the re-fetch completed.
+  const [meetings, setMeetings] = useState<Meeting[]>([]);
+  const [meetingsLoading, setMeetingsLoading] = useState(false);
 
   const openSession = (id: string, tab: string = "overview") => {
     setDetailSessionId(id);
@@ -149,9 +158,52 @@ export default function Home() {
     }
   };
 
+  // Calendar loader. Kept here so the list survives nav switches. On
+  // errors or empty responses from a transient COM hiccup, we preserve
+  // whatever meetings we already have rather than blanking the UI —
+  // that was the root of the "flash away, need to refresh" behavior.
+  const reloadCalendar = useCallback(async (opts?: {
+    force?: boolean;
+    announce?: boolean;
+    // `silent=true` for background refreshes (focus-triggered): keep the
+    // existing list on empty/failure so an Outlook hiccup doesn't make
+    // the panel flash blank while the user is just tabbing around.
+    silent?: boolean;
+  }) => {
+    const force = !!opts?.force;
+    const announce = !!opts?.announce;
+    const silent = !!opts?.silent;
+    setMeetingsLoading(true);
+    try {
+      const cal = await api.getUpcomingMeetings(36, force);
+      setMeetings((prev) => {
+        // Backend returned nothing but we already had meetings — keep
+        // the prior list. Specifically guards the Outlook-COM-timeout
+        // path that returns [] after 15s. For silent refreshes we always
+        // preserve; for explicit Refresh clicks we only preserve when
+        // the request wasn't forced (i.e. cache-hit empty).
+        if (cal.length === 0 && prev.length > 0 && (silent || !force)) {
+          return prev;
+        }
+        return cal;
+      });
+      if (announce) toast.success(`Loaded ${cal.length} upcoming meetings`);
+    } catch (e) {
+      if (announce) {
+        toast.error(`Calendar: ${e instanceof Error ? e.message : e}`);
+      }
+      // don't clobber an existing list on transient failure
+    } finally {
+      setMeetingsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    if (backendReady) reloadSessions();
-  }, [backendReady]);
+    if (backendReady) {
+      reloadSessions();
+      reloadCalendar();
+    }
+  }, [backendReady, reloadCalendar]);
 
   // Notification system — polls /sessions/unprocessed every 60s and fires
   // a Windows toast the first time a new unprocessed session appears. The
@@ -343,7 +395,17 @@ export default function Home() {
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden p-8 min-h-0">
           {nav === "record" && (
-            <RecordView onSessionsChanged={reloadSessions} onOpenSession={openSession} />
+            <RecordView
+              onSessionsChanged={reloadSessions}
+              onOpenSession={openSession}
+              meetings={meetings}
+              meetingsLoading={meetingsLoading}
+              onRefreshCalendar={(silent) => reloadCalendar({
+                force: true,
+                announce: !silent,
+                silent: !!silent,
+              })}
+            />
           )}
           {nav === "sessions" && (
             <SessionsView sessions={sessions} onReload={reloadSessions} onOpenSession={openSession} />

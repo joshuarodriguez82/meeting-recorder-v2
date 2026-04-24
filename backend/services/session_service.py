@@ -6,7 +6,9 @@ Uses atomic write (temp file + rename) to prevent corrupt JSON on crash.
 import datetime
 import json
 import os
+import shutil
 import tempfile
+import uuid
 from pathlib import Path
 from typing import List, Optional
 
@@ -153,3 +155,44 @@ class SessionService:
                     logger.info(f"Deleted {p.name}")
                 except OSError as e:
                     logger.warning(f"Could not delete {p}: {e}")
+
+    def import_from_file(
+        self,
+        source_path: str,
+        display_name: str = "",
+        client: str = "",
+        project: str = "",
+    ) -> Session:
+        """
+        Import an existing audio file (WAV) as a new session.
+
+        Copies (doesn't move) the source into the recordings directory
+        using the standard `session_<id>.wav` naming, creates a Session
+        with metadata from the file, and writes the session JSON. The
+        returned session has no transcript/summary yet — the user will
+        run processing from the UI like any freshly-recorded session.
+        """
+        src = Path(source_path)
+        if not src.exists():
+            raise FileNotFoundError(f"File not found: {source_path}")
+        if src.suffix.lower() not in (".wav", ".mp3", ".m4a", ".flac"):
+            raise ValueError(
+                f"Unsupported audio format: {src.suffix}. "
+                "Use .wav, .mp3, .m4a, or .flac.")
+
+        session_id = uuid.uuid4().hex[:8].upper()
+        # Keep the original extension so downstream tooling doesn't
+        # assume .wav when the user imported, say, an .m4a from Teams.
+        dst = self._recordings_dir / f"session_{session_id}{src.suffix.lower()}"
+        shutil.copy2(src, dst)
+
+        session = Session(session_id=session_id)
+        session.display_name = (display_name or src.stem).strip()
+        session.started_at = datetime.datetime.fromtimestamp(src.stat().st_mtime)
+        session.ended_at = session.started_at
+        session.audio_path = str(dst)
+        session.client = client
+        session.project = project
+        self.save(session)
+        logger.info(f"Imported external file {src.name} as session {session_id}")
+        return session

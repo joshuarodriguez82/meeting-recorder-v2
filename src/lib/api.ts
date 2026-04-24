@@ -314,6 +314,38 @@ export const api = {
       `/retention/cleanup?processed_days=${processed_days}&unprocessed_days=${unprocessed_days}`,
       { method: "POST" }
     ),
+
+  // Filesystem helpers
+  openFolder: (body: { kind: "recordings" | "client" | "path"; client?: string; path?: string }) =>
+    request<{ ok: boolean; path: string }>("/system/open-folder", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  importSession: (body: {
+    file_path: string;
+    display_name?: string;
+    client?: string;
+    project?: string;
+  }) =>
+    request<{ ok: boolean; session_id: string }>("/sessions/import", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  // Per-client configs (designated export folders, etc.)
+  getClientConfigs: () =>
+    request<Record<string, { export_folder: string }>>("/clients/config"),
+  setClientConfig: (name: string, cfg: { export_folder: string }) =>
+    request<{ ok: boolean; export_folder: string }>(
+      `/clients/config/${encodeURIComponent(name)}`,
+      { method: "PUT", body: JSON.stringify(cfg) }
+    ),
+
+  exportSession: (id: string) =>
+    request<{ ok: boolean; target_dir: string; paths: string[] }>(
+      `/sessions/${id}/export`, { method: "POST" }
+    ),
 };
 
 export function formatBytes(bytes: number): string {

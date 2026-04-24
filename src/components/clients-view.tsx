@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
-import { Plus, Sparkles, Loader2, Tag, Pencil, Trash2, FolderKanban, X } from "lucide-react";
+import { Plus, Sparkles, Loader2, Tag, Pencil, Trash2, FolderKanban, X, FolderOpen, Check } from "lucide-react";
 
 interface Props {
   sessions: SessionSummary[];
@@ -20,6 +20,17 @@ interface Props {
 }
 
 export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
+  // Per-client configs (keyed by normalized name; matches backend).
+  const [clientConfigs, setClientConfigs] = useState<Record<string, { export_folder: string }>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getClientConfigs()
+      .then((cfgs) => { if (!cancelled) setClientConfigs(cfgs); })
+      .catch(() => { /* non-fatal */ });
+    return () => { cancelled = true; };
+  }, []);
+
   // Client names actually used on sessions
   const taggedClients = useMemo(
     () => Array.from(new Set(sessions.map((s) => s.client).filter(Boolean))).sort(),
@@ -196,6 +207,17 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
             </Button>
           </div>
         </div>
+
+        <DesignatedFolderCard
+          client={selected}
+          folder={clientConfigs[selected.trim().toLowerCase()]?.export_folder || ""}
+          onSaved={(folder) => {
+            setClientConfigs((prev) => ({
+              ...prev,
+              [selected.trim().toLowerCase()]: { export_folder: folder },
+            }));
+          }}
+        />
 
         {/* Projects under this client — click a chip to filter below */}
         <Card>
@@ -948,5 +970,85 @@ function RenameClientDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function DesignatedFolderCard({
+  client, folder, onSaved,
+}: {
+  client: string;
+  folder: string;
+  onSaved: (folder: string) => void;
+}) {
+  // Keep a local copy so typing doesn't have to round-trip through the
+  // parent on every keystroke. Reset when the selected client changes
+  // or the server-side folder value shifts (after a save).
+  const [value, setValue] = useState(folder);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { setValue(folder); }, [client, folder]);
+
+  const dirty = value.trim() !== (folder || "").trim();
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const res = await api.setClientConfig(client, { export_folder: value.trim() });
+      onSaved(res.export_folder);
+      toast.success(
+        res.export_folder
+          ? `Designated folder set for ${client}`
+          : `Cleared designated folder for ${client}`
+      );
+    } catch (e) {
+      toast.error(`Save failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const openFolder = async () => {
+    try {
+      await api.openFolder({ kind: "client", client });
+    } catch (e) {
+      toast.error(`Could not open folder: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader className="py-3">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <FolderOpen className="h-4 w-4 text-primary" />
+          Designated Folder
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="pt-0 space-y-2">
+        <p className="text-xs text-muted-foreground">
+          New recordings, transcripts, summaries, and action items for{" "}
+          <strong>{client}</strong> get copied here automatically after processing.
+          Leave blank to skip auto-routing.
+        </p>
+        <div className="flex gap-2">
+          <Input
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="e.g. C:\Users\joshu\OneDrive - TTEC\Clients\Acme"
+            autoComplete="off"
+          />
+          {folder && (
+            <Button variant="outline" onClick={openFolder} title="Open folder in Explorer">
+              <FolderOpen className="h-4 w-4" />
+            </Button>
+          )}
+          <Button onClick={save} disabled={!dirty || saving}>
+            {saving ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Check className="h-3.5 w-3.5" />
+            )}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
