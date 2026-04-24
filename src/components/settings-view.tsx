@@ -1,15 +1,19 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, formatBytes, type Settings } from "@/lib/api";
+import { api, formatBytes, type Settings, type TemplateEntry } from "@/lib/api";
 import { toast } from "sonner";
-import { Loader2, Save, Trash2 } from "lucide-react";
+import { Loader2, Save, Trash2, Plus, RotateCcw } from "lucide-react";
 import { GpuAccelerationCard } from "./gpu-acceleration-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Badge } from "@/components/ui/badge";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+} from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
@@ -280,6 +284,9 @@ export function SettingsView() {
           <AIProviderSection settings={settings} update={update} />
         </CardContent>
       </Card>
+
+      {/* Summary Templates */}
+      <SummaryTemplatesCard />
 
       {/* Email */}
       <Card>
@@ -599,5 +606,235 @@ function AIProviderSection({
         )}
       </div>
     </div>
+  );
+}
+
+function SummaryTemplatesCard() {
+  const [templates, setTemplates] = useState<TemplateEntry[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [editing, setEditing] = useState<TemplateEntry | null>(null);
+  const [creating, setCreating] = useState(false);
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      const ts = await api.getTemplates();
+      setTemplates(ts);
+    } catch (e) {
+      toast.error(`Could not load templates: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { refresh(); }, []);
+
+  const handleSave = async (name: string, prompt: string) => {
+    try {
+      await api.upsertTemplate(name, prompt);
+      toast.success(`Saved "${name}"`);
+      setEditing(null);
+      setCreating(false);
+      refresh();
+    } catch (e) {
+      toast.error(`Save failed: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  const handleDelete = async (t: TemplateEntry) => {
+    const label = t.is_default ? "Hide" : "Delete";
+    const detail = t.is_default
+      ? "This is a default template. Hiding it keeps the prompt on disk so you can restore it later."
+      : "This permanently removes your custom template.";
+    if (!confirm(`${label} template "${t.name}"?\n\n${detail}`)) return;
+    try {
+      await api.deleteTemplate(t.name);
+      toast.success(t.is_default ? "Template hidden" : "Template deleted");
+      refresh();
+    } catch (e) {
+      toast.error(`Delete failed: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  const handleReset = async (t: TemplateEntry) => {
+    if (!confirm(`Reset "${t.name}" back to the shipped default prompt?`)) return;
+    try {
+      const fresh = await api.resetTemplate(t.name);
+      toast.success("Reset to default");
+      setEditing(fresh);
+      refresh();
+    } catch (e) {
+      toast.error(`Reset failed: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <CardTitle className="text-base">Summary Templates</CardTitle>
+            <p className="text-xs text-muted-foreground mt-1">
+              Each template is a prompt Claude uses when you click <strong>Summarize</strong> on
+              a session. Edit the prompts to match the kind of meetings you actually run, or add
+              new ones (e.g. &quot;SOW Kickoff&quot;, &quot;AWS Connect Discovery&quot;).
+            </p>
+          </div>
+          <Button variant="outline" size="sm" onClick={() => setCreating(true)}>
+            <Plus className="h-3.5 w-3.5 mr-2" />
+            New
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-1">
+        {loading && !templates ? (
+          <div className="flex justify-center py-4 text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+          </div>
+        ) : !templates || templates.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-4 text-center">
+            No templates. Click New to add one.
+          </p>
+        ) : (
+          templates.map((t) => {
+            const edited = t.is_default && t.default_prompt !== null
+              && t.prompt !== t.default_prompt;
+            return (
+              <div
+                key={t.name}
+                className="flex items-center gap-3 rounded-md px-3 py-2 hover:bg-muted/50 cursor-pointer"
+                onClick={() => setEditing(t)}
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium truncate">{t.name}</span>
+                    {t.is_default && (
+                      <Badge variant="outline" className="text-[10px]">default</Badge>
+                    )}
+                    {edited && (
+                      <Badge variant="outline" className="text-[10px] border-amber-400 text-amber-700">edited</Badge>
+                    )}
+                  </div>
+                  <div className="text-xs text-muted-foreground truncate mt-0.5">
+                    {t.prompt.slice(0, 120)}{t.prompt.length > 120 ? "…" : ""}
+                  </div>
+                </div>
+                {t.is_default && edited && (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); handleReset(t); }}
+                    className="h-7 w-7 inline-flex items-center justify-center rounded-md hover:bg-accent text-muted-foreground"
+                    title="Reset to shipped default"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); handleDelete(t); }}
+                  className="h-7 w-7 inline-flex items-center justify-center rounded-md hover:bg-destructive/10 text-muted-foreground hover:text-destructive"
+                  title={t.is_default ? "Hide this default" : "Delete this custom template"}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            );
+          })
+        )}
+      </CardContent>
+      <TemplateEditDialog
+        open={editing !== null}
+        initial={editing}
+        onOpenChange={(v) => !v && setEditing(null)}
+        onSave={handleSave}
+      />
+      <TemplateEditDialog
+        open={creating}
+        initial={null}
+        onOpenChange={(v) => !v && setCreating(false)}
+        onSave={handleSave}
+      />
+    </Card>
+  );
+}
+
+function TemplateEditDialog({
+  open, initial, onOpenChange, onSave,
+}: {
+  open: boolean;
+  initial: TemplateEntry | null;
+  onOpenChange: (v: boolean) => void;
+  onSave: (name: string, prompt: string) => Promise<void> | void;
+}) {
+  const [name, setName] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [saving, setSaving] = useState(false);
+  const isNew = initial === null;
+
+  useEffect(() => {
+    if (open) {
+      setName(initial?.name || "");
+      setPrompt(initial?.prompt || "");
+    }
+  }, [open, initial]);
+
+  const save = async () => {
+    const n = name.trim();
+    const p = prompt.trim();
+    if (!n || !p) return;
+    setSaving(true);
+    try {
+      await onSave(n, p);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{isNew ? "New Template" : `Edit "${initial?.name}"`}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3 py-2">
+          <div className="space-y-2">
+            <Label>Name</Label>
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. AWS Connect Discovery"
+              disabled={!isNew}
+              autoComplete="off"
+            />
+            {!isNew && (
+              <p className="text-[11px] text-muted-foreground">
+                Renaming isn&apos;t supported here — delete this one and create a new name to rename.
+              </p>
+            )}
+          </div>
+          <div className="space-y-2">
+            <Label>Prompt</Label>
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              rows={14}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+              placeholder="Write the instruction Claude should follow when summarizing meetings of this type…"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              The user&apos;s session notes + meeting transcript are automatically appended after
+              this prompt — don&apos;t include a placeholder for the transcript.
+            </p>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button onClick={save} disabled={!name.trim() || !prompt.trim() || saving}>
+            {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <Save className="h-3.5 w-3.5 mr-2" />}
+            {isNew ? "Create" : "Save"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

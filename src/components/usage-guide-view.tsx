@@ -101,7 +101,9 @@ const SECTIONS: Section[] = [
             selected client</strong> — you&apos;ll only see projects that were previously tagged
             under that client, so you can&apos;t accidentally cross-tag. Changing the Client clears
             the Project field.</li>
-          <li>Pick a Template: General, Requirements Gathering, Design Review, Sprint Planning, Stakeholder Update.</li>
+          <li>Pick a Template (see <strong>Summary Templates</strong> section — defaults include
+            General, Requirements Gathering, Design Review, Sprint Planning, Stakeholder Update,
+            plus any custom templates you&apos;ve added).</li>
           <li>Select your mic + System Audio loopback device.</li>
           <li>Click <strong>Start Recording</strong> (bottom of the Audio Devices card).</li>
           <li>When done, <strong>Stop</strong>. A &quot;Just Recorded&quot; card appears with an <strong>Open Session</strong> button.</li>
@@ -110,6 +112,14 @@ const SECTIONS: Section[] = [
           <strong>Calendar list survives nav switches.</strong> Clicking between Record / Sessions /
           Clients won&apos;t drop the loaded meetings. Silent auto-refresh kicks in when the window
           regains focus — useful if you just accepted a meeting in Outlook.
+        </Tip>
+        <Tip>
+          <strong>Client auto-tagging from attendees.</strong> Clicking <strong>Use</strong> on a
+          calendar meeting will pre-fill the Client field when the meeting&apos;s attendee email
+          domains match an existing client you&apos;ve tagged before. It learns from your own
+          history — no configuration. First time you tag meetings with <code>@acme.com</code>
+          attendees to &quot;Acme,&quot; the next one auto-fills. Ties or new domains → leaves Client
+          blank, you pick manually like today.
         </Tip>
         <Tip>
           <strong>Audio device selection is persistent.</strong> Your mic + loopback choices are
@@ -271,6 +281,45 @@ const SECTIONS: Section[] = [
           The copy happens in the background — failures are logged but never block the main
           flow, so a missing network share or a permission glitch won&apos;t stop a recording
           from saving. Leave the field blank to disable auto-routing for that client.
+        </Tip>
+      </>
+    ),
+  },
+  {
+    id: "templates",
+    title: "Summary Templates",
+    content: (
+      <>
+        <p>
+          <strong>Settings → Summary Templates</strong> is the prompt library that powers the
+          Summarize action. Each template is a named prompt Claude (or your chosen provider)
+          follows when you click Summarize on a session. Five ship by default — General,
+          Requirements Gathering, Design Review, Sprint Planning, Stakeholder Update — and
+          every one of them is editable.
+        </p>
+        <ul className="list-disc pl-5 space-y-1">
+          <li><strong>Edit a template</strong> — click the row. Change the prompt to match how
+            your meetings actually go (e.g. extend Requirements Gathering to also ask about
+            existing IVR providers, current call volume, hours of operation).</li>
+          <li><strong>Reset to default</strong> — edited defaults show a small &quot;edited&quot;
+            badge. Click the revert icon (🔄) to restore the prompt that shipped with the app.</li>
+          <li><strong>New template</strong> — click <strong>New</strong> to add your own. Great
+            for recurring meeting types that don&apos;t match a default — &quot;SOW Kickoff&quot;,
+            &quot;Customer Onboarding,&quot; &quot;Post-Mortem,&quot; etc. Once saved it appears in
+            the Template dropdown in the Record view and the Session Detail dialog.</li>
+          <li><strong>Delete / hide</strong> — defaults are <em>hidden</em> when deleted (the
+            prompt stays on disk so you can undelete by re-creating with the same name).
+            User-created templates are fully removed.</li>
+        </ul>
+        <Tip>
+          Templates are stored in <code>%LOCALAPPDATA%\MeetingRecorder\summary_templates.json</code>.
+          Backup that file if you want to move templates between machines.
+        </Tip>
+        <Tip>
+          <strong>Only the Summarize action uses templates.</strong> Action Items, Decisions,
+          Requirements, and Prep Brief use fixed prompts that aren&apos;t exposed in the UI —
+          those outputs are structured enough that customization rarely helps. Edit the summary
+          prompt to focus the free-form narrative.
         </Tip>
       </>
     ),
