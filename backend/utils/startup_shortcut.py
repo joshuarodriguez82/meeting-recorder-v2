@@ -4,9 +4,7 @@ Shortcut lives in %APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup.
 """
 
 import os
-import subprocess
 from pathlib import Path
-from typing import Optional
 
 from utils.logger import get_logger
 
@@ -39,57 +37,56 @@ def is_enabled() -> bool:
 
 
 def enable() -> bool:
-    """Create a .lnk in the Windows Startup folder."""
+    """
+    Create a .lnk in the Windows Startup folder.
+
+    Uses win32com's WScript.Shell directly rather than shelling out to
+    powershell.exe. Two reasons:
+      1. PowerShell spawn pops a console window even under pythonw on
+         locked-down Windows, which the user sees as a black flash.
+      2. On corporate laptops, EDR/AppLocker can kill unsigned-parent
+         PowerShell invocations, which would take the whole backend down
+         (see HANDOFF.md bug #4).
+    """
     app_root = install_dir()
     pyexe = app_root / ".venv" / "Scripts" / "pythonw.exe"
     main_py = app_root / "main.py"
     icon = app_root / "meeting_recorder.ico"
 
     if not pyexe.exists() or not main_py.exists():
-        logger.warning(f"Cannot enable startup — venv or main.py missing")
+        logger.warning("Cannot enable startup — venv or main.py missing")
         return False
 
     lnk = startup_shortcut_path()
     lnk.parent.mkdir(parents=True, exist_ok=True)
 
-    icon_line = f'$sc.IconLocation = "{icon}"\n' if icon.exists() else ""
-    ps_content = (
-        f'$ws = New-Object -ComObject WScript.Shell\n'
-        f'$sc = $ws.CreateShortcut("{lnk}")\n'
-        f'$sc.TargetPath = "{pyexe}"\n'
-        f'$sc.Arguments = \'"{main_py}"\'\n'
-        f'$sc.WorkingDirectory = "{app_root}"\n'
-        f'$sc.Description = "Launch {APP_NAME}"\n'
-        f'{icon_line}'
-        f'$sc.Save()\n'
-    )
-
-    ps_file = app_root / "_startup_shortcut.ps1"
-    ps_file.write_text(ps_content, encoding="utf-8")
     try:
-        # CREATE_NO_WINDOW (0x08000000) suppresses the black PowerShell
-        # console flash — without this the user sees a split-second prompt
-        # every time the startup shortcut setting is applied (app launch +
-        # every settings save while LAUNCH_ON_STARTUP is on).
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-             "-File", str(ps_file)],
-            capture_output=True, text=True, timeout=15,
-            creationflags=0x08000000 if os.name == "nt" else 0,
-        )
-        if r.returncode == 0 and lnk.exists():
+        import pythoncom
+        import win32com.client
+        pythoncom.CoInitialize()
+        try:
+            shell = win32com.client.Dispatch("WScript.Shell")
+            sc = shell.CreateShortcut(str(lnk))
+            sc.TargetPath = str(pyexe)
+            sc.Arguments = f'"{main_py}"'
+            sc.WorkingDirectory = str(app_root)
+            sc.Description = f"Launch {APP_NAME}"
+            if icon.exists():
+                sc.IconLocation = str(icon)
+            sc.Save()
+        finally:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+        if lnk.exists():
             logger.info(f"Startup shortcut installed: {lnk}")
             return True
-        logger.warning(f"Startup shortcut creation failed: {r.stderr}")
+        logger.warning("Startup shortcut creation returned no file")
         return False
     except Exception as e:
         logger.warning(f"Startup shortcut creation errored: {e}")
         return False
-    finally:
-        try:
-            ps_file.unlink()
-        except OSError:
-            pass
 
 
 def disable() -> bool:
