@@ -178,6 +178,7 @@ from services.export_service import ExportService
 from services.recording_service import RecordingService
 from services.retention_service import cleanup as run_retention_cleanup, folder_stats
 from services.recovery_service import recover_orphans
+from services.qa_service import QAService
 from services.search_service import SearchService
 from services.session_service import SessionService
 from services.speaker_profile_service import (
@@ -216,6 +217,7 @@ class Services:
         self.recording_svc: Optional[RecordingService] = None
         self.speaker_profile_svc: Optional[SpeakerProfileService] = None
         self.search_svc: Optional[SearchService] = None
+        self.qa_svc: Optional[QAService] = None
         self.transcription: Optional[TranscriptionEngine] = None
         self.diarization: Optional[DiarizationEngine] = None
         self.summarizer: Optional[Summarizer] = None
@@ -299,6 +301,11 @@ class Services:
                     # surface the error at first use.
                     logger.warning(f"Summarizer init failed: {e}")
                     self.summarizer = None
+            # QAService threads search_svc + summarizer together. Either
+            # being None at this moment is fine — QAService.is_ready
+            # reports False and the endpoint emits a clear "not configured"
+            # message instead of crashing.
+            self.qa_svc = QAService(self.search_svc, self.summarizer)
         return self.settings
 
     def ensure_models_loaded(self):
@@ -2149,6 +2156,87 @@ async def search_index_backfill(limit: int = 50):
     except Exception as e:
         logger.exception("Backfill failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Cross-meeting Q&A ────────────────────────────────────────────────
+
+
+class QARequest(BaseModel):
+    query: str
+    top_k: int = 8
+    client: Optional[str] = None
+    project: Optional[str] = None
+
+
+@app.post("/qa/stream")
+async def qa_stream(req: QARequest):
+    """SSE endpoint that streams a Claude (or OpenAI-compatible) answer
+    to the user's question, grounded in chunks retrieved from the
+    semantic search index.
+
+    Event sequence delivered to the client:
+
+      event: sources
+      data: [{session_id, display_name, similarity, ...}, ...]
+
+      data: <text fragment>
+      data: <text fragment>
+      ...
+
+      event: done
+      data:
+
+    The `sources` event fires before the first text fragment so the
+    UI can render the citation panel while Claude is still typing. A
+    final `done` event signals normal completion. Errors come through
+    as an `event: error` so the client can show a clear failure state
+    instead of just hanging on a closed stream.
+    """
+    from fastapi.responses import StreamingResponse
+    import json as _json
+
+    svc.load_settings()
+    if not svc.qa_svc or not svc.qa_svc.is_ready:
+        raise HTTPException(
+            status_code=409,
+            detail=("Q&A needs both the semantic-search index and an AI "
+                    "provider configured. Save an Anthropic / OpenRouter / "
+                    "Ollama key in Settings → AI Provider, then try again."),
+        )
+    if not (req.query or "").strip():
+        raise HTTPException(status_code=400, detail="query cannot be empty")
+
+    # Retrieve up front (synchronous, fast) so the `sources` event can
+    # fire immediately when the SSE stream opens. If the retrieval
+    # finds nothing, QAService.stream_answer emits a "no material"
+    # answer instead of calling the LLM at all.
+    sources = await asyncio.to_thread(
+        svc.qa_svc.retrieve,
+        req.query,
+        max(1, min(20, req.top_k)),
+        req.client,
+        req.project,
+    )
+
+    async def event_stream():
+        try:
+            yield ": connected\n\n"
+            # Source list event — the UI builds its citation panel from
+            # this without having to parse anything out of the answer text.
+            yield "event: sources\n"
+            yield "data: " + _json.dumps(sources) + "\n\n"
+            # Stream the answer text
+            async for fragment in svc.qa_svc.stream_answer(req.query, sources):
+                # Each fragment becomes a single `data:` line. JSON-encode
+                # so embedded newlines / quotes don't break SSE framing.
+                yield "data: " + _json.dumps({"text": fragment}) + "\n\n"
+            yield "event: done\ndata: \n\n"
+        except Exception as e:
+            logger.exception(f"QA stream failed: {e}")
+            yield "event: error\n"
+            yield "data: " + _json.dumps({"error": str(e)}) + "\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 class PrepBriefRequest(BaseModel):
