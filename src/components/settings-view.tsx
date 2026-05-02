@@ -5,6 +5,7 @@ import { api, formatBytes, type Settings, type TemplateEntry } from "@/lib/api";
 import { toast } from "sonner";
 import { Loader2, Save, Trash2, Plus, RotateCcw } from "lucide-react";
 import { GpuAccelerationCard } from "./gpu-acceleration-card";
+import { KnownSpeakersSection } from "./known-speakers-section";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -395,6 +396,9 @@ export function SettingsView() {
 
       {/* GPU acceleration */}
       <GpuAccelerationCard />
+
+      {/* Known speakers (cross-session voice fingerprints) */}
+      <KnownSpeakersSection />
 
       {/* Retention */}
       <Card>
