@@ -479,6 +479,7 @@ def _detect_gpu_hardware() -> dict:
     if sys.platform == "darwin":
         import platform as _platform
         is_arm = _platform.machine() == "arm64"
+        result["platform"] = "macos"
         if is_arm:
             result["apple_silicon"] = True
             result["gpus"].append("Apple Silicon (Metal / MPS)")
@@ -492,9 +493,13 @@ def _detect_gpu_hardware() -> dict:
 
     if sys.platform != "win32":
         # Linux / other — no detection. UI hides the GPU panel.
+        result["platform"] = "linux"
         result["recommended"] = "cpu"
         _GPU_DETECTION_CACHE = result
         return result
+
+    # Falls through to Windows-registry detection below.
+    result["platform"] = "windows"
 
     try:
         import winreg
@@ -651,6 +656,21 @@ async def gpu_install(req: GpuInstallRequest):
         # Also remove torch-directml if present
         post = ["uninstall", "-y", "torch-directml"]
     elif backend_id == "cuda":
+        # Apple dropped NVIDIA driver support in 2018 and PyTorch ships
+        # zero CUDA wheels for macOS. If we let pip run it would churn for
+        # ~30s and fail with "no matching distribution" — confusing the
+        # user. Reject up front with the right answer instead.
+        if sys.platform == "darwin":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "CUDA isn't available on macOS. NVIDIA drivers haven't "
+                    "shipped on Mac since 2018, and PyTorch publishes no "
+                    "CUDA wheels for macOS. On Apple Silicon, MPS (Metal "
+                    "Performance Shaders) is already active by default — "
+                    "no install needed. On Intel Macs, stay on CPU."
+                ),
+            )
         args = [
             "--index-url", "https://download.pytorch.org/whl/cu121",
             "--force-reinstall", "--no-deps",
