@@ -28,7 +28,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": "all",
     "publisher": "[scrubbed]",
     "copyright": "Copyright 2026 [scrubbed]",
     "category": "Productivity",
@@ -48,6 +48,11 @@
       "webviewInstallMode": {
         "type": "embedBootstrapper"
       }
+    },
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "entitlements": "Entitlements.plist",
+      "frameworks": []
     }
   }
 }

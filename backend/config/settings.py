@@ -2,37 +2,48 @@
 Application configuration loaded from environment variables.
 All secrets are sourced from .env — never hardcoded.
 
-For portability, config + recordings live under %APPDATA%\\MeetingRecorder
-on Windows, so the bundled backend (inside the installed app directory,
-which is read-only for non-admin users) never needs to write anywhere
-outside the user's profile.
+Per-user config + recordings live under a writable per-platform location
+so the bundled backend (inside the installed app directory, which is
+read-only for non-admin users) never needs to write anywhere outside the
+user's profile:
+
+  Windows: %LOCALAPPDATA%\\MeetingRecorder
+  macOS:   ~/Library/Application Support/MeetingRecorder
+  Linux:   $XDG_CONFIG_HOME/MeetingRecorder (or ~/.config/MeetingRecorder)
 """
 
 import os
+import sys
 from pathlib import Path
 from dataclasses import dataclass
 from dotenv import dotenv_values, load_dotenv
 
 
 def _user_data_dir() -> Path:
-    """
-    %LOCALAPPDATA%\\MeetingRecorder — the canonical writable directory.
+    """The canonical writable directory for this user's data.
 
-    IMPORTANT: we use LOCALAPPDATA, not APPDATA (Roaming). Corporate
-    environments like Northwind enable OneDrive Known Folder Move which
-    redirects %APPDATA% into OneDrive; sync causes stale reads, file
-    locks mid-write, and intermittent 'failed to fetch' errors from
-    the frontend when config/recordings are being synced in the
-    background. LOCALAPPDATA is per-machine and never redirected.
+    Notes:
+      - Windows: uses LOCALAPPDATA (non-roaming), NOT APPDATA. Corporate
+        environments enable OneDrive Known Folder Move which redirects
+        %APPDATA% into OneDrive; sync causes stale reads, file locks
+        mid-write, and intermittent 'failed to fetch' errors. LOCALAPPDATA
+        is per-machine and never redirected.
+      - macOS: Library/Application Support is the canonical Apple-blessed
+        spot for app data that doesn't need to be user-visible. It's
+        included in Time Machine backups (good for transcripts/sessions)
+        but not in iCloud Drive sync.
     """
     if os.name == "nt":
         base = (os.getenv("LOCALAPPDATA")
                 or os.getenv("APPDATA")
                 or os.getenv("USERPROFILE")
                 or str(Path.home()))
+        d = Path(base) / "MeetingRecorder"
+    elif sys.platform == "darwin":
+        d = Path.home() / "Library" / "Application Support" / "MeetingRecorder"
     else:
         base = os.getenv("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    d = Path(base) / "MeetingRecorder"
+        d = Path(base) / "MeetingRecorder"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -55,6 +66,14 @@ def _resolve_env_path() -> Path:
             if v:
                 candidates.append(Path(v) / "MeetingRecorder" / "config.env")
         candidates.append(Path.home() / "MeetingRecorder" / "config.env")
+    elif sys.platform == "darwin":
+        candidates.append(
+            Path.home() / "Library" / "Application Support"
+            / "MeetingRecorder" / "config.env")
+        # Some users prefer XDG-style on Mac; respect it as a fallback.
+        v = os.getenv("XDG_CONFIG_HOME")
+        if v:
+            candidates.append(Path(v) / "MeetingRecorder" / "config.env")
     else:
         v = os.getenv("XDG_CONFIG_HOME")
         if v:

@@ -5,13 +5,15 @@ Creates a Python venv inside backend/, installs all dependencies,
 and writes a fresh .env if none exists. Run once after cloning.
 
     cd meeting-recorder-v2
-    python setup.py
+    python setup.py     # Windows
+    python3 setup.py    # macOS / Linux
 
-After this, `npm run tauri dev` or the release .exe will find the
-venv at backend/.venv and launch the Python sidecar automatically.
+After this, `npm run tauri dev` or the release .exe / .app will find
+the venv at backend/.venv and launch the Python sidecar automatically.
 """
 
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -20,8 +22,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 BACKEND = ROOT / "backend"
 VENV = BACKEND / ".venv"
-PYEXE = VENV / "Scripts" / "python.exe"
-PIP = VENV / "Scripts" / "pip.exe"
+
+IS_WINDOWS = os.name == "nt"
+IS_MACOS = sys.platform == "darwin"
+
+# Venv layout differs by OS: Scripts/python.exe on Windows, bin/python on POSIX.
+if IS_WINDOWS:
+    PYEXE = VENV / "Scripts" / "python.exe"
+    PIP = VENV / "Scripts" / "pip.exe"
+else:
+    PYEXE = VENV / "bin" / "python"
+    PIP = VENV / "bin" / "pip"
 
 
 def run(cmd, check=True):
@@ -29,7 +40,8 @@ def run(cmd, check=True):
     return subprocess.run(cmd, check=check)
 
 
-def detect_gpu():
+def detect_gpu_windows():
+    """Probe for an NVIDIA GPU on Windows via nvidia-smi."""
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
@@ -47,9 +59,33 @@ def detect_gpu():
     return ("2.6.0", "https://download.pytorch.org/whl/cpu")
 
 
+def detect_pytorch_index():
+    """Pick the right PyTorch wheel index for this OS + hardware.
+
+    macOS: official wheels include MPS (Apple Silicon GPU acceleration)
+    out of the box; no special index needed. Apple Silicon vs Intel is
+    autodetected by pip (universal2 wheels).
+
+    Linux: same fallback as Windows-CPU until/unless we add CUDA support.
+    """
+    if IS_WINDOWS:
+        return detect_gpu_windows()
+    if IS_MACOS:
+        arch = platform.machine()
+        if arch == "arm64":
+            print(f"  macOS Apple Silicon ({arch}) — torch with MPS support")
+        else:
+            print(f"  macOS Intel ({arch}) — CPU torch")
+        # Default PyPI index ships universal2 wheels for macOS.
+        return ("2.6.0", None)
+    # Linux fallback — CPU build.
+    print("  Linux — using CPU-only torch")
+    return ("2.6.0", "https://download.pytorch.org/whl/cpu")
+
+
 def main():
     print("=" * 60)
-    print("  Meeting Recorder v2 — Backend Setup")
+    print(f"  Meeting Recorder v2 — Backend Setup ({platform.system()})")
     print("=" * 60)
 
     # 1. Venv
@@ -59,26 +95,32 @@ def main():
     else:
         print("\n[1/5] Venv already exists — skipping")
 
+    if not PYEXE.exists():
+        sys.exit(f"\n[ERROR] Expected venv Python at {PYEXE} but it's missing. "
+                 f"Delete {VENV} and re-run setup.")
+
     # 2. Upgrade bootstrap packages
     print("\n[2/5] Upgrading pip / setuptools / wheel...")
     run([str(PYEXE), "-m", "pip", "install", "--upgrade",
          "pip", "setuptools", "wheel"])
 
-    # 3. Torch (GPU-specific)
+    # 3. Torch (platform / GPU specific)
     print("\n[3/5] Installing PyTorch...")
-    torch_ver, idx = detect_gpu()
-    run([str(PIP), "install",
-         f"torch=={torch_ver}", f"torchaudio=={torch_ver}",
-         "--index-url", idx])
+    torch_ver, idx = detect_pytorch_index()
+    torch_cmd = [str(PYEXE), "-m", "pip", "install",
+                 f"torch=={torch_ver}", f"torchaudio=={torch_ver}"]
+    if idx:
+        torch_cmd += ["--index-url", idx]
+    run(torch_cmd)
 
-    # 4. All backend deps
+    # 4. All other backend deps
     print("\n[4/5] Installing backend dependencies...")
     pkgs = [
         "fastapi>=0.115.0",
         "uvicorn[standard]>=0.30.0",
         "numpy==2.1.3",
-        "pyaudiowpatch",
         "anthropic",
+        "openai",
         "python-dotenv",
         "sounddevice",
         "soundfile",
@@ -87,9 +129,21 @@ def main():
         "faster-whisper",
         "huggingface_hub==0.23.0",
         "pyannote.audio==3.3.2",
-        "pywin32",
+        "speechbrain==1.0.3",
+        "pytorch-lightning==2.6.1",
+        "lightning==2.6.1",
     ]
-    run([str(PIP), "install", *pkgs])
+    if IS_WINDOWS:
+        pkgs += ["pywin32", "pyaudiowpatch"]
+    if IS_MACOS:
+        # EventKit bridges for the macOS calendar backend. AppleScript
+        # email drafting needs no Python binding (uses /usr/bin/osascript).
+        pkgs += [
+            "pyobjc-core>=10.0",
+            "pyobjc-framework-Cocoa>=10.0",
+            "pyobjc-framework-EventKit>=10.0",
+        ]
+    run([str(PYEXE), "-m", "pip", "install", *pkgs])
 
     # 5. .env
     env_path = BACKEND / ".env"
@@ -118,9 +172,18 @@ def main():
     print("  BACKEND SETUP COMPLETE")
     print("=" * 60)
     print("\nNext steps:")
-    print("  1. Build the app:       npm install && npm run tauri build")
-    print("  2. Create shortcut:     python make_shortcut.py")
-    print("  3. Open File > Settings inside the app to paste your API keys")
+    if IS_MACOS:
+        print("  1. Install BlackHole for system-audio loopback:")
+        print("       brew install blackhole-2ch")
+        print("     (See MAC_SETUP.md for the full audio routing walkthrough.)")
+        print("  2. Build the app:        npm install && npm run tauri build")
+        print("  3. Patch Info.plist:     ./scripts/macos-postbuild.sh")
+        print("  4. Open the .app once    so macOS prompts for Mic/Calendar perms")
+        print("  5. Open Settings inside  the app to paste your API keys")
+    else:
+        print("  1. Build the app:       npm install && npm run tauri build")
+        print("  2. Create shortcut:     python make_shortcut.py")
+        print("  3. Open File > Settings inside the app to paste your API keys")
     print()
 
 
