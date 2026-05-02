@@ -11,6 +11,10 @@
 #   ./scripts/macos-postbuild.sh
 #
 # Re-run any time you rebuild. Idempotent — overwrites existing values.
+# Walks every Meeting Recorder.app under target/ so it works for both
+# native (target/release/bundle/macos/...) and target-prefixed
+# (target/aarch64-apple-darwin/release/bundle/macos/...) builds, which
+# matters in CI where we cross-compile for both Mac architectures.
 
 set -euo pipefail
 
@@ -20,8 +24,6 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_BUNDLE="$REPO_ROOT/src-tauri/target/release/bundle/macos/Meeting Recorder.app"
-DEBUG_BUNDLE="$REPO_ROOT/src-tauri/target/debug/bundle/macos/Meeting Recorder.app"
 
 inject() {
     local plist="$1"
@@ -40,15 +42,18 @@ inject() {
 }
 
 PATCHED=0
-for bundle in "$APP_BUNDLE" "$DEBUG_BUNDLE"; do
-    if [[ -d "$bundle" ]]; then
-        inject "$bundle/Contents/Info.plist" && PATCHED=$((PATCHED+1)) || true
+# Find every "Meeting Recorder.app" anywhere under src-tauri/target/ —
+# covers default builds, target-triple builds (e.g. aarch64-apple-darwin),
+# debug builds, and custom CARGO_TARGET_DIR setups.
+while IFS= read -r -d '' bundle; do
+    if inject "$bundle/Contents/Info.plist"; then
+        PATCHED=$((PATCHED+1))
     fi
-done
+done < <(find "$REPO_ROOT/src-tauri/target" -type d -name "Meeting Recorder.app" -print0 2>/dev/null)
 
 if [[ "$PATCHED" -eq 0 ]]; then
-    echo "macos-postbuild.sh: no .app bundle found yet. Run \`npm run tauri build\` first."
+    echo "macos-postbuild.sh: no .app bundle found yet. Run \`npm run tauri build\` (or \`npx tauri build\`) first."
     exit 1
 fi
 
-echo "Done. macOS will prompt for mic / calendar / automation access on first use."
+echo "Done — patched $PATCHED bundle(s). macOS will prompt for mic / calendar / automation access on first use."
