@@ -28,7 +28,7 @@ git clone https://github.com/joshuarodriguez82/meeting-recorder-v2.git
 cd meeting-recorder-v2
 python3.13 setup.py                       # backend venv (5–10 min). Use python3.13, NOT python3.
 npm install
-npm run tauri build
+npx tauri build
 ./scripts/macos-postbuild.sh              # patches Info.plist privacy keys
 ```
 
