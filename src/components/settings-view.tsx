@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { Loader2, Save, Trash2, Plus, RotateCcw } from "lucide-react";
 import { GpuAccelerationCard } from "./gpu-acceleration-card";
 import { KnownSpeakersSection } from "./known-speakers-section";
+import { SemanticIndexSection } from "./semantic-index-section";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -405,6 +406,9 @@ export function SettingsView() {
 
       {/* Known speakers (cross-session voice fingerprints) */}
       <KnownSpeakersSection />
+
+      {/* Semantic search index (cross-session vector retrieval) */}
+      <SemanticIndexSection />
 
       {/* Retention */}
       <Card>

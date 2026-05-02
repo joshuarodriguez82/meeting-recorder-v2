@@ -327,6 +327,52 @@ export const api = {
       { method: "POST" }
     ),
 
+  // ── Semantic search ───────────────────────────────────────────────
+  semanticSearch: (
+    query: string,
+    top_k: number = 10,
+    client?: string,
+    project?: string,
+  ) =>
+    request<{
+      query: string;
+      results: Array<{
+        session_id: string;
+        display_name: string;
+        started_at: string;
+        client: string;
+        project: string;
+        start_s: number;
+        end_s: number;
+        text: string;
+        similarity: number;
+      }>;
+    }>("/search/semantic", {
+      method: "POST",
+      body: JSON.stringify({ query, top_k, client, project }),
+    }),
+
+  searchIndexStatus: () =>
+    request<{
+      available: boolean;
+      total_sessions: number;
+      indexed_sessions: number;
+      model_id: string;
+    }>("/search/index/status"),
+
+  embedSession: (session_id: string) =>
+    request<{ embedded: boolean; session_id: string }>(
+      `/sessions/${session_id}/embed`,
+      { method: "POST" },
+    ),
+
+  searchIndexBackfill: (limit: number = 50) =>
+    request<{
+      embedded: string[];
+      embedded_count: number;
+      remaining: number;
+    }>(`/search/index/backfill?limit=${limit}`, { method: "POST" }),
+
   // ── Cross-session speaker profiles ────────────────────────────────
   listSpeakerProfiles: () => request<SpeakerProfile[]>("/speaker-profiles"),
   renameSpeakerProfile: (profile_id: string, display_name: string) =>
