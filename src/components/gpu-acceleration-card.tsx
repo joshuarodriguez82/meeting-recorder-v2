@@ -10,22 +10,21 @@ import { Zap, Cpu, Loader2, RefreshCw } from "lucide-react";
 
 type GpuStatus = Awaited<ReturnType<typeof api.getGpuStatus>>;
 
-// AMD / DirectML backend is kept visible even though it's not installable
-// yet — torch-directml only publishes Python 3.10 wheels, our bundled
-// runtime is 3.13. The card shown as "Not available yet" so SAs with AMD
-// hardware know this is coming + understand it's on us, not on them.
-// Re-enable the install path by flipping `disabled` + removing the
-// 400 response in server.py when Microsoft ships a 3.13 wheel:
-// https://pypi.org/project/torch-directml/#files
-const BACKENDS: {
-  id: "cpu" | "cuda" | "directml";
+type BackendCard = {
+  id: "cpu" | "cuda" | "mps" | "directml";
   title: string;
   subtitle: string;
   bytes: string;
   when: string;
   disabled?: boolean;
   disabledReason?: string;
-}[] = [
+};
+
+// Windows / Linux: NVIDIA CUDA is the upgrade path, AMD DirectML is shown
+// as "coming soon" (torch-directml only publishes Python 3.10 wheels and
+// our bundled runtime is 3.13 — re-enable once Microsoft ships a 3.13
+// wheel: https://pypi.org/project/torch-directml/#files).
+const BACKENDS_WINDOWS: BackendCard[] = [
   {
     id: "cpu",
     title: "CPU (default, bundled)",
@@ -50,6 +49,31 @@ const BACKENDS: {
     disabledReason:
       "torch-directml only publishes Python 3.10 wheels; the bundled runtime is 3.13. "
       + "This card will re-enable automatically once a compatible wheel is released.",
+  },
+];
+
+// macOS: NVIDIA / DirectML are not applicable — Apple dropped NVIDIA
+// driver support in 2018 and DirectML is Windows-only. Apple Silicon
+// uses Metal Performance Shaders (MPS), which ships baked into the
+// stock torch wheel — no install needed. Intel Macs only have CPU.
+const BACKENDS_MACOS: BackendCard[] = [
+  {
+    id: "mps",
+    title: "Apple Silicon (Metal / MPS)",
+    subtitle: "Hardware-accelerated transcription on M1, M2, M3, M4 Macs via Apple's Metal Performance Shaders.",
+    bytes: "0 MB — bundled with torch",
+    when: "Active automatically on Apple Silicon Macs. Nothing to install.",
+    disabled: true,
+    disabledReason:
+      "MPS is enabled out of the box whenever the running torch was built with MPS support — "
+      + "every torch 2.x universal2 wheel is. There's nothing to switch to or install.",
+  },
+  {
+    id: "cpu",
+    title: "CPU (force fallback)",
+    subtitle: "Force-disable Apple Silicon GPU acceleration. Slower but more compatible.",
+    bytes: "Reinstalls CPU-only torch",
+    when: "Use only if MPS is causing issues with a specific model. Most users should stay on the default.",
   },
 ];
 
@@ -109,7 +133,13 @@ export function GpuAccelerationCard() {
     };
   }, [installing]);
 
-  const install = async (backend: "cpu" | "cuda" | "directml") => {
+  const install = async (backend: BackendCard["id"]) => {
+    // MPS isn't installable — it's part of the bundled torch. The card
+    // is disabled in the UI but defend against accidental clicks anyway.
+    if (backend === "mps") {
+      toast.info("MPS is bundled with torch — there's nothing to install.");
+      return;
+    }
     if (status?.current === backend) {
       toast.info(`${labelFor(backend)} is already active`);
       return;
@@ -121,7 +151,7 @@ export function GpuAccelerationCard() {
     setInstalling(backend);
     lastAttemptRef.current = backend;
     try {
-      await api.installGpuBackend(backend);
+      await api.installGpuBackend(backend as "cpu" | "cuda" | "directml");
       toast.info(`Installing ${labelFor(backend)}. This can take a few minutes.`);
     } catch (e) {
       setInstalling(null);

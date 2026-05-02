@@ -309,6 +309,10 @@ export const api = {
     detected: {
       nvidia: boolean; amd: boolean; intel: boolean;
       gpus: string[]; recommended: string;
+      // Set on macOS by the backend so the frontend can swap the CUDA
+      // card for an MPS card. Absent on Windows / Linux.
+      platform?: string;
+      apple_silicon?: boolean;
     };
     task: {
       running: boolean; phase: string; message: string;
