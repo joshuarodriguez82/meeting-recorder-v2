@@ -104,8 +104,15 @@ export function SettingsView() {
     );
   }
 
+  // Functional updater — critical when callers fire multiple update()s in
+  // a single tick (e.g. applyPreset flips ai_provider + openai_base_url +
+  // claude_model in sequence). The previous spread-from-closure form
+  // captured `settings` at render time, so back-to-back calls clobbered
+  // each other and only the last update stuck. The visible symptom was:
+  // pick "OpenRouter" from the AI Provider dropdown, the model name
+  // changes but the provider label stubbornly stays on "anthropic".
   const update = <K extends keyof Settings>(key: K, value: Settings[K]) => {
-    setSettings({ ...settings, [key]: value });
+    setSettings((prev) => (prev ? { ...prev, [key]: value } : prev));
   };
 
   const save = async () => {
