@@ -357,6 +357,11 @@ class SettingsDTO(BaseModel):
     ai_provider: str = "anthropic"
     openai_api_key: str = ""
     openai_base_url: str = ""
+    # Streaming live-transcription preview during recording. Default
+    # True; set False on slower machines or for calls where the user
+    # finds the live preview noisy / inaccurate (the canonical
+    # post-stop transcript runs regardless).
+    live_transcription_enabled: bool = True
 
 
 class StartRecordingRequest(BaseModel):
@@ -413,6 +418,7 @@ async def get_settings():
         ai_provider=s.ai_provider or "anthropic",
         openai_api_key=s.openai_api_key,
         openai_base_url=s.openai_base_url,
+        live_transcription_enabled=s.live_transcription_enabled,
     )
 
 
@@ -442,6 +448,7 @@ async def save_settings(payload: SettingsDTO):
         ai_provider=payload.ai_provider or "anthropic",
         openai_api_key=payload.openai_api_key,
         openai_base_url=payload.openai_base_url,
+        live_transcription_enabled=payload.live_transcription_enabled,
     )
     # Force reload
     svc.settings = None
