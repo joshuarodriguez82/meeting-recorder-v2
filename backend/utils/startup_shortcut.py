@@ -151,14 +151,14 @@ def _mac_enable() -> bool:
 """
     try:
         plist_path.write_text(plist, encoding="utf-8")
-        # Load it now so the user doesn't have to log out/in to verify.
-        # `launchctl load -w` is the canonical "enable + start" command.
-        import subprocess
-        subprocess.run(
-            ["/bin/launchctl", "load", "-w", str(plist_path)],
-            capture_output=True, timeout=10,
-        )
-        logger.info(f"LaunchAgent installed: {plist_path}")
+        # We DON'T `launchctl load -w` here on purpose — load + RunAtLoad
+        # would re-launch the app immediately while the user is already
+        # using it (since they just toggled the switch from inside the
+        # running app). macOS auto-loads everything in ~/Library/Launch-
+        # Agents/ at next login, which is the behaviour the user is
+        # actually opting into.
+        logger.info(f"LaunchAgent installed: {plist_path} "
+                    f"(activates on next login)")
         return True
     except Exception as e:
         logger.warning(f"LaunchAgent install failed: {e}")
