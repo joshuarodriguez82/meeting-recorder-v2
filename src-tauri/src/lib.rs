@@ -16,18 +16,106 @@ const BACKEND_PORT: u16 = 17645;
 /// "respawn" a backend that hasn't been spawned yet.
 static BOOTSTRAPPING: AtomicBool = AtomicBool::new(false);
 
+// ─── Platform helpers ───────────────────────────────────────────────
+//
+// The whole shell is structured around three platform abstractions:
+//   - data_root_dir():  per-user state dir (LOCALAPPDATA on Win, Application
+//                        Support on Mac, $XDG_DATA_HOME on Linux)
+//   - venv_python():    where Python lands inside a venv
+//                        (Scripts\python.exe vs bin/python)
+//   - find_system_python_313(): how we locate a system Python to bootstrap
+//                        the venv from
+// Everything else is shared.
+
+#[cfg(windows)]
+fn data_root_dir() -> std::path::PathBuf {
+    let base = std::env::var("LOCALAPPDATA")
+        .or_else(|_| std::env::var("APPDATA"))
+        .unwrap_or_else(|_| std::env::var("USERPROFILE").unwrap_or_default());
+    let dir = std::path::PathBuf::from(base).join("MeetingRecorder");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+#[cfg(target_os = "macos")]
+fn data_root_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let dir = std::path::PathBuf::from(home)
+        .join("Library").join("Application Support").join("MeetingRecorder");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn data_root_dir() -> std::path::PathBuf {
+    let base = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_default();
+            format!("{}/.local/share", home)
+        });
+    let dir = std::path::PathBuf::from(base).join("MeetingRecorder");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Python interpreter path inside a venv directory. POSIX venvs put it
+/// at `<venv>/bin/python`; Windows at `<venv>\Scripts\python.exe`.
+#[cfg(windows)]
+fn venv_python_candidates(venv: &std::path::Path) -> Vec<std::path::PathBuf> {
+    vec![
+        venv.join("Scripts").join("pythonw.exe"),
+        venv.join("Scripts").join("python.exe"),
+    ]
+}
+
+#[cfg(unix)]
+fn venv_python_candidates(venv: &std::path::Path) -> Vec<std::path::PathBuf> {
+    // pythonw doesn't exist on POSIX. `python` is a symlink to python3 in
+    // every modern venv layout, but we check both for old-toolchain venvs.
+    vec![
+        venv.join("bin").join("python3"),
+        venv.join("bin").join("python"),
+    ]
+}
+
+/// Apply the Windows CREATE_NO_WINDOW flag if compiled for Windows. No-op
+/// on POSIX where there's no console-flash issue to suppress.
+fn no_window(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Where the backend zip is installed on disk by Tauri.
 fn resolve_bundle_zip() -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             // Tauri installs resources alongside the exe by default; check
             // a few conventional subdirs just to be safe across bundler
-            // versions (wix / nsis / portable).
-            let candidates = [
+            // versions (wix / nsis / portable on Win; .app/Contents/Resources
+            // on Mac).
+            let mut candidates = vec![
                 dir.join("resources").join("backend-bundle.zip"),
                 dir.join("backend-bundle.zip"),
                 dir.join("resources").join("_up_").join("backend-bundle.zip"),
             ];
+            // macOS: the binary lives at MyApp.app/Contents/MacOS/<exe>;
+            // resources land at MyApp.app/Contents/Resources/.
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(macos_dir) = dir.parent() {
+                    candidates.push(
+                        macos_dir.join("Resources").join("backend-bundle.zip"));
+                    candidates.push(
+                        macos_dir.join("Resources").join("_up_").join("backend-bundle.zip"));
+                }
+            }
             for c in &candidates {
                 if c.exists() {
                     return Some(c.clone());
@@ -35,21 +123,25 @@ fn resolve_bundle_zip() -> Option<std::path::PathBuf> {
             }
         }
     }
-    // Dev checkout
-    let dev = std::path::PathBuf::from(r"C:\meeting-recorder-v2\backend-bundle.zip");
-    if dev.exists() {
-        return Some(dev);
+    // Dev checkout — same path on every platform: a sibling backend-bundle.zip
+    // in the working directory or at the repo root if launched from src-tauri.
+    for dev in [
+        std::path::PathBuf::from("backend-bundle.zip"),
+        std::path::PathBuf::from("../backend-bundle.zip"),
+        #[cfg(windows)]
+        std::path::PathBuf::from(r"C:\meeting-recorder-v2\backend-bundle.zip"),
+    ] {
+        if dev.exists() {
+            return Some(dev);
+        }
     }
     None
 }
 
 /// Where the extracted runtime lives per-user. Writable, survives app
-/// updates, cleaned up only if the user explicitly removes %APPDATA%.
+/// updates, cleaned up only if the user explicitly removes the data root.
 fn runtime_dir() -> std::path::PathBuf {
-    let base = std::env::var("LOCALAPPDATA")
-        .or_else(|_| std::env::var("APPDATA"))
-        .unwrap_or_else(|_| std::env::var("USERPROFILE").unwrap_or_default());
-    let d = std::path::PathBuf::from(base).join("MeetingRecorder").join("runtime");
+    let d = data_root_dir().join("runtime");
     let _ = std::fs::create_dir_all(&d);
     d
 }
@@ -89,34 +181,22 @@ fn zip_version(zip_path: &std::path::Path) -> String {
 
 /// Extract the bundled backend zip into the per-user runtime directory
 /// if it doesn't already exist or if the bundled version changed.
-/// Uses the Windows built-in `tar.exe` (BSD libarchive, ships in 10+).
+/// Uses the system `tar` (BSD libarchive on macOS / Windows 10+; GNU tar
+/// on Linux). All three understand `tar -xf foo.zip`.
 fn ensure_runtime_extracted(zip_path: &std::path::Path) -> Result<std::path::PathBuf, String> {
     let runtime = runtime_dir();
     let version_file = runtime.join(".version");
-    let server_py = runtime.join("server.py");
     let expected_version = zip_version(zip_path);
 
-    // Essential files that MUST exist for the runtime to work. If any
-    // are missing, we re-extract. v2.0.3+ ships a source-only bundle
-    // (no embeddable Python — we bootstrap an app venv from a real
-    // Python 3.13 install instead), so server.py is the only essential.
-    // DO NOT add pythonw.exe here: the source-only bundle has no Python,
-    // so checking for it would force re-extract on every launch (and
-    // every 5-second watchdog respawn), wiping the runtime dir while a
-    // crashing backend may still hold file handles → corrupt partial
-    // state → another crash → loop.
-    let essentials = [
-        runtime.join("server.py"),
-    ];
+    // Essential files that MUST exist for the runtime to work. v2.0.3+
+    // ships a source-only bundle (no embeddable Python), so server.py is
+    // the only essential.
+    let essentials = [runtime.join("server.py")];
     let missing: Vec<_> = essentials.iter()
         .filter(|p| !p.exists())
         .map(|p| p.to_path_buf())
         .collect();
 
-    // Re-extract when the bundled zip changes (installer upgrade) so
-    // new server.py / core / services actually land. Earlier versions
-    // silently updated the marker without re-extracting — that silently
-    // shipped old code after every upgrade. Don't do that.
     let marker = std::fs::read_to_string(&version_file).unwrap_or_default();
     let version_changed = marker != expected_version;
     let needs_extract = !missing.is_empty() || version_changed;
@@ -141,17 +221,10 @@ fn ensure_runtime_extracted(zip_path: &std::path::Path) -> Result<std::path::Pat
             .arg("-xf").arg(zip_path)
             .arg("-C").arg(&runtime)
             .stdout(Stdio::null()).stderr(Stdio::null());
-        // Critical: without CREATE_NO_WINDOW, tar.exe pops a console
-        // window on Windows and the app can't proceed until it closes.
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            tar_cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        no_window(&mut tar_cmd);
         let status = tar_cmd
             .status()
-            .map_err(|e| format!("tar.exe failed to run: {}. Is Windows 10+?", e))?;
+            .map_err(|e| format!("tar failed to run: {}", e))?;
         if !status.success() {
             return Err(format!("tar exited with {}", status));
         }
@@ -177,10 +250,18 @@ fn resolve_backend_dir() -> Option<std::path::PathBuf> {
             Err(e) => rlog(&format!("Runtime extract failed: {}", e)),
         }
     }
-    // Dev fallback — git checkout that already has backend/server.py
-    let dev = std::path::PathBuf::from(r"C:\meeting-recorder-v2\backend");
-    if dev.join("server.py").exists() {
-        return Some(dev);
+    // Dev fallback: a `backend/` sibling directory next to the cwd, the
+    // current working dir's `backend/`, or the canonical Windows checkout.
+    let dev_candidates: Vec<std::path::PathBuf> = vec![
+        std::path::PathBuf::from("backend"),
+        std::path::PathBuf::from("../backend"),
+        #[cfg(windows)]
+        std::path::PathBuf::from(r"C:\meeting-recorder-v2\backend"),
+    ];
+    for c in dev_candidates {
+        if c.join("server.py").exists() {
+            return Some(c);
+        }
     }
     None
 }
@@ -188,68 +269,49 @@ fn resolve_backend_dir() -> Option<std::path::PathBuf> {
 /// Where the app-managed venv lives. Created by bootstrap_app_venv on
 /// first launch if no other Python is available.
 fn app_venv_dir() -> std::path::PathBuf {
-    let base = std::env::var("LOCALAPPDATA")
-        .or_else(|_| std::env::var("APPDATA"))
-        .unwrap_or_else(|_| std::env::var("USERPROFILE").unwrap_or_default());
-    std::path::PathBuf::from(base).join("MeetingRecorder").join(".venv")
+    data_root_dir().join(".venv")
 }
 
 /// Locate a working Python interpreter.
 ///
-/// Note: the embeddable Python at `runtime/python/` is intentionally NOT
-/// checked here. The v2.1.x bundle ships a broken embeddable stdlib and
-/// the whole embeddable approach hit dead ends (speechbrain LazyModule
-/// recursion, missing DiagnosticOptions, etc — see HANDOFF.md bug #1,2).
-/// We rely on a real Python install + venv instead.
+/// Priority:
+///   1. App-managed venv created by bootstrap (production path on
+///      clean machines: first launch creates this via `python -m venv`
+///      against a detected system Python 3.13).
+///   2. Dev checkout venv next to server.py.
+///   3. Legacy v1 venv (Windows only, original dev machine).
 fn resolve_python(backend_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    // 1. App-managed venv created by bootstrap (production path on
-    //    clean laptops: first launch creates this via `python -m venv`
-    //    against a detected system Python 3.13).
     let app_venv = app_venv_dir();
-    let app_candidates = [
-        app_venv.join("Scripts").join("pythonw.exe"),
-        app_venv.join("Scripts").join("python.exe"),
-    ];
-    for c in &app_candidates {
+    for c in venv_python_candidates(&app_venv) {
         if c.exists() {
-            return Some(c.clone());
+            return Some(c);
         }
     }
-    // 2. Dev checkout venv next to server.py.
-    let venv = [
-        backend_dir.join(".venv").join("Scripts").join("pythonw.exe"),
-        backend_dir.join(".venv").join("Scripts").join("python.exe"),
-    ];
-    for c in &venv {
+    let dev_venv = backend_dir.join(".venv");
+    for c in venv_python_candidates(&dev_venv) {
         if c.exists() {
-            return Some(c.clone());
+            return Some(c);
         }
     }
-    // 3. Legacy v1 venv — only present on the original dev machine.
-    let legacy = [
-        std::path::PathBuf::from(r"C:\meeting_recorder\.venv\Scripts\pythonw.exe"),
-    ];
-    for c in &legacy {
-        if c.exists() {
-            return Some(c.clone());
+    #[cfg(windows)]
+    {
+        let legacy = std::path::PathBuf::from(r"C:\meeting_recorder\.venv\Scripts\pythonw.exe");
+        if legacy.exists() {
+            return Some(legacy);
         }
     }
     None
 }
 
 /// Try to find a system-installed Python 3.13 that we can use to create
-/// an app venv from. Checks py launcher, PATH, and common install paths.
+/// an app venv from. Checks multiple discovery paths per platform.
+#[cfg(windows)]
 fn find_system_python_313() -> Option<std::path::PathBuf> {
-    #[cfg(windows)]
-    use std::os::windows::process::CommandExt;
-    #[cfg(windows)]
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
     // 1. `py -3.13 -c "print(sys.executable)"`
     let mut cmd = Command::new("py");
     cmd.args(["-3.13", "-c", "import sys; print(sys.executable)"])
         .stdout(Stdio::piped()).stderr(Stdio::null());
-    #[cfg(windows)] cmd.creation_flags(CREATE_NO_WINDOW);
+    no_window(&mut cmd);
     if let Ok(out) = cmd.output() {
         if out.status.success() {
             let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -264,7 +326,7 @@ fn find_system_python_313() -> Option<std::path::PathBuf> {
     let mut cmd = Command::new("python");
     cmd.args(["-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}'); print(sys.executable)"])
         .stdout(Stdio::piped()).stderr(Stdio::null());
-    #[cfg(windows)] cmd.creation_flags(CREATE_NO_WINDOW);
+    no_window(&mut cmd);
     if let Ok(out) = cmd.output() {
         if out.status.success() {
             let text = String::from_utf8_lossy(&out.stdout).to_string();
@@ -289,38 +351,138 @@ fn find_system_python_313() -> Option<std::path::PathBuf> {
     for c in candidates {
         if c.exists() { return Some(c); }
     }
-
     None
+}
+
+#[cfg(target_os = "macos")]
+fn find_system_python_313() -> Option<std::path::PathBuf> {
+    // 1. `python3.13` on PATH (Homebrew exposes this — `brew install python@3.13`).
+    let mut cmd = Command::new("python3.13");
+    cmd.args(["-c", "import sys; print(sys.executable)"])
+        .stdout(Stdio::piped()).stderr(Stdio::null());
+    if let Ok(out) = cmd.output() {
+        if out.status.success() {
+            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !path.is_empty() {
+                let p = std::path::PathBuf::from(&path);
+                if p.exists() { return Some(p); }
+            }
+        }
+    }
+
+    // 2. `python3` on PATH if it is exactly 3.13.
+    let mut cmd = Command::new("python3");
+    cmd.args(["-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}'); print(sys.executable)"])
+        .stdout(Stdio::piped()).stderr(Stdio::null());
+    if let Ok(out) = cmd.output() {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout).to_string();
+            let mut lines = text.lines();
+            if let (Some(ver), Some(exe)) = (lines.next(), lines.next()) {
+                if ver.trim() == "3.13" {
+                    let p = std::path::PathBuf::from(exe.trim());
+                    if p.exists() { return Some(p); }
+                }
+            }
+        }
+    }
+
+    // 3. Standard install locations: Homebrew on Apple Silicon, Homebrew on
+    //    Intel, python.org installer, pyenv shim.
+    let candidates: Vec<std::path::PathBuf> = vec![
+        std::path::PathBuf::from("/opt/homebrew/bin/python3.13"),         // brew, Apple Silicon
+        std::path::PathBuf::from("/usr/local/bin/python3.13"),             // brew, Intel
+        std::path::PathBuf::from("/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13"),  // python.org
+        std::path::PathBuf::from(format!("{}/.pyenv/versions/3.13.0/bin/python3.13",
+            std::env::var("HOME").unwrap_or_default())),
+    ];
+    for c in candidates {
+        if c.exists() { return Some(c); }
+    }
+    None
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn find_system_python_313() -> Option<std::path::PathBuf> {
+    for name in ["python3.13", "python3"] {
+        let mut cmd = Command::new(name);
+        cmd.args(["-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}'); print(sys.executable)"])
+            .stdout(Stdio::piped()).stderr(Stdio::null());
+        if let Ok(out) = cmd.output() {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout).to_string();
+                let mut lines = text.lines();
+                if let (Some(ver), Some(exe)) = (lines.next(), lines.next()) {
+                    if ver.trim() == "3.13" {
+                        let p = std::path::PathBuf::from(exe.trim());
+                        if p.exists() { return Some(p); }
+                    }
+                }
+            }
+        }
+    }
+    for c in ["/usr/bin/python3.13", "/usr/local/bin/python3.13"] {
+        let p = std::path::PathBuf::from(c);
+        if p.exists() { return Some(p); }
+    }
+    None
+}
+
+/// Human-readable instruction for installing Python 3.13. Surfaced in the
+/// error message when we can't find one — different per platform because
+/// the install method differs (py.org installer vs Homebrew vs apt).
+fn python_install_instructions() -> &'static str {
+    #[cfg(windows)]
+    { "Install Python 3.13 from https://www.python.org/downloads/ \
+       (per-user install, no admin needed; check 'Add python.exe to PATH'), \
+       then restart Meeting Recorder." }
+    #[cfg(target_os = "macos")]
+    { "Install Python 3.13 with Homebrew: `brew install python@3.13`. \
+       (If you don't have Homebrew, install it from https://brew.sh first.) \
+       Then restart Meeting Recorder." }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    { "Install Python 3.13 from your distro's package manager (e.g. `apt install python3.13`) \
+       and restart Meeting Recorder." }
+}
+
+/// Pick the right requirements file for this platform. macOS and Linux
+/// don't have pyaudiowpatch / pywin32 in their wheel index, so they need
+/// a slimmed list. requirements-cpu.txt is the canonical Windows file;
+/// requirements-mac.txt is its Unix sibling.
+fn requirements_filename() -> &'static str {
+    #[cfg(target_os = "macos")]
+    { "requirements-mac.txt" }
+    #[cfg(target_os = "linux")]
+    { "requirements-mac.txt" }   // same dependency set works on Linux
+    #[cfg(windows)]
+    { "requirements-cpu.txt" }
 }
 
 /// Create the app venv and pip install requirements into it. Blocks for
 /// several minutes on first launch while wheels download (~1.5 GB). All
-/// pip output goes to %LOCALAPPDATA%\MeetingRecorder\bootstrap.log so the
-/// user can tail it.
+/// pip output goes to <data_root>/bootstrap.log so the user can tail it.
 fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    #[cfg(windows)]
-    use std::os::windows::process::CommandExt;
-    #[cfg(windows)]
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
     let venv = app_venv_dir();
-    if venv.join("Scripts").join("python.exe").exists() {
-        rlog("App venv already exists — bootstrap skipped");
-        return Ok(venv);
+    // Did the venv already get created on a prior launch?
+    for c in venv_python_candidates(&venv) {
+        if c.exists() {
+            rlog("App venv already exists — bootstrap skipped");
+            return Ok(venv);
+        }
     }
 
     let system_py = find_system_python_313().ok_or_else(|| {
-        "Python 3.13 not found on this machine. Install Python 3.13 from \
-         https://www.python.org/downloads/ (per-user install, no admin needed; \
-         check 'Add python.exe to PATH'), then restart Meeting Recorder.".to_string()
+        format!("Python 3.13 not found on this machine. {}",
+                python_install_instructions())
     })?;
     rlog(&format!("Bootstrap: system Python at {}", system_py.display()));
 
-    let reqs = runtime_dir.join("requirements-cpu.txt");
+    let req_name = requirements_filename();
+    let reqs = runtime_dir.join(req_name);
     if !reqs.exists() {
         return Err(format!(
-            "requirements-cpu.txt not found at {} — bundle may be corrupted",
-            reqs.display()));
+            "{} not found at {} — bundle may be corrupted",
+            req_name, reqs.display()));
     }
 
     let bootstrap_log_path = log_dir().join("bootstrap.log");
@@ -338,16 +500,15 @@ fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBu
     let mut c = Command::new(&system_py);
     c.args(["-m", "venv"]).arg(&venv)
         .stdout(Stdio::from(out)).stderr(Stdio::from(err));
-    #[cfg(windows)] c.creation_flags(CREATE_NO_WINDOW);
+    no_window(&mut c);
     let status = c.status().map_err(|e| format!("venv cmd failed: {}", e))?;
     if !status.success() {
         return Err(format!("python -m venv exited with {} (see bootstrap.log)", status));
     }
 
-    let venv_py = venv.join("Scripts").join("python.exe");
-    if !venv_py.exists() {
-        return Err(format!("venv python.exe missing after create: {}", venv_py.display()));
-    }
+    let venv_py = venv_python_candidates(&venv).into_iter()
+        .find(|p| p.exists())
+        .ok_or_else(|| format!("venv python missing after create under {}", venv.display()))?;
 
     // Step 2: upgrade pip
     rlog("Bootstrap: upgrading pip");
@@ -355,17 +516,17 @@ fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBu
     let mut c = Command::new(&venv_py);
     c.args(["-m", "pip", "install", "--upgrade", "pip"])
         .stdout(Stdio::from(out)).stderr(Stdio::from(err));
-    #[cfg(windows)] c.creation_flags(CREATE_NO_WINDOW);
+    no_window(&mut c);
     let _ = c.status();
 
-    // Step 3: pip install -r requirements-cpu.txt — this is the slow part
-    rlog("Bootstrap: pip install -r requirements-cpu.txt (3-5 min, see bootstrap.log)");
+    // Step 3: pip install -r requirements — the slow part
+    rlog(&format!("Bootstrap: pip install -r {} (3-5 min, see bootstrap.log)", req_name));
     let (out, err) = open_log()?;
     let t0 = std::time::Instant::now();
     let mut c = Command::new(&venv_py);
     c.args(["-m", "pip", "install", "-r"]).arg(&reqs)
         .stdout(Stdio::from(out)).stderr(Stdio::from(err));
-    #[cfg(windows)] c.creation_flags(CREATE_NO_WINDOW);
+    no_window(&mut c);
     let status = c.status().map_err(|e| format!("pip install cmd failed: {}", e))?;
     if !status.success() {
         return Err(format!(
@@ -378,28 +539,25 @@ fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBu
     Ok(venv)
 }
 
-/// Get the log directory. Use %LOCALAPPDATA% (non-roaming) — it's not
-/// subject to OneDrive Known Folder Move on corporate laptops and
-/// matches where other Windows desktop apps put their non-roaming data.
+/// Get the log directory. Same as data_root_dir on every platform —
+/// kept as a separate function so callers' intent is clear.
 fn log_dir() -> std::path::PathBuf {
-    let localappdata = std::env::var("LOCALAPPDATA")
-        .or_else(|_| std::env::var("APPDATA"))
-        .unwrap_or_else(|_| std::env::var("USERPROFILE").unwrap_or_default());
-    let dir = std::path::PathBuf::from(localappdata).join("MeetingRecorder");
-    let _ = std::fs::create_dir_all(&dir);
-    // Migration breadcrumb: if we find stale logs from v2.1.1 under
-    // %APPDATA% (Roaming), drop a README next to them pointing to the
-    // new location so users who go hunting there see the redirect.
-    if let Ok(roaming) = std::env::var("APPDATA") {
-        let old = std::path::PathBuf::from(roaming).join("MeetingRecorder");
-        if old.exists() && old != dir {
-            let readme = old.join("LOGS_MOVED.txt");
-            if !readme.exists() {
-                let _ = std::fs::write(&readme,
-                    format!("Logs moved to {} in v2.1.2+.\n\
-                             Open %LOCALAPPDATA%\\MeetingRecorder in File Explorer \
-                             (paste in the address bar and press Enter).\n",
-                             dir.display()));
+    let dir = data_root_dir();
+    // Migration breadcrumb on Windows: if we find stale logs from v2.1.1
+    // under %APPDATA% (Roaming), drop a README pointing to the new spot.
+    #[cfg(windows)]
+    {
+        if let Ok(roaming) = std::env::var("APPDATA") {
+            let old = std::path::PathBuf::from(roaming).join("MeetingRecorder");
+            if old.exists() && old != dir {
+                let readme = old.join("LOGS_MOVED.txt");
+                if !readme.exists() {
+                    let _ = std::fs::write(&readme,
+                        format!("Logs moved to {} in v2.1.2+.\n\
+                                 Open %LOCALAPPDATA%\\MeetingRecorder in File Explorer \
+                                 (paste in the address bar and press Enter).\n",
+                                 dir.display()));
+                }
             }
         }
     }
@@ -493,17 +651,12 @@ pub fn run() {
             });
             // Watchdog: if the Python process dies unexpectedly (killed
             // by corporate AV, OOM, unhandled exception), respawn it
-            // after a short delay. Corporate security agents like
-            // SentinelOne / CrowdStrike sometimes kill subprocesses
-            // during runtime; without this the app becomes dead-weight
-            // with no recovery short of the user quitting and reopening.
+            // after a short delay.
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
                 let mut consecutive_restarts = 0;
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(5));
-                    // During bootstrap (first-launch pip install), no
-                    // child exists yet and we don't want to flap-respawn.
                     if BOOTSTRAPPING.load(Ordering::Relaxed) {
                         consecutive_restarts = 0;
                         continue;
@@ -532,8 +685,6 @@ pub fn run() {
                         consecutive_restarts = 0;
                         continue;
                     }
-                    // Don't loop on a broken install — if Python keeps
-                    // dying within seconds of spawn, back off.
                     consecutive_restarts += 1;
                     if consecutive_restarts > 5 {
                         rlog("Backend crashed 5+ times in a row — giving up. \
@@ -541,7 +692,7 @@ pub fn run() {
                         break;
                     }
                     if port_in_use(BACKEND_PORT) {
-                        continue; // something is listening, possibly another instance
+                        continue;
                     }
                     rlog(&format!("Respawning backend (attempt {})", consecutive_restarts));
                     if let Err(e) = spawn_python_backend(&app_handle) {
@@ -579,7 +730,6 @@ fn restart_backend(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     rlog("restart_backend command invoked");
-    // Kill the existing child if we own one.
     if let Ok(mut guard) = state.0.lock() {
         if let Some(mut child) = guard.take() {
             match child.kill() {
@@ -589,7 +739,6 @@ fn restart_backend(
             let _ = child.wait();
         }
     }
-    // Wait briefly for the TCP port to free up so the new spawn binds cleanly.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while port_in_use(BACKEND_PORT) && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -599,7 +748,6 @@ fn restart_backend(
 }
 
 fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    // If port is already bound, assume another instance is running and skip.
     if port_in_use(BACKEND_PORT) {
         rlog(&format!(
             "Port {} already in use — skipping spawn (another Meeting Recorder \
@@ -616,9 +764,6 @@ fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
     let python_exe = match resolve_python(&backend_dir) {
         Some(p) => p,
         None => {
-            // No usable Python — bootstrap an app venv from a system
-            // Python 3.13. This blocks for 3-5 minutes on first launch
-            // while pip downloads wheels.
             rlog("No Python found — starting venv bootstrap");
             bootstrap_app_venv(&backend_dir).map_err(|e| {
                 rlog(&format!("ERROR: bootstrap failed: {}", e));
@@ -634,18 +779,11 @@ fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
     rlog(&format!("  server.py: {}", server_py.display()));
     rlog(&format!("  backend.log: {}", backend_log_path().display()));
 
-    // Redirect Python stdout+stderr to a log file so we can see what
-    // happens if the server crashes or is slow to start.
-    // IMPORTANT: open in APPEND mode, not truncate. If the backend
-    // crashes and the watchdog respawns, we want to keep the crash
-    // logs from the previous process so we can diagnose the cause.
-    // File::create() truncates; OpenOptions::append() does not.
     let log_file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(backend_log_path())
         .map_err(|e| format!("Couldn't open backend log file: {}", e))?;
-    // Write a separator so multiple spawn sessions are visible in the log.
     {
         let mut sep = log_file.try_clone()
             .map_err(|e| format!("Couldn't clone log fd for separator: {}", e))?;
@@ -657,30 +795,17 @@ fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
         .map_err(|e| format!("Couldn't clone log fd: {}", e))?;
 
     let mut cmd = Command::new(&python_exe);
-    cmd.arg("-u")  // unbuffered stdout/stderr — critical so logs flush immediately
+    cmd.arg("-u")
        .arg(&server_py)
        .env("PYTHONUNBUFFERED", "1")
-       // Intel Fortran runtime (shipped with numpy/scipy/torch MKL) installs
-       // a Windows console-close handler that aborts the Python process with
-       // exit code 200 when a transient console window attaches/detaches.
-       // That fires when pyannote.audio loads on pythonw.exe with no stable
-       // console, producing "forrtl: error (200): program aborting due to
-       // window-CLOSE event" and a visible cmd-window flash on every model
-       // load call. This env var tells the Fortran runtime to skip registering
-       // the handler entirely.
+       // Intel Fortran runtime workarounds — Windows-only but harmless on
+       // POSIX (FOR_DISABLE_* are simply ignored when MKL isn't present).
        .env("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "1")
-       // Belt-and-suspenders: some MKL builds also install their own handler.
        .env("FOR_DISABLE_STACK_TRACE", "1")
        .stdout(Stdio::from(log_file))
        .stderr(Stdio::from(log_file2));
 
-    // Hide the Python console window on Windows
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    no_window(&mut cmd);
 
     let child = cmd.spawn()
         .map_err(|e| {

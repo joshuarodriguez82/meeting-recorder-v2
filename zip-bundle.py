@@ -10,7 +10,9 @@ BACKEND = ROOT / "backend"
 OUT = ROOT / "backend-bundle.zip"
 
 INCLUDE_DIRS = ["config", "core", "meeting_recorder", "models", "services", "utils"]
-INCLUDE_FILES = ["server.py", "requirements-cpu.txt"]
+# Both requirements files ship in the bundle so the Rust shell can pick the
+# right one for the host platform at first-launch venv bootstrap time.
+INCLUDE_FILES = ["server.py", "requirements-cpu.txt", "requirements-mac.txt"]
 # Skip __pycache__ dirs (they contain compiled bytecode for .py files
 # which Python regenerates on first import — no need to ship them).
 SKIP_PATTERNS = ("__pycache__",)

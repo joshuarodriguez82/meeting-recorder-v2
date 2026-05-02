@@ -1,6 +1,6 @@
 # Meeting Recorder v2
 
-AI-powered meeting recorder for Windows — transcribes meetings, identifies speakers, and extracts summaries, action items, requirements, and decisions.
+AI-powered meeting recorder — transcribes meetings, identifies speakers, and extracts summaries, action items, requirements, and decisions. Runs natively on **Windows** and **macOS**.
 
 **Native desktop app** built with Tauri + Rust for the shell, Next.js + React + shadcn/ui for the UI, and a Python FastAPI sidecar wrapping all the heavy lifting (Whisper, Pyannote, Claude).
 
@@ -12,6 +12,38 @@ Prebuilt installers are published under [**Releases**](https://github.com/joshua
 - **`Meeting Recorder_2.0.0_x64_en-US.msi`** — MSI installer, for IT-managed / Group Policy deploys.
 
 After install you still need a one-time setup to drop in API keys and accept the HuggingFace model terms — see [First-run setup](#first-run-setup) below.
+
+## Build (macOS)
+
+There's no prebuilt Mac installer yet — build from source. The full
+walkthrough (BlackHole audio loopback, EventKit calendar permissions,
+notarization) lives in **[MAC_SETUP.md](./MAC_SETUP.md)**. Short version:
+
+```sh
+xcode-select --install                    # C compiler
+brew install python@3.13 node blackhole-2ch
+brew install rustup-init && rustup-init -y
+
+git clone https://github.com/joshuarodriguez82/meeting-recorder-v2.git
+cd meeting-recorder-v2
+python3 setup.py                          # backend venv (5–10 min)
+npm install
+npm run tauri build
+./scripts/macos-postbuild.sh              # patches Info.plist privacy keys
+```
+
+Then **right-click → Open** the `.app` in `src-tauri/target/release/bundle/macos/`
+to bypass Gatekeeper on first launch (unsigned builds), grant mic + calendar
+permissions when prompted, and paste API keys in Settings.
+
+Mac feature parity vs. Windows:
+- Mic recording: ✅ Core Audio via sounddevice
+- System-audio loopback: ✅ via BlackHole 2ch (free, `brew install blackhole-2ch`, reboot once)
+- Calendar (Upcoming Meetings panel): ✅ EventKit (reads iCloud, Exchange/Outlook for Mac, Google — anything synced into Calendar.app)
+- Follow-up email drafts: ✅ Mail.app and Outlook for Mac via AppleScript, .eml fallback
+- Auto-launch on login: ✅ LaunchAgent plist
+- All AI features (Whisper / Pyannote / Claude / OpenAI-compatible): ✅ identical
+- GPU acceleration: ✅ Apple Silicon MPS auto-enabled by torch 2.6 (no setup)
 
 ## Architecture
 
@@ -77,12 +109,25 @@ After install you still need a one-time setup to drop in API keys and accept the
 
 ## Prerequisites
 
+### Windows
+
 - Windows 10/11 (**Classic Outlook**, not New Outlook)
 - Python 3.11+ — [python.org](https://www.python.org/downloads/)
 - Node.js 20+ — [nodejs.org](https://nodejs.org/)
 - Rust (rustup) — [rustup.rs](https://rustup.rs/)
 - Microsoft WebView2 Runtime (already on Windows 11)
 - NVIDIA GPU recommended (CPU works, slower)
+
+### macOS
+
+- macOS 12 Monterey or later
+- Calendar.app set up with whichever calendars you care about (iCloud,
+  Exchange / Outlook for Mac, Google) — Meeting Recorder reads through
+  Calendar.app, not directly from the providers
+- Xcode Command Line Tools (`xcode-select --install`)
+- Homebrew, Python 3.13, Node 20+, Rust, BlackHole 2ch — see
+  [MAC_SETUP.md](./MAC_SETUP.md) for the exact commands
+- Apple Silicon GPU acceleration is automatic (PyTorch 2.6 MPS backend)
 
 ## Install & build from source
 
@@ -146,7 +191,12 @@ Used to download the pyannote diarization models (runs locally on your machine a
 3. Click **Save Settings**
 4. **Restart the app** so the backend reloads config and downloads the pyannote models (~200 MB, one-time, happens on first Process)
 
-Tokens are stored locally in `%LOCALAPPDATA%\MeetingRecorder\config.env` — never roams to other machines.
+Tokens are stored locally:
+
+- Windows: `%LOCALAPPDATA%\MeetingRecorder\config.env`
+- macOS: `~/Library/Application Support/MeetingRecorder/config.env`
+
+Never roams to other machines.
 
 ## Dev loop (hot reload)
 
@@ -162,12 +212,27 @@ The backend runs at `http://127.0.0.1:17645` — hit endpoints with `curl` for d
 
 To capture other participants (not just your own voice):
 
+### Windows
+
 1. Right-click speaker icon → Sound settings → Recording tab
 2. Right-click empty space → Show Disabled Devices
 3. Enable **Stereo Mix** (right-click → Enable)
 4. In Meeting Recorder: **Record** view → System Audio → select your loopback device
 
 Or install [VB-Cable](https://vb-audio.com/Cable/) (free) as a virtual loopback.
+
+### macOS
+
+macOS has no first-party loopback API for general apps, so you install a
+virtual audio driver — see [MAC_SETUP.md → Audio routing](./MAC_SETUP.md#audio-routing-for-system-audio-capture)
+for the full walkthrough. Short version:
+
+1. `brew install blackhole-2ch && reboot`
+2. Open Audio MIDI Setup → create a Multi-Output Device that includes
+   both your normal output AND BlackHole 2ch.
+3. Set the Multi-Output Device as your system output.
+4. In Meeting Recorder: **Record** view → System Audio → select
+   **BlackHole 2ch**.
 
 ## Troubleshooting
 
