@@ -226,6 +226,48 @@ class Summarizer:
         )
         return resp.choices[0].message.content or ""
 
+    async def stream_chat(self, prompt: str, max_tokens: int = 2048):
+        """
+        Provider-agnostic streaming generator: yields text fragments
+        (str) as the model produces them, so the SSE endpoint can pipe
+        them straight to the browser. Used by QAService for the
+        cross-meeting Q&A "watch the answer type out" UX.
+
+        Both providers' streaming APIs deliver text in unpredictable
+        chunk sizes — sometimes a single token, sometimes a sentence.
+        Caller should accumulate fragments rather than treating each
+        as a sentence boundary.
+        """
+        if self._provider == "anthropic":
+            # Anthropic SDK's async streaming returns an async context
+            # manager; text_stream is an async iterator of deltas.
+            async with self._anthropic_client.messages.stream(
+                model=self._model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            ) as stream:
+                async for text in stream.text_stream:
+                    if text:
+                        yield text
+            return
+
+        # OpenAI-compatible streaming. Each chunk has a delta.content
+        # which is None on bookkeeping events (role, finish_reason)
+        # — skip those and yield only text.
+        stream = await self._openai_client.chat.completions.create(
+            model=self._model,
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+            stream=True,
+        )
+        async for chunk in stream:
+            try:
+                delta = chunk.choices[0].delta.content
+            except (AttributeError, IndexError):
+                continue
+            if delta:
+                yield delta
+
     async def summarize(self, transcript: str, prompt: str,
                          notes: str = "", template_name: str = "") -> str:
         """
