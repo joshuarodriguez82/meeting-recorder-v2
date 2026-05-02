@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Loader2, Mic } from "lucide-react";
+import { api } from "@/lib/api";
 
 // Live transcript panel.
 //
@@ -16,7 +17,8 @@ import { Loader2, Mic } from "lucide-react";
 // produced by /process is what gets persisted on the session.
 //
 // Connection lifecycle:
-//   - Open EventSource when recording starts.
+//   - Open EventSource when recording starts AND the user hasn't
+//     disabled the feature in Settings → Workflow.
 //   - On 'done' event (sent when LiveTranscriber.stop() fires its
 //     sentinel), close the connection.
 //   - On manual unmount (user navigates away), close on cleanup.
@@ -40,7 +42,32 @@ export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
   // we suppress auto-scroll on new segments so we don't rip them away
   // from what they're reading.
   const [autoStick, setAutoStick] = useState(true);
+  // Whether live transcription is enabled in user settings. null = not
+  // yet fetched; true/false = known. We don't render anything until we
+  // know the answer so a flicker of "connecting…" doesn't appear for
+  // users who've disabled the feature.
+  const [liveEnabled, setLiveEnabled] = useState<boolean | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  // Re-fetch the setting every time recording starts, so toggling the
+  // setting in another window between recordings is respected without
+  // an app restart.
+  useEffect(() => {
+    if (!recording) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const s = await api.getSettings();
+        if (!cancelled) setLiveEnabled(s.live_transcription_enabled);
+      } catch {
+        // If settings fetch fails (e.g. backend bouncing) default to
+        // the historical behavior of trying to subscribe — better than
+        // silently denying the user the feature on a transient blip.
+        if (!cancelled) setLiveEnabled(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [recording]);
 
   // Reset when a new recording starts so the previous session's text
   // isn't mixed in.
@@ -51,9 +78,9 @@ export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
     }
   }, [recording]);
 
-  // Open / close the EventSource based on `recording`.
+  // Open / close the EventSource based on `recording` AND `liveEnabled`.
   useEffect(() => {
-    if (!recording) {
+    if (!recording || liveEnabled !== true) {
       setConnected(false);
       return;
     }
@@ -102,7 +129,7 @@ export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
       cancelled = true;
       es?.close();
     };
-  }, [recording]);
+  }, [recording, liveEnabled]);
 
   // Auto-scroll handling. We attach a scroll listener on the panel and
   // toggle autoStick based on whether the user is near the bottom.
@@ -129,7 +156,11 @@ export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
     el.scrollTop = el.scrollHeight;
   }, [segments, autoStick]);
 
-  if (!recording) return null;
+  // Don't render anything when:
+  //   - the user isn't currently recording, OR
+  //   - the user has disabled live transcription in Settings, OR
+  //   - we're still fetching the setting (avoid a flash of "connecting…")
+  if (!recording || liveEnabled !== true) return null;
 
   return (
     <div className="rounded-lg border bg-card p-4 space-y-3">
@@ -159,9 +190,23 @@ export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
           </button>
         )}
       </div>
+      {/* Fixed height (not max-h) so the panel never grows or shrinks
+          as segments accumulate — long calls keep the rest of the page
+          stable. Always-visible scrollbar via the ::-webkit-scrollbar
+          arbitrary-variant classes (default macOS hides scrollbars
+          which made the panel feel like it was pushing things down
+          when it was actually scrolling). 24rem ≈ 8 visible segments. */}
       <div
         ref={scrollRef}
-        className="max-h-72 overflow-y-auto rounded-md bg-muted/40 p-3 text-sm leading-relaxed"
+        className={
+          "h-96 overflow-y-scroll rounded-md bg-muted/40 p-3 text-sm leading-relaxed"
+          + " [scrollbar-gutter:stable]"
+          + " [&::-webkit-scrollbar]:w-2"
+          + " [&::-webkit-scrollbar-track]:bg-transparent"
+          + " [&::-webkit-scrollbar-thumb]:bg-muted-foreground/40"
+          + " [&::-webkit-scrollbar-thumb]:rounded-full"
+          + " [&::-webkit-scrollbar-thumb:hover]:bg-muted-foreground/60"
+        }
       >
         {segments.length === 0 ? (
           <p className="text-muted-foreground text-xs italic">

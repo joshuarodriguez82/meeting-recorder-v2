@@ -186,15 +186,23 @@ class RecordingService:
             self._capture = None
             raise RuntimeError(f"Failed to open recording file: {e}") from e
 
-        # Spin up live transcription. Engine reference is resolved per-
-        # window via a closure so model loading can happen after start;
-        # the worker loop just drops windows until the engine is ready.
+        # Spin up live transcription only if the user hasn't disabled it
+        # in Settings. When disabled we skip the LiveTranscriber thread
+        # AND the per-chunk resampling in _on_audio_chunk, saving CPU on
+        # long calls. The canonical post-stop transcript runs regardless.
+        live_enabled = bool(
+            getattr(self._settings, "live_transcription_enabled", True))
         try:
-            if self._live_transcriber is None:
-                self._live_transcriber = LiveTranscriber(
-                    engine_provider=lambda: self._transcription,
-                )
-            self._live_transcriber.start(LIVE_SR)
+            if not live_enabled:
+                logger.info("Live transcription disabled by user setting; "
+                            "skipping LiveTranscriber spawn.")
+                self._live_transcriber = None
+            else:
+                if self._live_transcriber is None:
+                    self._live_transcriber = LiveTranscriber(
+                        engine_provider=lambda: self._transcription,
+                    )
+                self._live_transcriber.start(LIVE_SR)
         except Exception as e:
             # Live transcription failure is never fatal — recording must
             # still proceed even if streaming text doesn't.
