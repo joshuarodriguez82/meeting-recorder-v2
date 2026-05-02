@@ -13,11 +13,35 @@ Prebuilt installers are published under [**Releases**](https://github.com/joshua
 
 After install you still need a one-time setup to drop in API keys and accept the HuggingFace model terms — see [First-run setup](#first-run-setup) below.
 
-## Build (macOS)
+## Download (macOS)
 
-There's no prebuilt Mac installer yet — build from source. The full
-walkthrough (BlackHole audio loopback, EventKit calendar permissions,
-notarization) lives in **[MAC_SETUP.md](./MAC_SETUP.md)**. Short version:
+Starting with v2.1.0, prebuilt `.dmg` installers are published under
+[**Releases**](https://github.com/joshuarodriguez82/meeting-recorder-v2/releases)
+for both Apple Silicon and Intel Macs. Pick the one that matches your CPU:
+
+- `Meeting Recorder_X.Y.Z_aarch64.dmg` — Apple Silicon (M1, M2, M3, M4)
+- `Meeting Recorder_X.Y.Z_x64.dmg` — Intel Macs
+
+These are **not signed** (no Apple Developer cert), so on first launch
+macOS will block the app with "Apple cannot check it for malicious
+software". Workaround: **right-click the app → Open**, click Open in
+the dialog. One-time per install.
+
+After installing, you still need:
+
+1. **BlackHole** (free audio loopback driver — required to capture other
+   participants' audio): `brew install blackhole-2ch`, then reboot.
+2. **API keys** (Anthropic + HuggingFace) entered in Settings — same as
+   Windows; see [First-run setup](#first-run-setup) below.
+3. **Audio routing** through a Multi-Output Device — see
+   [MAC_SETUP.md → Audio routing](./MAC_SETUP.md#audio-routing-for-system-audio-capture).
+
+## Build from source (macOS)
+
+If you want to hack on the code or your CPU isn't covered by the
+prebuilt DMGs, build from source. The full walkthrough (BlackHole,
+EventKit, notarization) lives in **[MAC_SETUP.md](./MAC_SETUP.md)**.
+Short version:
 
 ```sh
 xcode-select --install                    # C compiler
