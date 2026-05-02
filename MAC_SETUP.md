@@ -66,8 +66,11 @@ After step 5 the toolchain is complete. Steps 7+ are about the app itself.
 git clone https://github.com/joshuarodriguez82/meeting-recorder-v2.git
 cd meeting-recorder-v2
 
-# 1. Backend venv + Python deps (5–10 min, mostly torch)
-python3 setup.py
+# 1. Backend venv + Python deps (5–10 min, mostly torch).
+#    NOTE: use `python3.13`, NOT `python3`. The stock macOS `python3` is
+#    Apple's 3.9, which can't install modern numpy or torch. setup.py
+#    itself will bail with an explanation if you get this wrong.
+python3.13 setup.py
 
 # 2. Frontend deps + Rust toolchain initial compile
 npm install
