@@ -459,20 +459,43 @@ _GPU_DETECTION_CACHE: dict | None = None
 
 
 def _detect_gpu_hardware() -> dict:
-    """Best-effort GPU probe via the Windows registry — NO subprocess.
+    """Best-effort GPU probe.
 
-    Previous versions shelled out to PowerShell (Get-CimInstance). On
-    corporate laptops with AppLocker / SentinelOne / CrowdStrike /
-    Zscaler that subprocess call was being killed and taking the whole
-    backend down with it. Reading DisplayAdapters directly from the
-    registry is the same information, involves no child process, and
-    works in locked-down environments.
+    Windows: reads the registry's DisplayAdapters key — no subprocess, no
+    PowerShell. (Previous versions shelled out to Get-CimInstance, which
+    AppLocker / SentinelOne / CrowdStrike / Zscaler kept killing on
+    corporate laptops, taking the backend down with it.)
+
+    macOS: reports whether the host is Apple Silicon (in which case torch's
+    MPS backend gives transparent GPU acceleration with no extra
+    install). No registry / IOKit poking — torch already knows.
     """
     global _GPU_DETECTION_CACHE
     if _GPU_DETECTION_CACHE is not None:
         return _GPU_DETECTION_CACHE
 
     result = {"nvidia": False, "amd": False, "intel": False, "gpus": []}
+
+    if sys.platform == "darwin":
+        import platform as _platform
+        is_arm = _platform.machine() == "arm64"
+        if is_arm:
+            result["apple_silicon"] = True
+            result["gpus"].append("Apple Silicon (Metal / MPS)")
+            result["recommended"] = "mps"
+        else:
+            result["apple_silicon"] = False
+            result["gpus"].append("Intel Mac (CPU only)")
+            result["recommended"] = "cpu"
+        _GPU_DETECTION_CACHE = result
+        return result
+
+    if sys.platform != "win32":
+        # Linux / other — no detection. UI hides the GPU panel.
+        result["recommended"] = "cpu"
+        _GPU_DETECTION_CACHE = result
+        return result
+
     try:
         import winreg
         # Each installed display adapter gets a subkey under this path
@@ -532,6 +555,16 @@ def _current_gpu_backend() -> str:
             return "cuda"
         if "+rocm" in v:
             return "rocm"
+        # Apple Silicon: torch ships universal2 wheels with MPS baked in.
+        # `is_available()` requires both an Apple GPU and a built-with-MPS
+        # torch — true for any 2.x build on macOS.
+        try:
+            if (sys.platform == "darwin"
+                    and getattr(torch.backends, "mps", None) is not None
+                    and torch.backends.mps.is_available()):
+                return "mps"
+        except Exception:
+            pass
         try:
             import torch_directml  # noqa: F401
             return "directml"
@@ -1197,10 +1230,24 @@ async def open_folder(req: OpenFolderRequest):
     try:
         if os.name == "nt":
             os.startfile(str(p))  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            # `open` on macOS reveals the folder in Finder. Run as a
+            # detached subprocess so we don't block the request, and
+            # ignore exit codes — `open` returns 1 for "already open"
+            # which isn't an error from the user's POV.
+            subprocess.Popen(["/usr/bin/open", str(p)],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
         else:
-            # macOS / Linux fallback for completeness (not the primary target).
-            import webbrowser
-            webbrowser.open(p.as_uri())
+            # Linux: best-effort xdg-open, with a webbrowser fallback for
+            # systems where xdg-utils isn't installed.
+            try:
+                subprocess.Popen(["xdg-open", str(p)],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+            except FileNotFoundError:
+                import webbrowser
+                webbrowser.open(p.as_uri())
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Could not open folder: {e}")
     return {"ok": True, "path": str(p)}

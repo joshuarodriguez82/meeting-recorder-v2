@@ -1,12 +1,48 @@
+"""
+Audio capture: mic + system audio (loopback).
+
+Two platform implementations behind one interface:
+
+- Windows: WASAPI loopback via pyaudiowpatch. The user's chosen system
+  audio device is opened as an "input" by the WASAPI loopback feature,
+  which gives a real-time copy of whatever the OS is playing.
+
+- macOS: requires the user to install BlackHole (`brew install blackhole-2ch`)
+  or another virtual loopback driver. The OS has no first-party loopback
+  API for non-screen-recording contexts, so we list any input device whose
+  name suggests it's a loopback (BlackHole / Loopback / Soundflower /
+  AggregateDevice) and open it as an ordinary sounddevice InputStream.
+  No pyaudiowpatch dependency on this path.
+
+Linux is untested but should follow the macOS path through PulseAudio /
+PipeWire (loopback exposed as a normal capture source).
+"""
+
+import os
+import sys
 import threading
 import time
 from typing import Callable, List, Optional
 import numpy as np
 import sounddevice as sd
-import pyaudiowpatch as pyaudio
+
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+IS_WINDOWS = os.name == "nt"
+IS_MACOS = sys.platform == "darwin"
+
+# pyaudiowpatch is Windows-only; importing it on Mac/Linux will ImportError.
+# We swallow that and switch to the sounddevice-based loopback path.
+pyaudio = None  # type: ignore
+if IS_WINDOWS:
+    try:
+        import pyaudiowpatch as _pyaudio  # type: ignore
+        pyaudio = _pyaudio
+    except ImportError as e:
+        logger.warning(f"pyaudiowpatch not available on Windows: {e}. "
+                       "System audio loopback will be unavailable.")
 
 SAMPLE_RATE = 16000
 BLOCK_SIZE = 1024
@@ -18,6 +54,19 @@ _DEVICE_CACHE_LOCK = threading.Lock()
 _DEVICE_CACHE_TTL = 60
 _input_cache: Optional[tuple[float, List[dict]]] = None
 _output_cache: Optional[tuple[float, List[dict]]] = None
+
+# Substrings that identify virtual loopback devices on macOS. The user
+# installs at least one of these (BlackHole is the recommended free
+# option) and picks it from the System Audio dropdown to capture audio
+# the other meeting participants are playing.
+_MAC_LOOPBACK_NAME_HINTS = (
+    "blackhole",
+    "loopback",
+    "soundflower",
+    "vb-cable",
+    "aggregate",   # user-created Aggregate Device
+    "multi-output", # not technically input but shows what user routed
+)
 
 
 def _get_wasapi_host_api_index() -> Optional[int]:
@@ -49,19 +98,19 @@ def _clean_device_name(raw: str) -> Optional[str]:
         return None
     if name.startswith("Output (") and "\\" in name:
         return None
-    # "Input ()" with nothing in parens — orphan virtual device
     if name in ("Input ()", "Output ()"):
         return None
-    # If the device has a friendly form in parens at the end like
-    # "Headset (Jabra Elite 85t)", the part in the last parens is the
-    # user-friendly label — but we only keep the whole string if it's
-    # human-readable.
     return name
 
 
 def list_input_devices() -> List[dict]:
     """
     One clean entry per physical mic. Cached for 60s.
+
+    Windows: dedupes across WASAPI/MME/DirectSound, prefers WASAPI.
+    macOS: walks Core Audio host devices and skips loopback drivers
+    (those go in list_output_devices instead so the UI distinguishes
+    "what mic captures me" from "what captures the other side").
     """
     global _input_cache
     with _DEVICE_CACHE_LOCK:
@@ -75,40 +124,65 @@ def list_input_devices() -> List[dict]:
     except Exception:
         hostapis = []
 
-    # Only these three host APIs ever appear in the dropdown.
-    ALLOWED_APIS = ("WASAPI", "MME", "DirectSound")
+    if IS_WINDOWS:
+        ALLOWED_APIS = ("WASAPI", "MME", "DirectSound")
 
-    def api_rank(api_name: str) -> int:
-        if "WASAPI" in api_name: return 0
-        if "MME" in api_name: return 1
-        if "DirectSound" in api_name: return 2
-        return 99  # filtered out below
+        def api_rank(api_name: str) -> int:
+            if "WASAPI" in api_name: return 0
+            if "MME" in api_name: return 1
+            if "DirectSound" in api_name: return 2
+            return 99
 
-    # Keep the best-ranked entry per cleaned device name
-    best: dict[str, tuple[int, int, dict]] = {}
-    for idx, dev in enumerate(sd.query_devices()):
-        if dev.get("max_input_channels", 0) <= 0:
-            continue
-        api_idx = dev.get("hostapi", -1)
-        api_name = hostapis[api_idx].get("name", "") if 0 <= api_idx < len(hostapis) else ""
-        if not any(tag in api_name for tag in ALLOWED_APIS):
-            continue  # skip WDM-KS and anything exotic
-        clean = _clean_device_name(dev.get("name", ""))
-        if not clean:
-            continue
-        rank = api_rank(api_name)
-        if clean not in best or rank < best[clean][0]:
-            best[clean] = (rank, idx, dev)
+        # Keep the best-ranked entry per cleaned device name
+        best: dict[str, tuple[int, int, dict]] = {}
+        for idx, dev in enumerate(sd.query_devices()):
+            if dev.get("max_input_channels", 0) <= 0:
+                continue
+            api_idx = dev.get("hostapi", -1)
+            api_name = hostapis[api_idx].get("name", "") if 0 <= api_idx < len(hostapis) else ""
+            if not any(tag in api_name for tag in ALLOWED_APIS):
+                continue
+            clean = _clean_device_name(dev.get("name", ""))
+            if not clean:
+                continue
+            rank = api_rank(api_name)
+            if clean not in best or rank < best[clean][0]:
+                best[clean] = (rank, idx, dev)
 
-    devices = [
-        {
-            "index": idx,
-            "name": name,
-            "max_input_channels": dev["max_input_channels"],
-            "default_samplerate": dev["default_samplerate"],
-        }
-        for name, (_, idx, dev) in best.items()
-    ]
+        devices = [
+            {
+                "index": idx,
+                "name": name,
+                "max_input_channels": dev["max_input_channels"],
+                "default_samplerate": dev["default_samplerate"],
+            }
+            for name, (_, idx, dev) in best.items()
+        ]
+    else:
+        # macOS / Linux: Core Audio (Mac) or ALSA/PulseAudio (Linux) names
+        # are already user-friendly. Skip loopback drivers — those go in
+        # the System Audio dropdown so we don't show BlackHole twice.
+        devices = []
+        seen = set()
+        for idx, dev in enumerate(sd.query_devices()):
+            if dev.get("max_input_channels", 0) <= 0:
+                continue
+            name = (dev.get("name") or "").strip()
+            if not name:
+                continue
+            low = name.lower()
+            if any(hint in low for hint in _MAC_LOOPBACK_NAME_HINTS):
+                continue
+            if name in seen:
+                continue
+            seen.add(name)
+            devices.append({
+                "index": idx,
+                "name": name,
+                "max_input_channels": dev["max_input_channels"],
+                "default_samplerate": dev["default_samplerate"],
+            })
+
     devices.sort(key=lambda d: d["name"].lower())
     with _DEVICE_CACHE_LOCK:
         _input_cache = (time.time(), devices)
@@ -127,8 +201,12 @@ def _find_device_alternatives(primary_idx: int) -> List[int]:
     Given a device index, return other indices that refer to the SAME
     physical device via other host APIs — MME / DirectSound / WDM-KS —
     ranked from most-to-least compatible. Used as fallbacks when the
-    primary (WASAPI) entry refuses to open.
+    primary (WASAPI) entry refuses to open. Windows-only behaviour;
+    on macOS / Linux every device only appears under one host API so
+    this returns [].
     """
+    if not IS_WINDOWS:
+        return []
     try:
         hostapis = sd.query_hostapis()
         primary = sd.query_devices(primary_idx)
@@ -139,7 +217,7 @@ def _find_device_alternatives(primary_idx: int) -> List[int]:
         return []
 
     def api_rank(api_name: str) -> int:
-        if "MME" in api_name: return 0         # most forgiving
+        if "MME" in api_name: return 0
         if "DirectSound" in api_name: return 1
         if "WASAPI" in api_name: return 2
         if "WDM-KS" in api_name: return 3
@@ -163,37 +241,73 @@ def _find_device_alternatives(primary_idx: int) -> List[int]:
 
 
 def list_output_devices() -> List[dict]:
-    """List WASAPI loopback devices for system audio capture via pyaudiowpatch. Cached."""
+    """
+    List loopback / system-audio devices. Cached.
+
+    Windows: WASAPI loopback via pyaudiowpatch — every output device
+    auto-exposes a loopback "input" with `isLoopbackDevice` = True.
+
+    macOS / Linux: enumerate sounddevice inputs whose name suggests they
+    are virtual loopback drivers (BlackHole etc.). The user must install
+    one — see MAC_SETUP.md. If none are present the list is empty and
+    the UI degrades to mic-only capture.
+    """
     global _output_cache
     with _DEVICE_CACHE_LOCK:
         if _output_cache is not None:
             ts, val = _output_cache
             if time.time() - ts < _DEVICE_CACHE_TTL:
                 return val
-    devices = []
-    try:
-        p = pyaudio.PyAudio()
-        wasapi_info = None
-        for i in range(p.get_host_api_count()):
-            api = p.get_host_api_info_by_index(i)
-            if api["name"] == "Windows WASAPI":
-                wasapi_info = api
-                break
 
-        if wasapi_info:
-            for i in range(wasapi_info["deviceCount"]):
-                dev = p.get_device_info_by_host_api_device_index(
-                    wasapi_info["index"], i)
-                if dev.get("isLoopbackDevice", False):
-                    devices.append({
-                        "index": dev["index"],
-                        "name": dev["name"],
-                        "channels": int(dev["maxInputChannels"]),
-                        "default_samplerate": dev["defaultSampleRate"],
-                    })
-        p.terminate()
-    except Exception as e:
-        logger.warning(f"Could not enumerate loopback devices: {e}")
+    devices: list[dict] = []
+
+    if IS_WINDOWS and pyaudio is not None:
+        try:
+            p = pyaudio.PyAudio()
+            wasapi_info = None
+            for i in range(p.get_host_api_count()):
+                api = p.get_host_api_info_by_index(i)
+                if api["name"] == "Windows WASAPI":
+                    wasapi_info = api
+                    break
+
+            if wasapi_info:
+                for i in range(wasapi_info["deviceCount"]):
+                    dev = p.get_device_info_by_host_api_device_index(
+                        wasapi_info["index"], i)
+                    if dev.get("isLoopbackDevice", False):
+                        devices.append({
+                            "index": dev["index"],
+                            "name": dev["name"],
+                            "channels": int(dev["maxInputChannels"]),
+                            "default_samplerate": dev["defaultSampleRate"],
+                        })
+            p.terminate()
+        except Exception as e:
+            logger.warning(f"Could not enumerate loopback devices: {e}")
+    else:
+        # macOS / Linux: list any input device whose name matches a known
+        # virtual-loopback driver. We use sounddevice indices directly so
+        # AudioCapture can open them as ordinary InputStreams below.
+        try:
+            for idx, dev in enumerate(sd.query_devices()):
+                if dev.get("max_input_channels", 0) <= 0:
+                    continue
+                name = (dev.get("name") or "").strip()
+                if not name:
+                    continue
+                low = name.lower()
+                if not any(hint in low for hint in _MAC_LOOPBACK_NAME_HINTS):
+                    continue
+                devices.append({
+                    "index": idx,
+                    "name": name,
+                    "channels": int(dev["max_input_channels"]),
+                    "default_samplerate": dev["default_samplerate"],
+                })
+        except Exception as e:
+            logger.warning(f"Could not enumerate loopback devices: {e}")
+
     with _DEVICE_CACHE_LOCK:
         _output_cache = (time.time(), devices)
     return devices
@@ -216,10 +330,18 @@ class AudioCapture:
         self._running = False
         self._chunk_count = 0
         self.actual_sr = SAMPLE_RATE
-        self._pa: Optional[pyaudio.PyAudio] = None
+        # Windows-only PyAudio handle; unused on Mac (we use sounddevice
+        # for both mic and loopback there).
+        self._pa = None
         self._pa_stream = None
         self._loopback_wav_path = loopback_wav_path
         self._loopback_writer: Optional[object] = None
+        # macOS path uses a sounddevice InputStream for loopback. Tracked
+        # separately from the mic stream so we can stop them independently.
+        self._loopback_sd_stream: Optional[sd.InputStream] = None
+        self._loopback_thread: Optional[threading.Thread] = None
+        self._loopback_sr: int = SAMPLE_RATE
+        self._loopback_channels: int = 1
 
     def start(self) -> None:
         self._running = True
@@ -238,10 +360,6 @@ class AudioCapture:
                     f"Mic device: [{self._mic_idx}] {dev_info['name']} | "
                     f"api={api_name} ch={channels}/{max_ch} sr={native_sr}")
 
-                # Try multiple configurations. Order matters: start with the
-                # device's native sample rate (the most likely to work), then
-                # variations. ASCII-only log markers (cp1252 terminals choke
-                # on unicode like ✓/✗).
                 attempts = [
                     dict(samplerate=native_sr, blocksize=0, latency="high"),
                     dict(samplerate=native_sr, blocksize=0, latency="low"),
@@ -250,7 +368,6 @@ class AudioCapture:
                     dict(samplerate=44100, blocksize=0, latency="high"),
                     dict(samplerate=16000, blocksize=0, latency="high"),
                 ]
-                # Dedup while preserving order
                 seen_cfgs = set()
                 unique_attempts = []
                 for cfg in attempts:
@@ -261,8 +378,7 @@ class AudioCapture:
 
                 # Try the user-selected device first; if every config fails,
                 # fall back to the SAME physical mic on other host APIs
-                # (MME / DirectSound). This rescues drivers that refuse
-                # WASAPI but open cleanly under MME.
+                # (Windows only — _find_device_alternatives returns [] on Mac).
                 device_candidates = [self._mic_idx] + _find_device_alternatives(self._mic_idx)
 
                 mic_stream = None
@@ -294,7 +410,6 @@ class AudioCapture:
                             mic_stream = candidate
                             mic_started = True
                             self.actual_sr = cfg["samplerate"]
-                            # Update in case we fell back to an alternate host API
                             self._mic_idx = dev_idx
                             logger.info(
                                 f"  [OK] Mic stream opened: sr={cfg['samplerate']}Hz "
@@ -314,77 +429,135 @@ class AudioCapture:
                         break
 
                 if not mic_started:
+                    if IS_MACOS:
+                        hint = (
+                            "On macOS this usually means the app hasn't been "
+                            "granted microphone access. Open System Settings → "
+                            "Privacy & Security → Microphone and toggle "
+                            "Meeting Recorder on. Then quit and relaunch.")
+                    else:
+                        hint = (
+                            "The device may be in use by another app (Teams, "
+                            "Zoom, Windows Camera), disconnected, or the driver "
+                            "may need a restart. Try closing other apps or "
+                            "picking a different mic.")
                     raise RuntimeError(
-                        f"All mic configurations failed across every host API. "
-                        f"Last error: {last_err}. The device may be in use by "
-                        f"another app (Teams, Zoom, Windows Camera), disconnected, "
-                        f"or the driver may need a restart. Try closing other "
-                        f"apps or picking a different mic.")
+                        f"All mic configurations failed. Last error: {last_err}. "
+                        f"{hint}")
 
                 self._streams.append(mic_stream)
 
             if self._out_idx is not None:
-                try:
-                    self._pa = pyaudio.PyAudio()
-                    dev_info = self._pa.get_device_info_by_index(self._out_idx)
-                    self._loopback_channels = int(dev_info["maxInputChannels"])
-                    self._loopback_sr = int(dev_info["defaultSampleRate"])
-                    logger.info(
-                        f"Loopback device: [{self._out_idx}] {dev_info['name']} "
-                        f"ch={self._loopback_channels} sr={self._loopback_sr}")
+                if IS_WINDOWS and pyaudio is not None:
+                    self._start_loopback_windows()
+                else:
+                    self._start_loopback_macos()
 
-                    # Try different buffer sizes — some drivers are picky
-                    buffer_attempts = [0, 1024, 4096, 2048]
-                    opened = False
-                    last_err = None
-                    for buf in buffer_attempts:
-                        try:
-                            logger.info(f"  Loopback attempt buffer={buf}")
-                            self._pa_stream = self._pa.open(
-                                format=pyaudio.paFloat32,
-                                channels=self._loopback_channels,
-                                rate=self._loopback_sr,
-                                input=True,
-                                input_device_index=self._out_idx,
-                                frames_per_buffer=buf if buf else 1024,
-                            )
-                            opened = True
-                            logger.info(f"  [OK] Loopback opened with buffer={buf}")
-                            break
-                        except Exception as e:
-                            last_err = e
-                            logger.warning(f"  [FAIL] Loopback buffer={buf} failed: {e}")
-                            continue
-                    if not opened:
-                        raise last_err or RuntimeError("No working loopback config")
-
-                    # Use a dedicated thread for blocking reads
-                    self._loopback_thread = threading.Thread(
-                        target=self._loopback_reader, daemon=True)
-                    self._loopback_thread.start()
-                    logger.info(f"System audio stream started")
-                except Exception as e:
-                    logger.warning(f"System audio capture unavailable: {e}. Mic only.")
-                    self._out_idx = None
-                    if self._pa:
-                        self._pa.terminate()
-                        self._pa = None
-
-        except Exception as e:
+        except Exception:
             self._close_all_streams()
             self._running = False
             raise
 
+    def _start_loopback_windows(self) -> None:
+        """WASAPI loopback path (pyaudiowpatch)."""
+        try:
+            self._pa = pyaudio.PyAudio()
+            dev_info = self._pa.get_device_info_by_index(self._out_idx)
+            self._loopback_channels = int(dev_info["maxInputChannels"])
+            self._loopback_sr = int(dev_info["defaultSampleRate"])
+            logger.info(
+                f"Loopback device (WASAPI): [{self._out_idx}] {dev_info['name']} "
+                f"ch={self._loopback_channels} sr={self._loopback_sr}")
+
+            buffer_attempts = [0, 1024, 4096, 2048]
+            opened = False
+            last_err = None
+            for buf in buffer_attempts:
+                try:
+                    logger.info(f"  Loopback attempt buffer={buf}")
+                    self._pa_stream = self._pa.open(
+                        format=pyaudio.paFloat32,
+                        channels=self._loopback_channels,
+                        rate=self._loopback_sr,
+                        input=True,
+                        input_device_index=self._out_idx,
+                        frames_per_buffer=buf if buf else 1024,
+                    )
+                    opened = True
+                    logger.info(f"  [OK] Loopback opened with buffer={buf}")
+                    break
+                except Exception as e:
+                    last_err = e
+                    logger.warning(f"  [FAIL] Loopback buffer={buf} failed: {e}")
+                    continue
+            if not opened:
+                raise last_err or RuntimeError("No working loopback config")
+
+            self._loopback_thread = threading.Thread(
+                target=self._loopback_reader_pa, daemon=True)
+            self._loopback_thread.start()
+            logger.info("System audio stream started (WASAPI)")
+        except Exception as e:
+            logger.warning(f"System audio capture unavailable: {e}. Mic only.")
+            self._out_idx = None
+            if self._pa:
+                try:
+                    self._pa.terminate()
+                except Exception:
+                    pass
+                self._pa = None
+
+    def _start_loopback_macos(self) -> None:
+        """
+        BlackHole / virtual-loopback path. The "loopback" device is just an
+        ordinary sounddevice input here — whatever the OS routes into it
+        (which the user configures in Audio MIDI Setup or via System
+        Settings → Sound → Output) appears as audio frames.
+        """
+        try:
+            dev_info = sd.query_devices(self._out_idx)
+            self._loopback_channels = min(2, int(dev_info["max_input_channels"]))
+            self._loopback_sr = int(dev_info["default_samplerate"])
+            logger.info(
+                f"Loopback device (sounddevice): [{self._out_idx}] {dev_info['name']} "
+                f"ch={self._loopback_channels} sr={self._loopback_sr}")
+
+            self._loopback_sd_stream = sd.InputStream(
+                device=self._out_idx,
+                channels=self._loopback_channels,
+                samplerate=self._loopback_sr,
+                blocksize=0,
+                latency="high",
+                dtype="float32",
+                callback=self._loopback_callback_sd,
+            )
+            self._loopback_sd_stream.start()
+            # Open the WAV writer in a thread so the callback path stays
+            # tight. The same callback writes frames into the writer.
+            self._loopback_thread = threading.Thread(
+                target=self._loopback_writer_sd, daemon=True)
+            self._loopback_thread.start()
+            logger.info("System audio stream started (sounddevice loopback)")
+        except Exception as e:
+            logger.warning(
+                f"System audio capture unavailable on this device: {e}. "
+                f"Mic only. (On macOS, install BlackHole and pick it from "
+                f"the System Audio dropdown — see MAC_SETUP.md.)")
+            self._out_idx = None
+            if self._loopback_sd_stream is not None:
+                try:
+                    self._loopback_sd_stream.close()
+                except Exception:
+                    pass
+                self._loopback_sd_stream = None
+
     def stop(self) -> None:
         self._running = False
-        # Clear output buffer so mic callback doesn't merge stale loopback data
         with self._lock:
             self._out_buffer = None
 
         def _run_with_timeout(fn, timeout_s, label):
-            """Run fn() in a daemon thread, return whether it finished in time."""
             done = threading.Event()
-            err: List[Exception] = []
             def _wrap():
                 try:
                     fn()
@@ -397,20 +570,35 @@ class AudioCapture:
                 return False
             return True
 
-        # Stop sounddevice streams (mic) with a hard cap so a bad driver
-        # can't wedge the stop request.
+        # Stop sounddevice mic stream (and the sd loopback if we used it).
         _run_with_timeout(self._close_all_streams, 3.0, "close_all_streams")
 
-        # Join loopback reader thread
-        if hasattr(self, '_loopback_thread') and self._loopback_thread is not None:
+        # Mac path: also stop the dedicated loopback sd.InputStream.
+        if self._loopback_sd_stream is not None:
+            sd_stream = self._loopback_sd_stream
+            self._loopback_sd_stream = None
+            def _stop_sd():
+                try:
+                    sd_stream.stop()
+                    sd_stream.close()
+                except Exception as e:
+                    logger.warning(f"Error closing sd loopback stream: {e}")
+            _run_with_timeout(_stop_sd, 2.0, "loopback_sd.stop")
+
+        # Wake the loopback writer thread out of its queue wait.
+        try:
+            self._loopback_q_putter(None)
+        except Exception:
+            pass
+
+        if self._loopback_thread is not None:
             self._loopback_thread.join(timeout=2.0)
             self._loopback_thread = None
 
-        # Close pyaudio loopback stream — stop_stream() is the real WASAPI
-        # hang risk, so time-box it and fall through to close() regardless.
+        # Close pyaudio loopback stream — Windows path.
         if self._pa_stream is not None:
             pa_stream = self._pa_stream
-            self._pa_stream = None  # prevent reader thread from touching it
+            self._pa_stream = None
             def _stop_pa():
                 try:
                     pa_stream.stop_stream()
@@ -453,8 +641,8 @@ class AudioCapture:
         except Exception as e:
             logger.error(f"Error in mic callback: {e}")
 
-    def _loopback_reader(self):
-        """Blocking-read loop for WASAPI loopback — writes to separate WAV file."""
+    def _loopback_reader_pa(self):
+        """Blocking-read loop for WASAPI loopback (Windows pyaudiowpatch path)."""
         import soundfile as sf
         logged_first = False
         try:
@@ -479,7 +667,7 @@ class AudioCapture:
                     logged_first = True
                     logger.info("Loopback audio flowing")
             except OSError:
-                break  # Stream closed during shutdown — normal
+                break
             except Exception as e:
                 if self._running:
                     logger.error(f"Loopback read error: {e}")
@@ -487,6 +675,71 @@ class AudioCapture:
 
         writer.close()
         logger.info(f"Loopback WAV closed: {self._loopback_wav_path}")
+
+    # ── macOS / sounddevice loopback path ──────────────────────────────
+    #
+    # We can't write soundfile from inside a sounddevice callback (it does
+    # disk I/O which would underrun the audio thread). Instead the callback
+    # pushes blocks into a queue; a worker thread drains them and writes.
+    def _loopback_callback_sd(self, indata: np.ndarray, frames: int, time_, status) -> None:
+        try:
+            if status:
+                logger.warning(f"Loopback stream status: {status}")
+            block = indata.mean(axis=1) if indata.ndim > 1 else indata[:, 0]
+            self._loopback_q_putter(np.copy(block))
+        except Exception as e:
+            logger.error(f"Error in loopback callback: {e}")
+
+    # Lazy-initialised queue. We don't import queue.Queue until first use
+    # so the Windows path doesn't pay the import cost.
+    _loopback_queue = None  # type: ignore[assignment]
+
+    def _loopback_q_putter(self, item):
+        if self._loopback_queue is None:
+            import queue
+            self._loopback_queue = queue.Queue(maxsize=1024)
+        # Drop oldest on overflow rather than block the audio callback.
+        try:
+            self._loopback_queue.put_nowait(item)
+        except Exception:
+            try:
+                _ = self._loopback_queue.get_nowait()
+                self._loopback_queue.put_nowait(item)
+            except Exception:
+                pass
+
+    def _loopback_writer_sd(self):
+        """Drain the loopback queue and write frames to a WAV on disk."""
+        import soundfile as sf
+        if self._loopback_queue is None:
+            import queue
+            self._loopback_queue = queue.Queue(maxsize=1024)
+        try:
+            writer = sf.SoundFile(
+                self._loopback_wav_path, mode="w",
+                samplerate=self._loopback_sr, channels=1, subtype="FLOAT")
+        except Exception as e:
+            logger.error(f"Could not open loopback WAV: {e}")
+            return
+        logged_first = False
+        try:
+            while self._running:
+                try:
+                    block = self._loopback_queue.get(timeout=0.5)
+                except Exception:
+                    continue
+                if block is None:
+                    break
+                writer.write(block)
+                if not logged_first:
+                    logged_first = True
+                    logger.info("Loopback audio flowing (sounddevice)")
+        finally:
+            try:
+                writer.close()
+            except Exception:
+                pass
+            logger.info(f"Loopback WAV closed: {self._loopback_wav_path}")
 
     def _safe_invoke(self, chunk: np.ndarray) -> None:
         try:

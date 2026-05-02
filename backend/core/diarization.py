@@ -17,17 +17,31 @@ class DiarizationEngine:
         self._pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
         )
-        # Move the pipeline to CUDA if available — otherwise it runs on
-        # CPU. Hardcoding `.to("cuda")` crashes on machines with CPU-only
-        # torch (AssertionError: Torch not compiled with CUDA enabled).
+        # Pick the best available accelerator. Order: CUDA > MPS (Apple
+        # Silicon) > CPU. Hardcoding any of them crashes on hosts that
+        # don't have it (AssertionError: Torch not compiled with CUDA;
+        # or "MPS backend not available").
+        device = torch.device("cpu")
+        device_label = "CPU"
         if torch.cuda.is_available():
             device = torch.device("cuda")
-            logger.info("Loading pyannote diarization pipeline on GPU (CUDA).")
-        else:
-            device = torch.device("cpu")
-            logger.info("Loading pyannote diarization pipeline on CPU "
-                        "(no CUDA-enabled torch detected).")
-        self._pipeline.to(device)
+            device_label = "GPU (CUDA)"
+        elif (getattr(torch.backends, "mps", None) is not None
+              and torch.backends.mps.is_available()):
+            # Pyannote works on MPS as of pyannote.audio 3.x; some
+            # operations fall back to CPU automatically.
+            device = torch.device("mps")
+            device_label = "GPU (MPS, Apple Silicon)"
+        logger.info(f"Loading pyannote diarization pipeline on {device_label}.")
+        try:
+            self._pipeline.to(device)
+        except Exception as e:
+            # If MPS rejects the move (rare — some pyannote layers don't
+            # implement an MPS kernel), fall back to CPU rather than crash.
+            if device.type != "cpu":
+                logger.warning(
+                    f"Pipeline.to({device}) failed ({e}); falling back to CPU.")
+                self._pipeline.to(torch.device("cpu"))
         self._max_speakers = max_speakers
         logger.info("Diarization pipeline loaded.")
 

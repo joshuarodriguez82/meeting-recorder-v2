@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- App is NOT sandboxed: needs to spawn a Python sidecar, talk to
+         Outlook/Mail via AppleScript, read the user's Calendar via EventKit,
+         and capture audio from BlackHole. Sandboxing would block all of
+         these without a complex set of temporary-exception entitlements. -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+
+    <!-- Hardened runtime exceptions needed by the embedded Python interpreter
+         and ML libraries (torch, faster-whisper, pyannote). Without these
+         the notarization service rejects the build, AND the app crashes at
+         runtime trying to JIT/load native dylibs. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+
+    <!-- Audio input (mic + BlackHole loopback). -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+
+    <!-- Apple Events for AppleScript automation of Mail.app and Outlook
+         (follow-up email drafts). -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+
+    <!-- Personal information classes used by EventKit (read calendar). -->
+    <key>com.apple.security.personal-information.calendars</key>
+    <true/>
+</dict>
+</plist>
