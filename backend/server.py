@@ -871,6 +871,14 @@ async def start_recording(req: StartRecordingRequest):
         raise HTTPException(status_code=500, detail="Recording service not initialized")
     if svc.recording_svc.is_recording:
         raise HTTPException(status_code=409, detail="Already recording")
+    # Pre-warm AI models so live transcription has Whisper ready when the
+    # first 15-second window completes (~15s into the recording). Without
+    # this the first window sits waiting 5-10s for the cold model load
+    # before any text appears, which feels like the live preview is
+    # broken. The load runs in a thread; recording starts immediately.
+    if (svc.settings and svc.settings.is_configured
+            and not svc.models_ready and not svc.models_loading):
+        threading.Thread(target=svc.ensure_models_loaded, daemon=True).start()
     try:
         # start_recording can take a couple seconds opening audio streams —
         # run off the event loop so /recording/status stays responsive
@@ -879,6 +887,60 @@ async def start_recording(req: StartRecordingRequest):
     except Exception as e:
         logger.exception("Start recording failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/recording/transcript/stream")
+async def stream_live_transcript():
+    """Server-Sent Events endpoint for live transcription segments.
+
+    Frontend opens an EventSource as soon as recording starts; segments
+    arrive as `data: {json}\\n\\n` lines. A `done` event fires when the
+    recording stops (or on a backend error) so the client closes the
+    connection cleanly.
+
+    Quirks worth knowing:
+      - The route is only useful while a recording is active. Hitting
+        it any other time returns 409, not 404, so the frontend can
+        distinguish "wrong URL" from "no recording right now".
+      - Heartbeat events go out every 5 seconds even when no transcript
+        is happening, so proxies / browsers don't kill an idle stream
+        and the frontend can detect a broken connection.
+    """
+    from fastapi.responses import StreamingResponse
+    from core.live_transcriber import serialize_segment_sse
+
+    if not svc.recording_svc or not svc.recording_svc.live_transcriber:
+        raise HTTPException(status_code=409,
+                            detail="No live transcription is active.")
+    transcriber = svc.recording_svc.live_transcriber
+    if not transcriber.is_running:
+        raise HTTPException(status_code=409,
+                            detail="No live transcription is active.")
+
+    q = transcriber.subscribe()
+
+    async def event_stream():
+        try:
+            # SSE comment line on connect — tells curl/browsers the stream
+            # opened successfully without committing to a data event yet.
+            yield ": connected\n\n"
+            while True:
+                try:
+                    item = await asyncio.to_thread(q.get, True, 5.0)
+                except Exception:
+                    # Queue.Empty after the 5s timeout — emit a heartbeat
+                    # comment so the connection stays warm.
+                    yield ": heartbeat\n\n"
+                    continue
+                if item is None:
+                    # Recording stopped — flush a done event and exit.
+                    yield "event: done\ndata: \n\n"
+                    return
+                yield serialize_segment_sse(item)
+        finally:
+            transcriber.unsubscribe(q)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 def _stop_recording_sync():

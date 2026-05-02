@@ -16,6 +16,7 @@ import soundfile as sf
 from config.settings import Settings
 from core.audio_capture import AudioCapture
 from core.diarization import DiarizationEngine
+from core.live_transcriber import LiveTranscriber, TARGET_SR as LIVE_SR
 from core.transcription import TranscriptionEngine
 from models.segment import Segment
 from models.session import Session
@@ -28,6 +29,30 @@ logger = get_logger(__name__)
 SESSION_LOG_FMT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
 TARGET_SR = 16000
+
+
+def _resample_for_live(audio: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
+    """Resample a mono float32 chunk for the live transcriber.
+
+    Most mics report 48 kHz natively; faster-whisper expects 16 kHz.
+    Per-chunk resample produces tiny artifacts at chunk boundaries, but
+    the artifacts are imperceptible at speech-recognition fidelity and
+    we'd lose more from a lock-coupled queue than we gain from a longer
+    resample window. The canonical /process pass at stop-time uses
+    full-window resample for the persisted transcript.
+    """
+    if src_sr == dst_sr:
+        return audio.astype(np.float32, copy=False)
+    # scipy.signal.resample_poly is the same routine utils/audio_utils
+    # uses for the final merge — keep them consistent so live + final
+    # transcripts have identical timing math.
+    from math import gcd
+    from scipy.signal import resample_poly
+    g = gcd(src_sr, dst_sr)
+    up = dst_sr // g
+    down = src_sr // g
+    out = resample_poly(audio.astype(np.float64, copy=False), up, down)
+    return out.astype(np.float32)
 
 
 class RecordingService:
@@ -58,6 +83,12 @@ class RecordingService:
         self._capture_sr = TARGET_SR
         self._chunk_count = 0
         self._session_log_handler: Optional[logging.FileHandler] = None
+        # Live transcription (#1 from the roadmap). Constructed lazily
+        # on first start_recording so we don't pay the import cost at
+        # backend startup. The provider closure lets the LiveTranscriber
+        # see the current TranscriptionEngine even if it loads after
+        # recording starts (fresh installs, no models warmed yet).
+        self._live_transcriber: Optional[LiveTranscriber] = None
 
     @property
     def current_session(self) -> Optional[Session]:
@@ -66,6 +97,12 @@ class RecordingService:
     @property
     def is_recording(self) -> bool:
         return self._recording
+
+    @property
+    def live_transcriber(self) -> Optional[LiveTranscriber]:
+        """Exposed so the SSE endpoint in server.py can subscribe to
+        the active recording's segment stream."""
+        return self._live_transcriber
 
     def set_session(self, session: Session) -> None:
         """Allow an externally created session (e.g. loaded file) to be processed."""
@@ -143,6 +180,21 @@ class RecordingService:
             self._capture = None
             raise RuntimeError(f"Failed to open recording file: {e}") from e
 
+        # Spin up live transcription. Engine reference is resolved per-
+        # window via a closure so model loading can happen after start;
+        # the worker loop just drops windows until the engine is ready.
+        try:
+            if self._live_transcriber is None:
+                self._live_transcriber = LiveTranscriber(
+                    engine_provider=lambda: self._transcription,
+                )
+            self._live_transcriber.start(LIVE_SR)
+        except Exception as e:
+            # Live transcription failure is never fatal — recording must
+            # still proceed even if streaming text doesn't.
+            logger.warning(f"Live transcription unavailable: {e}")
+            self._live_transcriber = None
+
         self._on_status(f"Recording started — Session {session_id}")
         logger.info(f"Session {session_id} recording started.")
         return self._session
@@ -154,6 +206,16 @@ class RecordingService:
         self._recording = False
         self._capture.stop()
         self._capture = None
+
+        # Stop the live transcriber FIRST (before joining the audio
+        # threads) so its tail flush + None sentinel reach SSE clients
+        # while they're still listening. The 10-second join inside
+        # stop() covers the worst case where Whisper is mid-window.
+        if self._live_transcriber is not None:
+            try:
+                self._live_transcriber.stop()
+            except Exception as e:
+                logger.warning(f"Live transcriber stop raised: {e}")
 
         # Close the streaming WAV file
         with self._chunks_lock:
@@ -311,11 +373,27 @@ class RecordingService:
     def _on_audio_chunk(self, chunk: np.ndarray) -> None:
         if not self._recording:
             return
+        mono = chunk.mean(axis=0) if chunk.ndim > 1 else chunk
         with self._chunks_lock:
             if self._wav_writer is not None:
-                mono = chunk.mean(axis=0) if chunk.ndim > 1 else chunk
+                # Disk write keeps the original capture sample rate so the
+                # final merge / Whisper-on-stop pipeline sees full-fidelity
+                # audio. Live transcription gets a 16 kHz copy below since
+                # faster-whisper's input is hardcoded to 16 kHz.
                 self._wav_writer.write(mono)
                 self._chunk_count += 1
+        # Live transcription path. We do this OUTSIDE the chunks_lock
+        # because resampling is CPU work and we don't want to delay the
+        # disk-writer thread waiting on it. push_audio is internally
+        # thread-safe via its own buffer lock.
+        live = self._live_transcriber
+        if live is not None and live.is_running:
+            try:
+                live.push_audio(_resample_for_live(mono, self._capture_sr, LIVE_SR))
+            except Exception as e:
+                # Never let live transcription kill the recording. A
+                # bad chunk just means a glitch in the live preview.
+                logger.debug(f"Live push_audio failed: {e}")
 
     def _start_session_log(self, session_id: str) -> None:
         try:
