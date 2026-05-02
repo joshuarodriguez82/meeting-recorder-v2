@@ -179,6 +179,9 @@ from services.recording_service import RecordingService
 from services.retention_service import cleanup as run_retention_cleanup, folder_stats
 from services.recovery_service import recover_orphans
 from services.session_service import SessionService
+from services.speaker_profile_service import (
+    SpeakerProfile, SpeakerProfileService,
+)
 from utils.logger import get_logger
 
 # Heavy ML imports deferred to avoid blocking startup. These load torch +
@@ -210,6 +213,7 @@ class Services:
         self.client_cfg_svc: Optional[ClientConfigService] = None
         self.template_svc: Optional[TemplateService] = None
         self.recording_svc: Optional[RecordingService] = None
+        self.speaker_profile_svc: Optional[SpeakerProfileService] = None
         self.transcription: Optional[TranscriptionEngine] = None
         self.diarization: Optional[DiarizationEngine] = None
         self.summarizer: Optional[Summarizer] = None
@@ -253,8 +257,10 @@ class Services:
             from config.settings import USER_DATA_DIR
             self.client_cfg_svc = ClientConfigService(USER_DATA_DIR)
             self.template_svc = TemplateService(USER_DATA_DIR)
+            self.speaker_profile_svc = SpeakerProfileService(USER_DATA_DIR)
             self.recording_svc = RecordingService(
                 settings=self.settings,
+                profile_service=self.speaker_profile_svc,
                 on_status=self._record_status,
             )
             # The summarizer is constructed whenever an LLM is configured
@@ -982,21 +988,226 @@ async def patch_session(session_id: str, req: SessionPatchRequest):
 
 class SpeakerRenameRequest(BaseModel):
     display_name: str
+    # When True, also create / update a persistent SpeakerProfile so future
+    # sessions auto-recognize this voice. Default True — almost always
+    # what the user wants; set False for one-off relabels (typo fixes).
+    save_profile: bool = True
+
+
+def _serialize_speaker(sp) -> dict:
+    """Speaker dict for the API. Mirrors Speaker.to_dict() but drops the
+    raw embedding (192 floats add ~3 KB per speaker per response and the
+    UI doesn't need them — they're internal to the matching pipeline)."""
+    d = sp.to_dict()
+    d.pop("embedding", None)
+    return d
 
 
 @app.patch("/sessions/{session_id}/speakers/{speaker_id}")
 async def rename_speaker(session_id: str, speaker_id: str, req: SpeakerRenameRequest):
-    """Rename a speaker on a session — updates the Speaker.display_name."""
+    """Rename a speaker on a session.
+
+    Side effects when save_profile=True (the default):
+      - If the new name matches an existing profile (case-insensitive),
+        link this speaker to that profile.
+      - Else, create a new profile from this speaker's centroid.
+      - Either way, mark match_confirmed=True so the UI clears the
+        "(87%) confirm?" badge.
+    """
     svc.load_settings()
     session = svc.session_svc.load_full(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     if speaker_id not in session.speakers:
         raise HTTPException(status_code=404, detail="Speaker not on this session")
-    session.rename_speaker(speaker_id, req.display_name.strip())
+
+    new_name = req.display_name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="display_name cannot be empty")
+
+    speaker = session.speakers[speaker_id]
+    speaker.display_name = new_name
+    speaker.match_confirmed = True
+
+    if req.save_profile and svc.speaker_profile_svc and speaker.embedding:
+        import numpy as np
+        emb = np.asarray(speaker.embedding, dtype=np.float32)
+
+        # Case 1: this speaker was already linked to a profile (e.g. user
+        # is correcting an auto-match's name). Update the linked profile.
+        existing = (svc.speaker_profile_svc.get(speaker.profile_id)
+                    if speaker.profile_id else None)
+        if existing is not None:
+            svc.speaker_profile_svc.rename(existing.profile_id, new_name)
+            svc.speaker_profile_svc.confirm_match(
+                existing.profile_id, emb, session.session_id)
+        else:
+            # Case 2: try to find a profile whose name matches what the
+            # user typed — re-using the existing profile is much better
+            # than creating a duplicate every time.
+            wanted = new_name.lower()
+            same_name = next(
+                (p for p in svc.speaker_profile_svc.list_all()
+                 if p.display_name.lower() == wanted), None)
+            if same_name is not None:
+                speaker.profile_id = same_name.profile_id
+                svc.speaker_profile_svc.confirm_match(
+                    same_name.profile_id, emb, session.session_id)
+            else:
+                # Case 3: brand-new name — create a fresh profile.
+                profile = svc.speaker_profile_svc.create(
+                    new_name, emb, session.session_id)
+                speaker.profile_id = profile.profile_id
+        # Either way: stop showing a confidence badge after a confirm.
+        speaker.match_confidence = None
+
     svc.session_svc.save(session)
-    return {"ok": True, "speaker_id": speaker_id,
-            "display_name": session.speakers[speaker_id].display_name}
+    return {"ok": True, "speaker": _serialize_speaker(speaker)}
+
+
+class SpeakerConfirmRequest(BaseModel):
+    # Pass the expected profile_id so a stale confirm from an old UI
+    # state can't accidentally confirm a different match if the
+    # backend re-ran fingerprinting in the meantime.
+    profile_id: str
+
+
+@app.post("/sessions/{session_id}/speakers/{speaker_id}/confirm")
+async def confirm_speaker_match(
+    session_id: str, speaker_id: str, req: SpeakerConfirmRequest,
+):
+    """Accept the auto-match: the speaker really is the suggested
+    profile. Refines the profile centroid via the running mean."""
+    svc.load_settings()
+    session = svc.session_svc.load_full(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if speaker_id not in session.speakers:
+        raise HTTPException(status_code=404, detail="Speaker not on this session")
+    speaker = session.speakers[speaker_id]
+    if speaker.profile_id != req.profile_id:
+        raise HTTPException(
+            status_code=409,
+            detail=("This speaker's profile changed since the page loaded. "
+                    "Refresh and try again."),
+        )
+    if not svc.speaker_profile_svc or not speaker.embedding:
+        raise HTTPException(
+            status_code=400,
+            detail="No fingerprint to confirm. (Was this session processed "
+                   "before speaker fingerprinting was enabled?)",
+        )
+    import numpy as np
+    emb = np.asarray(speaker.embedding, dtype=np.float32)
+    profile = svc.speaker_profile_svc.confirm_match(
+        req.profile_id, emb, session.session_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    speaker.match_confirmed = True
+    speaker.match_confidence = None
+    svc.session_svc.save(session)
+    return {"ok": True, "speaker": _serialize_speaker(speaker)}
+
+
+@app.post("/sessions/{session_id}/speakers/{speaker_id}/reject")
+async def reject_speaker_match(session_id: str, speaker_id: str):
+    """Reject the auto-match. Resets the speaker to an unlabeled
+    SPEAKER_XX state. Does NOT touch the profile — other sessions of
+    the same person stay valid; only THIS speaker is unlinked."""
+    svc.load_settings()
+    session = svc.session_svc.load_full(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if speaker_id not in session.speakers:
+        raise HTTPException(status_code=404, detail="Speaker not on this session")
+    speaker = session.speakers[speaker_id]
+    speaker.profile_id = None
+    speaker.match_confidence = None
+    speaker.match_confirmed = False
+    speaker.display_name = speaker.speaker_id  # back to "SPEAKER_XX"
+    svc.session_svc.save(session)
+    return {"ok": True, "speaker": _serialize_speaker(speaker)}
+
+
+# ── Speaker Profiles (cross-session voice fingerprints) ────────────
+
+def _profile_to_public_dict(p: SpeakerProfile) -> dict:
+    """Profile dict for the API. Drops the raw 192-dim embedding for
+    response size — the UI just needs name + counts + timestamps."""
+    return {
+        "profile_id": p.profile_id,
+        "display_name": p.display_name,
+        "created_at": p.created_at,
+        "updated_at": p.updated_at,
+        "confirmation_count": p.confirmation_count,
+        "session_count": len(p.sessions_seen_in),
+        "sessions_seen_in": list(p.sessions_seen_in),
+    }
+
+
+@app.get("/speaker-profiles")
+async def list_speaker_profiles():
+    svc.load_settings()
+    if not svc.speaker_profile_svc:
+        return []
+    profiles = await asyncio.to_thread(svc.speaker_profile_svc.list_all)
+    return [_profile_to_public_dict(p) for p in profiles]
+
+
+class ProfileRenameRequest(BaseModel):
+    display_name: str
+
+
+@app.patch("/speaker-profiles/{profile_id}")
+async def rename_speaker_profile(profile_id: str, req: ProfileRenameRequest):
+    svc.load_settings()
+    if not svc.speaker_profile_svc:
+        raise HTTPException(status_code=500, detail="Profile service unavailable")
+    new_name = req.display_name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="display_name cannot be empty")
+    profile = await asyncio.to_thread(
+        svc.speaker_profile_svc.rename, profile_id, new_name)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return _profile_to_public_dict(profile)
+
+
+@app.delete("/speaker-profiles/{profile_id}")
+async def delete_speaker_profile(profile_id: str):
+    svc.load_settings()
+    if not svc.speaker_profile_svc:
+        raise HTTPException(status_code=500, detail="Profile service unavailable")
+    ok = await asyncio.to_thread(svc.speaker_profile_svc.delete, profile_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return {"ok": True}
+
+
+class ProfileMergeRequest(BaseModel):
+    profile_ids: list[str]
+    display_name: str  # name for the merged profile
+
+
+@app.post("/speaker-profiles/merge")
+async def merge_speaker_profiles(req: ProfileMergeRequest):
+    svc.load_settings()
+    if not svc.speaker_profile_svc:
+        raise HTTPException(status_code=500, detail="Profile service unavailable")
+    if len(req.profile_ids) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Need at least 2 profile_ids to merge")
+    new_name = req.display_name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="display_name cannot be empty")
+    merged = await asyncio.to_thread(
+        svc.speaker_profile_svc.merge, req.profile_ids, new_name)
+    if merged is None:
+        raise HTTPException(
+            status_code=404,
+            detail="One or more profile_ids not found")
+    return _profile_to_public_dict(merged)
 
 
 class BulkTagRequest(BaseModel):
