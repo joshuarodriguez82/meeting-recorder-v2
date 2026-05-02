@@ -67,6 +67,36 @@ TARGET_SR = 16000
 MIN_TAIL_SECONDS = 1.0
 
 
+def _mix(mic: np.ndarray, loopback: np.ndarray, target_len: int) -> np.ndarray:
+    """Mix mic + loopback into a single mono float32 window.
+
+    The mic length is the source of truth — loopback gets truncated or
+    zero-padded to match. We zero-pad rather than stretching so an
+    underrun (loopback briefly behind) inserts silence in that span
+    instead of altering the speaker's pitch.
+
+    Both inputs are expected mono float32 in [-1, 1]. The sum can
+    exceed [-1, 1] when both speakers are loud simultaneously, so we
+    clip — clipping distorts loud peaks but Whisper's robust to it,
+    and it's better than silently letting MKL emit NaNs from an
+    out-of-range float.
+    """
+    if len(mic) != target_len:
+        if len(mic) > target_len:
+            mic = mic[:target_len]
+        else:
+            pad = np.zeros(target_len - len(mic), dtype=np.float32)
+            mic = np.concatenate([mic, pad])
+    if len(loopback) > target_len:
+        loopback = loopback[:target_len]
+    elif len(loopback) < target_len:
+        pad = np.zeros(target_len - len(loopback), dtype=np.float32)
+        loopback = np.concatenate([loopback, pad])
+    mixed = mic + loopback
+    np.clip(mixed, -1.0, 1.0, out=mixed)
+    return mixed.astype(np.float32, copy=False)
+
+
 class LiveTranscriber:
     """Streams audio into a windowed transcription pipeline.
 
@@ -86,8 +116,17 @@ class LiveTranscriber:
         self._engine_provider = engine_provider
         self._sr = samplerate
         self._window_samples = int(self._sr * WINDOW_SECONDS)
-        self._buffer: List[np.ndarray] = []
-        self._buffer_samples = 0
+        # Two parallel ring-style buffers — one for the mic, one for the
+        # system-audio loopback (if any). We drain the mic buffer to
+        # decide when a window is ready (mic always provides samples at
+        # wall-clock rate, even silence), then drain whatever loopback
+        # audio overlaps the same time range and mix the two before
+        # transcription. Mic is the timing source of truth; loopback
+        # drift is handled by zero-padding to match the mic length.
+        self._mic_buffer: List[np.ndarray] = []
+        self._mic_buffer_samples = 0
+        self._loopback_buffer: List[np.ndarray] = []
+        self._loopback_buffer_samples = 0
         self._buffer_lock = threading.Lock()
         # Global timestamp where the next window starts (seconds since
         # recording start). Whisper hands back window-relative timings;
@@ -109,8 +148,10 @@ class LiveTranscriber:
         self._sr = samplerate
         self._window_samples = int(self._sr * WINDOW_SECONDS)
         with self._buffer_lock:
-            self._buffer.clear()
-            self._buffer_samples = 0
+            self._mic_buffer.clear()
+            self._mic_buffer_samples = 0
+            self._loopback_buffer.clear()
+            self._loopback_buffer_samples = 0
         self._next_window_start = 0.0
         self._running = True
         self._worker = threading.Thread(
@@ -141,22 +182,44 @@ class LiveTranscriber:
         logger.info("LiveTranscriber stopped")
 
     def push_audio(self, chunk: np.ndarray) -> None:
-        """Append audio (mono float32 at self._sr) to the rolling buffer.
+        """Append mic audio (mono float32 at self._sr) to the mic buffer.
 
         Called from the audio capture callback thread. Drops the chunk
-        if we're not running so a late callback after stop() can't
-        leak into the next session.
+        if we're not running so a late callback after stop() can't leak
+        into the next session.
         """
         if not self._running:
             return
         if chunk.ndim > 1:
             chunk = chunk.mean(axis=1)
-        # Cheap defensive copy so the caller's numpy array isn't held
-        # past callback return (sounddevice reuses its callback buffers).
         block = np.ascontiguousarray(chunk, dtype=np.float32)
         with self._buffer_lock:
-            self._buffer.append(block)
-            self._buffer_samples += len(block)
+            self._mic_buffer.append(block)
+            self._mic_buffer_samples += len(block)
+
+    def push_loopback(self, chunk: np.ndarray) -> None:
+        """Append system-audio loopback (mono float32 at self._sr) to
+        the loopback buffer.
+
+        Called from AudioCapture's loopback reader thread (Win) or
+        writer thread (Mac), via recording_service. Same drop-when-
+        stopped policy as push_audio.
+
+        Mic and loopback come from independent OS audio paths and arrive
+        on different threads at slightly different cadences. We don't try
+        to sample-align them here — _drain_window mixes whatever loopback
+        we have against each mic window, zero-padding any tail mismatch.
+        Sub-frame drift is inaudible to Whisper at speech-recognition
+        fidelity.
+        """
+        if not self._running:
+            return
+        if chunk.ndim > 1:
+            chunk = chunk.mean(axis=1)
+        block = np.ascontiguousarray(chunk, dtype=np.float32)
+        with self._buffer_lock:
+            self._loopback_buffer.append(block)
+            self._loopback_buffer_samples += len(block)
 
     def subscribe(self, max_pending: int = 256) -> queue.Queue:
         """Return a Queue that will receive published segment dicts.
@@ -179,30 +242,55 @@ class LiveTranscriber:
     # ── Worker internals ─────────────────────────────────────────────
 
     def _drain_window(self) -> Optional[np.ndarray]:
-        """Pull the next full window off the buffer. Returns None when
-        not enough audio has accumulated yet."""
+        """Pull the next full window off the buffers and return mic+loopback
+        mixed into a single mono float32 array. Returns None when the mic
+        buffer hasn't accumulated a full window yet (mic is the timing
+        source of truth — it always provides samples at wall-clock rate)."""
         with self._buffer_lock:
-            if self._buffer_samples < self._window_samples:
+            if self._mic_buffer_samples < self._window_samples:
                 return None
-            audio = np.concatenate(self._buffer) if self._buffer else np.zeros(0, dtype=np.float32)
-            window = audio[:self._window_samples].copy()
-            tail = audio[self._window_samples:]
-            self._buffer = [tail] if len(tail) else []
-            self._buffer_samples = len(tail)
-            return window
+            mic_audio = (np.concatenate(self._mic_buffer)
+                         if self._mic_buffer else np.zeros(0, dtype=np.float32))
+            mic_window = mic_audio[:self._window_samples].copy()
+            mic_tail = mic_audio[self._window_samples:]
+            self._mic_buffer = [mic_tail] if len(mic_tail) else []
+            self._mic_buffer_samples = len(mic_tail)
+
+            # Drain up to one window of loopback. Loopback often has less
+            # data than mic (different OS audio path, may have started a
+            # touch later, may be empty entirely if no system audio is
+            # selected). Take whatever's there.
+            lb_audio = (np.concatenate(self._loopback_buffer)
+                        if self._loopback_buffer
+                        else np.zeros(0, dtype=np.float32))
+            lb_window = lb_audio[:self._window_samples]
+            lb_tail = lb_audio[self._window_samples:]
+            self._loopback_buffer = [lb_tail] if len(lb_tail) else []
+            self._loopback_buffer_samples = len(lb_tail)
+
+        return _mix(mic_window, lb_window, self._window_samples)
 
     def _drain_tail(self) -> Optional[np.ndarray]:
-        """At stop time, return whatever's left in the buffer (may be
-        less than a full window). Returns None if too short to bother."""
+        """At stop time, return whatever's left in both buffers as a mixed
+        window. Returns None if the mic tail is too short to bother
+        (sub-second tails are usually silence + a fade-out)."""
         with self._buffer_lock:
-            if self._buffer_samples < int(self._sr * MIN_TAIL_SECONDS):
-                self._buffer = []
-                self._buffer_samples = 0
+            if self._mic_buffer_samples < int(self._sr * MIN_TAIL_SECONDS):
+                self._mic_buffer = []
+                self._mic_buffer_samples = 0
+                self._loopback_buffer = []
+                self._loopback_buffer_samples = 0
                 return None
-            audio = np.concatenate(self._buffer) if self._buffer else np.zeros(0, dtype=np.float32)
-            self._buffer = []
-            self._buffer_samples = 0
-            return audio
+            mic_audio = (np.concatenate(self._mic_buffer)
+                         if self._mic_buffer else np.zeros(0, dtype=np.float32))
+            lb_audio = (np.concatenate(self._loopback_buffer)
+                        if self._loopback_buffer
+                        else np.zeros(0, dtype=np.float32))
+            self._mic_buffer = []
+            self._mic_buffer_samples = 0
+            self._loopback_buffer = []
+            self._loopback_buffer_samples = 0
+        return _mix(mic_audio, lb_audio, len(mic_audio))
 
     def _publish(self, segment: dict) -> None:
         """Best-effort fan-out to every consumer. A slow client gets its
