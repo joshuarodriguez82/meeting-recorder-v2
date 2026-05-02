@@ -41,6 +41,10 @@ export interface Settings {
   ai_provider: string;
   openai_api_key: string;
   openai_base_url: string;
+  // Streaming live-transcription preview while recording. Default true.
+  // When false the live panel doesn't render and the backend doesn't
+  // spin up the LiveTranscriber thread (saves CPU).
+  live_transcription_enabled: boolean;
 }
 
 export interface AudioDevice {
