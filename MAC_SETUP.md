@@ -76,7 +76,7 @@ python3.13 setup.py
 npm install
 
 # 3. Build the .app + .dmg installer (3–5 min first time)
-npm run tauri build
+npx tauri build
 
 # 4. Patch privacy-usage strings into the bundled Info.plist so macOS will
 #    actually grant mic / calendar / Apple Events access at runtime.
