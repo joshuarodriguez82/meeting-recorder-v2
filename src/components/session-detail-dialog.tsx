@@ -579,8 +579,29 @@ function SpeakerRow({
     }
     setSaving(true);
     try {
-      await api.renameSpeaker(sessionId, speakerId, next);
-      toast.success(`Renamed "${displayName}" to "${next}"`);
+      const res = await api.renameSpeaker(sessionId, speakerId, next);
+      // Honest toast: tell the user what actually happened with the
+      // cross-session profile, not just that the display name changed.
+      // Same-named speakers get linked silently — no need to brag — but
+      // skipped fingerprinting needs a heads-up so the user doesn't
+      // wonder why Settings → Known Speakers stays empty.
+      switch (res.profile_action) {
+        case "created":
+          toast.success(`Saved voice profile for "${next}". Future meetings will auto-tag them.`);
+          break;
+        case "linked":
+          toast.success(`Linked to existing "${next}" profile.`);
+          break;
+        case "refined":
+          toast.success(`Refined "${next}" voice profile.`);
+          break;
+        case "skipped":
+          toast.warning(
+            `Renamed to "${next}", but no voice profile saved.`,
+            { description: res.profile_skip_reason ?? undefined },
+          );
+          break;
+      }
       setEditing(false);
       await onRenamed();
     } catch (e) {
