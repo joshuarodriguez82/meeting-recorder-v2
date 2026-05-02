@@ -412,6 +412,12 @@ async def get_settings():
 
 @app.post("/settings")
 async def save_settings(payload: SettingsDTO):
+    # Capture the previous launch_on_startup value BEFORE writing the new
+    # one — we only call into the OS to install/remove the auto-launch
+    # entry when it actually changes. Otherwise every Save Settings click
+    # would hammer the LaunchAgent / Startup folder.
+    prev_launch = bool(svc.settings.launch_on_startup) if svc.settings else False
+
     Settings.save_to_env(
         anthropic_api_key=payload.anthropic_api_key,
         hf_token=payload.hf_token,
@@ -435,6 +441,20 @@ async def save_settings(payload: SettingsDTO):
     svc.settings = None
     svc.models_ready = False
     svc.load_settings()
+
+    # Apply launch-on-login state to the OS only on actual transitions.
+    # The startup_shortcut module is platform-aware: Windows installs a
+    # .lnk in the Startup folder, macOS installs a LaunchAgent plist,
+    # Linux is a no-op. Failures are logged but don't block the save —
+    # the user can re-toggle later if they fix the underlying issue
+    # (e.g. denied LaunchAgents permission on locked-down Macs).
+    if bool(payload.launch_on_startup) != prev_launch:
+        try:
+            from utils.startup_shortcut import apply as apply_startup
+            await asyncio.to_thread(apply_startup, bool(payload.launch_on_startup))
+        except Exception as e:
+            logger.warning(f"launch_on_startup transition failed: {e}")
+
     return {"ok": True}
 
 
