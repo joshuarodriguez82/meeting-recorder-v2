@@ -5,8 +5,13 @@ Creates a Python venv inside backend/, installs all dependencies,
 and writes a fresh .env if none exists. Run once after cloning.
 
     cd meeting-recorder-v2
-    python setup.py     # Windows
-    python3 setup.py    # macOS / Linux
+    python setup.py        # Windows
+    python3.13 setup.py    # macOS / Linux
+
+IMPORTANT: invoke this with Python 3.13 specifically (`python3.13`, not
+`python3`). The default `python3` on macOS is Apple's stock 3.9, which
+can't install numpy 2.x or torch 2.6. We bail with an explanatory error
+if the running interpreter is older than 3.10.
 
 After this, `npm run tauri dev` or the release .exe / .app will find
 the venv at backend/.venv and launch the Python sidecar automatically.
@@ -18,6 +23,30 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+# Hard-fail early on too-old Python rather than letting pip print a
+# 50-line wall of "Requires-Python >=3.10 ignored" before failing on
+# numpy. Mac users hit this when they run `python3 setup.py` (system
+# Python 3.9) instead of `python3.13 setup.py` (Homebrew install).
+if sys.version_info < (3, 10):
+    sys.stderr.write(
+        f"\n[ERROR] This setup needs Python 3.10 or newer.\n"
+        f"You're running Python {sys.version.split()[0]} from {sys.executable}.\n\n"
+    )
+    if sys.platform == "darwin":
+        sys.stderr.write(
+            "On macOS, the default `python3` is Apple's stock 3.9. Install\n"
+            "Python 3.13 via Homebrew and rerun explicitly:\n\n"
+            "    brew install python@3.13\n"
+            "    rm -rf backend/.venv\n"
+            "    python3.13 setup.py\n\n"
+        )
+    else:
+        sys.stderr.write(
+            "Install a newer Python from python.org or your distro's package\n"
+            "manager and rerun this script with that interpreter.\n\n"
+        )
+    sys.exit(1)
 
 ROOT = Path(__file__).resolve().parent
 BACKEND = ROOT / "backend"
