@@ -9,7 +9,7 @@
     "lint": "eslint",
     "tauri": "tauri",
     "zip-bundle": "node scripts/run-python.js zip-bundle.py",
-    "prebuild": "npm run build && npm run zip-bundle"
+    "tauri-prebuild": "next build && node scripts/run-python.js zip-bundle.py"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.0",
