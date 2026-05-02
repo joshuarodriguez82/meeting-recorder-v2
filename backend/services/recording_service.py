@@ -147,6 +147,12 @@ class RecordingService:
             output_device_index=output_device_index,
             on_chunk=self._on_audio_chunk,
             loopback_wav_path=self._loopback_temp_path,
+            # Tee loopback into the live transcriber so other meeting
+            # participants' audio appears in the live preview alongside
+            # the user's voice. None when output_device_index is None
+            # (no system-audio capture configured).
+            on_loopback_chunk=(self._on_loopback_chunk
+                               if output_device_index is not None else None),
         )
 
         try:
@@ -394,6 +400,27 @@ class RecordingService:
                 # Never let live transcription kill the recording. A
                 # bad chunk just means a glitch in the live preview.
                 logger.debug(f"Live push_audio failed: {e}")
+
+    def _on_loopback_chunk(self, chunk: np.ndarray) -> None:
+        """Loopback (system audio) chunks routed into the live
+        transcriber. Same resample-to-16k step as mic. AudioCapture's
+        loopback sample rate is on the capture instance once start()
+        runs; we read it lazily here because at __init__ time the
+        capture hasn't opened the loopback stream yet."""
+        if not self._recording:
+            return
+        live = self._live_transcriber
+        if live is None or not live.is_running:
+            return
+        capture = self._capture
+        if capture is None:
+            return
+        loopback_sr = capture.loopback_sr or LIVE_SR
+        try:
+            mono = chunk.mean(axis=1) if chunk.ndim > 1 else chunk
+            live.push_loopback(_resample_for_live(mono, loopback_sr, LIVE_SR))
+        except Exception as e:
+            logger.debug(f"Live push_loopback failed: {e}")
 
     def _start_session_log(self, session_id: str) -> None:
         try:
