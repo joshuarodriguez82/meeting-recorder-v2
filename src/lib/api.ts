@@ -286,7 +286,17 @@ export const api = {
     display_name: string,
     save_profile: boolean = true,
   ) =>
-    request<{ ok: boolean; speaker: Speaker }>(
+    request<{
+      ok: boolean;
+      speaker: Speaker;
+      // What the backend did with the cross-session profile store:
+      //   "created" — new profile saved from this voice
+      //   "linked"  — linked to an existing same-named profile
+      //   "refined" — already-linked profile got refined
+      //   "skipped" — couldn't fingerprint (see profile_skip_reason)
+      profile_action: "created" | "linked" | "refined" | "skipped";
+      profile_skip_reason: string | null;
+    }>(
       `/sessions/${session_id}/speakers/${encodeURIComponent(speaker_id)}`,
       {
         method: "PATCH",
