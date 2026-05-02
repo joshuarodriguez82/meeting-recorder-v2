@@ -178,6 +178,7 @@ from services.export_service import ExportService
 from services.recording_service import RecordingService
 from services.retention_service import cleanup as run_retention_cleanup, folder_stats
 from services.recovery_service import recover_orphans
+from services.search_service import SearchService
 from services.session_service import SessionService
 from services.speaker_profile_service import (
     SpeakerProfile, SpeakerProfileService,
@@ -214,6 +215,7 @@ class Services:
         self.template_svc: Optional[TemplateService] = None
         self.recording_svc: Optional[RecordingService] = None
         self.speaker_profile_svc: Optional[SpeakerProfileService] = None
+        self.search_svc: Optional[SearchService] = None
         self.transcription: Optional[TranscriptionEngine] = None
         self.diarization: Optional[DiarizationEngine] = None
         self.summarizer: Optional[Summarizer] = None
@@ -258,6 +260,10 @@ class Services:
             self.client_cfg_svc = ClientConfigService(USER_DATA_DIR)
             self.template_svc = TemplateService(USER_DATA_DIR)
             self.speaker_profile_svc = SpeakerProfileService(USER_DATA_DIR)
+            # SearchService stays a thin wrapper around session_service —
+            # session embeddings live next to session JSONs, so it just
+            # needs that handle. Lazy index load happens on first search.
+            self.search_svc = SearchService(self.session_svc)
             self.recording_svc = RecordingService(
                 settings=self.settings,
                 profile_service=self.speaker_profile_svc,
@@ -1008,6 +1014,12 @@ async def get_session(session_id: str):
 async def delete_session(session_id: str):
     svc.load_settings()
     svc.session_svc.delete(session_id)
+    # Drop the session's semantic-search sidecar too — otherwise stale
+    # entries linger in the in-memory index and the next search would
+    # surface chunks pointing at a session that no longer exists.
+    if svc.search_svc:
+        await asyncio.to_thread(
+            svc.search_svc.delete_session_index, session_id)
     return {"ok": True}
 
 
@@ -1770,6 +1782,14 @@ async def process_session(session_id: str):
         result = await svc.recording_svc.process_session()
         await asyncio.to_thread(svc.session_svc.save, result)
         _auto_export_to_client(result, copy_audio=False)
+        # Build the semantic-search index entry for this session in the
+        # background. Non-fatal: if sentence-transformers is missing or
+        # the index pass fails, the session is still saved and full-text
+        # search keeps working — only the semantic search "knows" about
+        # one fewer session until the user re-runs the backfill.
+        if svc.search_svc:
+            asyncio.create_task(asyncio.to_thread(
+                svc.search_svc.index_session, result.session_id))
         return {"ok": True, "segments": len(result.segments),
                 "speakers": len(result.speakers)}
     except Exception as e:
@@ -2014,6 +2034,120 @@ async def create_follow_up_drafts(session_id: str, req: FollowUpDraftsRequest):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.exception("Follow-up drafts failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Semantic search ──────────────────────────────────────────────────
+
+
+class SemanticSearchRequest(BaseModel):
+    query: str
+    top_k: int = 10
+    client: Optional[str] = None
+    project: Optional[str] = None
+
+
+@app.post("/search/semantic")
+async def semantic_search(req: SemanticSearchRequest):
+    """Run a vector search across every indexed session's chunks.
+    Returns up to top_k hits ordered by cosine similarity. Filters
+    (client / project) narrow the candidate pool BEFORE ranking so a
+    scoped search isn't drowned out by closer matches in other clients."""
+    svc.load_settings()
+    if not svc.search_svc:
+        raise HTTPException(status_code=500, detail="Search service unavailable")
+    if not (req.query or "").strip():
+        return {"results": [], "query": req.query}
+    try:
+        results = await asyncio.to_thread(
+            svc.search_svc.search,
+            req.query,
+            max(1, min(50, req.top_k)),
+            req.client,
+            req.project,
+        )
+        return {"results": results, "query": req.query}
+    except Exception as e:
+        logger.exception("Semantic search failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/search/index/status")
+async def search_index_status():
+    """How many sessions are currently in the semantic index, vs total
+    session count. Drives the Settings backfill UI's progress hint."""
+    svc.load_settings()
+    if not svc.search_svc:
+        return {"available": False, "total_sessions": 0,
+                "indexed_sessions": 0, "model_id": ""}
+    return await asyncio.to_thread(svc.search_svc.index_status)
+
+
+@app.post("/sessions/{session_id}/embed")
+async def embed_session(session_id: str):
+    """Embed (or re-embed) one session's transcript for semantic search.
+    Idempotent — running twice produces the same result, the second
+    write just overwrites the existing pickle. Used by the backfill
+    UI in Settings to walk every session that's missing an index entry."""
+    svc.load_settings()
+    if not svc.search_svc:
+        raise HTTPException(status_code=500, detail="Search service unavailable")
+    try:
+        ok = await asyncio.to_thread(svc.search_svc.index_session, session_id)
+    except Exception as e:
+        logger.exception("Embed failed")
+        raise HTTPException(status_code=500, detail=str(e))
+    if not ok:
+        # Session has no segments yet OR sentence-transformers isn't
+        # installed. 200 with embedded=False so callers can keep walking
+        # through a backfill list rather than treating one no-op as fatal.
+        return {"embedded": False, "session_id": session_id}
+    return {"embedded": True, "session_id": session_id}
+
+
+@app.post("/search/index/backfill")
+async def search_index_backfill(limit: int = 50):
+    """Embed up to `limit` sessions that don't have an index entry yet.
+
+    Designed to be called repeatedly from the UI in batches so the user
+    sees progress. Each call processes whichever sessions are still
+    missing — when indexed_sessions == total_sessions, the UI knows
+    backfill is done.
+
+    Capped by `limit` so the FastAPI request doesn't sit on the event
+    loop for several minutes if the user has 100s of unindexed sessions.
+    """
+    svc.load_settings()
+    if not svc.search_svc:
+        raise HTTPException(status_code=500, detail="Search service unavailable")
+
+    def _backfill_one_batch():
+        recordings_dir = svc.search_svc._session_service.recordings_dir
+        all_sessions = svc.search_svc._session_service.list_sessions()
+        # Only embed processed sessions — sessions without segments would
+        # produce no chunks and waste a model load.
+        candidates = [
+            s for s in all_sessions
+            if s.get("has_transcript")
+            and not (recordings_dir / f"session_{s['session_id']}.embeddings.pkl").exists()
+        ]
+        embedded: list[str] = []
+        for s in candidates[:limit]:
+            try:
+                if svc.search_svc.index_session(s["session_id"]):
+                    embedded.append(s["session_id"])
+            except Exception as e:
+                logger.warning(f"Backfill failed for {s['session_id']}: {e}")
+        return {
+            "embedded": embedded,
+            "embedded_count": len(embedded),
+            "remaining": max(0, len(candidates) - len(embedded)),
+        }
+
+    try:
+        return await asyncio.to_thread(_backfill_one_batch)
+    except Exception as e:
+        logger.exception("Backfill failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 
