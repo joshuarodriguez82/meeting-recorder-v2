@@ -168,6 +168,46 @@ export interface UnprocessedSession {
   project: string;
 }
 
+// One retrieved chunk that the QA endpoint sent the LLM as context.
+// Same shape as a semantic search hit, with the addition that the QA
+// view renders these in a sources panel under the streamed answer.
+export interface QASource {
+  session_id: string;
+  display_name: string;
+  started_at: string;
+  client: string;
+  project: string;
+  start_s: number;
+  end_s: number;
+  text: string;
+  similarity: number;
+}
+
+// Bare-bones SSE event parser. The browser EventSource API does this
+// for us — but EventSource is GET-only, and the QA endpoint is POST
+// because the body can be 100s of bytes (query + filters). So we
+// reimplement just enough to walk SSE event blocks.
+//
+// SSE format per spec: each event is a sequence of "field: value\n"
+// lines, terminated by a blank line. Recognised fields here: `event`
+// (defaults to "message" if absent) and `data`. Multi-line `data` is
+// concatenated with newlines, but our backend never emits that — every
+// event has a single data line, so we just take the first.
+function parseSSEEvent(raw: string): { eventName: string; data: string } | null {
+  let eventName = "message";
+  const dataLines: string[] = [];
+  for (const line of raw.split("\n")) {
+    if (line.startsWith(":")) continue;       // comment / heartbeat
+    if (line.startsWith("event:")) {
+      eventName = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trim());
+    }
+  }
+  if (dataLines.length === 0 && eventName === "message") return null;
+  return { eventName, data: dataLines.join("\n") };
+}
+
 export interface ProcessFullStages {
   transcribe_diarize?: string;
   summary?: string;
@@ -372,6 +412,86 @@ export const api = {
       embedded_count: number;
       remaining: number;
     }>(`/search/index/backfill?limit=${limit}`, { method: "POST" }),
+
+  // ── Cross-meeting Q&A ─────────────────────────────────────────────
+  // POST + SSE so we need fetch + ReadableStream parsing (EventSource
+  // only supports GET). Returns an abort handle so the caller can cancel
+  // a long-running answer mid-stream when the user clicks Stop or
+  // navigates away.
+  qaStream: (
+    body: { query: string; top_k?: number; client?: string; project?: string },
+    handlers: {
+      onSources: (sources: QASource[]) => void;
+      onText: (text: string) => void;
+      onDone: () => void;
+      onError: (msg: string) => void;
+    },
+  ): { abort: () => void } => {
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const res = await fetch(`${BASE_URL}/qa/stream`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => `${res.status}`);
+          handlers.onError(text);
+          return;
+        }
+        if (!res.body) {
+          handlers.onError("No stream body");
+          return;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        // Buffer accumulates raw SSE text until we have at least one
+        // full event (terminated by a blank line, per spec).
+        let buf = "";
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          // Walk forward; an event is everything up to the next "\n\n".
+          let split: number;
+          while ((split = buf.indexOf("\n\n")) !== -1) {
+            const raw = buf.slice(0, split);
+            buf = buf.slice(split + 2);
+            const event = parseSSEEvent(raw);
+            if (!event) continue;
+            if (event.eventName === "sources") {
+              try {
+                handlers.onSources(JSON.parse(event.data));
+              } catch { /* malformed */ }
+            } else if (event.eventName === "done") {
+              handlers.onDone();
+              return;
+            } else if (event.eventName === "error") {
+              try {
+                handlers.onError(JSON.parse(event.data).error || "Unknown error");
+              } catch {
+                handlers.onError(event.data || "Unknown error");
+              }
+              return;
+            } else {
+              // Default "message" event = text fragment chunk
+              try {
+                const payload = JSON.parse(event.data);
+                if (payload.text) handlers.onText(payload.text);
+              } catch { /* heartbeat or comment line */ }
+            }
+          }
+        }
+        handlers.onDone();
+      } catch (e) {
+        if ((e as DOMException)?.name === "AbortError") return;
+        handlers.onError(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return { abort: () => controller.abort() };
+  },
 
   // ── Cross-session speaker profiles ────────────────────────────────
   listSpeakerProfiles: () => request<SpeakerProfile[]>("/speaker-profiles"),

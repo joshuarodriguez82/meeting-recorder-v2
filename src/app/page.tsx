@@ -6,7 +6,7 @@ import { api, formatBytes, type Meeting, type SessionSummary } from "@/lib/api";
 import {
   Mic, History, CheckSquare, Target, Search,
   LayoutDashboard, Settings as SettingsIcon, HelpCircle, Loader2,
-  Sparkles,
+  Sparkles, MessageCircle,
 } from "lucide-react";
 import { RecordView } from "@/components/record-view";
 import { SettingsView } from "@/components/settings-view";
@@ -16,6 +16,7 @@ import { DecisionsView } from "@/components/decisions-view";
 import { SearchView } from "@/components/search-view";
 import { ClientsView } from "@/components/clients-view";
 import { PrepBriefView } from "@/components/prep-brief-view";
+import { QAView } from "@/components/qa-view";
 import { UsageGuideView } from "@/components/usage-guide-view";
 import { CalendarMonitor } from "@/components/calendar-monitor";
 import { SessionDetailDialog } from "@/components/session-detail-dialog";
@@ -27,6 +28,7 @@ const NAV_ITEMS = [
   { id: "follow-ups", label: "Follow-Ups", icon: CheckSquare },
   { id: "decisions", label: "Decisions", icon: Target },
   { id: "search", label: "Search", icon: Search },
+  { id: "qa", label: "Ask", icon: MessageCircle },
   { id: "clients", label: "Clients", icon: LayoutDashboard },
   { id: "prep-brief", label: "Prep Brief", icon: Sparkles },
 ];
@@ -396,6 +398,7 @@ export default function Home() {
               {nav === "follow-ups" && "Track action items across every meeting"}
               {nav === "decisions" && "Every decision, auto-generated ADR log"}
               {nav === "search" && "Search across all transcripts"}
+              {nav === "qa" && "Ask Claude questions about your meetings — answers come with citations"}
               {nav === "clients" && "Clients and their projects — drill in to see meetings"}
               {nav === "prep-brief" && "Generate a pre-meeting brief from past sessions"}
               {nav === "settings" && "Configure API keys, devices, and workflow"}
@@ -428,6 +431,7 @@ export default function Home() {
             <DecisionsView sessions={sessions} onOpenSession={openSession} />
           )}
           {nav === "search" && <SearchView onOpenSession={openSession} />}
+          {nav === "qa" && <QAView onOpenSession={openSession} />}
           {nav === "clients" && (
             <ClientsView sessions={sessions} onReload={reloadSessions} onOpenSession={openSession} />
           )}
