@@ -300,7 +300,6 @@ fn resolve_backend_dir() -> Option<std::path::PathBuf> {
     // Final fallback (release-mode only path here; debug already tried it).
     pick_dev()
 }
-}
 
 /// Where the app-managed venv lives. Created by bootstrap_app_venv on
 /// first launch if no other Python is available.
