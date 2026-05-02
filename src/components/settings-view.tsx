@@ -90,6 +90,14 @@ function configPathHint(): string {
   return "%LOCALAPPDATA%\\MeetingRecorder\\config.env";
 }
 
+// True when the host OS is macOS, used to swap Windows-specific labels
+// (Outlook draft / Windows Startup folder) for Mac equivalents (Mail.app
+// or Outlook for Mac / LaunchAgent). SSR-safe.
+function isMac(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return navigator.userAgent.toLowerCase().includes("mac");
+}
+
 export function SettingsView() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [storage, setStorage] = useState<{
@@ -368,13 +376,17 @@ export function SettingsView() {
           />
           <Toggle
             label="Auto-draft follow-up email"
-            description="Creates an Outlook draft to attendees after processing"
+            description={isMac()
+              ? "Creates a Mail.app (or Outlook for Mac) draft to attendees after processing"
+              : "Creates an Outlook draft to attendees after processing"}
             checked={settings.auto_follow_up_email}
             onChange={(v) => update("auto_follow_up_email", v)}
           />
           <Toggle
-            label="Launch on Windows startup"
-            description="Adds a shortcut to the Windows Startup folder"
+            label={isMac() ? "Launch on login" : "Launch on Windows startup"}
+            description={isMac()
+              ? "Installs a LaunchAgent so the app starts automatically when you log in"
+              : "Adds a shortcut to the Windows Startup folder"}
             checked={settings.launch_on_startup}
             onChange={(v) => update("launch_on_startup", v)}
           />
