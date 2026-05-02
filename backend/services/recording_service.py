@@ -19,6 +19,7 @@ from core.diarization import DiarizationEngine
 from core.transcription import TranscriptionEngine
 from models.segment import Segment
 from models.session import Session
+from services.speaker_profile_service import SpeakerProfileService
 from utils.audio_utils import finalize_recording_streaming
 from utils.logger import get_logger
 
@@ -36,11 +37,17 @@ class RecordingService:
         settings: Settings,
         transcription_engine: Optional[TranscriptionEngine] = None,
         diarization_engine: Optional[DiarizationEngine] = None,
+        profile_service: Optional[SpeakerProfileService] = None,
         on_status: Optional[Callable[[str], None]] = None,
     ):
         self._settings = settings
         self._transcription = transcription_engine
         self._diarization = diarization_engine
+        # SpeakerProfileService is optional — when None we keep the v1
+        # behaviour (no fingerprinting; speakers are session-local
+        # SPEAKER_XX labels until manually renamed). Server.py wires it
+        # up by default.
+        self._profile_service = profile_service
         self._on_status = on_status or (lambda _: None)
         self._session: Optional[Session] = None
         self._capture: Optional[AudioCapture] = None
@@ -225,9 +232,81 @@ class RecordingService:
             )
             self._session.segments.append(segment)
 
+        # Speaker fingerprinting: compute per-speaker centroid embeddings
+        # from the diarization turns, then look up matches in the
+        # persistent profile store. Best-effort — any failure here is
+        # logged and the session is still saved with bare SPEAKER_XX
+        # labels (i.e. v1 behaviour).
+        try:
+            self._fingerprint_speakers(diarization_turns)
+        except Exception as e:
+            logger.exception(f"Speaker fingerprinting failed: {e}")
+
         self._on_status("Processing complete.")
         logger.info(f"Session {self._session.session_id} processing complete.")
         return self._session
+
+    def _fingerprint_speakers(self, diarization_turns: List[dict]) -> None:
+        """Extract per-speaker centroids from the audio + diarization
+        turns, attach them to each Speaker object, and apply any matches
+        from the persistent profile store as auto-renames awaiting user
+        confirmation.
+
+        Called from process_session() after segments + speakers are
+        populated. Safe to call when self._profile_service is None
+        (skips matching, still computes + stores embeddings so a future
+        session can match them later if profiling gets enabled)."""
+        if not self._session or not self._session.audio_path:
+            return
+
+        # Lazy import — avoids paying the speechbrain import cost on
+        # backends that never run processing (e.g. settings-only restarts).
+        from core.speaker_embeddings import (
+            extract_speaker_centroids, is_available,
+        )
+        if not is_available():
+            return
+
+        # Group diarization turns by speaker label.
+        turns_by_speaker: dict[str, list[tuple[float, float]]] = {}
+        for turn in diarization_turns:
+            label = turn.get("speaker") or turn.get("speaker_id")
+            if not label:
+                continue
+            turns_by_speaker.setdefault(label, []).append(
+                (float(turn["start"]), float(turn["end"]))
+            )
+
+        centroids = extract_speaker_centroids(
+            self._session.audio_path, turns_by_speaker,
+        )
+        if not centroids:
+            return
+
+        for speaker_id, centroid in centroids.items():
+            speaker = self._session.speakers.get(speaker_id)
+            if speaker is None:
+                continue
+            speaker.embedding = [float(x) for x in centroid.tolist()]
+
+            # Profile lookup. The threshold is intentionally on the
+            # service side (configurable centrally) rather than per-call
+            # so the same cutoff applies to UI hints later.
+            if self._profile_service is None:
+                continue
+            match = self._profile_service.find_match(centroid)
+            if match is None:
+                continue
+            profile, similarity = match
+            speaker.profile_id = profile.profile_id
+            speaker.match_confidence = similarity
+            speaker.match_confirmed = False  # user confirms in UI
+            # Set the display name optimistically — the UI shows a
+            # "(87%) confirm?" badge so the user knows it's an auto-match.
+            speaker.display_name = profile.display_name
+            logger.info(
+                f"Auto-matched {speaker_id} → {profile.display_name} "
+                f"(similarity={similarity:.2f})")
 
     def _on_audio_chunk(self, chunk: np.ndarray) -> None:
         if not self._recording:
