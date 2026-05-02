@@ -25,6 +25,12 @@ class SessionService:
         self._recordings_dir = Path(recordings_dir)
         self._recordings_dir.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def recordings_dir(self) -> Path:
+        """Public read-only accessor — used by SearchService to find
+        per-session embedding sidecar files (session_<id>.embeddings.pkl)."""
+        return self._recordings_dir
+
     def save(self, session: Session) -> str:
         """
         Serialize a session to a JSON file using an atomic write.
