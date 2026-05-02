@@ -376,6 +376,12 @@ export function SettingsView() {
             onChange={(v) => update("auto_process_after_stop", v)}
           />
           <Toggle
+            label="Live transcription during recording"
+            description="Streams a rolling preview of what's being said while you record. Disable on slower machines or for calls where the live preview is noisy. The canonical post-stop transcript runs regardless."
+            checked={settings.live_transcription_enabled}
+            onChange={(v) => update("live_transcription_enabled", v)}
+          />
+          <Toggle
             label="Auto-draft follow-up email"
             description={isMac()
               ? "Creates a Mail.app (or Outlook for Mac) draft to attendees after processing"
