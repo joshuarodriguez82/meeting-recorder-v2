@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, type SessionFull, formatDuration } from "@/lib/api";
+import { api, type SessionFull, type Speaker, formatDuration } from "@/lib/api";
 import { toast } from "sonner";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
@@ -533,8 +533,7 @@ function SpeakersView({
           <SpeakerRow
             key={sp.speaker_id}
             sessionId={session.session_id}
-            speakerId={sp.speaker_id}
-            displayName={sp.display_name}
+            speaker={sp}
             segmentCount={count}
             onRenamed={onRenamed}
           />
@@ -545,19 +544,31 @@ function SpeakersView({
 }
 
 function SpeakerRow({
-  sessionId, speakerId, displayName, segmentCount, onRenamed,
+  sessionId, speaker, segmentCount, onRenamed,
 }: {
   sessionId: string;
-  speakerId: string;
-  displayName: string;
+  speaker: Speaker;
   segmentCount: number;
   onRenamed: () => void | Promise<void>;
 }) {
+  const speakerId = speaker.speaker_id;
+  const displayName = speaker.display_name;
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(displayName);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => { setValue(displayName); }, [displayName]);
+
+  // An auto-match is "pending review" when the backend linked the
+  // speaker to a profile but the user hasn't confirmed or rejected yet.
+  // The match_confidence number doubles as the badge text.
+  const pendingMatch =
+    !!speaker.profile_id
+    && speaker.match_confidence != null
+    && speaker.match_confirmed === false;
+  const confidencePct = pendingMatch && speaker.match_confidence != null
+    ? Math.round(speaker.match_confidence * 100)
+    : null;
 
   const save = async () => {
     const next = value.trim();
@@ -582,6 +593,33 @@ function SpeakerRow({
   const cancel = () => {
     setEditing(false);
     setValue(displayName);
+  };
+
+  const confirmMatch = async () => {
+    if (!speaker.profile_id) return;
+    setSaving(true);
+    try {
+      await api.confirmSpeakerMatch(sessionId, speakerId, speaker.profile_id);
+      toast.success(`Confirmed: this is ${displayName}`);
+      await onRenamed();
+    } catch (e) {
+      toast.error(`Confirm failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const rejectMatch = async () => {
+    setSaving(true);
+    try {
+      await api.rejectSpeakerMatch(sessionId, speakerId);
+      toast.info(`Reset to ${speakerId}. You can rename them manually now.`);
+      await onRenamed();
+    } catch (e) {
+      toast.error(`Reject failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -611,17 +649,53 @@ function SpeakerRow({
             </Button>
           </div>
         ) : (
-          <button
-            onClick={() => setEditing(true)}
-            className="group flex items-center gap-2 text-left w-full min-w-0"
-          >
-            <span className="text-sm font-medium truncate">{displayName || speakerId}</span>
-            <Pencil className="h-3 w-3 text-muted-foreground opacity-0 group-hover:opacity-100 shrink-0" />
-          </button>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={() => setEditing(true)}
+              className="group flex items-center gap-2 text-left min-w-0"
+            >
+              <span className="text-sm font-medium truncate">{displayName || speakerId}</span>
+              <Pencil className="h-3 w-3 text-muted-foreground opacity-0 group-hover:opacity-100 shrink-0" />
+            </button>
+            {pendingMatch && confidencePct != null && (
+              <span
+                className="rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary"
+                title="The backend matched this voice to a saved profile. Confirm or reject below."
+              >
+                Likely match · {confidencePct}%
+              </span>
+            )}
+          </div>
         )}
         <div className="text-xs text-muted-foreground">
           {speakerId} · {segmentCount} segments
+          {speaker.match_confirmed && speaker.profile_id && (
+            <span className="ml-2 text-primary/80">· profile linked</span>
+          )}
         </div>
+        {pendingMatch && !editing && (
+          <div className="mt-2 flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={confirmMatch}
+              disabled={saving}
+              className="h-7 px-3"
+            >
+              {saving ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Check className="h-3 w-3 mr-1" />}
+              Yes, this is {displayName}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={rejectMatch}
+              disabled={saving}
+              className="h-7 px-3"
+            >
+              <X className="h-3 w-3 mr-1" />
+              Not them
+            </Button>
+          </div>
+        )}
       </div>
     </div>
   );

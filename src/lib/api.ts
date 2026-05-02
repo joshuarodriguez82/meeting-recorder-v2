@@ -126,7 +126,33 @@ export interface SessionFull {
   attendees: string[];
   notes: string;
   segments: Array<{ speaker_id: string; start: number; end: number; text: string }>;
-  speakers: Record<string, { speaker_id: string; display_name: string }>;
+  speakers: Record<string, Speaker>;
+}
+
+export interface Speaker {
+  speaker_id: string;
+  display_name: string;
+  // Set when this session-local speaker is linked to a persistent
+  // SpeakerProfile, either via auto-match after diarize or because the
+  // user manually renamed them.
+  profile_id?: string | null;
+  // Cosine similarity (0-1) when this is an unconfirmed auto-match.
+  // null after the user confirms or manually renames.
+  match_confidence?: number | null;
+  // True after the user has accepted the auto-match (or done a manual
+  // rename, which counts as acceptance). Drives whether the UI shows
+  // the "(87%) confirm?" badge.
+  match_confirmed?: boolean;
+}
+
+export interface SpeakerProfile {
+  profile_id: string;
+  display_name: string;
+  created_at: string;
+  updated_at: string;
+  confirmation_count: number;
+  session_count: number;
+  sessions_seen_in: string[];
 }
 
 export interface UnprocessedSession {
@@ -254,14 +280,59 @@ export const api = {
       body: JSON.stringify(patch),
     }),
 
-  renameSpeaker: (session_id: string, speaker_id: string, display_name: string) =>
-    request<{ ok: boolean; speaker_id: string; display_name: string }>(
+  renameSpeaker: (
+    session_id: string,
+    speaker_id: string,
+    display_name: string,
+    save_profile: boolean = true,
+  ) =>
+    request<{ ok: boolean; speaker: Speaker }>(
       `/sessions/${session_id}/speakers/${encodeURIComponent(speaker_id)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ display_name, save_profile }),
+      }
+    ),
+
+  confirmSpeakerMatch: (
+    session_id: string,
+    speaker_id: string,
+    profile_id: string,
+  ) =>
+    request<{ ok: boolean; speaker: Speaker }>(
+      `/sessions/${session_id}/speakers/${encodeURIComponent(speaker_id)}/confirm`,
+      {
+        method: "POST",
+        body: JSON.stringify({ profile_id }),
+      }
+    ),
+
+  rejectSpeakerMatch: (session_id: string, speaker_id: string) =>
+    request<{ ok: boolean; speaker: Speaker }>(
+      `/sessions/${session_id}/speakers/${encodeURIComponent(speaker_id)}/reject`,
+      { method: "POST" }
+    ),
+
+  // ── Cross-session speaker profiles ────────────────────────────────
+  listSpeakerProfiles: () => request<SpeakerProfile[]>("/speaker-profiles"),
+  renameSpeakerProfile: (profile_id: string, display_name: string) =>
+    request<SpeakerProfile>(
+      `/speaker-profiles/${encodeURIComponent(profile_id)}`,
       {
         method: "PATCH",
         body: JSON.stringify({ display_name }),
       }
     ),
+  deleteSpeakerProfile: (profile_id: string) =>
+    request<{ ok: boolean }>(
+      `/speaker-profiles/${encodeURIComponent(profile_id)}`,
+      { method: "DELETE" }
+    ),
+  mergeSpeakerProfiles: (profile_ids: string[], display_name: string) =>
+    request<SpeakerProfile>("/speaker-profiles/merge", {
+      method: "POST",
+      body: JSON.stringify({ profile_ids, display_name }),
+    }),
 
   bulkTag: (session_ids: string[], client?: string, project?: string) =>
     request<{ updated: number }>("/tags/apply", {
