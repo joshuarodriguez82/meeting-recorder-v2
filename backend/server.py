@@ -1003,16 +1003,102 @@ def _serialize_speaker(sp) -> dict:
     return d
 
 
+def _ensure_session_embeddings(session: Session) -> bool:
+    """Lazily compute speaker embeddings for an already-processed session
+    that doesn't have them yet.
+
+    Sessions processed before the fingerprinting feature shipped have
+    `speaker.embedding == []`. Without that centroid we can't create or
+    match a SpeakerProfile during rename — the user's "save my name"
+    silently no-ops in Settings → Known Speakers.
+
+    This helper backfills embeddings on demand by re-running the ECAPA
+    encoder over the saved audio + segment timings (segments are 1:1 with
+    diarization turns by speaker, so they're a fine substitute for the
+    raw turn list we no longer have at this point in the pipeline).
+
+    Returns True if any new embedding was computed and written. Caller
+    should `session_svc.save(session)` after a True return so the
+    embeddings persist for subsequent renames.
+    """
+    if not session.audio_path:
+        return False
+    if not session.segments:
+        return False
+
+    # Skip if every speaker already has an embedding — common path for
+    # sessions processed AFTER this feature shipped.
+    needs = [
+        sp for sp in session.speakers.values()
+        if not sp.embedding
+    ]
+    if not needs:
+        return False
+
+    from pathlib import Path as _P
+    if not _P(session.audio_path).exists():
+        logger.info(f"Cannot fingerprint session {session.session_id}: "
+                    f"audio file {session.audio_path} not on disk")
+        return False
+
+    try:
+        from core.speaker_embeddings import (
+            extract_speaker_centroids, is_available,
+        )
+    except ImportError:
+        return False
+    if not is_available():
+        return False
+
+    # Reconstruct turns_by_speaker from the saved segments. Segments
+    # already aggregate diarization + transcription, so the timing is
+    # identical to the original turns for our purposes.
+    turns_by_speaker: dict[str, list[tuple[float, float]]] = {}
+    for seg in session.segments:
+        turns_by_speaker.setdefault(seg.speaker_id, []).append(
+            (float(seg.start), float(seg.end))
+        )
+    if not turns_by_speaker:
+        return False
+
+    centroids = extract_speaker_centroids(session.audio_path, turns_by_speaker)
+    if not centroids:
+        return False
+
+    changed = False
+    for speaker_id, centroid in centroids.items():
+        sp = session.speakers.get(speaker_id)
+        if sp is None or sp.embedding:
+            continue
+        sp.embedding = [float(x) for x in centroid.tolist()]
+        changed = True
+    if changed:
+        logger.info(
+            f"Backfilled embeddings for session {session.session_id} "
+            f"({sum(1 for s in session.speakers.values() if s.embedding)} "
+            f"of {len(session.speakers)} speakers fingerprinted)")
+    return changed
+
+
 @app.patch("/sessions/{session_id}/speakers/{speaker_id}")
 async def rename_speaker(session_id: str, speaker_id: str, req: SpeakerRenameRequest):
     """Rename a speaker on a session.
 
     Side effects when save_profile=True (the default):
-      - If the new name matches an existing profile (case-insensitive),
+      - If the speaker was already linked to a profile, refine + rename it.
+      - Else if the new name matches an existing profile (case-insensitive),
         link this speaker to that profile.
-      - Else, create a new profile from this speaker's centroid.
-      - Either way, mark match_confirmed=True so the UI clears the
-        "(87%) confirm?" badge.
+      - Else create a fresh profile from this speaker's centroid.
+
+    For sessions processed before the fingerprinting feature shipped (no
+    stored embedding), we transparently backfill the embedding now from
+    the saved audio file. That makes the rename behave the same way for
+    old and new sessions — the user doesn't need to know about the
+    history of when fingerprinting got added.
+
+    Response includes `profile_action` so the frontend toast can be
+    honest about what happened: "created", "linked", "refined" (existing
+    match got better), or "skipped" (no audio / no centroid available).
     """
     svc.load_settings()
     session = svc.session_svc.load_full(session_id)
@@ -1029,40 +1115,75 @@ async def rename_speaker(session_id: str, speaker_id: str, req: SpeakerRenameReq
     speaker.display_name = new_name
     speaker.match_confirmed = True
 
-    if req.save_profile and svc.speaker_profile_svc and speaker.embedding:
-        import numpy as np
-        emb = np.asarray(speaker.embedding, dtype=np.float32)
+    profile_action: str = "skipped"
+    skip_reason: Optional[str] = None
 
-        # Case 1: this speaker was already linked to a profile (e.g. user
-        # is correcting an auto-match's name). Update the linked profile.
-        existing = (svc.speaker_profile_svc.get(speaker.profile_id)
-                    if speaker.profile_id else None)
-        if existing is not None:
-            svc.speaker_profile_svc.rename(existing.profile_id, new_name)
-            svc.speaker_profile_svc.confirm_match(
-                existing.profile_id, emb, session.session_id)
+    if not req.save_profile:
+        skip_reason = "save_profile=false on the request"
+    elif not svc.speaker_profile_svc:
+        skip_reason = "speaker_profile_svc not initialised"
+    else:
+        # Lazy backfill for legacy sessions. Slow path the first time
+        # (~3s for ECAPA load + per-segment encoding) but only runs once
+        # per session — embedding then persists with the session JSON.
+        if not speaker.embedding:
+            try:
+                if await asyncio.to_thread(_ensure_session_embeddings, session):
+                    speaker = session.speakers[speaker_id]  # refresh ref
+            except Exception as e:
+                logger.exception(f"Embedding backfill failed: {e}")
+
+        if not speaker.embedding:
+            skip_reason = (
+                "no voice fingerprint available for this speaker — they "
+                "may have spoken too briefly (<1.5s), or the session "
+                "audio may be missing from disk"
+            )
         else:
-            # Case 2: try to find a profile whose name matches what the
-            # user typed — re-using the existing profile is much better
-            # than creating a duplicate every time.
-            wanted = new_name.lower()
-            same_name = next(
-                (p for p in svc.speaker_profile_svc.list_all()
-                 if p.display_name.lower() == wanted), None)
-            if same_name is not None:
-                speaker.profile_id = same_name.profile_id
+            import numpy as np
+            emb = np.asarray(speaker.embedding, dtype=np.float32)
+
+            # Case 1: speaker was already linked (e.g. correcting an
+            # auto-match's name). Update the linked profile.
+            existing = (svc.speaker_profile_svc.get(speaker.profile_id)
+                        if speaker.profile_id else None)
+            if existing is not None:
+                svc.speaker_profile_svc.rename(existing.profile_id, new_name)
                 svc.speaker_profile_svc.confirm_match(
-                    same_name.profile_id, emb, session.session_id)
+                    existing.profile_id, emb, session.session_id)
+                profile_action = "refined"
             else:
-                # Case 3: brand-new name — create a fresh profile.
-                profile = svc.speaker_profile_svc.create(
-                    new_name, emb, session.session_id)
-                speaker.profile_id = profile.profile_id
-        # Either way: stop showing a confidence badge after a confirm.
-        speaker.match_confidence = None
+                # Case 2: name matches an existing profile case-insensitively
+                # → link instead of duplicating.
+                wanted = new_name.lower()
+                same_name = next(
+                    (p for p in svc.speaker_profile_svc.list_all()
+                     if p.display_name.lower() == wanted), None)
+                if same_name is not None:
+                    speaker.profile_id = same_name.profile_id
+                    svc.speaker_profile_svc.confirm_match(
+                        same_name.profile_id, emb, session.session_id)
+                    profile_action = "linked"
+                else:
+                    # Case 3: brand-new name → create a fresh profile.
+                    profile = svc.speaker_profile_svc.create(
+                        new_name, emb, session.session_id)
+                    speaker.profile_id = profile.profile_id
+                    profile_action = "created"
+            speaker.match_confidence = None
 
     svc.session_svc.save(session)
-    return {"ok": True, "speaker": _serialize_speaker(speaker)}
+    return {
+        "ok": True,
+        "speaker": _serialize_speaker(speaker),
+        # What we did with the persistent SpeakerProfile store:
+        #   "created" — new profile created from this speaker's centroid
+        #   "linked"  — linked to an existing profile with the same name
+        #   "refined" — already-linked profile got the new centroid blended in
+        #   "skipped" — couldn't fingerprint (see profile_skip_reason)
+        "profile_action": profile_action,
+        "profile_skip_reason": skip_reason,
+    }
 
 
 class SpeakerConfirmRequest(BaseModel):
