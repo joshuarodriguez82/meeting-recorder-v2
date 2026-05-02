@@ -71,6 +71,25 @@ function presetFromSettings(s: Settings): ProviderPreset {
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const OLLAMA_BASE = "http://localhost:11434/v1";
 
+// User-facing path to the config.env file so the "stored on this machine"
+// note in the API Keys section reflects the actual filesystem layout. We
+// sniff platform from navigator.userAgent because Tauri exposes the host
+// OS that way; SSR safety: fall back to the Windows path during render
+// on the server (build) where `navigator` is undefined.
+function configPathHint(): string {
+  if (typeof navigator === "undefined") {
+    return "%LOCALAPPDATA%\\MeetingRecorder\\config.env";
+  }
+  const ua = navigator.userAgent.toLowerCase();
+  if (ua.includes("mac")) {
+    return "~/Library/Application Support/MeetingRecorder/config.env";
+  }
+  if (ua.includes("linux")) {
+    return "~/.config/MeetingRecorder/config.env";
+  }
+  return "%LOCALAPPDATA%\\MeetingRecorder\\config.env";
+}
+
 export function SettingsView() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [storage, setStorage] = useState<{
@@ -153,15 +172,20 @@ export function SettingsView() {
         <CardHeader>
           <CardTitle className="text-base">API Keys</CardTitle>
           <p className="text-xs text-muted-foreground mt-1">
-            Both are required. Anthropic powers AI extraction (summaries, action
-            items, decisions, requirements, prep briefs). HuggingFace powers
-            speaker identification via pyannote. Both are free to start, stored
-            only on this machine in{" "}
-            <code className="text-[11px]">%LOCALAPPDATA%\MeetingRecorder\config.env</code>.
+            HuggingFace is always required (powers speaker identification via
+            pyannote). The Anthropic key is only required when AI Provider is
+            set to Anthropic — pick a different provider in AI Models below to
+            use OpenRouter / Ollama / a custom OpenAI-compatible endpoint
+            instead. Both are free to start, stored only on this machine in{" "}
+            <code className="text-[11px]">{configPathHint()}</code>.
           </p>
         </CardHeader>
         <CardContent className="space-y-5">
-          {/* Anthropic */}
+          {/* Anthropic — only relevant when AI Provider = Anthropic. Hidden
+              otherwise so the user doesn't see two API-key fields competing
+              for attention. The value persists in settings state across the
+              hide/show cycle, so toggling back to Anthropic restores it. */}
+          {settings.ai_provider === "anthropic" && (
           <div className="space-y-2">
             <Label>Anthropic API Key</Label>
             <Input
@@ -190,6 +214,7 @@ export function SettingsView() {
               </ol>
             </div>
           </div>
+          )}
 
           {/* HuggingFace */}
           <div className="space-y-2">
