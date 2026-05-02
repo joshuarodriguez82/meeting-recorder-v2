@@ -199,6 +199,13 @@ export function GpuAccelerationCard() {
   const detected = status.detected;
   const task = status.task;
   const current = status.current;
+  // Pick the backend list to render. The /gpu/status response carries
+  // platform = "macos" | "windows" | "linux" (added in the Mac port).
+  // Older Windows backends without that field fall through to the
+  // Windows list, which is the historical default.
+  const backends: BackendCard[] = detected.platform === "macos"
+    ? BACKENDS_MACOS
+    : BACKENDS_WINDOWS;
 
   return (
     <Card>
@@ -251,7 +258,7 @@ export function GpuAccelerationCard() {
 
         {/* Backend cards */}
         <div className="space-y-2">
-          {BACKENDS.map((b) => {
+          {backends.map((b) => {
             const active = current === b.id;
             const recommended = detected.recommended === b.id;
             const thisInstalling = task.running && installing === b.id;
@@ -352,6 +359,7 @@ function labelFor(id: string): string {
   switch (id) {
     case "cpu": return "CPU";
     case "cuda": return "NVIDIA (CUDA)";
+    case "mps": return "Apple Silicon (MPS)";
     case "directml": return "AMD / Intel (DirectML)";
     case "rocm": return "ROCm";
     default: return id;
