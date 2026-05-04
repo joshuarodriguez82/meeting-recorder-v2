@@ -176,7 +176,7 @@ export function QAView({ onOpenSession }: Props) {
         <span className="text-muted-foreground">Scope:</span>
         <Select
           value={client || "__all__"}
-          onValueChange={(v) => setClient(v === "__all__" ? "" : v)}
+          onValueChange={(v) => setClient(v === "__all__" || !v ? "" : v)}
         >
           <SelectTrigger className="h-7 w-44 text-xs">
             <SelectValue placeholder="All clients" />
@@ -191,7 +191,7 @@ export function QAView({ onOpenSession }: Props) {
         {client && projects.length > 0 && (
           <Select
             value={project || "__all__"}
-            onValueChange={(v) => setProject(v === "__all__" ? "" : v)}
+            onValueChange={(v) => setProject(v === "__all__" || !v ? "" : v)}
           >
             <SelectTrigger className="h-7 w-44 text-xs">
               <SelectValue placeholder="All projects" />
