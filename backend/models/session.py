@@ -111,6 +111,10 @@ class Session:
             sp = Speaker(
                 speaker_id=sdata.get("speaker_id", speaker_id),
                 display_name=sdata.get("display_name", "") or "",
+                profile_id=sdata.get("profile_id"),
+                match_confidence=sdata.get("match_confidence"),
+                match_confirmed=bool(sdata.get("match_confirmed", False)),
+                embedding=list(sdata.get("embedding") or []),
             )
             session.speakers[speaker_id] = sp
 
