@@ -4,6 +4,29 @@ First-class macOS build. Same feature set as the Windows version, just
 running on Mac. No fork, no second app — both platforms ship from the
 same codebase.
 
+> ## ⚠️ macOS install — READ THIS FIRST
+>
+> **The DMG will say "damaged and can't be opened" when you double-click it.**
+> It is **not** damaged — the build is unsigned and macOS adds a
+> quarantine flag to anything downloaded from the internet. The fix is
+> four Terminal commands (one-time, per install):
+>
+> ```sh
+> xattr -cr ~/Downloads/Meeting*Recorder*.dmg
+> open ~/Downloads/Meeting*Recorder*.dmg
+> # drag the app from the DMG to /Applications, then:
+> xattr -cr "/Applications/Meeting Recorder.app"
+> open "/Applications/Meeting Recorder.app"
+> ```
+>
+> macOS treats the app as trusted on every subsequent launch — you only
+> do this once. **Right-click → Open does not work** on macOS Sequoia /
+> Sonoma; don't waste time trying it. Proper signing + notarization is
+> on the roadmap; until then, the four commands above are the path.
+>
+> **Windows users** — none of this applies. Just download the `.msi`
+> or `.exe` and double-click.
+
 ## What's new
 
 - **Native macOS app.** Tauri produces a `.dmg` installer (Apple Silicon
@@ -56,31 +79,12 @@ same codebase.
   prompts (mic, calendar, AppleScript automation), and notarization
   instructions for anyone who later picks up an Apple Developer account.
 
-## Distribution caveat — Mac install requires four Terminal commands
+## Distribution caveat (Mac)
 
-These builds are **not signed or notarized** — that requires a paid
-Apple Developer account ($99/yr) which the project doesn't have yet.
-On macOS Sequoia / Sonoma the DMG opens with **"damaged and can't be
-opened"**. This isn't actual damage — it's the quarantine attribute
-your browser added when downloading the file. The older
-*"right-click → Open"* workaround stopped working on recent macOS
-versions; you have to strip the quarantine attribute first.
-
-Open Terminal and run:
-
-```sh
-xattr -cr ~/Downloads/Meeting*Recorder*.dmg
-open ~/Downloads/Meeting*Recorder*.dmg
-# drag the app from the DMG to /Applications, then:
-xattr -cr "/Applications/Meeting Recorder.app"
-open "/Applications/Meeting Recorder.app"
-```
-
-One-time per install. macOS trusts the app on every subsequent launch.
-
-If you'd rather have a clean drag-to-install experience without
-Terminal, see `MAC_SETUP.md` → "Code signing and notarization" — that
-path requires the $99/yr Apple Developer enrollment.
+See the **macOS install — READ THIS FIRST** callout at the top of these
+notes. Until Apple Developer signing + notarization is in place, the
+four `xattr` / `open` commands are the install path on Mac. Windows is
+unaffected.
 
 ## Internal: cross-platform CI
 
