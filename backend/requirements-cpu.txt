@@ -22,6 +22,9 @@ anthropic
 # cost for Anthropic-only users.
 openai
 python-dotenv
+# OS keychain for API keys (Anthropic/HF/OpenAI). Windows Credential
+# Manager on Win, Keychain on macOS. See backend/config/secrets.py.
+keyring>=24.0
 sounddevice
 soundfile
 scipy

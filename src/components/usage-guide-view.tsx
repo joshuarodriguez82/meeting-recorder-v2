@@ -82,9 +82,14 @@ const SECTIONS: Section[] = [
           automation.
         </Tip>
         <Tip>
-          The tokens are stored in <code>%LOCALAPPDATA%\MeetingRecorder\config.env</code> on
-          this machine only — they never roam to other laptops and never leave to the network
-          except when you actually make an AI extraction call.
+          API keys (HuggingFace, Anthropic, OpenRouter) are stored in your OS&apos;s native
+          credential vault — Windows Credential Manager on Windows, Keychain on macOS — not in
+          plaintext on disk. Other settings live in{" "}
+          <code>%LOCALAPPDATA%\MeetingRecorder\config.env</code>{" "}
+          (Win) or{" "}
+          <code>~/Library/Application Support/MeetingRecorder/config.env</code>{" "}
+          (Mac). Existing keys from older versions migrate into the keychain automatically the
+          first time the new build reads them.
         </Tip>
       </>
     ),
