@@ -22,12 +22,38 @@ for both Apple Silicon and Intel Macs. Pick the one that matches your CPU:
 - `Meeting Recorder_X.Y.Z_aarch64.dmg` — Apple Silicon (M1, M2, M3, M4)
 - `Meeting Recorder_X.Y.Z_x64.dmg` — Intel Macs
 
-These are **not signed** (no Apple Developer cert), so on first launch
-macOS will block the app with "Apple cannot check it for malicious
-software". Workaround: **right-click the app → Open**, click Open in
-the dialog. One-time per install.
+### Bypassing Gatekeeper on first install
 
-After installing, you still need:
+These DMGs are **not signed** (no Apple Developer cert yet), so macOS
+Sequoia / Sonoma flags them as *"damaged and can't be opened"* on
+first download. This isn't real damage — it's the quarantine attribute
+your browser added when downloading from the internet. The older
+**right-click → Open** workaround stopped working on recent macOS
+versions; the only reliable fix is to clear the quarantine attribute
+in Terminal before opening:
+
+```sh
+# 1. Strip quarantine from the downloaded DMG
+xattr -cr ~/Downloads/Meeting*Recorder*.dmg
+
+# 2. Open the DMG, drag the app to /Applications
+
+# 3. Strip quarantine from the installed app too
+xattr -cr "/Applications/Meeting Recorder.app"
+
+# 4. Launch
+open "/Applications/Meeting Recorder.app"
+```
+
+One-time per install. After this macOS treats the app as trusted and
+launches it normally on every subsequent open.
+
+The proper fix is Apple Developer ID signing + notarization. Until
+that's set up, the four commands above are the install path.
+
+### First-run setup (after install)
+
+You still need:
 
 1. **BlackHole** (free audio loopback driver — required to capture other
    participants' audio): `brew install blackhole-2ch`, then reboot.
