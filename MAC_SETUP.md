@@ -95,11 +95,28 @@ doesn't care).
 
 ## First launch
 
-1. **Right-click → Open** the first time (NOT a regular double-click). The
-   app isn't notarized yet, so Gatekeeper will refuse a normal launch with
-   "can't be opened because Apple cannot check it for malicious software".
-   Right-click → Open shows an Open button that bypasses that warning. You
-   only have to do this once per install.
+1. **Bypass Gatekeeper.** The build isn't signed yet, so macOS refuses
+   a regular double-click with "damaged and can't be opened." Two ways
+   around it; pick whichever's easier.
+
+   **Easier — System Settings:** Double-click the app, dismiss the
+   warning, then go to **System Settings → Privacy & Security**. Scroll
+   to Security, click **Open Anyway** next to the Meeting Recorder
+   blocked-app message, double-click the app again, click Open.
+
+   **Faster — Terminal:**
+   ```sh
+   xattr -cr ~/Downloads/Meeting*.dmg
+   open ~/Downloads/Meeting*.dmg
+   # (Drag the app to Applications via Finder.)
+   ls /Applications/ | grep -i meeting
+   # Use whichever name ls prints. Quote if it has a space:
+   xattr -cr "/Applications/Meeting Recorder.app"
+   open "/Applications/Meeting Recorder.app"
+   ```
+
+   The older right-click → Open trick stopped working on recent macOS
+   (Sequoia / Sonoma); don't bother with it.
 
 2. **Wait for the venv bootstrap.** First launch on a clean Mac without a
    `backend/.venv` will trigger the embedded `bootstrap_app_venv` flow,
@@ -107,6 +124,23 @@ doesn't care).
    Takes 3–5 minutes. The window opens immediately but API calls will fail
    with "backend not ready" until pip finishes. Tail
    `~/Library/Application Support/MeetingRecorder/bootstrap.log` to watch.
+
+   **If you're upgrading from an earlier version** and a feature like
+   Semantic Search complains "sentence-transformers isn't installed,"
+   it means your existing venv is missing a newly-added dependency.
+   Either run a one-shot install:
+
+   ```sh
+   ~/Library/Application\ Support/MeetingRecorder/.venv/bin/pip install "sentence-transformers<3"
+   pkill -f server.py   # watchdog respawns the backend
+   ```
+
+   …or nuke the venv to force a full rebootstrap on next launch:
+
+   ```sh
+   rm -rf ~/Library/Application\ Support/MeetingRecorder/.venv
+   # quit and relaunch the app (~5 min while pip rebuilds)
+   ```
 
 3. **Grant permissions when prompted:**
    - **Microphone** — required for any recording. macOS prompts on the
@@ -169,14 +203,16 @@ Mac. (Renaming the UI label is a frontend cleanup we can do later.)
 | Upcoming Meetings panel always empty | Same screen → Calendars → toggle on. Confirm in Calendar.app that you actually have meetings scheduled (the app reads whatever Calendar.app sees). |
 | BlackHole doesn't appear in System Audio dropdown | After `brew install blackhole-2ch`, you must reboot. Driver loads at boot. |
 | Follow-up drafts didn't appear in Mail | First time: System Settings → Privacy & Security → Automation → Meeting Recorder → toggle Mail (and/or Microsoft Outlook) on. Re-run the action. |
-| "App is damaged and can't be opened" | Gatekeeper quarantine bit. Run `xattr -dr com.apple.quarantine "/Applications/Meeting Recorder.app"` and try again. |
+| "App is damaged and can't be opened" | Gatekeeper quarantine bit on an unsigned build. See [First launch](#first-launch) — either System Settings → Privacy & Security → Open Anyway, OR `xattr -cr "/Applications/Meeting Recorder.app"` then re-launch. |
+| Settings → Semantic Index says "sentence-transformers isn't installed" | Existing venv from an earlier version is missing a new dependency. Run: `~/Library/Application\ Support/MeetingRecorder/.venv/bin/pip install "sentence-transformers<3"` then `pkill -f server.py` to respawn the backend. |
 | `npm run tauri dev` opens window but mic permissions never prompt | Dev-mode binary doesn't have the patched Info.plist. Build the release `.app` once with the steps above and run that — once permissions are granted to the bundle ID, dev-mode runs inherit them. |
 | pip install fails on `lightning==2.6.1` (Apple Silicon) | Make sure `xcode-select --install` finished. If you have multiple Xcode versions, run `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer` to point at the full Xcode. |
 
 ## Code signing and notarization (when you want to distribute)
 
 Right now the build is unsigned, which is why first-launch needs the
-right-click-Open trick. To distribute to other Macs without that step:
+Open Anyway / `xattr` workaround. To distribute to other Macs without
+that step:
 
 1. Get an Apple Developer ID Application certificate from
    developer.apple.com (paid Apple Developer account, $99/yr).
