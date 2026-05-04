@@ -19,34 +19,66 @@ Starting with v2.1.0, prebuilt `.dmg` installers are published under
 [**Releases**](https://github.com/joshuarodriguez82/meeting-recorder-v2/releases)
 for both Apple Silicon and Intel Macs. Pick the one that matches your CPU:
 
-- `Meeting Recorder_X.Y.Z_aarch64.dmg` — Apple Silicon (M1, M2, M3, M4)
-- `Meeting Recorder_X.Y.Z_x64.dmg` — Intel Macs
+- `Meeting.Recorder_X.Y.Z_aarch64.dmg` — Apple Silicon (M1, M2, M3, M4)
+- `Meeting.Recorder_X.Y.Z_x64.dmg` — Intel Macs
+
+(GitHub Actions writes spaces as dots in the artifact filename — the
+app's display name is still "Meeting Recorder".)
 
 ### Bypassing Gatekeeper on first install
 
 These DMGs are **not signed** (no Apple Developer cert yet), so macOS
 Sequoia / Sonoma flags them as *"damaged and can't be opened"* on
 first download. This isn't real damage — it's the quarantine attribute
-your browser added when downloading from the internet. The older
-**right-click → Open** workaround stopped working on recent macOS
-versions; the only reliable fix is to clear the quarantine attribute
-in Terminal before opening:
+your browser added. Pick whichever path is easier; both work.
+
+#### Path A: System Settings (no Terminal)
+
+1. Double-click the DMG in Finder, drag the app to **Applications**.
+2. Double-click `Meeting Recorder` in Applications. macOS refuses with
+   the "damaged" warning. **Click Done / Cancel.**
+3. Open **System Settings → Privacy & Security**. Scroll to the
+   Security section. You'll see *"Meeting Recorder was blocked to
+   protect your Mac"* with an **Open Anyway** button. Click it.
+4. Re-double-click the app. macOS asks once more; click **Open**.
+
+That's it — first launch starts. macOS now trusts the app forever.
+
+#### Path B: Terminal (faster if you're comfortable with it)
+
+The older **right-click → Open** workaround stopped working on recent
+macOS. Use `xattr` to clear the quarantine attribute:
 
 ```sh
-# 1. Strip quarantine from the downloaded DMG
-xattr -cr ~/Downloads/Meeting*Recorder*.dmg
+# 1. Strip quarantine from whatever Meeting Recorder DMG is in Downloads.
+#    The Meeting* glob is robust to either dot or space in the filename.
+xattr -cr ~/Downloads/Meeting*.dmg
 
-# 2. Open the DMG, drag the app to /Applications
+# 2. Open the DMG. Finder mounts it; drag the app to Applications.
+open ~/Downloads/Meeting*.dmg
 
-# 3. Strip quarantine from the installed app too
+# 3. Confirm the installed app's filename — could be "Meeting Recorder.app"
+#    (with a space) or "Meeting.Recorder.app" (with a dot) depending on
+#    the build pipeline. Whichever ls prints, use that exact name below.
+ls /Applications/ | grep -i meeting
+
+# 4. Strip quarantine from the installed app and launch. Quote the path
+#    if it contains a space.
 xattr -cr "/Applications/Meeting Recorder.app"
-
-# 4. Launch
 open "/Applications/Meeting Recorder.app"
 ```
 
-One-time per install. After this macOS treats the app as trusted and
-launches it normally on every subsequent open.
+**Heads-up on copy-paste from chat / Slack / etc.:** some clients
+auto-link `Recorder.app` (treats `.app` as a TLD) and `[Recorder.app]`
+syntax ends up in your pasted command. Either type the commands by
+hand or copy from the GitHub-rendered README directly. If you see
+`^[[200~` or `^[[201~` echoed back at you, that's stray bracketed-paste
+escape sequences — hit **Ctrl+C** to clear the prompt and try again.
+
+After either path, macOS treats the app as trusted and launches it
+normally on every subsequent open. The proper long-term fix is Apple
+Developer ID signing + notarization; until that's set up, the four
+clicks above are the install path.
 
 The proper fix is Apple Developer ID signing + notarization. Until
 that's set up, the four commands above are the install path.
