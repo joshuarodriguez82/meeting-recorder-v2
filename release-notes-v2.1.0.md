@@ -56,17 +56,31 @@ same codebase.
   prompts (mic, calendar, AppleScript automation), and notarization
   instructions for anyone who later picks up an Apple Developer account.
 
-## Distribution caveat
+## Distribution caveat — Mac install requires four Terminal commands
 
 These builds are **not signed or notarized** — that requires a paid
-Apple Developer account ($99/yr) which the project doesn't have yet. On
-first launch, macOS will block the app with "Apple cannot check it for
-malicious software". Workaround: **right-click the app → Open**, then
-click Open in the dialog. One-time per install. After that, double-click
-launch works normally.
+Apple Developer account ($99/yr) which the project doesn't have yet.
+On macOS Sequoia / Sonoma the DMG opens with **"damaged and can't be
+opened"**. This isn't actual damage — it's the quarantine attribute
+your browser added when downloading the file. The older
+*"right-click → Open"* workaround stopped working on recent macOS
+versions; you have to strip the quarantine attribute first.
 
-If you want signed/notarized builds, see `MAC_SETUP.md` →
-"Code signing and notarization" for the steps.
+Open Terminal and run:
+
+```sh
+xattr -cr ~/Downloads/Meeting*Recorder*.dmg
+open ~/Downloads/Meeting*Recorder*.dmg
+# drag the app from the DMG to /Applications, then:
+xattr -cr "/Applications/Meeting Recorder.app"
+open "/Applications/Meeting Recorder.app"
+```
+
+One-time per install. macOS trusts the app on every subsequent launch.
+
+If you'd rather have a clean drag-to-install experience without
+Terminal, see `MAC_SETUP.md` → "Code signing and notarization" — that
+path requires the $99/yr Apple Developer enrollment.
 
 ## Internal: cross-platform CI
 
