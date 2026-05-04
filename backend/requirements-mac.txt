@@ -36,7 +36,12 @@ numpy==2.1.3
 
 # Semantic search across meetings — small (22 MB) MiniLM-L6 model,
 # CPU-only, runs locally. Adds ~50ms per chunk on Apple Silicon.
-sentence-transformers>=2.7.0
+sentence-transformers>=2.7.0,<3
+# pyannote.audio 3.3.2 uses huggingface_hub<1's `use_auth_token=` API.
+# sentence-transformers 3+ pulls transformers 5+ which requires
+# huggingface_hub>=1.5 and breaks pyannote at import. Pin both upper
+# bounds until pyannote ships a fix.
+transformers<5
 
 # macOS-only: EventKit (Calendar) and Foundation bridges. Used by
 # services/calendar_service.py to read the user's Calendar without any
