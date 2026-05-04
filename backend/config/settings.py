@@ -18,6 +18,8 @@ from pathlib import Path
 from dataclasses import dataclass
 from dotenv import dotenv_values, load_dotenv
 
+from . import secrets as _secrets
+
 
 def _user_data_dir() -> Path:
     """The canonical writable directory for this user's data.
@@ -178,7 +180,19 @@ class Settings:
             # Also populate os.environ so subprocesses inherit.
             load_dotenv(dotenv_path=env_path, override=True)
 
+        # One-shot migration: copy any secrets still living in config.env
+        # into the OS keychain. After this point get_secret() returns the
+        # value; on the next save we blank the env line so the file no
+        # longer holds plaintext credentials.
+        _secrets.migrate_from_env(file_values)
+
         def _get(key: str, default: str = "") -> str:
+            # Sensitive keys come from the OS keychain when available,
+            # falling back to file/env for migration and degraded modes.
+            if key in _secrets.SECRET_KEYS:
+                kc = _secrets.get_secret(key)
+                if kc:
+                    return kc
             v = file_values.get(key)
             if v is not None and v != "":
                 return v
@@ -276,10 +290,28 @@ class Settings:
         openai_api_key: str = "",
         openai_base_url: str = "",
     ) -> None:
-        """Write settings back to the .env file."""
+        """Write settings back to the .env file.
+
+        Secrets (Anthropic / HF / OpenAI keys) are routed to the OS keychain
+        when available; the corresponding config.env lines are written empty
+        so the file no longer holds plaintext credentials. If the keychain
+        write fails (no backend, locked, etc.) the secret falls back to
+        config.env so the app still works — degraded security, not broken.
+        """
+        # Try keychain first for each secret. kc_ok[name] == True means
+        # we successfully stored it; the file gets a blank for that name.
+        kc_ok = {
+            "ANTHROPIC_API_KEY": _secrets.set_secret("ANTHROPIC_API_KEY", anthropic_api_key),
+            "HF_TOKEN":          _secrets.set_secret("HF_TOKEN", hf_token),
+            "OPENAI_API_KEY":    _secrets.set_secret("OPENAI_API_KEY", openai_api_key),
+        }
+        env_anthropic = "" if kc_ok["ANTHROPIC_API_KEY"] else anthropic_api_key
+        env_hf        = "" if kc_ok["HF_TOKEN"]          else hf_token
+        env_openai    = "" if kc_ok["OPENAI_API_KEY"]    else openai_api_key
+
         content = (
-            f"ANTHROPIC_API_KEY={anthropic_api_key}\n"
-            f"HF_TOKEN={hf_token}\n"
+            f"ANTHROPIC_API_KEY={env_anthropic}\n"
+            f"HF_TOKEN={env_hf}\n"
             f"WHISPER_MODEL={whisper_model}\n"
             f"MAX_SPEAKERS={max_speakers}\n"
             f"RECORDINGS_DIR={recordings_dir}\n"
@@ -293,7 +325,7 @@ class Settings:
             f"RETENTION_PROCESSED_DAYS={retention_processed_days}\n"
             f"RETENTION_UNPROCESSED_DAYS={retention_unprocessed_days}\n"
             f"AI_PROVIDER={ai_provider}\n"
-            f"OPENAI_API_KEY={openai_api_key}\n"
+            f"OPENAI_API_KEY={env_openai}\n"
             f"OPENAI_BASE_URL={openai_base_url}\n"
         )
         # Write to the canonical LOCALAPPDATA location first. In rare cases

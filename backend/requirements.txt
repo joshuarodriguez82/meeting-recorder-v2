@@ -4,6 +4,11 @@ pydantic>=2.0
 anthropic
 openai
 python-dotenv
+# OS keychain for secrets (Anthropic/HF/OpenAI keys). Picks the right
+# backend automatically: Windows Credential Manager, macOS Keychain,
+# or Linux Secret Service. Falls back to plaintext config.env if the
+# backend is unavailable — see backend/config/secrets.py.
+keyring>=24.0
 sounddevice
 soundfile
 scipy
