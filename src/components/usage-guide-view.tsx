@@ -140,6 +140,329 @@ const SECTIONS: Section[] = [
     ),
   },
   {
+    id: "live-transcript",
+    title: "Live Transcript",
+    content: (
+      <>
+        <p>
+          While you record, a streaming preview of the transcript scrolls
+          beneath the recording bar. New segments arrive every ~15 seconds —
+          one full window of audio at a time. Both your mic AND the system-
+          audio loopback (if configured) are mixed and run through Whisper,
+          so the panel shows what everyone in the meeting is saying, not
+          just you.
+        </p>
+
+        <Tip>
+          The live preview is a convenience — the canonical, persisted
+          transcript runs after you stop the recording. Don&apos;t worry
+          if the live version misses a word at a window boundary; the
+          post-stop pass uses different segmentation and gets it right.
+        </Tip>
+
+        <p className="font-medium mt-3">Toggle it off:</p>
+        <p>
+          Settings → Workflow → <em>Live transcription during recording</em>.
+          When off, the panel doesn&apos;t render and the backend skips the
+          extra Whisper passes — saves CPU on long calls or low-spec
+          machines. Has no effect on the post-stop transcript.
+        </p>
+
+        <p className="font-medium mt-3">Speaker labels:</p>
+        <p>
+          Live segments aren&apos;t diarized — pyannote needs the full audio
+          to cluster speakers. The post-stop pass at <em>Process</em> (or
+          auto-process) is what assigns SPEAKER_00 / John / Sarah labels
+          to the canonical transcript.
+        </p>
+
+        <Tip>
+          On slower machines (or when you&apos;re using Whisper{" "}
+          <code className="text-[11px]">medium</code> /{" "}
+          <code className="text-[11px]">large</code>) the live worker can
+          fall behind realtime. Not an error — text just trails the
+          conversation. Switch to <code className="text-[11px]">base</code>{" "}
+          or <code className="text-[11px]">tiny</code> in Settings if it
+          bothers you, or turn the toggle off entirely.
+        </Tip>
+      </>
+    ),
+  },
+  {
+    id: "known-speakers",
+    title: "Known Speakers",
+    content: (
+      <>
+        <p>
+          The first time you label a speaker on a session — clicking the
+          pencil next to SPEAKER_00 and typing &quot;John Smith&quot; — the
+          backend extracts a voice fingerprint (192-dim ECAPA embedding)
+          from that speaker&apos;s audio and saves it as a persistent
+          profile. Future sessions where John talks will auto-tag him
+          before you even open the session detail. You confirm or reject
+          the auto-match and the profile gets refined over time.
+        </p>
+
+        <p className="font-medium mt-3">In a session you didn&apos;t label yet:</p>
+        <p>
+          When fingerprinting matches a speaker against a saved profile,
+          the speaker row shows{" "}
+          <span className="rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+            Likely match · 87%
+          </span>{" "}
+          plus &quot;Yes, this is John&quot; and &quot;Not them&quot;
+          buttons. Click yes to confirm; the profile&apos;s centroid gets
+          refined via a running mean over confirmations, so it gets MORE
+          accurate the more you label.
+        </p>
+
+        <p className="font-medium mt-3">Manage profiles:</p>
+        <p>
+          Settings → Known Speakers shows everyone you&apos;ve fingerprinted,
+          with rename / delete / merge actions. Use merge when you spot
+          two profiles for the same person (e.g. &quot;John Smith&quot; and
+          &quot;John S.&quot; created in different sessions before
+          fingerprint-matching had a profile to match against).
+        </p>
+
+        <Tip>
+          Sessions processed before this feature shipped don&apos;t have
+          stored embeddings yet — but the first time you rename a speaker
+          on one, the backend backfills the centroid from the saved audio
+          on demand. Sessions whose audio file is gone (retention deleted
+          it, etc.) can&apos;t be back-filled and the rename will warn you
+          that no profile was saved.
+        </Tip>
+
+        <Warn>
+          Voice fingerprints are stored at{" "}
+          <code className="text-[11px]">speaker_profiles.json</code> in the
+          user data folder and never leave your machine. They&apos;re also
+          NOT a security boundary — the profile is just a centroid, not
+          authentication. Two people with similar voices can collide.
+        </Warn>
+      </>
+    ),
+  },
+  {
+    id: "semantic-search",
+    title: "Semantic Search",
+    content: (
+      <>
+        <p>
+          The Search tab now has a <strong>Keyword</strong> /{" "}
+          <strong>Semantic</strong> toggle. Keyword is the existing regex
+          search across titles, summaries, action items, decisions, and
+          transcripts — fast, exact. Semantic ranks transcript chunks by
+          meaning rather than keyword overlap.
+        </p>
+
+        <p className="font-medium mt-3">When to use which:</p>
+        <ul className="list-disc pl-5 space-y-1">
+          <li>
+            <strong>Keyword</strong>: you remember the actual words used
+            — &quot;[scrubbed]&quot;, &quot;Q3 OKRs&quot;, &quot;net 30&quot;.
+          </li>
+          <li>
+            <strong>Semantic</strong>: you remember the topic but not the
+            wording — &quot;how should we approach pricing for ACME&quot;
+            finds chunks about pricing decisions even if neither
+            &quot;approach&quot; nor &quot;ACME&quot; appears in them.
+          </li>
+        </ul>
+
+        <p className="font-medium mt-3">How it&apos;s indexed:</p>
+        <p>
+          Each processed session&apos;s transcript is chunked into
+          ~400-word windows with 50-word overlap, embedded with a small
+          (22 MB) MiniLM model that runs locally on CPU, and persisted to
+          a sibling pickle file next to the session JSON. New sessions
+          auto-index when you process them. Older sessions need a one-time
+          backfill in <strong>Settings → Semantic Index</strong> (button
+          says &quot;Index N sessions&quot;).
+        </p>
+
+        <p className="font-medium mt-3">Reading the results:</p>
+        <p>
+          Semantic results show a confidence badge (≥70% strong, 50-70%
+          plausible, &lt;50% weak) plus the chunk&apos;s timestamp range.
+          The chunk text itself is the unit of meaning — usually 60 seconds
+          of speech — so the snippet is longer than keyword search results.
+        </p>
+
+        <Tip>
+          The whole index lives at{" "}
+          <code className="text-[11px]">recordings/session_*.embeddings.pkl</code>.
+          Nothing leaves your machine — the model is local, the embeddings
+          are local, the search is one numpy dot product on the FastAPI
+          backend.
+        </Tip>
+      </>
+    ),
+  },
+  {
+    id: "ask-cross-meeting",
+    title: "Ask (Cross-Meeting Q&A)",
+    content: (
+      <>
+        <p>
+          The <strong>Ask</strong> tab lets you ask natural-language
+          questions across your entire meeting corpus and get a Claude
+          (or OpenAI-compatible) answer back, grounded in retrieved
+          transcript chunks. Every claim in the answer comes with an
+          inline citation that opens the source session for verification.
+        </p>
+
+        <p className="font-medium mt-3">Try queries like:</p>
+        <ul className="list-disc pl-5 space-y-1">
+          <li>What did we decide about pricing for ACME?</li>
+          <li>Has Sarah committed to anything in the last three calls?</li>
+          <li>What open questions came up in the discovery sessions?</li>
+          <li>Where did we land on the auth approach?</li>
+        </ul>
+
+        <p className="font-medium mt-3">How it works:</p>
+        <ol className="list-decimal pl-5 space-y-1">
+          <li>
+            Your question is embedded with the same MiniLM model semantic
+            search uses.
+          </li>
+          <li>
+            Top-K (default 8) most-similar transcript chunks are retrieved
+            from the index.
+          </li>
+          <li>
+            Those chunks are formatted into a prompt that tells Claude
+            to use ONLY the supplied excerpts and cite each claim with{" "}
+            <code className="text-[11px]">[session_id @ mm:ss]</code>.
+          </li>
+          <li>
+            Claude streams the answer back token-by-token. Citations get
+            auto-rendered as click-to-jump buttons.
+          </li>
+        </ol>
+
+        <p className="font-medium mt-3">Scope filters:</p>
+        <p>
+          The dropdowns at the top of the Ask view restrict which sessions
+          get searched — handy when you&apos;re asking about ACME and
+          don&apos;t want context from other clients bleeding into the
+          answer.
+        </p>
+
+        <Tip>
+          The sources strip below your question shows the chunks Claude
+          is reasoning over, BEFORE the answer starts streaming. Click any
+          chip to verify what raw material went in. If the answer
+          contradicts the sources, that&apos;s a hallucination — Claude
+          should never get there with the strict prompt, but worth
+          checking.
+        </Tip>
+
+        <Warn>
+          v1 doesn&apos;t have multi-turn conversation memory yet. Each
+          question is independent — Claude doesn&apos;t see your previous
+          Q&A. Restate context if you need to.
+        </Warn>
+      </>
+    ),
+  },
+  {
+    id: "mac-specifics",
+    title: "macOS specifics",
+    content: (
+      <>
+        <p>
+          Meeting Recorder ships native Mac builds (Apple Silicon and Intel)
+          alongside the Windows installers. Most things work the same; a
+          few have OS-specific quirks worth knowing.
+        </p>
+
+        <p className="font-medium mt-3">System audio (recording other participants):</p>
+        <p>
+          macOS has no first-party loopback API for general apps, so you
+          install <strong>BlackHole</strong> — a free virtual audio driver
+          — once and route system audio through it.
+        </p>
+        <ol className="list-decimal pl-5 space-y-1">
+          <li>
+            <code className="text-[11px]">brew install blackhole-2ch</code>,
+            then reboot so the kernel extension loads.
+          </li>
+          <li>
+            Open <strong>Audio MIDI Setup</strong> → <em>+</em> button →{" "}
+            <em>Create Multi-Output Device</em>. Tick BOTH your normal
+            output (Speakers / AirPods) AND BlackHole 2ch.
+          </li>
+          <li>
+            Right-click the Multi-Output Device → <em>Use This Device For
+            Sound Output</em>.
+          </li>
+          <li>
+            In Meeting Recorder Record view → System Audio dropdown → pick{" "}
+            <strong>BlackHole 2ch</strong>.
+          </li>
+        </ol>
+        <p className="text-xs text-muted-foreground mt-2">
+          Audio still plays through your speakers AND gets piped to
+          BlackHole, which Meeting Recorder records. There&apos;s no audio
+          routing on Windows because WASAPI loopback is built in — Mac
+          requires the BlackHole step.
+        </p>
+
+        <p className="font-medium mt-3">Calendar integration:</p>
+        <p>
+          Mac uses <strong>EventKit</strong> instead of Outlook COM. It
+          reads whatever is synced into Calendar.app — iCloud, Microsoft
+          365 / Outlook for Mac, Google. First time the app fetches your
+          calendar, macOS prompts for access; if you accidentally deny,
+          re-enable in <em>System Settings → Privacy &amp; Security →
+          Calendars</em>.
+        </p>
+
+        <p className="font-medium mt-3">Follow-up email drafts:</p>
+        <p>
+          On Mac, drafts go to <strong>Mail.app</strong> first; falls back
+          to Outlook for Mac if Mail isn&apos;t scriptable; falls back
+          again to <code className="text-[11px]">.eml</code> files in
+          your Downloads folder if neither works. macOS prompts for
+          Apple Events automation permission the first time — grant it
+          for whichever mail app you use.
+        </p>
+
+        <p className="font-medium mt-3">Auto-launch on login:</p>
+        <p>
+          The &quot;Launch on login&quot; toggle installs a LaunchAgent
+          plist at{" "}
+          <code className="text-[11px]">~/Library/LaunchAgents/com.joshuarodriguez.meeting-recorder.plist</code>.
+          Activates on next login (we deliberately don&apos;t fire it
+          immediately, since you&apos;re already in the app when you
+          flip the switch).{" "}
+          <strong>The .app must be in /Applications</strong> for the
+          launcher to find it.
+        </p>
+
+        <p className="font-medium mt-3">Why first-launch shows a Gatekeeper warning:</p>
+        <p>
+          Mac builds aren&apos;t signed yet (no Apple Developer account on
+          the project). On first launch macOS will say &quot;app cannot be
+          opened because Apple cannot check it for malicious software.&quot;
+          Workaround: <strong>right-click → Open</strong> the .app the
+          very first time. One-time only; subsequent launches are normal
+          double-clicks.
+        </p>
+
+        <Tip>
+          Apple Silicon GPU acceleration (MPS) is automatic for pyannote
+          speaker diarization on M1/M2/M3/M4 Macs — no install. Whisper
+          stays on CPU because faster-whisper&apos;s underlying
+          ctranslate2 doesn&apos;t support MPS yet (CPU is still fast on
+          Apple Silicon — `base` runs at 2-3× realtime).
+        </Tip>
+      </>
+    ),
+  },
+  {
     id: "session-detail",
     title: "Session Detail",
     content: (

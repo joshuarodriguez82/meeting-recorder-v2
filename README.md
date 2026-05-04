@@ -4,6 +4,14 @@ AI-powered meeting recorder — transcribes meetings, identifies speakers, and e
 
 **Native desktop app** built with Tauri + Rust for the shell, Next.js + React + shadcn/ui for the UI, and a Python FastAPI sidecar wrapping all the heavy lifting (Whisper, Pyannote, Claude).
 
+## Highlight features (v2.2.0+)
+
+- 🎙️ **Live transcription** while you record — mic + system audio mixed in real time
+- 🧠 **Cross-session speaker fingerprints** — label "John" once, every future meeting auto-tags him
+- 🔍 **Semantic search** across your meeting corpus — finds chunks by meaning, not keyword overlap
+- ❓ **Ask** anything about your meetings — Claude answers with click-to-jump citations
+- All AI models run locally except the LLM call (and even that can stay local via Ollama)
+
 ## Download (Windows)
 
 Prebuilt installers are published under [**Releases**](https://github.com/joshuarodriguez82/meeting-recorder-v2/releases). Pick one:
