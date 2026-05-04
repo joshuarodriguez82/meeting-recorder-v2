@@ -8,8 +8,8 @@ AI-powered meeting recorder — transcribes meetings, identifies speakers, and e
 
 Prebuilt installers are published under [**Releases**](https://github.com/joshuarodriguez82/meeting-recorder-v2/releases). Pick one:
 
-- **`Meeting Recorder_2.0.0_x64-setup.exe`** — NSIS installer, double-click to install. Creates a Start Menu shortcut and uninstaller.
-- **`Meeting Recorder_2.0.0_x64_en-US.msi`** — MSI installer, for IT-managed / Group Policy deploys.
+- **`Meeting Recorder_X.Y.Z_x64-setup.exe`** — NSIS installer, double-click to install. Creates a Start Menu shortcut and uninstaller.
+- **`Meeting Recorder_X.Y.Z_x64_en-US.msi`** — MSI installer, for IT-managed / Group Policy deploys.
 
 After install you still need a one-time setup to drop in API keys and accept the HuggingFace model terms — see [First-run setup](#first-run-setup) below.
 
@@ -72,34 +72,46 @@ Mac feature parity vs. Windows:
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────┐
-│   Tauri shell (Rust, native Windows .exe)    │
-│  ┌────────────────────────────────────────┐  │
-│  │  Next.js + React + Tailwind + shadcn   │  │
-│  └────────────────────────────────────────┘  │
-│                HTTP @ 127.0.0.1:17645         │
-│  ┌────────────────────────────────────────┐  │
-│  │  Python FastAPI sidecar                │  │
-│  │  ↳ Whisper transcription               │  │
-│  │  ↳ Pyannote speaker diarization        │  │
-│  │  ↳ Claude summaries + action items +   │  │
-│  │    requirements + decisions            │  │
-│  │  ↳ Outlook COM (calendar + email)      │  │
-│  └────────────────────────────────────────┘  │
-└──────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│   Tauri shell (Rust) — Windows .exe / macOS .app       │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │  Next.js + React + Tailwind + shadcn             │  │
+│  │  ↳ Live transcript panel (SSE, during recording) │  │
+│  │  ↳ Cross-meeting Q&A with citations (SSE)        │  │
+│  └──────────────────────────────────────────────────┘  │
+│                HTTP @ 127.0.0.1:17645                   │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │  Python FastAPI sidecar                          │  │
+│  │  ↳ Whisper transcription (post-stop, canonical)  │  │
+│  │  ↳ LiveTranscriber (15s windows, while recording)│  │
+│  │  ↳ Pyannote speaker diarization                  │  │
+│  │  ↳ Speaker fingerprinting (cross-session match)  │  │
+│  │  ↳ Sentence-transformers semantic index (local)  │  │
+│  │  ↳ Anthropic / OpenAI-compat summaries +         │  │
+│  │    action items + requirements + decisions       │  │
+│  │  ↳ Calendar + email — Outlook COM (Win) or       │  │
+│  │    EventKit + Mail.app/AppleScript (Mac)         │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                         │
+│  Secrets → OS keychain (Win Credential Manager /        │
+│            macOS Keychain), never plaintext on disk     │
+└────────────────────────────────────────────────────────┘
 ```
 
 ## Features
 
 ### Recording
-- **Captures mic + system audio** via WASAPI loopback (works with headphones)
+- **Captures mic + system audio** via WASAPI loopback (Win) or BlackHole (Mac). Works with headphones.
+- **Live transcript panel** — rolling 15-second windows of mic + system audio appear next to the recording controls while you record. Toggle off in Settings → Workflow on slow machines; the canonical post-stop transcript runs regardless.
 - **Unlimited recording duration** — streams to disk
 - **Auto device discovery** with host-API fallback — if WASAPI refuses the mic, the backend silently retries under MME → DirectSound → WDM-KS before giving up
 - **Persistent device selection** — mic and loopback choices saved by name, survive reboots and USB re-plugs
 - **Calendar-driven start** — click a meeting from Upcoming Meetings to pre-fill the name + attendees
+- **Wallclock-anchored merge** — mic and loopback streams are time-stamped on first frame and aligned by absolute timing, not sample-count heuristics. Reduces speaker drift on long recordings.
 
-### AI extraction (Claude)
-- **Summary** — template-aware (General, Requirements Gathering, Design Review, Sprint Planning, Stakeholder Update)
+### AI extraction
+- **Multi-provider** — native Anthropic SDK (default) or any OpenAI-compatible endpoint (OpenRouter, Ollama, LM Studio, vLLM). Switch in Settings; same prompts on either side.
+- **Summary** — template-aware (General, Requirements Gathering, Design Review, Sprint Planning, Stakeholder Update, plus your own custom templates)
 - **Action Items** — owner, task, due date, decisions, open questions
 - **Requirements** — FR/NFR tables with priority and owner
 - **Decisions** — auto-generated ADR log (Decided, Rationale, Alternatives, Owner, Impact)
@@ -111,14 +123,23 @@ Mac feature parity vs. Windows:
 - **Session Detail dialog** — inline audio player, editable tags, rename speakers with one click, run any AI extraction on the fly
 - **Follow-Ups** — action items aggregated across every meeting, filterable by status/client/owner/text
 - **Decisions** — ADR-style decision log, list + detail pane
-- **Transcript Search** — full-text search with context snippets
+- **Semantic search** — type a phrase and get hits where the wording differs but the meaning matches. Powered by a local 22 MB sentence-transformer (MiniLM-L6); embeddings never leave the machine.
+- **Cross-meeting Q&A** — ask natural-language questions across every transcript, get streamed answers with inline citations like `[ABC123 @ 12:34]` that jump to the source session. Scope by client or project.
 - **Clients + nested Projects** — Projects live inside Clients (one-to-many). Client dashboard shows a chip row of its projects; click a chip to drill into just that project's meetings. AI-assisted tagging suggests which meetings belong to a given client.
+
+### Speakers
+- **Cross-session fingerprinting** — rename a speaker once (e.g. SPEAKER_01 → "Maria Chen") and the embedding is saved. Future meetings auto-label her without re-tagging.
+- **Known Speakers UI** — manage the roster from Settings: rename, delete, or merge two profiles that ended up as separate entries. All local, stored as JSON.
 
 ### Workflow
 - **Auto-process after stop** — full transcribe + extract chain runs automatically
-- **Auto-draft follow-up email** — Outlook draft to attendees after processing
-- **Launch on Windows startup** — optional shortcut to Startup folder
+- **Auto-draft follow-up email** — Outlook draft (Win) or Mail.app / Outlook for Mac draft (Mac) to attendees after processing
+- **Launch on startup** — optional. Windows: Startup folder shortcut. macOS: LaunchAgent plist.
 - **Retention policy** — automatic cleanup of old audio WAV files, separate thresholds for processed/unprocessed. Transcripts/summaries never deleted.
+
+### Security
+- **API keys → OS keychain** — Anthropic, HuggingFace, and OpenRouter tokens go into Windows Credential Manager (Win) or Keychain (Mac), never plaintext on disk. Existing `config.env` keys auto-migrate the first time the new build reads them.
+- **Local-only** — every model that can run locally does (Whisper, Pyannote, sentence-transformers, speaker fingerprints). Only the LLM extraction step calls out to a network service, and only the provider you picked.
 
 ### Calendar
 - **Upcoming Meetings** panel pulled from Outlook on launch (Classic Outlook only)
@@ -140,7 +161,7 @@ Mac feature parity vs. Windows:
 - Node.js 20+ — [nodejs.org](https://nodejs.org/)
 - Rust (rustup) — [rustup.rs](https://rustup.rs/)
 - Microsoft WebView2 Runtime (already on Windows 11)
-- NVIDIA GPU recommended (CPU works, slower)
+- NVIDIA GPU recommended for Whisper transcription (CPU works, slower)
 
 ### macOS
 
@@ -177,8 +198,8 @@ python make_shortcut.py
 
 After this you have:
 - `src-tauri/target/release/meeting-recorder.exe` — single portable executable
-- `src-tauri/target/release/bundle/nsis/Meeting Recorder_2.0.0_x64-setup.exe` — NSIS installer (ships in Releases)
-- `src-tauri/target/release/bundle/msi/Meeting Recorder_2.0.0_x64_en-US.msi` — MSI installer (ships in Releases)
+- `src-tauri/target/release/bundle/nsis/Meeting Recorder_X.Y.Z_x64-setup.exe` — NSIS installer (ships in Releases)
+- `src-tauri/target/release/bundle/msi/Meeting Recorder_X.Y.Z_x64_en-US.msi` — MSI installer (ships in Releases)
 
 Double-click either installer to install, or run the portable exe directly.
 
@@ -215,12 +236,12 @@ Used to download the pyannote diarization models (runs locally on your machine a
 3. Click **Save Settings**
 4. **Restart the app** so the backend reloads config and downloads the pyannote models (~200 MB, one-time, happens on first Process)
 
-Tokens are stored locally:
+Tokens are stored in your OS's native credential vault — **Windows Credential Manager** on Windows, **Keychain** on macOS. Never written to plaintext on disk, never roams to other machines. If you upgraded from an earlier build that kept tokens in `config.env`, the values are migrated into the keychain automatically the first time the new build reads them; the env file lines are blanked on the next save.
+
+Other (non-secret) settings still live at:
 
 - Windows: `%LOCALAPPDATA%\MeetingRecorder\config.env`
 - macOS: `~/Library/Application Support/MeetingRecorder/config.env`
-
-Never roams to other machines.
 
 ## Dev loop (hot reload)
 
@@ -279,7 +300,10 @@ meeting-recorder-v2/
 │   │   ├── sessions-view.tsx         # Session history + bulk process
 │   │   ├── follow-ups-view.tsx       # Action items aggregator
 │   │   ├── decisions-view.tsx        # Decision log
-│   │   ├── search-view.tsx           # Transcript search
+│   │   ├── search-view.tsx           # Semantic search across meetings
+│   │   ├── qa-view.tsx               # Cross-meeting Q&A with citations
+│   │   ├── live-transcript-panel.tsx # Live transcript stream while recording
+│   │   ├── known-speakers-section.tsx# Speaker profile management (in Settings)
 │   │   ├── clients-view.tsx          # Per-client dashboard
 │   │   ├── prep-brief-view.tsx       # Meeting prep brief generator
 │   │   ├── settings-view.tsx         # Full settings page
@@ -294,13 +318,31 @@ meeting-recorder-v2/
 │   ├── tauri.conf.json               # App metadata + bundler config
 │   └── icons/
 ├── backend/                          # Python FastAPI sidecar
-│   ├── server.py                     # All HTTP endpoints
-│   ├── config/                       # Settings (shared with v1)
-│   ├── core/                         # AudioCapture, Transcription, Diarization, Summarizer
-│   ├── models/                       # Session, Segment, Speaker
-│   ├── services/                     # Recording, Session, Calendar, Retention, Export
+│   ├── server.py                     # All HTTP endpoints (incl. SSE streams)
+│   ├── config/
+│   │   ├── settings.py               # User-visible settings (env-backed)
+│   │   └── secrets.py                # OS keychain wrapper for API keys
+│   ├── core/
+│   │   ├── audio_capture.py          # Mic + WASAPI/BlackHole loopback
+│   │   ├── transcription.py          # Whisper (post-stop canonical)
+│   │   ├── live_transcriber.py       # Whisper streaming windows during record
+│   │   ├── diarization.py            # Pyannote
+│   │   ├── speaker_embeddings.py     # Cross-session fingerprint matching
+│   │   ├── embeddings.py             # Sentence-transformers (semantic search)
+│   │   └── summarizer.py             # Anthropic + OpenAI-compat router
+│   ├── models/                       # Session, Segment, Speaker, SpeakerProfile
+│   ├── services/
+│   │   ├── recording_service.py      # Recording orchestration
+│   │   ├── session_service.py        # Session CRUD
+│   │   ├── speaker_profile_service.py# Known Speakers persistence
+│   │   ├── search_service.py         # Semantic-index lookup
+│   │   ├── qa_service.py             # Cross-meeting Q&A retrieval + LLM
+│   │   ├── calendar_service.py       # Outlook COM (Win) / EventKit (Mac)
+│   │   ├── follow_up_email.py        # Outlook (Win) / Mail.app (Mac)
+│   │   ├── retention_service.py
+│   │   └── export_service.py
 │   ├── utils/
-│   └── .env                          # API keys (gitignored)
+│   └── .env                          # Dev fallback (gitignored)
 ├── setup.py                          # One-command backend install
 ├── make_shortcut.py                  # Desktop shortcut creator
 └── README.md
