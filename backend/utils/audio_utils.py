@@ -100,14 +100,26 @@ def finalize_recording_streaming(
     output_wav_path: str,
     target_sr: int = TARGET_SAMPLE_RATE,
     block_seconds: float = STREAM_BLOCK_SECONDS,
+    loopback_start_offset_s: Optional[float] = None,
 ) -> Tuple[float, bool]:
     """
     Stream-merge mic + (optional) loopback into a single mono PCM_16 WAV at
     target_sr. Uses bounded memory regardless of recording length.
 
-    Loopback is right-aligned against mic (it starts later because WASAPI
-    blocks until audio actually plays). This matches the previous in-memory
-    behaviour at recording_service.py:190-193.
+    Cross-stream alignment:
+      - When loopback_start_offset_s is provided (live recording path),
+        the loopback track is positioned at exactly that offset from t=0,
+        using wallclock anchors captured the first time each stream
+        delivered audio. This is the correct alignment.
+      - When None (legacy callers, recovery path with no clock info), we
+        fall back to right-aligning loopback against mic length. This
+        assumes both streams stopped at the same wallclock instant — close
+        enough at stop, but the start offset is approximate.
+
+    Drift detection: at end of merge, log a warning if the produced
+    duration differs from sample-count-derived expectations by >1%. Useful
+    diagnostic for long recordings on devices with non-nominal sample
+    rates (USB audio, Bluetooth, virtualized inputs).
 
     Args:
         mic_wav_path: path to the mic-only temp WAV (any SR, mono float).
@@ -115,6 +127,9 @@ def finalize_recording_streaming(
         output_wav_path: destination session WAV.
         target_sr: output sample rate (default 16 kHz — matches whisper/pyannote).
         block_seconds: streaming block size in seconds of input audio.
+        loopback_start_offset_s: known cross-stream offset (loopback start
+            minus mic start, in seconds, ≥0). Pass None to fall back to
+            the right-aligned heuristic.
 
     Returns:
         (duration_seconds_written, loopback_mixed_in)
@@ -172,7 +187,23 @@ def finalize_recording_streaming(
             have_lb = False
 
     mic_total_out = int(round(mic_total_frames * target_sr / mic_sr))
-    lb_offset_out = max(0, mic_total_out - lb_total_out) if have_lb else None
+    if have_lb:
+        if loopback_start_offset_s is not None and loopback_start_offset_s >= 0:
+            # Wallclock-anchored alignment. The first loopback frame sits at
+            # exactly loopback_start_offset_s from t=0 in the merged output.
+            lb_offset_out = int(round(loopback_start_offset_s * target_sr))
+            logger.info(
+                f"Loopback aligned by wallclock: offset {loopback_start_offset_s:.3f}s"
+            )
+        else:
+            # Legacy heuristic: assume both streams stopped at the same
+            # wallclock instant and right-align by length difference.
+            lb_offset_out = max(0, mic_total_out - lb_total_out)
+            logger.info(
+                f"Loopback aligned by right-justification (no clock anchor)"
+            )
+    else:
+        lb_offset_out = None
 
     written_out = 0
     loopback_mixed = False
@@ -247,6 +278,21 @@ def finalize_recording_streaming(
 
     duration_s = written_out / target_sr
     if have_lb and loopback_mixed:
+        # Drift sanity check. mic_total_out is what we expect from the mic
+        # samplecount alone; written_out should match (mix doesn't add or
+        # drop frames, only overlays). A divergence >1% means something is
+        # off — most likely a write error during recording or an SR
+        # mismatch we didn't catch. Worth a warning but not a failure.
+        expected = mic_total_out
+        if expected > 0:
+            drift_pct = abs(written_out - expected) / expected * 100.0
+            if drift_pct > 1.0:
+                logger.warning(
+                    f"Audio drift detected: written {written_out} vs "
+                    f"expected {expected} samples ({drift_pct:.2f}%). "
+                    f"Long recordings on USB/Bluetooth devices may need "
+                    f"resampling at capture time."
+                )
         logger.info(
             f"Merged mic + loopback streaming: {duration_s:.1f}s "
             f"(mic {mic_sr}Hz, lb {lb_sr}Hz → {target_sr}Hz)"

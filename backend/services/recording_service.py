@@ -145,6 +145,17 @@ class RecordingService:
             return self._session
 
         self._recording = False
+        # Grab the per-stream wallclock anchors before tearing the capture
+        # down. If both arrived (mic always does; loopback only when system
+        # audio is captured) the difference is the real cross-stream start
+        # offset and gets passed to the merge step. None means: fall back to
+        # the legacy right-aligned heuristic.
+        mic_start = getattr(self._capture, "mic_start_monotonic", None)
+        lb_start = getattr(self._capture, "loopback_start_monotonic", None)
+        if mic_start is not None and lb_start is not None:
+            loopback_start_offset_s = max(0.0, lb_start - mic_start)
+        else:
+            loopback_start_offset_s = None
         self._capture.stop()
         self._capture = None
 
@@ -167,6 +178,7 @@ class RecordingService:
                     loopback_wav_path=loopback_path,
                     output_wav_path=final_path,
                     target_sr=TARGET_SR,
+                    loopback_start_offset_s=loopback_start_offset_s,
                 )
                 self._session.audio_path = final_path
                 self._session.ended_at = datetime.now()

@@ -342,6 +342,16 @@ class AudioCapture:
         self._loopback_thread: Optional[threading.Thread] = None
         self._loopback_sr: int = SAMPLE_RATE
         self._loopback_channels: int = 1
+        # Wallclock anchors stamped on the FIRST chunk that actually arrives
+        # from each stream. WASAPI loopback typically starts a few hundred ms
+        # after the mic stream because it blocks until audio plays — without
+        # these, the merge step right-aligns by sample count, which assumes
+        # both streams stopped at the same instant (close enough at stop, but
+        # leaves the START offset wrong). recording_service.py reads these
+        # and passes a known offset to finalize_recording_streaming so the
+        # mix uses true cross-stream timing instead of a heuristic.
+        self.mic_start_monotonic: Optional[float] = None
+        self.loopback_start_monotonic: Optional[float] = None
 
     def start(self) -> None:
         self._running = True
@@ -634,6 +644,13 @@ class AudioCapture:
             if status:
                 logger.warning(f"Mic stream status: {status}")
             chunk = indata.mean(axis=1) if indata.ndim > 1 else indata[:, 0].copy()
+            if self.mic_start_monotonic is None:
+                # Record the wallclock at FIRST audio frame arrival, not at
+                # stream-open time — there can be hundreds of ms between
+                # them on slow audio drivers. Used to compute cross-stream
+                # offset against loopback_start_monotonic.
+                import time as _t
+                self.mic_start_monotonic = _t.monotonic()
             self._chunk_count += 1
             if self._chunk_count % 100 == 0:
                 logger.info(f"Mic chunks received: {self._chunk_count}")
@@ -662,6 +679,8 @@ class AudioCapture:
                 if audio.size > BLOCK_SIZE:
                     channels = audio.size // BLOCK_SIZE
                     audio = audio.reshape(BLOCK_SIZE, channels).mean(axis=1)
+                if self.loopback_start_monotonic is None:
+                    self.loopback_start_monotonic = time.monotonic()
                 writer.write(audio)
                 if not logged_first:
                     logged_first = True
@@ -686,6 +705,8 @@ class AudioCapture:
             if status:
                 logger.warning(f"Loopback stream status: {status}")
             block = indata.mean(axis=1) if indata.ndim > 1 else indata[:, 0]
+            if self.loopback_start_monotonic is None:
+                self.loopback_start_monotonic = time.monotonic()
             self._loopback_q_putter(np.copy(block))
         except Exception as e:
             logger.error(f"Error in loopback callback: {e}")
