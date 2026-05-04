@@ -34,6 +34,10 @@ pytorch-lightning==2.6.1
 lightning==2.6.1
 numpy==2.1.3
 
+# Semantic search across meetings — small (22 MB) MiniLM-L6 model,
+# CPU-only, runs locally. Adds ~50ms per chunk on Apple Silicon.
+sentence-transformers>=2.7.0
+
 # macOS-only: EventKit (Calendar) and Foundation bridges. Used by
 # services/calendar_service.py to read the user's Calendar without any
 # Outlook dependency. Skipped on Linux; pyobjc is a no-op import there.

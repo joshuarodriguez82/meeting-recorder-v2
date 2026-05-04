@@ -16,9 +16,11 @@ import soundfile as sf
 from config.settings import Settings
 from core.audio_capture import AudioCapture
 from core.diarization import DiarizationEngine
+from core.live_transcriber import LiveTranscriber, TARGET_SR as LIVE_SR
 from core.transcription import TranscriptionEngine
 from models.segment import Segment
 from models.session import Session
+from services.speaker_profile_service import SpeakerProfileService
 from utils.audio_utils import finalize_recording_streaming
 from utils.logger import get_logger
 
@@ -29,6 +31,30 @@ SESSION_LOG_FMT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 TARGET_SR = 16000
 
 
+def _resample_for_live(audio: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
+    """Resample a mono float32 chunk for the live transcriber.
+
+    Most mics report 48 kHz natively; faster-whisper expects 16 kHz.
+    Per-chunk resample produces tiny artifacts at chunk boundaries, but
+    the artifacts are imperceptible at speech-recognition fidelity and
+    we'd lose more from a lock-coupled queue than we gain from a longer
+    resample window. The canonical /process pass at stop-time uses
+    full-window resample for the persisted transcript.
+    """
+    if src_sr == dst_sr:
+        return audio.astype(np.float32, copy=False)
+    # scipy.signal.resample_poly is the same routine utils/audio_utils
+    # uses for the final merge — keep them consistent so live + final
+    # transcripts have identical timing math.
+    from math import gcd
+    from scipy.signal import resample_poly
+    g = gcd(src_sr, dst_sr)
+    up = dst_sr // g
+    down = src_sr // g
+    out = resample_poly(audio.astype(np.float64, copy=False), up, down)
+    return out.astype(np.float32)
+
+
 class RecordingService:
 
     def __init__(
@@ -36,11 +62,17 @@ class RecordingService:
         settings: Settings,
         transcription_engine: Optional[TranscriptionEngine] = None,
         diarization_engine: Optional[DiarizationEngine] = None,
+        profile_service: Optional[SpeakerProfileService] = None,
         on_status: Optional[Callable[[str], None]] = None,
     ):
         self._settings = settings
         self._transcription = transcription_engine
         self._diarization = diarization_engine
+        # SpeakerProfileService is optional — when None we keep the v1
+        # behaviour (no fingerprinting; speakers are session-local
+        # SPEAKER_XX labels until manually renamed). Server.py wires it
+        # up by default.
+        self._profile_service = profile_service
         self._on_status = on_status or (lambda _: None)
         self._session: Optional[Session] = None
         self._capture: Optional[AudioCapture] = None
@@ -51,6 +83,12 @@ class RecordingService:
         self._capture_sr = TARGET_SR
         self._chunk_count = 0
         self._session_log_handler: Optional[logging.FileHandler] = None
+        # Live transcription (#1 from the roadmap). Constructed lazily
+        # on first start_recording so we don't pay the import cost at
+        # backend startup. The provider closure lets the LiveTranscriber
+        # see the current TranscriptionEngine even if it loads after
+        # recording starts (fresh installs, no models warmed yet).
+        self._live_transcriber: Optional[LiveTranscriber] = None
 
     @property
     def current_session(self) -> Optional[Session]:
@@ -59,6 +97,12 @@ class RecordingService:
     @property
     def is_recording(self) -> bool:
         return self._recording
+
+    @property
+    def live_transcriber(self) -> Optional[LiveTranscriber]:
+        """Exposed so the SSE endpoint in server.py can subscribe to
+        the active recording's segment stream."""
+        return self._live_transcriber
 
     def set_session(self, session: Session) -> None:
         """Allow an externally created session (e.g. loaded file) to be processed."""
@@ -103,6 +147,12 @@ class RecordingService:
             output_device_index=output_device_index,
             on_chunk=self._on_audio_chunk,
             loopback_wav_path=self._loopback_temp_path,
+            # Tee loopback into the live transcriber so other meeting
+            # participants' audio appears in the live preview alongside
+            # the user's voice. None when output_device_index is None
+            # (no system-audio capture configured).
+            on_loopback_chunk=(self._on_loopback_chunk
+                               if output_device_index is not None else None),
         )
 
         try:
@@ -136,6 +186,29 @@ class RecordingService:
             self._capture = None
             raise RuntimeError(f"Failed to open recording file: {e}") from e
 
+        # Spin up live transcription only if the user hasn't disabled it
+        # in Settings. When disabled we skip the LiveTranscriber thread
+        # AND the per-chunk resampling in _on_audio_chunk, saving CPU on
+        # long calls. The canonical post-stop transcript runs regardless.
+        live_enabled = bool(
+            getattr(self._settings, "live_transcription_enabled", True))
+        try:
+            if not live_enabled:
+                logger.info("Live transcription disabled by user setting; "
+                            "skipping LiveTranscriber spawn.")
+                self._live_transcriber = None
+            else:
+                if self._live_transcriber is None:
+                    self._live_transcriber = LiveTranscriber(
+                        engine_provider=lambda: self._transcription,
+                    )
+                self._live_transcriber.start(LIVE_SR)
+        except Exception as e:
+            # Live transcription failure is never fatal — recording must
+            # still proceed even if streaming text doesn't.
+            logger.warning(f"Live transcription unavailable: {e}")
+            self._live_transcriber = None
+
         self._on_status(f"Recording started — Session {session_id}")
         logger.info(f"Session {session_id} recording started.")
         return self._session
@@ -158,6 +231,16 @@ class RecordingService:
             loopback_start_offset_s = None
         self._capture.stop()
         self._capture = None
+
+        # Stop the live transcriber FIRST (before joining the audio
+        # threads) so its tail flush + None sentinel reach SSE clients
+        # while they're still listening. The 10-second join inside
+        # stop() covers the worst case where Whisper is mid-window.
+        if self._live_transcriber is not None:
+            try:
+                self._live_transcriber.stop()
+            except Exception as e:
+                logger.warning(f"Live transcriber stop raised: {e}")
 
         # Close the streaming WAV file
         with self._chunks_lock:
@@ -237,18 +320,127 @@ class RecordingService:
             )
             self._session.segments.append(segment)
 
+        # Speaker fingerprinting: compute per-speaker centroid embeddings
+        # from the diarization turns, then look up matches in the
+        # persistent profile store. Best-effort — any failure here is
+        # logged and the session is still saved with bare SPEAKER_XX
+        # labels (i.e. v1 behaviour).
+        try:
+            self._fingerprint_speakers(diarization_turns)
+        except Exception as e:
+            logger.exception(f"Speaker fingerprinting failed: {e}")
+
         self._on_status("Processing complete.")
         logger.info(f"Session {self._session.session_id} processing complete.")
         return self._session
 
+    def _fingerprint_speakers(self, diarization_turns: List[dict]) -> None:
+        """Extract per-speaker centroids from the audio + diarization
+        turns, attach them to each Speaker object, and apply any matches
+        from the persistent profile store as auto-renames awaiting user
+        confirmation.
+
+        Called from process_session() after segments + speakers are
+        populated. Safe to call when self._profile_service is None
+        (skips matching, still computes + stores embeddings so a future
+        session can match them later if profiling gets enabled)."""
+        if not self._session or not self._session.audio_path:
+            return
+
+        # Lazy import — avoids paying the speechbrain import cost on
+        # backends that never run processing (e.g. settings-only restarts).
+        from core.speaker_embeddings import (
+            extract_speaker_centroids, is_available,
+        )
+        if not is_available():
+            return
+
+        # Group diarization turns by speaker label.
+        turns_by_speaker: dict[str, list[tuple[float, float]]] = {}
+        for turn in diarization_turns:
+            label = turn.get("speaker") or turn.get("speaker_id")
+            if not label:
+                continue
+            turns_by_speaker.setdefault(label, []).append(
+                (float(turn["start"]), float(turn["end"]))
+            )
+
+        centroids = extract_speaker_centroids(
+            self._session.audio_path, turns_by_speaker,
+        )
+        if not centroids:
+            return
+
+        for speaker_id, centroid in centroids.items():
+            speaker = self._session.speakers.get(speaker_id)
+            if speaker is None:
+                continue
+            speaker.embedding = [float(x) for x in centroid.tolist()]
+
+            # Profile lookup. The threshold is intentionally on the
+            # service side (configurable centrally) rather than per-call
+            # so the same cutoff applies to UI hints later.
+            if self._profile_service is None:
+                continue
+            match = self._profile_service.find_match(centroid)
+            if match is None:
+                continue
+            profile, similarity = match
+            speaker.profile_id = profile.profile_id
+            speaker.match_confidence = similarity
+            speaker.match_confirmed = False  # user confirms in UI
+            # Set the display name optimistically — the UI shows a
+            # "(87%) confirm?" badge so the user knows it's an auto-match.
+            speaker.display_name = profile.display_name
+            logger.info(
+                f"Auto-matched {speaker_id} → {profile.display_name} "
+                f"(similarity={similarity:.2f})")
+
     def _on_audio_chunk(self, chunk: np.ndarray) -> None:
         if not self._recording:
             return
+        mono = chunk.mean(axis=0) if chunk.ndim > 1 else chunk
         with self._chunks_lock:
             if self._wav_writer is not None:
-                mono = chunk.mean(axis=0) if chunk.ndim > 1 else chunk
+                # Disk write keeps the original capture sample rate so the
+                # final merge / Whisper-on-stop pipeline sees full-fidelity
+                # audio. Live transcription gets a 16 kHz copy below since
+                # faster-whisper's input is hardcoded to 16 kHz.
                 self._wav_writer.write(mono)
                 self._chunk_count += 1
+        # Live transcription path. We do this OUTSIDE the chunks_lock
+        # because resampling is CPU work and we don't want to delay the
+        # disk-writer thread waiting on it. push_audio is internally
+        # thread-safe via its own buffer lock.
+        live = self._live_transcriber
+        if live is not None and live.is_running:
+            try:
+                live.push_audio(_resample_for_live(mono, self._capture_sr, LIVE_SR))
+            except Exception as e:
+                # Never let live transcription kill the recording. A
+                # bad chunk just means a glitch in the live preview.
+                logger.debug(f"Live push_audio failed: {e}")
+
+    def _on_loopback_chunk(self, chunk: np.ndarray) -> None:
+        """Loopback (system audio) chunks routed into the live
+        transcriber. Same resample-to-16k step as mic. AudioCapture's
+        loopback sample rate is on the capture instance once start()
+        runs; we read it lazily here because at __init__ time the
+        capture hasn't opened the loopback stream yet."""
+        if not self._recording:
+            return
+        live = self._live_transcriber
+        if live is None or not live.is_running:
+            return
+        capture = self._capture
+        if capture is None:
+            return
+        loopback_sr = capture.loopback_sr or LIVE_SR
+        try:
+            mono = chunk.mean(axis=1) if chunk.ndim > 1 else chunk
+            live.push_loopback(_resample_for_live(mono, loopback_sr, LIVE_SR))
+        except Exception as e:
+            logger.debug(f"Live push_loopback failed: {e}")
 
     def _start_session_log(self, session_id: str) -> None:
         try:

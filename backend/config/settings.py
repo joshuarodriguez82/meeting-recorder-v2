@@ -140,6 +140,12 @@ class Settings:
     retention_enabled: bool
     retention_processed_days: int
     retention_unprocessed_days: int
+    # Whether to run the streaming live-transcription pipeline during
+    # recording. When False the recording itself is unaffected — we just
+    # don't spin up the LiveTranscriber thread or its 16 kHz resample,
+    # which saves CPU on long calls. The canonical post-stop transcript
+    # always runs regardless.
+    live_transcription_enabled: bool
     # Which LLM family powers summaries/extractions.
     #   "anthropic"         → native Anthropic SDK, uses anthropic_api_key +
     #                         claude_model (e.g. claude-haiku-4-5)
@@ -234,6 +240,10 @@ class Settings:
             ai_provider=_get("AI_PROVIDER", "anthropic"),
             openai_api_key=_get("OPENAI_API_KEY", ""),
             openai_base_url=_get("OPENAI_BASE_URL", ""),
+            # Default ON — feature is opt-OUT, since most users will want
+            # the live preview. Explicit "false" in config.env disables.
+            live_transcription_enabled=_get_bool(
+                "LIVE_TRANSCRIPTION_ENABLED", True),
         )
 
     @property
@@ -289,6 +299,7 @@ class Settings:
         ai_provider: str = "anthropic",
         openai_api_key: str = "",
         openai_base_url: str = "",
+        live_transcription_enabled: bool = True,
     ) -> None:
         """Write settings back to the .env file.
 
@@ -327,6 +338,7 @@ class Settings:
             f"AI_PROVIDER={ai_provider}\n"
             f"OPENAI_API_KEY={env_openai}\n"
             f"OPENAI_BASE_URL={openai_base_url}\n"
+            f"LIVE_TRANSCRIPTION_ENABLED={'true' if live_transcription_enabled else 'false'}\n"
         )
         # Write to the canonical LOCALAPPDATA location first. In rare cases
         # a Tauri-spawned Python child cannot open files under LOCALAPPDATA
