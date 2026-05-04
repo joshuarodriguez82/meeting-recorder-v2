@@ -24,6 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
+import { LiveTranscriptPanel } from "./live-transcript-panel";
 
 interface Props {
   onSessionsChanged: () => void;
@@ -340,6 +341,10 @@ export function RecordView({
           </Button>
         </div>
       )}
+
+      {/* Live transcript stream — only mounts during an active recording.
+          Subscribes to SSE itself; we just give it the recording flag. */}
+      <LiveTranscriptPanel recording={recording} />
 
       {/* Meeting details */}
       <Card>

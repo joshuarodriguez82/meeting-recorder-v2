@@ -236,9 +236,55 @@ fn ensure_runtime_extracted(zip_path: &std::path::Path) -> Result<std::path::Pat
     Ok(runtime)
 }
 
-/// Resolve the installed backend directory: prefer the extracted runtime
-/// when a bundle zip is present; fall back to the dev checkout.
+/// Resolve the installed backend directory.
+///
+/// Two backend sources can exist on disk simultaneously:
+///   - The extracted runtime under <data_root>/runtime/, populated from
+///     a backend-bundle.zip resource. This is what production .app /
+///     installer builds always use.
+///   - The dev-checkout `backend/` source dir next to the repo root.
+///     This is what we want during `cargo run` / `tauri dev` so that
+///     edits to backend/*.py are picked up the moment the watchdog
+///     respawns the Python child — no `python zip-bundle.py` step.
+///
+/// Resolution order:
+///   - Debug builds (`cargo run`, `tauri dev`): dev `backend/` first,
+///     extracted runtime as fallback. Frees iteration from the zip
+///     dance during development.
+///   - Release builds (`tauri build`): extracted runtime first, dev
+///     fallback only if extraction failed and there's a co-located
+///     source tree (rare — covers the case of running the release exe
+///     directly from a checkout for debugging).
 fn resolve_backend_dir() -> Option<std::path::PathBuf> {
+    // Same dev candidates regardless of build mode — used either as
+    // primary (debug) or fallback (release).
+    let dev_candidates: Vec<std::path::PathBuf> = vec![
+        std::path::PathBuf::from("backend"),
+        std::path::PathBuf::from("../backend"),
+        #[cfg(windows)]
+        std::path::PathBuf::from(r"C:\meeting-recorder-v2\backend"),
+    ];
+    let pick_dev = || -> Option<std::path::PathBuf> {
+        for c in &dev_candidates {
+            if c.join("server.py").exists() {
+                return Some(c.clone());
+            }
+        }
+        None
+    };
+
+    if cfg!(debug_assertions) {
+        if let Some(d) = pick_dev() {
+            rlog(&format!(
+                "Debug build: using dev backend dir at {} (zip ignored \
+                 in debug mode so backend/*.py edits land immediately).",
+                d.display()));
+            return Some(d);
+        }
+        // No dev source — fall through to the bundled-zip path so a
+        // standalone debug binary still has a backend to spawn.
+    }
+
     if let Some(zip) = resolve_bundle_zip() {
         match ensure_runtime_extracted(&zip) {
             Ok(d) => {
@@ -250,20 +296,9 @@ fn resolve_backend_dir() -> Option<std::path::PathBuf> {
             Err(e) => rlog(&format!("Runtime extract failed: {}", e)),
         }
     }
-    // Dev fallback: a `backend/` sibling directory next to the cwd, the
-    // current working dir's `backend/`, or the canonical Windows checkout.
-    let dev_candidates: Vec<std::path::PathBuf> = vec![
-        std::path::PathBuf::from("backend"),
-        std::path::PathBuf::from("../backend"),
-        #[cfg(windows)]
-        std::path::PathBuf::from(r"C:\meeting-recorder-v2\backend"),
-    ];
-    for c in dev_candidates {
-        if c.join("server.py").exists() {
-            return Some(c);
-        }
-    }
-    None
+
+    // Final fallback (release-mode only path here; debug already tried it).
+    pick_dev()
 }
 
 /// Where the app-managed venv lives. Created by bootstrap_app_venv on

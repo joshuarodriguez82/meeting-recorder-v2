@@ -161,6 +161,7 @@ def main():
         "speechbrain==1.0.3",
         "pytorch-lightning==2.6.1",
         "lightning==2.6.1",
+        "sentence-transformers>=2.7.0",
     ]
     if IS_WINDOWS:
         pkgs += ["pywin32", "pyaudiowpatch"]
