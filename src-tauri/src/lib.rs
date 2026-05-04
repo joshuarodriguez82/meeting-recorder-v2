@@ -498,26 +498,35 @@ fn requirements_filename() -> &'static str {
 /// pip output goes to <data_root>/bootstrap.log so the user can tail it.
 fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
     let venv = app_venv_dir();
-    // Did the venv already get created on a prior launch?
-    for c in venv_python_candidates(&venv) {
-        if c.exists() {
-            rlog("App venv already exists — bootstrap skipped");
-            return Ok(venv);
-        }
-    }
-
-    let system_py = find_system_python_313().ok_or_else(|| {
-        format!("Python 3.13 not found on this machine. {}",
-                python_install_instructions())
-    })?;
-    rlog(&format!("Bootstrap: system Python at {}", system_py.display()));
-
     let req_name = requirements_filename();
     let reqs = runtime_dir.join(req_name);
     if !reqs.exists() {
         return Err(format!(
             "{} not found at {} — bundle may be corrupted",
             req_name, reqs.display()));
+    }
+    let current_reqs = std::fs::read_to_string(&reqs).map_err(|e| {
+        format!("read {} failed: {}", reqs.display(), e)
+    })?;
+    // Marker file lets us detect when the bundled requirements changed
+    // between app versions (e.g. an upgrade adds sentence-transformers
+    // for semantic search). Without it, an existing venv from v2.0.x
+    // would be reused for v2.1.0 even though the new code expects
+    // packages the venv doesn't have. Storing the file content rather
+    // than a hash makes the diff trivially auditable from the user's
+    // bootstrap.log if anything goes wrong.
+    let reqs_marker = venv.join("requirements.installed.txt");
+
+    let venv_py_existing = venv_python_candidates(&venv).into_iter()
+        .find(|p| p.exists());
+
+    if venv_py_existing.is_some() {
+        let installed_reqs = std::fs::read_to_string(&reqs_marker).unwrap_or_default();
+        if !installed_reqs.is_empty() && installed_reqs == current_reqs {
+            rlog("App venv up to date — bootstrap skipped");
+            return Ok(venv);
+        }
+        rlog("App venv exists but requirements changed — re-running pip install");
     }
 
     let bootstrap_log_path = log_dir().join("bootstrap.log");
@@ -529,33 +538,51 @@ fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBu
         Ok((f, f2))
     };
 
-    // Step 1: python -m venv
-    rlog(&format!("Bootstrap: creating venv at {}", venv.display()));
-    let (out, err) = open_log()?;
-    let mut c = Command::new(&system_py);
-    c.args(["-m", "venv"]).arg(&venv)
-        .stdout(Stdio::from(out)).stderr(Stdio::from(err));
-    no_window(&mut c);
-    let status = c.status().map_err(|e| format!("venv cmd failed: {}", e))?;
-    if !status.success() {
-        return Err(format!("python -m venv exited with {} (see bootstrap.log)", status));
-    }
+    let venv_py = match venv_py_existing {
+        Some(p) => p,
+        None => {
+            // First-time install: create the venv from scratch with system Python.
+            let system_py = find_system_python_313().ok_or_else(|| {
+                format!("Python 3.13 not found on this machine. {}",
+                        python_install_instructions())
+            })?;
+            rlog(&format!("Bootstrap: system Python at {}", system_py.display()));
 
-    let venv_py = venv_python_candidates(&venv).into_iter()
-        .find(|p| p.exists())
-        .ok_or_else(|| format!("venv python missing after create under {}", venv.display()))?;
+            // Step 1: python -m venv
+            rlog(&format!("Bootstrap: creating venv at {}", venv.display()));
+            let (out, err) = open_log()?;
+            let mut c = Command::new(&system_py);
+            c.args(["-m", "venv"]).arg(&venv)
+                .stdout(Stdio::from(out)).stderr(Stdio::from(err));
+            no_window(&mut c);
+            let status = c.status().map_err(|e| format!("venv cmd failed: {}", e))?;
+            if !status.success() {
+                return Err(format!("python -m venv exited with {} (see bootstrap.log)", status));
+            }
 
-    // Step 2: upgrade pip
-    rlog("Bootstrap: upgrading pip");
-    let (out, err) = open_log()?;
-    let mut c = Command::new(&venv_py);
-    c.args(["-m", "pip", "install", "--upgrade", "pip"])
-        .stdout(Stdio::from(out)).stderr(Stdio::from(err));
-    no_window(&mut c);
-    let _ = c.status();
+            let p = venv_python_candidates(&venv).into_iter()
+                .find(|p| p.exists())
+                .ok_or_else(|| format!("venv python missing after create under {}", venv.display()))?;
 
-    // Step 3: pip install -r requirements — the slow part
-    rlog(&format!("Bootstrap: pip install -r {} (3-5 min, see bootstrap.log)", req_name));
+            // Step 2: upgrade pip — only on first create. On the upgrade
+            // path we trust whatever pip is already in the venv.
+            rlog("Bootstrap: upgrading pip");
+            let (out, err) = open_log()?;
+            let mut c = Command::new(&p);
+            c.args(["-m", "pip", "install", "--upgrade", "pip"])
+                .stdout(Stdio::from(out)).stderr(Stdio::from(err));
+            no_window(&mut c);
+            let _ = c.status();
+            p
+        }
+    };
+
+    // Step 3: pip install -r requirements. Idempotent: pip skips packages
+    // that are already at the right version, only installs deltas. On a
+    // fresh venv this is the slow part (3–5 min, ~1.5 GB of wheels). On
+    // an upgrade where one package was added (e.g. sentence-transformers)
+    // it's tens of seconds.
+    rlog(&format!("Bootstrap: pip install -r {} (see bootstrap.log)", req_name));
     let (out, err) = open_log()?;
     let t0 = std::time::Instant::now();
     let mut c = Command::new(&venv_py);
@@ -570,6 +597,13 @@ fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBu
     }
     rlog(&format!("Bootstrap: pip install completed in {:.0}s",
         t0.elapsed().as_secs_f32()));
+
+    // Record what we installed so the next launch can tell whether
+    // requirements changed again.
+    if let Err(e) = std::fs::write(&reqs_marker, &current_reqs) {
+        rlog(&format!("Warning: could not write {}: {}",
+                      reqs_marker.display(), e));
+    }
 
     Ok(venv)
 }
