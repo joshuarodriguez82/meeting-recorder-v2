@@ -245,6 +245,52 @@ const SECTIONS: Section[] = [
     ),
   },
   {
+    id: "live-and-search",
+    title: "Live Transcription, Search & Q&A",
+    content: (
+      <>
+        <p className="font-medium">Live transcription panel (during recording)</p>
+        <p>
+          A rolling preview of what&apos;s being said appears next to the recording controls
+          while audio is being captured. Mic + system audio are both included, so the other
+          meeting participants&apos; speech shows up too. Segments arrive in 15-second windows —
+          boundary words occasionally split across two segments, which is why the canonical
+          post-stop transcript (run by <strong>Process</strong>) is what gets persisted.
+          Disable in <strong>Settings → Workflow → Live transcription during recording</strong>{" "}
+          on slower machines or when the live preview is just noise.
+        </p>
+
+        <p className="font-medium mt-4">Semantic search across meetings</p>
+        <p>
+          The <strong>Search</strong> tab in the Knowledge Base now does meaning-based retrieval,
+          not just keyword match. Type <em>&quot;billing concerns from finance&quot;</em> and you get hits
+          where someone said <em>&quot;the CFO is worried about invoice timing&quot;</em> — wording you
+          never typed. Powered by a local 22 MB sentence-transformer (MiniLM-L6); no embeddings
+          ever leave the machine. Filters by client / project apply on top of the semantic ranking.
+        </p>
+
+        <p className="font-medium mt-4">Cross-meeting Q&A with citations</p>
+        <p>
+          New <strong>Q&A</strong> tab. Ask a natural-language question (&quot;what did we decide
+          about the migration phasing?&quot;) and the answer streams back inline with citations
+          like <code>[ABC123 @ 12:34]</code> — click the citation to jump to that moment in
+          the source session. Each turn is independent (no multi-turn memory yet); scope by
+          client or project to keep retrieval focused on one account.
+        </p>
+
+        <p className="font-medium mt-4">Cross-session speaker fingerprinting</p>
+        <p>
+          When you rename a speaker (e.g. SPEAKER_01 → &quot;Maria Chen&quot;), the embedding
+          fingerprint is saved. Future sessions where Maria speaks will auto-label her — no
+          re-tagging. Manage the roster in <strong>Settings → Known Speakers</strong>: rename,
+          delete, or merge two profiles that ended up as separate entries (typical when the same
+          person was labeled differently before enough samples accumulated). Profiles are stored
+          locally in <code>speaker_profiles.json</code>; nothing leaves the machine.
+        </p>
+      </>
+    ),
+  },
+  {
     id: "clients",
     title: "Clients & Projects",
     content: (

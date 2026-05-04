@@ -321,10 +321,20 @@ class AudioCapture:
         output_device_index: Optional[int],
         on_chunk: Callable[[np.ndarray], None],
         loopback_wav_path: Optional[str] = None,
+        on_loopback_chunk: Optional[Callable[[np.ndarray], None]] = None,
     ):
         self._mic_idx = mic_device_index
         self._out_idx = output_device_index
         self._on_chunk = on_chunk
+        # Optional second callback that fires for every loopback (system
+        # audio) chunk in addition to the WAV writer. Used by live
+        # transcription to mix mic + loopback in real time so the user
+        # sees what other meeting participants are saying as they say it.
+        # The callback runs on the loopback reader thread (Win) or the
+        # writer thread (Mac); recording_service routes it onward to
+        # LiveTranscriber.push_loopback. None = WAV-only behaviour
+        # (matches v1 — no live transcription consumer).
+        self._on_loopback_chunk = on_loopback_chunk
         self._streams: List[sd.InputStream] = []
         self._lock = threading.Lock()
         self._running = False
@@ -352,6 +362,13 @@ class AudioCapture:
         # mix uses true cross-stream timing instead of a heuristic.
         self.mic_start_monotonic: Optional[float] = None
         self.loopback_start_monotonic: Optional[float] = None
+
+    @property
+    def loopback_sr(self) -> int:
+        """The sample rate of the loopback stream once it's open. The
+        recording service needs this to resample loopback chunks for
+        the LiveTranscriber."""
+        return self._loopback_sr
 
     def start(self) -> None:
         self._running = True
@@ -682,6 +699,15 @@ class AudioCapture:
                 if self.loopback_start_monotonic is None:
                     self.loopback_start_monotonic = time.monotonic()
                 writer.write(audio)
+                # Tee to the live-transcription consumer if there is one.
+                # The callback is in the recording_service thread, NOT
+                # this reader thread, but it's thread-safe (push_loopback
+                # uses its own lock) and very fast.
+                if self._on_loopback_chunk is not None:
+                    try:
+                        self._on_loopback_chunk(audio)
+                    except Exception as cb_err:
+                        logger.debug(f"Loopback callback raised (Win path): {cb_err}")
                 if not logged_first:
                     logged_first = True
                     logger.info("Loopback audio flowing")
@@ -752,6 +778,15 @@ class AudioCapture:
                 if block is None:
                     break
                 writer.write(block)
+                # Tee to live transcription. We do this from the writer
+                # thread (not the audio callback) so any cost from the
+                # consumer doesn't risk the realtime audio callback. The
+                # block is already a numpy float32 mono array.
+                if self._on_loopback_chunk is not None:
+                    try:
+                        self._on_loopback_chunk(block)
+                    except Exception as cb_err:
+                        logger.debug(f"Loopback callback raised (Mac path): {cb_err}")
                 if not logged_first:
                     logged_first = True
                     logger.info("Loopback audio flowing (sounddevice)")

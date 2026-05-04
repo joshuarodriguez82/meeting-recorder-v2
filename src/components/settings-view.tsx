@@ -5,6 +5,8 @@ import { api, formatBytes, type Settings, type TemplateEntry } from "@/lib/api";
 import { toast } from "sonner";
 import { Loader2, Save, Trash2, Plus, RotateCcw } from "lucide-react";
 import { GpuAccelerationCard } from "./gpu-acceleration-card";
+import { KnownSpeakersSection } from "./known-speakers-section";
+import { SemanticIndexSection } from "./semantic-index-section";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -375,6 +377,12 @@ export function SettingsView() {
             onChange={(v) => update("auto_process_after_stop", v)}
           />
           <Toggle
+            label="Live transcription during recording"
+            description="Streams a rolling preview of what's being said while you record. Disable on slower machines or for calls where the live preview is noisy. The canonical post-stop transcript runs regardless."
+            checked={settings.live_transcription_enabled}
+            onChange={(v) => update("live_transcription_enabled", v)}
+          />
+          <Toggle
             label="Auto-draft follow-up email"
             description={isMac()
               ? "Creates a Mail.app (or Outlook for Mac) draft to attendees after processing"
@@ -395,6 +403,12 @@ export function SettingsView() {
 
       {/* GPU acceleration */}
       <GpuAccelerationCard />
+
+      {/* Known speakers (cross-session voice fingerprints) */}
+      <KnownSpeakersSection />
+
+      {/* Semantic search index (cross-session vector retrieval) */}
+      <SemanticIndexSection />
 
       {/* Retention */}
       <Card>

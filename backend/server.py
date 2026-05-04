@@ -178,7 +178,12 @@ from services.export_service import ExportService
 from services.recording_service import RecordingService
 from services.retention_service import cleanup as run_retention_cleanup, folder_stats
 from services.recovery_service import recover_orphans
+from services.qa_service import QAService
+from services.search_service import SearchService
 from services.session_service import SessionService
+from services.speaker_profile_service import (
+    SpeakerProfile, SpeakerProfileService,
+)
 from utils.logger import get_logger
 
 # Heavy ML imports deferred to avoid blocking startup. These load torch +
@@ -210,6 +215,9 @@ class Services:
         self.client_cfg_svc: Optional[ClientConfigService] = None
         self.template_svc: Optional[TemplateService] = None
         self.recording_svc: Optional[RecordingService] = None
+        self.speaker_profile_svc: Optional[SpeakerProfileService] = None
+        self.search_svc: Optional[SearchService] = None
+        self.qa_svc: Optional[QAService] = None
         self.transcription: Optional[TranscriptionEngine] = None
         self.diarization: Optional[DiarizationEngine] = None
         self.summarizer: Optional[Summarizer] = None
@@ -253,8 +261,14 @@ class Services:
             from config.settings import USER_DATA_DIR
             self.client_cfg_svc = ClientConfigService(USER_DATA_DIR)
             self.template_svc = TemplateService(USER_DATA_DIR)
+            self.speaker_profile_svc = SpeakerProfileService(USER_DATA_DIR)
+            # SearchService stays a thin wrapper around session_service —
+            # session embeddings live next to session JSONs, so it just
+            # needs that handle. Lazy index load happens on first search.
+            self.search_svc = SearchService(self.session_svc)
             self.recording_svc = RecordingService(
                 settings=self.settings,
+                profile_service=self.speaker_profile_svc,
                 on_status=self._record_status,
             )
             # The summarizer is constructed whenever an LLM is configured
@@ -287,6 +301,11 @@ class Services:
                     # surface the error at first use.
                     logger.warning(f"Summarizer init failed: {e}")
                     self.summarizer = None
+            # QAService threads search_svc + summarizer together. Either
+            # being None at this moment is fine — QAService.is_ready
+            # reports False and the endpoint emits a clear "not configured"
+            # message instead of crashing.
+            self.qa_svc = QAService(self.search_svc, self.summarizer)
         return self.settings
 
     def ensure_models_loaded(self):
@@ -351,6 +370,11 @@ class SettingsDTO(BaseModel):
     ai_provider: str = "anthropic"
     openai_api_key: str = ""
     openai_base_url: str = ""
+    # Streaming live-transcription preview during recording. Default
+    # True; set False on slower machines or for calls where the user
+    # finds the live preview noisy / inaccurate (the canonical
+    # post-stop transcript runs regardless).
+    live_transcription_enabled: bool = True
 
 
 class StartRecordingRequest(BaseModel):
@@ -407,6 +431,7 @@ async def get_settings():
         ai_provider=s.ai_provider or "anthropic",
         openai_api_key=s.openai_api_key,
         openai_base_url=s.openai_base_url,
+        live_transcription_enabled=s.live_transcription_enabled,
     )
 
 
@@ -436,6 +461,7 @@ async def save_settings(payload: SettingsDTO):
         ai_provider=payload.ai_provider or "anthropic",
         openai_api_key=payload.openai_api_key,
         openai_base_url=payload.openai_base_url,
+        live_transcription_enabled=payload.live_transcription_enabled,
     )
     # Force reload
     svc.settings = None
@@ -865,6 +891,14 @@ async def start_recording(req: StartRecordingRequest):
         raise HTTPException(status_code=500, detail="Recording service not initialized")
     if svc.recording_svc.is_recording:
         raise HTTPException(status_code=409, detail="Already recording")
+    # Pre-warm AI models so live transcription has Whisper ready when the
+    # first 15-second window completes (~15s into the recording). Without
+    # this the first window sits waiting 5-10s for the cold model load
+    # before any text appears, which feels like the live preview is
+    # broken. The load runs in a thread; recording starts immediately.
+    if (svc.settings and svc.settings.is_configured
+            and not svc.models_ready and not svc.models_loading):
+        threading.Thread(target=svc.ensure_models_loaded, daemon=True).start()
     try:
         # start_recording can take a couple seconds opening audio streams —
         # run off the event loop so /recording/status stays responsive
@@ -873,6 +907,60 @@ async def start_recording(req: StartRecordingRequest):
     except Exception as e:
         logger.exception("Start recording failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/recording/transcript/stream")
+async def stream_live_transcript():
+    """Server-Sent Events endpoint for live transcription segments.
+
+    Frontend opens an EventSource as soon as recording starts; segments
+    arrive as `data: {json}\\n\\n` lines. A `done` event fires when the
+    recording stops (or on a backend error) so the client closes the
+    connection cleanly.
+
+    Quirks worth knowing:
+      - The route is only useful while a recording is active. Hitting
+        it any other time returns 409, not 404, so the frontend can
+        distinguish "wrong URL" from "no recording right now".
+      - Heartbeat events go out every 5 seconds even when no transcript
+        is happening, so proxies / browsers don't kill an idle stream
+        and the frontend can detect a broken connection.
+    """
+    from fastapi.responses import StreamingResponse
+    from core.live_transcriber import serialize_segment_sse
+
+    if not svc.recording_svc or not svc.recording_svc.live_transcriber:
+        raise HTTPException(status_code=409,
+                            detail="No live transcription is active.")
+    transcriber = svc.recording_svc.live_transcriber
+    if not transcriber.is_running:
+        raise HTTPException(status_code=409,
+                            detail="No live transcription is active.")
+
+    q = transcriber.subscribe()
+
+    async def event_stream():
+        try:
+            # SSE comment line on connect — tells curl/browsers the stream
+            # opened successfully without committing to a data event yet.
+            yield ": connected\n\n"
+            while True:
+                try:
+                    item = await asyncio.to_thread(q.get, True, 5.0)
+                except Exception:
+                    # Queue.Empty after the 5s timeout — emit a heartbeat
+                    # comment so the connection stays warm.
+                    yield ": heartbeat\n\n"
+                    continue
+                if item is None:
+                    # Recording stopped — flush a done event and exit.
+                    yield "event: done\ndata: \n\n"
+                    return
+                yield serialize_segment_sse(item)
+        finally:
+            transcriber.unsubscribe(q)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 def _stop_recording_sync():
@@ -933,6 +1021,12 @@ async def get_session(session_id: str):
 async def delete_session(session_id: str):
     svc.load_settings()
     svc.session_svc.delete(session_id)
+    # Drop the session's semantic-search sidecar too — otherwise stale
+    # entries linger in the in-memory index and the next search would
+    # surface chunks pointing at a session that no longer exists.
+    if svc.search_svc:
+        await asyncio.to_thread(
+            svc.search_svc.delete_session_index, session_id)
     return {"ok": True}
 
 
@@ -982,21 +1076,347 @@ async def patch_session(session_id: str, req: SessionPatchRequest):
 
 class SpeakerRenameRequest(BaseModel):
     display_name: str
+    # When True, also create / update a persistent SpeakerProfile so future
+    # sessions auto-recognize this voice. Default True — almost always
+    # what the user wants; set False for one-off relabels (typo fixes).
+    save_profile: bool = True
+
+
+def _serialize_speaker(sp) -> dict:
+    """Speaker dict for the API. Mirrors Speaker.to_dict() but drops the
+    raw embedding (192 floats add ~3 KB per speaker per response and the
+    UI doesn't need them — they're internal to the matching pipeline)."""
+    d = sp.to_dict()
+    d.pop("embedding", None)
+    return d
+
+
+def _ensure_session_embeddings(session: Session) -> bool:
+    """Lazily compute speaker embeddings for an already-processed session
+    that doesn't have them yet.
+
+    Sessions processed before the fingerprinting feature shipped have
+    `speaker.embedding == []`. Without that centroid we can't create or
+    match a SpeakerProfile during rename — the user's "save my name"
+    silently no-ops in Settings → Known Speakers.
+
+    This helper backfills embeddings on demand by re-running the ECAPA
+    encoder over the saved audio + segment timings (segments are 1:1 with
+    diarization turns by speaker, so they're a fine substitute for the
+    raw turn list we no longer have at this point in the pipeline).
+
+    Returns True if any new embedding was computed and written. Caller
+    should `session_svc.save(session)` after a True return so the
+    embeddings persist for subsequent renames.
+    """
+    if not session.audio_path:
+        return False
+    if not session.segments:
+        return False
+
+    # Skip if every speaker already has an embedding — common path for
+    # sessions processed AFTER this feature shipped.
+    needs = [
+        sp for sp in session.speakers.values()
+        if not sp.embedding
+    ]
+    if not needs:
+        return False
+
+    from pathlib import Path as _P
+    if not _P(session.audio_path).exists():
+        logger.info(f"Cannot fingerprint session {session.session_id}: "
+                    f"audio file {session.audio_path} not on disk")
+        return False
+
+    try:
+        from core.speaker_embeddings import (
+            extract_speaker_centroids, is_available,
+        )
+    except ImportError:
+        return False
+    if not is_available():
+        return False
+
+    # Reconstruct turns_by_speaker from the saved segments. Segments
+    # already aggregate diarization + transcription, so the timing is
+    # identical to the original turns for our purposes.
+    turns_by_speaker: dict[str, list[tuple[float, float]]] = {}
+    for seg in session.segments:
+        turns_by_speaker.setdefault(seg.speaker_id, []).append(
+            (float(seg.start), float(seg.end))
+        )
+    if not turns_by_speaker:
+        return False
+
+    centroids = extract_speaker_centroids(session.audio_path, turns_by_speaker)
+    if not centroids:
+        return False
+
+    changed = False
+    for speaker_id, centroid in centroids.items():
+        sp = session.speakers.get(speaker_id)
+        if sp is None or sp.embedding:
+            continue
+        sp.embedding = [float(x) for x in centroid.tolist()]
+        changed = True
+    if changed:
+        logger.info(
+            f"Backfilled embeddings for session {session.session_id} "
+            f"({sum(1 for s in session.speakers.values() if s.embedding)} "
+            f"of {len(session.speakers)} speakers fingerprinted)")
+    return changed
 
 
 @app.patch("/sessions/{session_id}/speakers/{speaker_id}")
 async def rename_speaker(session_id: str, speaker_id: str, req: SpeakerRenameRequest):
-    """Rename a speaker on a session — updates the Speaker.display_name."""
+    """Rename a speaker on a session.
+
+    Side effects when save_profile=True (the default):
+      - If the speaker was already linked to a profile, refine + rename it.
+      - Else if the new name matches an existing profile (case-insensitive),
+        link this speaker to that profile.
+      - Else create a fresh profile from this speaker's centroid.
+
+    For sessions processed before the fingerprinting feature shipped (no
+    stored embedding), we transparently backfill the embedding now from
+    the saved audio file. That makes the rename behave the same way for
+    old and new sessions — the user doesn't need to know about the
+    history of when fingerprinting got added.
+
+    Response includes `profile_action` so the frontend toast can be
+    honest about what happened: "created", "linked", "refined" (existing
+    match got better), or "skipped" (no audio / no centroid available).
+    """
     svc.load_settings()
     session = svc.session_svc.load_full(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     if speaker_id not in session.speakers:
         raise HTTPException(status_code=404, detail="Speaker not on this session")
-    session.rename_speaker(speaker_id, req.display_name.strip())
+
+    new_name = req.display_name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="display_name cannot be empty")
+
+    speaker = session.speakers[speaker_id]
+    speaker.display_name = new_name
+    speaker.match_confirmed = True
+
+    profile_action: str = "skipped"
+    skip_reason: Optional[str] = None
+
+    if not req.save_profile:
+        skip_reason = "save_profile=false on the request"
+    elif not svc.speaker_profile_svc:
+        skip_reason = "speaker_profile_svc not initialised"
+    else:
+        # Lazy backfill for legacy sessions. Slow path the first time
+        # (~3s for ECAPA load + per-segment encoding) but only runs once
+        # per session — embedding then persists with the session JSON.
+        if not speaker.embedding:
+            try:
+                if await asyncio.to_thread(_ensure_session_embeddings, session):
+                    speaker = session.speakers[speaker_id]  # refresh ref
+            except Exception as e:
+                logger.exception(f"Embedding backfill failed: {e}")
+
+        if not speaker.embedding:
+            skip_reason = (
+                "no voice fingerprint available for this speaker — they "
+                "may have spoken too briefly (<1.5s), or the session "
+                "audio may be missing from disk"
+            )
+        else:
+            import numpy as np
+            emb = np.asarray(speaker.embedding, dtype=np.float32)
+
+            # Case 1: speaker was already linked (e.g. correcting an
+            # auto-match's name). Update the linked profile.
+            existing = (svc.speaker_profile_svc.get(speaker.profile_id)
+                        if speaker.profile_id else None)
+            if existing is not None:
+                svc.speaker_profile_svc.rename(existing.profile_id, new_name)
+                svc.speaker_profile_svc.confirm_match(
+                    existing.profile_id, emb, session.session_id)
+                profile_action = "refined"
+            else:
+                # Case 2: name matches an existing profile case-insensitively
+                # → link instead of duplicating.
+                wanted = new_name.lower()
+                same_name = next(
+                    (p for p in svc.speaker_profile_svc.list_all()
+                     if p.display_name.lower() == wanted), None)
+                if same_name is not None:
+                    speaker.profile_id = same_name.profile_id
+                    svc.speaker_profile_svc.confirm_match(
+                        same_name.profile_id, emb, session.session_id)
+                    profile_action = "linked"
+                else:
+                    # Case 3: brand-new name → create a fresh profile.
+                    profile = svc.speaker_profile_svc.create(
+                        new_name, emb, session.session_id)
+                    speaker.profile_id = profile.profile_id
+                    profile_action = "created"
+            speaker.match_confidence = None
+
     svc.session_svc.save(session)
-    return {"ok": True, "speaker_id": speaker_id,
-            "display_name": session.speakers[speaker_id].display_name}
+    return {
+        "ok": True,
+        "speaker": _serialize_speaker(speaker),
+        # What we did with the persistent SpeakerProfile store:
+        #   "created" — new profile created from this speaker's centroid
+        #   "linked"  — linked to an existing profile with the same name
+        #   "refined" — already-linked profile got the new centroid blended in
+        #   "skipped" — couldn't fingerprint (see profile_skip_reason)
+        "profile_action": profile_action,
+        "profile_skip_reason": skip_reason,
+    }
+
+
+class SpeakerConfirmRequest(BaseModel):
+    # Pass the expected profile_id so a stale confirm from an old UI
+    # state can't accidentally confirm a different match if the
+    # backend re-ran fingerprinting in the meantime.
+    profile_id: str
+
+
+@app.post("/sessions/{session_id}/speakers/{speaker_id}/confirm")
+async def confirm_speaker_match(
+    session_id: str, speaker_id: str, req: SpeakerConfirmRequest,
+):
+    """Accept the auto-match: the speaker really is the suggested
+    profile. Refines the profile centroid via the running mean."""
+    svc.load_settings()
+    session = svc.session_svc.load_full(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if speaker_id not in session.speakers:
+        raise HTTPException(status_code=404, detail="Speaker not on this session")
+    speaker = session.speakers[speaker_id]
+    if speaker.profile_id != req.profile_id:
+        raise HTTPException(
+            status_code=409,
+            detail=("This speaker's profile changed since the page loaded. "
+                    "Refresh and try again."),
+        )
+    if not svc.speaker_profile_svc or not speaker.embedding:
+        raise HTTPException(
+            status_code=400,
+            detail="No fingerprint to confirm. (Was this session processed "
+                   "before speaker fingerprinting was enabled?)",
+        )
+    import numpy as np
+    emb = np.asarray(speaker.embedding, dtype=np.float32)
+    profile = svc.speaker_profile_svc.confirm_match(
+        req.profile_id, emb, session.session_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    speaker.match_confirmed = True
+    speaker.match_confidence = None
+    svc.session_svc.save(session)
+    return {"ok": True, "speaker": _serialize_speaker(speaker)}
+
+
+@app.post("/sessions/{session_id}/speakers/{speaker_id}/reject")
+async def reject_speaker_match(session_id: str, speaker_id: str):
+    """Reject the auto-match. Resets the speaker to an unlabeled
+    SPEAKER_XX state. Does NOT touch the profile — other sessions of
+    the same person stay valid; only THIS speaker is unlinked."""
+    svc.load_settings()
+    session = svc.session_svc.load_full(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if speaker_id not in session.speakers:
+        raise HTTPException(status_code=404, detail="Speaker not on this session")
+    speaker = session.speakers[speaker_id]
+    speaker.profile_id = None
+    speaker.match_confidence = None
+    speaker.match_confirmed = False
+    speaker.display_name = speaker.speaker_id  # back to "SPEAKER_XX"
+    svc.session_svc.save(session)
+    return {"ok": True, "speaker": _serialize_speaker(speaker)}
+
+
+# ── Speaker Profiles (cross-session voice fingerprints) ────────────
+
+def _profile_to_public_dict(p: SpeakerProfile) -> dict:
+    """Profile dict for the API. Drops the raw 192-dim embedding for
+    response size — the UI just needs name + counts + timestamps."""
+    return {
+        "profile_id": p.profile_id,
+        "display_name": p.display_name,
+        "created_at": p.created_at,
+        "updated_at": p.updated_at,
+        "confirmation_count": p.confirmation_count,
+        "session_count": len(p.sessions_seen_in),
+        "sessions_seen_in": list(p.sessions_seen_in),
+    }
+
+
+@app.get("/speaker-profiles")
+async def list_speaker_profiles():
+    svc.load_settings()
+    if not svc.speaker_profile_svc:
+        return []
+    profiles = await asyncio.to_thread(svc.speaker_profile_svc.list_all)
+    return [_profile_to_public_dict(p) for p in profiles]
+
+
+class ProfileRenameRequest(BaseModel):
+    display_name: str
+
+
+@app.patch("/speaker-profiles/{profile_id}")
+async def rename_speaker_profile(profile_id: str, req: ProfileRenameRequest):
+    svc.load_settings()
+    if not svc.speaker_profile_svc:
+        raise HTTPException(status_code=500, detail="Profile service unavailable")
+    new_name = req.display_name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="display_name cannot be empty")
+    profile = await asyncio.to_thread(
+        svc.speaker_profile_svc.rename, profile_id, new_name)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return _profile_to_public_dict(profile)
+
+
+@app.delete("/speaker-profiles/{profile_id}")
+async def delete_speaker_profile(profile_id: str):
+    svc.load_settings()
+    if not svc.speaker_profile_svc:
+        raise HTTPException(status_code=500, detail="Profile service unavailable")
+    ok = await asyncio.to_thread(svc.speaker_profile_svc.delete, profile_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return {"ok": True}
+
+
+class ProfileMergeRequest(BaseModel):
+    profile_ids: list[str]
+    display_name: str  # name for the merged profile
+
+
+@app.post("/speaker-profiles/merge")
+async def merge_speaker_profiles(req: ProfileMergeRequest):
+    svc.load_settings()
+    if not svc.speaker_profile_svc:
+        raise HTTPException(status_code=500, detail="Profile service unavailable")
+    if len(req.profile_ids) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Need at least 2 profile_ids to merge")
+    new_name = req.display_name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="display_name cannot be empty")
+    merged = await asyncio.to_thread(
+        svc.speaker_profile_svc.merge, req.profile_ids, new_name)
+    if merged is None:
+        raise HTTPException(
+            status_code=404,
+            detail="One or more profile_ids not found")
+    return _profile_to_public_dict(merged)
 
 
 class BulkTagRequest(BaseModel):
@@ -1369,6 +1789,14 @@ async def process_session(session_id: str):
         result = await svc.recording_svc.process_session()
         await asyncio.to_thread(svc.session_svc.save, result)
         _auto_export_to_client(result, copy_audio=False)
+        # Build the semantic-search index entry for this session in the
+        # background. Non-fatal: if sentence-transformers is missing or
+        # the index pass fails, the session is still saved and full-text
+        # search keeps working — only the semantic search "knows" about
+        # one fewer session until the user re-runs the backfill.
+        if svc.search_svc:
+            asyncio.create_task(asyncio.to_thread(
+                svc.search_svc.index_session, result.session_id))
         return {"ok": True, "segments": len(result.segments),
                 "speakers": len(result.speakers)}
     except Exception as e:
@@ -1614,6 +2042,201 @@ async def create_follow_up_drafts(session_id: str, req: FollowUpDraftsRequest):
     except Exception as e:
         logger.exception("Follow-up drafts failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Semantic search ──────────────────────────────────────────────────
+
+
+class SemanticSearchRequest(BaseModel):
+    query: str
+    top_k: int = 10
+    client: Optional[str] = None
+    project: Optional[str] = None
+
+
+@app.post("/search/semantic")
+async def semantic_search(req: SemanticSearchRequest):
+    """Run a vector search across every indexed session's chunks.
+    Returns up to top_k hits ordered by cosine similarity. Filters
+    (client / project) narrow the candidate pool BEFORE ranking so a
+    scoped search isn't drowned out by closer matches in other clients."""
+    svc.load_settings()
+    if not svc.search_svc:
+        raise HTTPException(status_code=500, detail="Search service unavailable")
+    if not (req.query or "").strip():
+        return {"results": [], "query": req.query}
+    try:
+        results = await asyncio.to_thread(
+            svc.search_svc.search,
+            req.query,
+            max(1, min(50, req.top_k)),
+            req.client,
+            req.project,
+        )
+        return {"results": results, "query": req.query}
+    except Exception as e:
+        logger.exception("Semantic search failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/search/index/status")
+async def search_index_status():
+    """How many sessions are currently in the semantic index, vs total
+    session count. Drives the Settings backfill UI's progress hint."""
+    svc.load_settings()
+    if not svc.search_svc:
+        return {"available": False, "total_sessions": 0,
+                "indexed_sessions": 0, "model_id": ""}
+    return await asyncio.to_thread(svc.search_svc.index_status)
+
+
+@app.post("/sessions/{session_id}/embed")
+async def embed_session(session_id: str):
+    """Embed (or re-embed) one session's transcript for semantic search.
+    Idempotent — running twice produces the same result, the second
+    write just overwrites the existing pickle. Used by the backfill
+    UI in Settings to walk every session that's missing an index entry."""
+    svc.load_settings()
+    if not svc.search_svc:
+        raise HTTPException(status_code=500, detail="Search service unavailable")
+    try:
+        ok = await asyncio.to_thread(svc.search_svc.index_session, session_id)
+    except Exception as e:
+        logger.exception("Embed failed")
+        raise HTTPException(status_code=500, detail=str(e))
+    if not ok:
+        # Session has no segments yet OR sentence-transformers isn't
+        # installed. 200 with embedded=False so callers can keep walking
+        # through a backfill list rather than treating one no-op as fatal.
+        return {"embedded": False, "session_id": session_id}
+    return {"embedded": True, "session_id": session_id}
+
+
+@app.post("/search/index/backfill")
+async def search_index_backfill(limit: int = 50):
+    """Embed up to `limit` sessions that don't have an index entry yet.
+
+    Designed to be called repeatedly from the UI in batches so the user
+    sees progress. Each call processes whichever sessions are still
+    missing — when indexed_sessions == total_sessions, the UI knows
+    backfill is done.
+
+    Capped by `limit` so the FastAPI request doesn't sit on the event
+    loop for several minutes if the user has 100s of unindexed sessions.
+    """
+    svc.load_settings()
+    if not svc.search_svc:
+        raise HTTPException(status_code=500, detail="Search service unavailable")
+
+    def _backfill_one_batch():
+        recordings_dir = svc.search_svc._session_service.recordings_dir
+        all_sessions = svc.search_svc._session_service.list_sessions()
+        # Only embed processed sessions — sessions without segments would
+        # produce no chunks and waste a model load.
+        candidates = [
+            s for s in all_sessions
+            if s.get("has_transcript")
+            and not (recordings_dir / f"session_{s['session_id']}.embeddings.pkl").exists()
+        ]
+        embedded: list[str] = []
+        for s in candidates[:limit]:
+            try:
+                if svc.search_svc.index_session(s["session_id"]):
+                    embedded.append(s["session_id"])
+            except Exception as e:
+                logger.warning(f"Backfill failed for {s['session_id']}: {e}")
+        return {
+            "embedded": embedded,
+            "embedded_count": len(embedded),
+            "remaining": max(0, len(candidates) - len(embedded)),
+        }
+
+    try:
+        return await asyncio.to_thread(_backfill_one_batch)
+    except Exception as e:
+        logger.exception("Backfill failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Cross-meeting Q&A ────────────────────────────────────────────────
+
+
+class QARequest(BaseModel):
+    query: str
+    top_k: int = 8
+    client: Optional[str] = None
+    project: Optional[str] = None
+
+
+@app.post("/qa/stream")
+async def qa_stream(req: QARequest):
+    """SSE endpoint that streams a Claude (or OpenAI-compatible) answer
+    to the user's question, grounded in chunks retrieved from the
+    semantic search index.
+
+    Event sequence delivered to the client:
+
+      event: sources
+      data: [{session_id, display_name, similarity, ...}, ...]
+
+      data: <text fragment>
+      data: <text fragment>
+      ...
+
+      event: done
+      data:
+
+    The `sources` event fires before the first text fragment so the
+    UI can render the citation panel while Claude is still typing. A
+    final `done` event signals normal completion. Errors come through
+    as an `event: error` so the client can show a clear failure state
+    instead of just hanging on a closed stream.
+    """
+    from fastapi.responses import StreamingResponse
+    import json as _json
+
+    svc.load_settings()
+    if not svc.qa_svc or not svc.qa_svc.is_ready:
+        raise HTTPException(
+            status_code=409,
+            detail=("Q&A needs both the semantic-search index and an AI "
+                    "provider configured. Save an Anthropic / OpenRouter / "
+                    "Ollama key in Settings → AI Provider, then try again."),
+        )
+    if not (req.query or "").strip():
+        raise HTTPException(status_code=400, detail="query cannot be empty")
+
+    # Retrieve up front (synchronous, fast) so the `sources` event can
+    # fire immediately when the SSE stream opens. If the retrieval
+    # finds nothing, QAService.stream_answer emits a "no material"
+    # answer instead of calling the LLM at all.
+    sources = await asyncio.to_thread(
+        svc.qa_svc.retrieve,
+        req.query,
+        max(1, min(20, req.top_k)),
+        req.client,
+        req.project,
+    )
+
+    async def event_stream():
+        try:
+            yield ": connected\n\n"
+            # Source list event — the UI builds its citation panel from
+            # this without having to parse anything out of the answer text.
+            yield "event: sources\n"
+            yield "data: " + _json.dumps(sources) + "\n\n"
+            # Stream the answer text
+            async for fragment in svc.qa_svc.stream_answer(req.query, sources):
+                # Each fragment becomes a single `data:` line. JSON-encode
+                # so embedded newlines / quotes don't break SSE framing.
+                yield "data: " + _json.dumps({"text": fragment}) + "\n\n"
+            yield "event: done\ndata: \n\n"
+        except Exception as e:
+            logger.exception(f"QA stream failed: {e}")
+            yield "event: error\n"
+            yield "data: " + _json.dumps({"error": str(e)}) + "\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 class PrepBriefRequest(BaseModel):
