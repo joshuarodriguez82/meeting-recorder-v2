@@ -104,6 +104,133 @@ if os.name == "nt":
 os.environ.setdefault("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "1")
 os.environ.setdefault("FOR_DISABLE_STACK_TRACE", "1")
 
+
+# ── Dependency self-heal ────────────────────────────────────────────
+#
+# Auto-repair the venv when a feature's package is missing. Fires on
+# every backend boot but only does work when a critical import fails —
+# otherwise it's ~10ms of import-testing.
+#
+# What this catches that the Rust-side bootstrap (lib.rs::bootstrap_app_venv)
+# doesn't:
+#
+#   1. An interrupted pip install on initial bootstrap. Wheels download in
+#      sequence; if the user's network blipped on whichever batch was
+#      installing sentence-transformers, the venv ends up with everything
+#      else but missing that one package. The bootstrap fingerprint check
+#      sees a populated venv and skips re-install on next launch, so the
+#      missing package stays missing forever.
+#
+#   2. Upgrades where a new package gets added to requirements-{cpu,mac}.txt
+#      after the user's venv was created. The bootstrap version-fingerprint
+#      check (commit ca836ad) is supposed to detect this and re-pip-install,
+#      but it's only as good as the fingerprint scheme. This is a runtime
+#      defense-in-depth — even if the Rust shell decided not to re-bootstrap,
+#      we re-run pip install here for the missing pieces.
+#
+#   3. User manually pip-uninstalled something, then complained that
+#      Settings → Semantic Index says "not installed."
+#
+# The trade-off: backend boot stalls for ~30s the ONE time we have to
+# repair. The watchdog in lib.rs uses try_wait() (process-alive check)
+# rather than port-check, so it doesn't respawn the backend during the
+# repair pip install.
+
+def _verify_and_repair_dependencies() -> None:
+    """Import-test critical packages. If any are missing, re-run
+    `pip install -r requirements-*.txt` to repair the venv in place."""
+    import importlib
+
+    # Map of (importable module name) → (human label for log lines).
+    # Whisper / pyannote / faster-whisper are intentionally NOT here:
+    # they fail loudly on first /process call so the user notices.
+    # The packages below are different — their absence shows up as a
+    # quiet "feature not installed" warning in Settings that's easy
+    # to miss until you go looking for the feature.
+    critical = {
+        "sentence_transformers": "sentence-transformers (semantic search + Q&A)",
+        "speechbrain": "speechbrain (cross-session speaker fingerprints)",
+        "anthropic": "anthropic (default LLM provider)",
+    }
+    missing: list[str] = []
+    for module, label in critical.items():
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            missing.append(label)
+            sys.stderr.write(
+                f"[deps] {module} is missing from the venv\n")
+
+    if not missing:
+        return
+
+    # Pick the right requirements file for the platform — same logic
+    # as the Rust shell's requirements_filename().
+    req_name = "requirements-cpu.txt" if os.name == "nt" else "requirements-mac.txt"
+    req_path = Path(__file__).resolve().parent / req_name
+    if not req_path.exists():
+        # Fall back to the generic file if the platform-specific one
+        # got dropped. Better than no-op when the bundle is in a weird
+        # state.
+        fallback = Path(__file__).resolve().parent / "requirements.txt"
+        if fallback.exists():
+            req_path = fallback
+        else:
+            sys.stderr.write(
+                f"[deps] cannot self-heal — no requirements file found at "
+                f"{req_path}. Reinstall Meeting Recorder.\n")
+            return
+
+    sys.stderr.write(
+        f"[deps] missing: {', '.join(missing)}. "
+        f"Re-running pip install -r {req_path.name} to repair the venv. "
+        f"This is a one-time ~30s pause; subsequent launches won't repeat it.\n"
+    )
+
+    # Use the SAME interpreter the Rust shell launched us with — that's
+    # the venv's python. We pin a 10-min timeout because torch wheels
+    # are big; on a cold pip cache the repair can take a few minutes.
+    cmd = [
+        sys.executable, "-m", "pip", "install",
+        "--disable-pip-version-check",
+        "-r", str(req_path),
+    ]
+    creationflags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True, timeout=600,
+            creationflags=creationflags,
+        )
+    except subprocess.TimeoutExpired:
+        sys.stderr.write(
+            "[deps] pip install timed out after 10 min. "
+            "Manually run `pip install -r {}` in the venv.\n".format(req_path))
+        return
+    except Exception as e:
+        sys.stderr.write(f"[deps] repair raised: {e}\n")
+        return
+
+    if result.returncode == 0:
+        sys.stderr.write("[deps] repair pip install completed.\n")
+    else:
+        # Surface the last few lines of pip's output to the backend.log
+        # so the user has a fighting chance of diagnosing wheel-build
+        # failures (e.g. xcode-select missing on Mac).
+        tail = (result.stderr or result.stdout or "").splitlines()[-15:]
+        sys.stderr.write(
+            f"[deps] pip exited {result.returncode}. Last lines:\n  "
+            + "\n  ".join(tail) + "\n"
+        )
+
+
+# Run before any heavy imports below — if torch / pyannote / whisper
+# are also missing, that's a deeper venv corruption the regular
+# repair can't fix (importing torch may itself crash). We let those
+# fail loudly at their use site instead.
+_verify_and_repair_dependencies()
+
+
 # Compatibility patches needed before importing pyannote/torch:
 #   - NumPy 2.0 removed np.NaN (pyannote uses it)
 #   - PyTorch 2.6 changed torch.load default to weights_only=True (pyannote breaks)
