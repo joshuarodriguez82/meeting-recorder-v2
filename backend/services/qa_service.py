@@ -76,6 +76,59 @@ class QAService:
             query=query, top_k=top_k, client=client, project=project,
         )
 
+    async def stream_inline_answer(
+        self,
+        query: str,
+        context: str,
+    ) -> AsyncIterator[str]:
+        """Stream a Claude answer grounded in a single inline context
+        blob — no semantic retrieval. Used by the in-call search panel
+        when the user wants Claude to reason over the LIVE transcript
+        of the current meeting ("what was that number she just said?").
+
+        We bypass `stream_answer` because there are no citation-bearing
+        sources to format, and the user does not need the "[ID @ mm:ss]"
+        link infrastructure during a live call — they're listening to
+        the source themselves.
+        """
+        if self._summarizer is None:
+            yield (
+                "AI search needs a provider configured (Anthropic, "
+                "OpenRouter, Ollama, Groq, Gemini, …) — open Settings → "
+                "AI Provider, save a key, and try again."
+            )
+            return
+        if not (context or "").strip():
+            yield (
+                "Nothing has been transcribed yet in this call. Wait "
+                "for the live preview to capture some speech, then ask."
+            )
+            return
+
+        prompt = (
+            "You answer questions about a live meeting in progress. "
+            "Use ONLY the transcript excerpt below — no outside "
+            "knowledge, no speculation. The excerpt is a rolling live "
+            "transcript with You / Them speaker tags; recent text is "
+            "at the bottom.\n\n"
+            "Rules:\n"
+            "1. Be concise — 1-3 sentences usually. The user is in a "
+            "meeting and reading mid-conversation.\n"
+            "2. Quote the exact wording when the transcript answers "
+            "the question verbatim.\n"
+            "3. If the transcript doesn't cover it, say so plainly: "
+            "\"I don't see that in this call yet.\"\n"
+            "4. Don't add any [citation @ mm:ss] markers — the user "
+            "can scroll the live transcript themselves.\n\n"
+            f"USER QUESTION: {query}\n\n"
+            f"LIVE TRANSCRIPT:\n{context}\n\n"
+            "ANSWER:"
+        )
+        async for fragment in self._summarizer.stream_chat(
+            prompt, max_tokens=512,
+        ):
+            yield fragment
+
     async def stream_answer(
         self,
         query: str,

@@ -60,18 +60,45 @@ const OLLAMA_MODELS = [
   { value: "phi3", label: "Phi-3 3.8B — small + fast" },
 ];
 
-type ProviderPreset = "anthropic" | "openrouter" | "ollama" | "custom";
+// Groq — generous free tier, fastest hosted inference available. Models
+// rotate; current free roster as of early 2026.
+const GROQ_MODELS = [
+  { value: "llama-3.3-70b-versatile", label: "Llama 3.3 70B Versatile (free, fast)" },
+  { value: "llama-3.1-8b-instant", label: "Llama 3.1 8B Instant (free, fastest)" },
+  { value: "mixtral-8x7b-32768", label: "Mixtral 8x7B (free)" },
+  { value: "gemma2-9b-it", label: "Gemma 2 9B (free)" },
+];
+
+// Google Gemini — free tier via the OpenAI-compatible compat endpoint.
+// Same model id format as Google's native API.
+const GEMINI_MODELS = [
+  { value: "gemini-2.0-flash", label: "Gemini 2.0 Flash (free)" },
+  { value: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash-Lite (free, faster)" },
+  { value: "gemini-1.5-flash", label: "Gemini 1.5 Flash (free)" },
+];
+
+type ProviderPreset =
+  | "anthropic"
+  | "openrouter"
+  | "ollama"
+  | "groq"
+  | "gemini"
+  | "custom";
 
 function presetFromSettings(s: Settings): ProviderPreset {
   if (s.ai_provider !== "openai") return "anthropic";
   const base = (s.openai_base_url || "").toLowerCase();
   if (base.includes("openrouter")) return "openrouter";
+  if (base.includes("groq.com")) return "groq";
+  if (base.includes("generativelanguage.googleapis")) return "gemini";
   if (base.includes("localhost") || base.includes("127.0.0.1")) return "ollama";
   return "custom";
 }
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const OLLAMA_BASE = "http://localhost:11434/v1";
+const GROQ_BASE = "https://api.groq.com/openai/v1";
+const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai";
 
 // User-facing path to the config.env file so the "stored on this machine"
 // note in the API Keys section reflects the actual filesystem layout. We
@@ -529,6 +556,16 @@ function AIProviderSection({
       if (!OLLAMA_MODELS.find((m) => m.value === settings.claude_model)) {
         update("claude_model", OLLAMA_MODELS[0].value);
       }
+    } else if (next === "groq") {
+      update("openai_base_url", GROQ_BASE);
+      if (!GROQ_MODELS.find((m) => m.value === settings.claude_model)) {
+        update("claude_model", GROQ_MODELS[0].value);
+      }
+    } else if (next === "gemini") {
+      update("openai_base_url", GEMINI_BASE);
+      if (!GEMINI_MODELS.find((m) => m.value === settings.claude_model)) {
+        update("claude_model", GEMINI_MODELS[0].value);
+      }
     } else {
       // Custom — leave URL and model alone so the user can fill them in.
       if (!settings.openai_base_url) update("openai_base_url", "");
@@ -540,6 +577,8 @@ function AIProviderSection({
   const presetModels = preset === "anthropic" ? ANTHROPIC_MODELS
     : preset === "openrouter" ? OPENROUTER_MODELS
     : preset === "ollama" ? OLLAMA_MODELS
+    : preset === "groq" ? GROQ_MODELS
+    : preset === "gemini" ? GEMINI_MODELS
     : null;
   const modelIsPreset = presetModels
     ? presetModels.some((m) => m.value === settings.claude_model)
@@ -555,6 +594,8 @@ function AIProviderSection({
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="anthropic">Anthropic — Claude (uses Anthropic API key above)</SelectItem>
+            <SelectItem value="groq">Groq — free, fastest hosted inference (Llama, Mixtral, Gemma)</SelectItem>
+            <SelectItem value="gemini">Google Gemini — free tier (Gemini 2.0 Flash)</SelectItem>
             <SelectItem value="openrouter">OpenRouter — free-tier Llama / Gemini / Qwen / DeepSeek</SelectItem>
             <SelectItem value="ollama">Ollama (local) — free, runs on your machine</SelectItem>
             <SelectItem value="custom">Custom OpenAI-compatible endpoint</SelectItem>
@@ -563,6 +604,26 @@ function AIProviderSection({
         <p className="text-[11px] text-muted-foreground">
           {preset === "anthropic" && (
             <>Uses Claude directly. Best quality, but each extraction costs a few cents per meeting.</>
+          )}
+          {preset === "groq" && (
+            <>
+              Get a free API key at{" "}
+              <a href="https://console.groq.com/keys" className="underline" target="_blank" rel="noreferrer">
+                console.groq.com
+              </a>
+              . Generous free tier, very fast inference (often &lt;1s for a meeting summary).
+              Paste the key in the OpenAI API Key field below.
+            </>
+          )}
+          {preset === "gemini" && (
+            <>
+              Get a free API key at{" "}
+              <a href="https://aistudio.google.com/apikey" className="underline" target="_blank" rel="noreferrer">
+                aistudio.google.com
+              </a>
+              . Free tier with daily request limits — fine for personal use.
+              Paste the key in the OpenAI API Key field below.
+            </>
           )}
           {preset === "openrouter" && (
             <>
@@ -589,16 +650,24 @@ function AIProviderSection({
         </p>
       </div>
 
-      {(preset === "openrouter" || preset === "custom") && (
+      {(preset === "openrouter" || preset === "groq" || preset === "gemini" || preset === "custom") && (
         <div className="space-y-2">
           <Label>
-            {preset === "openrouter" ? "OpenRouter API Key" : "API Key"}
+            {preset === "openrouter" ? "OpenRouter API Key"
+              : preset === "groq" ? "Groq API Key"
+              : preset === "gemini" ? "Gemini API Key"
+              : "API Key"}
           </Label>
           <Input
             type="password"
             value={settings.openai_api_key}
             onChange={(e) => update("openai_api_key", e.target.value)}
-            placeholder={preset === "openrouter" ? "sk-or-v1-..." : "Your provider's API key"}
+            placeholder={
+              preset === "openrouter" ? "sk-or-v1-..."
+                : preset === "groq" ? "gsk_..."
+                : preset === "gemini" ? "AIza..."
+                : "Your provider's API key"
+            }
             autoComplete="off"
           />
         </div>
