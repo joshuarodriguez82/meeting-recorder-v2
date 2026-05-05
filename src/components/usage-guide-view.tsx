@@ -252,12 +252,74 @@ const SECTIONS: Section[] = [
         <p className="font-medium">Live transcription panel (during recording)</p>
         <p>
           A rolling preview of what&apos;s being said appears next to the recording controls
-          while audio is being captured. Mic + system audio are both included, so the other
-          meeting participants&apos; speech shows up too. Segments arrive in 15-second windows —
-          boundary words occasionally split across two segments, which is why the canonical
-          post-stop transcript (run by <strong>Process</strong>) is what gets persisted.
-          Disable in <strong>Settings → Workflow → Live transcription during recording</strong>{" "}
+          while audio is being captured. Each segment is tagged{" "}
+          <strong>You</strong> (your mic) or <strong>Them</strong> (system audio — everyone
+          else on the call). The two streams are transcribed independently rather than mixed,
+          which keeps your voice from drowning out the far end. Segments arrive in 15-second
+          windows — boundary words occasionally split across two segments, which is why the
+          canonical post-stop transcript (run by <strong>Process</strong>) is what gets
+          persisted. Disable in{" "}
+          <strong>Settings → Workflow → Live transcription during recording</strong>{" "}
           on slower machines or when the live preview is just noise.
+        </p>
+
+        <p className="font-medium mt-4">In-call search (during recording)</p>
+        <p>
+          A second panel appears beside the live transcript while
+          you&apos;re recording, with a toggle for two scopes:
+        </p>
+        <ul className="list-disc list-inside ml-2 mt-1">
+          <li>
+            <strong>This call</strong> (default) — instant text find
+            through the live transcript above. Type a phrase, hit Find,
+            and matching segments highlight with timestamps and the You
+            / Them speaker tag. No AI call, no API cost, no latency.
+            Best for &ldquo;did anyone mention X yet?&rdquo; or &ldquo;what
+            was that company name?&rdquo;.
+          </li>
+          <li>
+            <strong>This call (AI)</strong> — Claude answers a question
+            grounded in the live transcript so far. Useful when the
+            answer isn&apos;t a literal phrase someone said (&ldquo;what
+            number did she mention for Q3?&rdquo;,
+            &ldquo;summarize what we&apos;ve discussed about the timeline&rdquo;).
+            Costs an API call. The most recent ~8 KB of transcript is
+            sent as context — older callers get truncated to keep the
+            prompt cheap.
+          </li>
+          <li>
+            <strong>Past meetings</strong> — semantic search across your
+            indexed history, answered by Claude with citations. Same
+            pipeline as the standalone Q&amp;A tab. Click-through to
+            source sessions is disabled during a recording so you
+            don&apos;t navigate away mid-call — the cited session IDs are
+            shown for follow-up afterward.
+          </li>
+        </ul>
+
+        <p className="font-medium mt-4">Speaker bleed reduction (mic duck)</p>
+        <p>
+          If you record over speakers (vs. headphones), your mic picks
+          up the far end&apos;s voice and pollutes the live &ldquo;You&rdquo;
+          transcript with garbled echoes. The live pipeline now applies
+          a duck gate — when system audio is loud, the mic stream
+          feeding the live transcript is attenuated so the loopback
+          channel (which already captures the far end cleanly) carries
+          the signal. The mic recording on disk is untouched, so the
+          canonical post-stop transcript still has full-fidelity audio
+          for proper speaker diarization.
+        </p>
+
+        <p className="font-medium mt-4">Free AI providers</p>
+        <p>
+          Settings → AI Provider now includes presets for{" "}
+          <strong>Groq</strong> (free, fastest hosted inference),{" "}
+          <strong>Google Gemini</strong> (free tier), in addition to
+          existing <strong>OpenRouter</strong> (free-tier Llama / Qwen /
+          DeepSeek) and <strong>Ollama</strong> (fully local). Each
+          preset auto-fills the base URL and a default model so you
+          only need to paste the API key (Ollama doesn&apos;t even
+          need that). Sign-up links are listed inline.
         </p>
 
         <p className="font-medium mt-4">Semantic search across meetings</p>

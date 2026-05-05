@@ -150,17 +150,38 @@ def finalize_recording_streaming(
     lb_sr = 0
     lb_total_frames = 0
     if loopback_wav_path and Path(loopback_wav_path).exists():
+        # Defensive size check before handing the file to libsndfile.
+        # A WAV header alone is ~44 bytes; anything smaller than 1 KB
+        # has no meaningful audio data and may even be a malformed
+        # header-only file (e.g. when the loopback reader thread opens
+        # the writer but the WASAPI device never delivers a buffer
+        # because nothing is rendering to that endpoint). libsndfile
+        # has been observed to crash the Python process at native
+        # level on such files — `try/except` won't catch a segfault.
+        # Skip the soundfile call entirely for files this small and
+        # fall through to the mic-only merge path. Mirrors the same
+        # 1024-byte threshold used in recovery_service for orphans.
         try:
-            lb_info = sf.info(str(loopback_wav_path))
-            if lb_info.frames > 0:
-                have_lb = True
-                lb_sr = lb_info.samplerate
-                lb_total_frames = lb_info.frames
-        except Exception as e:
+            lb_size = Path(loopback_wav_path).stat().st_size
+        except OSError:
+            lb_size = 0
+        if lb_size < 1024:
             logger.warning(
-                f"Could not read loopback info ({e}) — "
+                f"Loopback WAV is {lb_size} bytes (no audio frames) — "
                 f"merging mic-only"
             )
+        else:
+            try:
+                lb_info = sf.info(str(loopback_wav_path))
+                if lb_info.frames > 0:
+                    have_lb = True
+                    lb_sr = lb_info.samplerate
+                    lb_total_frames = lb_info.frames
+            except Exception as e:
+                logger.warning(
+                    f"Could not read loopback info ({e}) — "
+                    f"merging mic-only"
+                )
 
     out_path = Path(output_wav_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
