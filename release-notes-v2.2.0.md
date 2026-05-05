@@ -1,5 +1,74 @@
 # v2.2.0 — Better live transcription + in-call search
 
+> ## ⚠️ macOS install — READ THIS FIRST
+>
+> ### Step 1: download the right file
+>
+> On the [Releases page](https://github.com/joshuarodriguez82/meeting-recorder-v2/releases),
+> grab the `.dmg` that matches your CPU:
+>
+> - **Apple Silicon** (M1, M2, M3, M4) → `Meeting.Recorder_2.2.0_aarch64.dmg`
+> - **Intel Mac** → `Meeting.Recorder_2.2.0_x64.dmg`
+>
+> (The filename writes spaces as dots — that's just the GitHub Actions
+> artifact naming. The app's display name is still "Meeting Recorder".)
+>
+> ### Step 2: bypass Gatekeeper
+>
+> The build is **unsigned** (no Apple Developer cert yet), so macOS will
+> say *"damaged and can't be opened"* when you double-click the DMG.
+> It is **not** damaged — it's the quarantine attribute your browser
+> added on download. Pick whichever path is easier; both work, both are
+> one-time per install.
+>
+> **Path A — System Settings (no Terminal):**
+>
+> 1. Double-click the DMG, drag the app to **Applications**.
+> 2. Double-click `Meeting Recorder` in Applications. macOS refuses
+>    with the "damaged" warning. Click Done / Cancel.
+> 3. Open **System Settings → Privacy & Security**. Scroll to the
+>    Security section. Click **Open Anyway** next to the Meeting
+>    Recorder blocked-app message.
+> 4. Re-double-click the app. macOS asks once more — click Open. Done.
+>
+> **Path B — Terminal:**
+>
+> ```sh
+> # 1. Strip the quarantine flag from whichever Meeting Recorder DMG
+> #    is in Downloads. The Meeting* glob handles either dot or space
+> #    in the filename.
+> xattr -cr ~/Downloads/Meeting*.dmg
+> open ~/Downloads/Meeting*.dmg
+>
+> # 2. In Finder: drag the app icon to Applications.
+>
+> # 3. Confirm the installed app's exact filename — could have a
+> #    space or a dot depending on the build.
+> ls /Applications/ | grep -i meeting
+>
+> # 4. Strip quarantine on the installed app and launch. Quote the
+> #    path if it contains a space.
+> xattr -cr "/Applications/Meeting Recorder.app"
+> open "/Applications/Meeting Recorder.app"
+> ```
+>
+> macOS treats the app as trusted on every subsequent launch — you only
+> do this once. **Right-click → Open does not work** on macOS Sequoia /
+> Sonoma; don't waste time trying it. Proper signing + notarization is
+> on the roadmap; until then, the steps above are the install path.
+>
+> **If you copy commands from chat / Slack:** some clients auto-link
+> `Recorder.app` (treats `.app` as a TLD) and turn it into
+> `[Recorder.app](http://Recorder.app)` in the paste. Either type the
+> commands by hand, or copy from the GitHub-rendered README directly.
+> If you see `^[[200~` echoed in your terminal that's a stray
+> bracketed-paste sequence — Ctrl+C and re-type.
+>
+> **Windows users** — none of this Gatekeeper stuff applies. Download
+> the `.msi` or `.exe` from the Releases page and double-click.
+
+## Summary
+
 This release rebuilds the live transcription pipeline so the *other*
 participants on a call actually show up in the live preview, adds a
 search panel beside the live transcript so you can recall facts mid-
