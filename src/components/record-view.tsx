@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { LiveTranscriptPanel } from "./live-transcript-panel";
+import { LiveSearchPanel } from "./live-search-panel";
 
 interface Props {
   onSessionsChanged: () => void;
@@ -345,6 +346,11 @@ export function RecordView({
       {/* Live transcript stream — only mounts during an active recording.
           Subscribes to SSE itself; we just give it the recording flag. */}
       <LiveTranscriptPanel recording={recording} />
+
+      {/* In-call semantic search — query past meetings without leaving
+          the recording view. Reuses the cross-meeting Q&A pipeline; it
+          just exposes that capability beside the live transcript. */}
+      <LiveSearchPanel recording={recording} />
 
       {/* Meeting details */}
       <Card>

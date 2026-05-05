@@ -30,6 +30,26 @@ SESSION_LOG_FMT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
 TARGET_SR = 16000
 
+# Mic duck gate (live transcription only). When far-end audio (loopback)
+# is louder than DUCK_LEVEL_THRESHOLD, the user's mic is almost
+# certainly picking up speaker bleed — at typical desktop speaker
+# distances, anything the OS is rendering at moderate volume couples
+# back into a webcam/desk mic. Multiply the mic chunk going into the
+# LiveTranscriber by DUCK_ATTENUATION so the live "You" transcript
+# doesn't get polluted with mangled echoes of what the loopback channel
+# already transcribes cleanly. The smoothing keeps brief silences mid-
+# sentence (a speaker's natural breathing pauses) from reopening the
+# gate prematurely. Tuned conservatively — too-aggressive ducking would
+# clip your own voice when you talk over someone.
+#
+# Disk-write path is NOT ducked. The full-fidelity mic WAV is preserved
+# for the canonical post-stop transcript, where Whisper's VAD + the
+# stereo merge handle echo more carefully than this naive gate ever
+# could.
+DUCK_LEVEL_THRESHOLD = 0.02   # ~ -34 dBFS RMS — quiet speech band
+DUCK_ATTENUATION = 0.15
+DUCK_SMOOTHING = 0.4          # EMA blend of new-chunk RMS into running
+
 
 def _resample_for_live(audio: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
     """Resample a mono float32 chunk for the live transcriber.
@@ -89,6 +109,16 @@ class RecordingService:
         # see the current TranscriptionEngine even if it loads after
         # recording starts (fresh installs, no models warmed yet).
         self._live_transcriber: Optional[LiveTranscriber] = None
+        # Rolling RMS of the most recent system-audio chunks. Used by
+        # the mic duck gate (see _on_audio_chunk) — when far-end audio
+        # is loud (other meeting participants talking), the user's mic
+        # is also picking up bleed from their speakers, which shows up
+        # as garbled "you said" segments mixed in with the real
+        # transcript. We attenuate the mic copy that goes into live
+        # transcription whenever loopback is hot. The mic WAV on disk
+        # is untouched — full fidelity preserved for the canonical
+        # post-stop transcript / processing.
+        self._loopback_level_ema: float = 0.0
 
     @property
     def current_session(self) -> Optional[Session]:
@@ -137,6 +167,7 @@ class RecordingService:
 
         self._recording = True
         self._chunk_count = 0
+        self._loopback_level_ema = 0.0
         recordings_dir = Path(self._settings.recordings_dir)
         recordings_dir.mkdir(parents=True, exist_ok=True)
         self._loopback_temp_path = str(
@@ -217,6 +248,15 @@ class RecordingService:
         if not self._recording or not self._capture:
             return self._session
 
+        # Step-by-step instrumentation so a hung or crashed stop has a
+        # clear timeline pointing at the offending step. Without these,
+        # the log just trails off mid-stop and you can't tell whether
+        # capture, the live transcriber, the WAV merge, or session save
+        # was the one that hung. Each step logs entry + elapsed.
+        import time as _t
+        stop_t0 = _t.monotonic()
+        logger.info("[stop] begin")
+
         self._recording = False
         # Grab the per-stream wallclock anchors before tearing the capture
         # down. If both arrived (mic always does; loopback only when system
@@ -229,7 +269,13 @@ class RecordingService:
             loopback_start_offset_s = max(0.0, lb_start - mic_start)
         else:
             loopback_start_offset_s = None
-        self._capture.stop()
+        logger.info("[stop] capture.stop() …")
+        t = _t.monotonic()
+        try:
+            self._capture.stop()
+        except Exception as e:
+            logger.exception(f"[stop] capture.stop raised: {e}")
+        logger.info(f"[stop] capture.stop done in {_t.monotonic()-t:.1f}s")
         self._capture = None
 
         # Stop the live transcriber FIRST (before joining the audio
@@ -237,16 +283,26 @@ class RecordingService:
         # while they're still listening. The 10-second join inside
         # stop() covers the worst case where Whisper is mid-window.
         if self._live_transcriber is not None:
+            logger.info("[stop] live_transcriber.stop() …")
+            t = _t.monotonic()
             try:
                 self._live_transcriber.stop()
             except Exception as e:
-                logger.warning(f"Live transcriber stop raised: {e}")
+                logger.warning(f"[stop] live transcriber raised: {e}")
+            logger.info(
+                f"[stop] live_transcriber.stop done in {_t.monotonic()-t:.1f}s")
 
         # Close the streaming WAV file
+        logger.info("[stop] close mic WAV writer …")
+        t = _t.monotonic()
         with self._chunks_lock:
             if self._wav_writer is not None:
-                self._wav_writer.close()
+                try:
+                    self._wav_writer.close()
+                except Exception as e:
+                    logger.exception(f"[stop] mic WAV close raised: {e}")
                 self._wav_writer = None
+        logger.info(f"[stop] close mic WAV done in {_t.monotonic()-t:.1f}s")
 
         if self._session and self._chunk_count > 0 and self._wav_temp_path:
             # Stream-merge mic + loopback into final WAV with bounded memory.
@@ -255,6 +311,9 @@ class RecordingService:
             # trigger a native STATUS_ACCESS_VIOLATION on stop (lost session).
             loopback_path = getattr(self, '_loopback_temp_path', None)
             final_path = self._build_audio_path(self._session.session_id)
+            logger.info(
+                f"[stop] finalize_recording_streaming → {final_path} …")
+            t = _t.monotonic()
             try:
                 duration_s, _ = finalize_recording_streaming(
                     mic_wav_path=self._wav_temp_path,
@@ -268,8 +327,11 @@ class RecordingService:
                 self._on_status("Recording saved. Ready to process.")
                 logger.info(
                     f"Audio saved to {final_path} ({duration_s:.1f}s)")
+                logger.info(
+                    f"[stop] finalize done in {_t.monotonic()-t:.1f}s")
             except Exception as e:
-                logger.exception("Failed to save audio")
+                logger.exception(
+                    f"[stop] finalize failed after {_t.monotonic()-t:.1f}s")
                 self._on_status(f"Error saving audio: {e}")
             finally:
                 # Clean up temps whether or not merge succeeded; any failure
@@ -287,6 +349,8 @@ class RecordingService:
 
         self._wav_temp_path = None
         self._stop_session_log()
+        logger.info(
+            f"[stop] complete in {_t.monotonic()-stop_t0:.1f}s")
         return self._session
 
     async def process_session(self) -> Session:
@@ -415,7 +479,18 @@ class RecordingService:
         live = self._live_transcriber
         if live is not None and live.is_running:
             try:
-                live.push_audio(_resample_for_live(mono, self._capture_sr, LIVE_SR))
+                # Mic duck: if far-end audio is loud right now, the
+                # user's mic is bleeding speaker output and the live
+                # "You" transcript would pollute with echo of what
+                # the "Them" transcript already captures cleanly.
+                # Attenuate before pushing.
+                if self._loopback_level_ema > DUCK_LEVEL_THRESHOLD:
+                    mic_for_live = mono * DUCK_ATTENUATION
+                else:
+                    mic_for_live = mono
+                live.push_audio(
+                    _resample_for_live(
+                        mic_for_live, self._capture_sr, LIVE_SR))
             except Exception as e:
                 # Never let live transcription kill the recording. A
                 # bad chunk just means a glitch in the live preview.
@@ -438,6 +513,15 @@ class RecordingService:
         loopback_sr = capture.loopback_sr or LIVE_SR
         try:
             mono = chunk.mean(axis=1) if chunk.ndim > 1 else chunk
+            # Update the rolling level estimate that the mic-duck gate
+            # in _on_audio_chunk reads. RMS over the chunk smoothed with
+            # an exponential moving average so brief silences within
+            # speech don't release the gate.
+            chunk_rms = float(np.sqrt(np.mean(mono.astype(np.float32) ** 2)))
+            self._loopback_level_ema = (
+                DUCK_SMOOTHING * chunk_rms
+                + (1.0 - DUCK_SMOOTHING) * self._loopback_level_ema
+            )
             live.push_loopback(_resample_for_live(mono, loopback_sr, LIVE_SR))
         except Exception as e:
             logger.debug(f"Live push_loopback failed: {e}")
