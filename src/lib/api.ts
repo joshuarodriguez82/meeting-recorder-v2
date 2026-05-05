@@ -493,6 +493,75 @@ export const api = {
     return { abort: () => controller.abort() };
   },
 
+  // ── In-call AI search (live transcript as context) ───────────────
+  // Same SSE framing as qaStream but no `sources` event — the only
+  // context is the inline blob the caller passes in.
+  qaInlineStream: (
+    body: { query: string; context: string },
+    handlers: {
+      onText: (text: string) => void;
+      onDone: () => void;
+      onError: (msg: string) => void;
+    },
+  ): { abort: () => void } => {
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const res = await fetch(`${BASE_URL}/qa/inline-stream`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => `${res.status}`);
+          handlers.onError(text);
+          return;
+        }
+        if (!res.body) {
+          handlers.onError("No stream body");
+          return;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let split: number;
+          while ((split = buf.indexOf("\n\n")) !== -1) {
+            const raw = buf.slice(0, split);
+            buf = buf.slice(split + 2);
+            const event = parseSSEEvent(raw);
+            if (!event) continue;
+            if (event.eventName === "done") {
+              handlers.onDone();
+              return;
+            } else if (event.eventName === "error") {
+              try {
+                handlers.onError(JSON.parse(event.data).error || "Unknown");
+              } catch {
+                handlers.onError(event.data || "Unknown error");
+              }
+              return;
+            } else {
+              try {
+                const payload = JSON.parse(event.data);
+                if (payload.text) handlers.onText(payload.text);
+              } catch { /* heartbeat / comment */ }
+            }
+          }
+        }
+        handlers.onDone();
+      } catch (e) {
+        if ((e as DOMException)?.name === "AbortError") return;
+        handlers.onError(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return { abort: () => controller.abort() };
+  },
+
   // ── Cross-session speaker profiles ────────────────────────────────
   listSpeakerProfiles: () => request<SpeakerProfile[]>("/speaker-profiles"),
   renameSpeakerProfile: (profile_id: string, display_name: string) =>

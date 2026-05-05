@@ -27,10 +27,16 @@ import { api } from "@/lib/api";
 
 const BACKEND = "http://127.0.0.1:17645";
 
+type Speaker = "you" | "them";
+
 type Segment = {
   start: number;
   end: number;
   text: string;
+  // "you" = your mic, "them" = system-audio loopback (everyone else on
+  // the call). Older backends (before dual-stream live transcription)
+  // didn't tag segments — those render without a label.
+  speaker?: Speaker;
 };
 
 export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
@@ -221,6 +227,18 @@ export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
                 <span className="font-mono text-[10px] text-muted-foreground tabular-nums shrink-0 pt-1">
                   {formatTime(seg.start)}
                 </span>
+                {seg.speaker ? (
+                  <span
+                    className={
+                      "shrink-0 px-1.5 rounded text-[10px] font-medium uppercase tracking-wide self-start mt-1 "
+                      + (seg.speaker === "you"
+                        ? "bg-primary/15 text-primary"
+                        : "bg-muted-foreground/15 text-foreground/70")
+                    }
+                  >
+                    {seg.speaker === "you" ? "You" : "Them"}
+                  </span>
+                ) : null}
                 <span className="break-words">{seg.text}</span>
               </div>
             ))}
@@ -228,8 +246,10 @@ export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
         )}
       </div>
       <p className="text-[10px] text-muted-foreground italic">
-        Live preview. Speaker labels and the canonical transcript appear
-        after you stop and process the recording.
+        Live preview. <span className="font-medium">You</span> = your mic,{" "}
+        <span className="font-medium">Them</span> = system audio. Final
+        speaker attribution and the canonical transcript appear after you
+        stop and process the recording.
       </p>
     </div>
   );
