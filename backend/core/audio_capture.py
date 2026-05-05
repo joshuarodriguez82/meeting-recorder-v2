@@ -598,7 +598,9 @@ class AudioCapture:
             return True
 
         # Stop sounddevice mic stream (and the sd loopback if we used it).
+        logger.info("[capture.stop] close mic streams …")
         _run_with_timeout(self._close_all_streams, 3.0, "close_all_streams")
+        logger.info("[capture.stop] mic streams closed")
 
         # Mac path: also stop the dedicated loopback sd.InputStream.
         if self._loopback_sd_stream is not None:
@@ -612,39 +614,82 @@ class AudioCapture:
                     logger.warning(f"Error closing sd loopback stream: {e}")
             _run_with_timeout(_stop_sd, 2.0, "loopback_sd.stop")
 
-        # Wake the loopback writer thread out of its queue wait.
+        # Wake the loopback writer thread out of its queue wait (Mac path).
         try:
             self._loopback_q_putter(None)
         except Exception:
             pass
 
-        if self._loopback_thread is not None:
-            self._loopback_thread.join(timeout=2.0)
-            self._loopback_thread = None
-
-        # Close pyaudio loopback stream — Windows path.
-        if self._pa_stream is not None:
-            pa_stream = self._pa_stream
-            self._pa_stream = None
+        # Windows loopback shutdown order matters.
+        #
+        # The reader thread (_loopback_reader_pa) is blocked inside
+        # pa_stream.read(BLOCK_SIZE, ...). That read can block forever
+        # when nothing is rendering to the loopback endpoint (system
+        # quiet, or the user's meeting app stopped sending audio just
+        # before they hit Stop). Two failure modes follow from that:
+        #
+        #   1. Joining the reader thread BEFORE stopping the stream
+        #      times out at 2s, then we close the stream while read() is
+        #      still in flight on the other thread. PyAudio /
+        #      pyaudiowpatch segfaults the Python process when this
+        #      happens — no traceback, just `=== backend spawn ===` in
+        #      the log a few seconds later. (We saw this exact crash
+        #      twice today on this user's machine — the diagnostic in
+        #      recording_service.stop_recording pinpointed it.)
+        #
+        #   2. PyAudio.terminate() while a stream is still open is also
+        #      undefined and has been observed to crash on Windows.
+        #
+        # Correct order:
+        #   stop_stream  → makes the in-flight read() return / error
+        #   join         → reader thread exits its loop now that read()
+        #                  unblocked
+        #   close        → safe; no other thread holds it
+        #   terminate    → safe; no streams left.
+        pa_stream = self._pa_stream
+        self._pa_stream = None  # signal reader-loop to exit
+        if pa_stream is not None:
+            logger.info("[capture.stop] pa_stream.stop_stream() …")
             def _stop_pa():
                 try:
                     pa_stream.stop_stream()
                 except Exception as e:
                     logger.warning(f"Error stopping loopback stream: {e}")
             _run_with_timeout(_stop_pa, 2.0, "pa_stream.stop_stream")
+            logger.info("[capture.stop] pa_stream stopped")
+
+        # Now that the stream is stopped, the reader's pa_stream.read()
+        # has unblocked and the loop will exit. Join it before closing
+        # the stream, so close() doesn't race with an in-flight read.
+        if self._loopback_thread is not None:
+            logger.info("[capture.stop] join loopback reader thread …")
+            self._loopback_thread.join(timeout=2.0)
+            if self._loopback_thread.is_alive():
+                logger.warning(
+                    "[capture.stop] loopback reader thread didn't exit "
+                    "in 2s — abandoning")
+            self._loopback_thread = None
+            logger.info("[capture.stop] loopback thread joined")
+
+        # Safe to close now — no other thread owns the stream.
+        if pa_stream is not None:
+            logger.info("[capture.stop] pa_stream.close() …")
             def _close_pa():
                 try:
                     pa_stream.close()
                 except Exception as e:
                     logger.warning(f"Error closing loopback stream: {e}")
             _run_with_timeout(_close_pa, 2.0, "pa_stream.close")
+            logger.info("[capture.stop] pa_stream closed")
 
         if self._pa is not None:
             pa = self._pa
             self._pa = None
+            logger.info("[capture.stop] pa.terminate() …")
             _run_with_timeout(
                 lambda: pa.terminate(), 2.0, "pa.terminate"
             )
+            logger.info("[capture.stop] pa terminated")
         logger.info(f"Audio capture stopped. Total chunks captured: {self._chunk_count}")
 
     def _close_all_streams(self) -> None:
