@@ -2295,6 +2295,14 @@ class QARequest(BaseModel):
     project: Optional[str] = None
 
 
+class QAInlineRequest(BaseModel):
+    """Used by the in-call search panel's 'this call (AI)' mode. The
+    `context` is the live-transcript text the frontend has accumulated
+    so far; we hand it straight to Claude with no semantic retrieval."""
+    query: str
+    context: str
+
+
 @app.post("/qa/stream")
 async def qa_stream(req: QARequest):
     """SSE endpoint that streams a Claude (or OpenAI-compatible) answer
@@ -2360,6 +2368,46 @@ async def qa_stream(req: QARequest):
             yield "event: done\ndata: \n\n"
         except Exception as e:
             logger.exception(f"QA stream failed: {e}")
+            yield "event: error\n"
+            yield "data: " + _json.dumps({"error": str(e)}) + "\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/qa/inline-stream")
+async def qa_inline_stream(req: QAInlineRequest):
+    """SSE endpoint for the in-call 'ask about this call' mode.
+
+    Mirrors /qa/stream's framing (data: text fragments, then `done` /
+    `error` events) but skips the `sources` event and the retrieval
+    step — the only context is the live-transcript blob the frontend
+    sends in the request body. Faster (no embedding lookup, no source
+    formatting) and cheaper (smaller prompt) than /qa/stream.
+    """
+    from fastapi.responses import StreamingResponse
+    import json as _json
+
+    svc.load_settings()
+    if not svc.qa_svc or svc.summarizer is None:
+        raise HTTPException(
+            status_code=409,
+            detail=("AI search needs a provider configured. Save an "
+                    "Anthropic / OpenRouter / Ollama / Groq / Gemini "
+                    "key in Settings → AI Provider, then try again."),
+        )
+    if not (req.query or "").strip():
+        raise HTTPException(status_code=400, detail="query cannot be empty")
+
+    async def event_stream():
+        try:
+            yield ": connected\n\n"
+            async for fragment in svc.qa_svc.stream_inline_answer(
+                req.query, req.context,
+            ):
+                yield "data: " + _json.dumps({"text": fragment}) + "\n\n"
+            yield "event: done\ndata: \n\n"
+        except Exception as e:
+            logger.exception(f"QA inline stream failed: {e}")
             yield "event: error\n"
             yield "data: " + _json.dumps({"error": str(e)}) + "\n\n"
 
