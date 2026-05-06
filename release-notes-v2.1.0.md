@@ -6,13 +6,13 @@ same codebase.
 
 > ## ⚠️ macOS install — READ THIS FIRST
 >
-> ### Step 1: download the right file
+> ### Step 1: download the .dmg
 >
-> On the [Releases page](https://github.com/joshuarodriguez82/meeting-recorder-v2/releases),
-> grab the `.dmg` that matches your CPU:
->
-> - **Apple Silicon** (M1, M2, M3, M4) → `Meeting.Recorder_2.1.0_aarch64.dmg`
-> - **Intel Mac** → `Meeting.Recorder_2.1.0_x64.dmg`
+> Grab the `.dmg` from the [Releases page](https://github.com/joshuarodriguez82/meeting-recorder-v2/releases).
+> v2.1.0 was released as two separate architecture-specific files
+> (`_aarch64.dmg` for Apple Silicon, `_x64.dmg` for Intel) — pick the
+> one that matches your Mac's CPU. From v2.1.1 onward there's a single
+> `_universal.dmg` that runs on either.
 >
 > (The filename writes spaces as dots — that's just the GitHub Actions
 > artifact naming. The app's display name is still "Meeting Recorder".)
