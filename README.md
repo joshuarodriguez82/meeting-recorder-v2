@@ -16,11 +16,15 @@ After install you still need a one-time setup to drop in API keys and accept the
 ## Download (macOS)
 
 Starting with v2.1.0, prebuilt `.dmg` installers are published under
-[**Releases**](https://github.com/joshuarodriguez82/meeting-recorder-v2/releases)
-for both Apple Silicon and Intel Macs. Pick the one that matches your CPU:
+[**Releases**](https://github.com/joshuarodriguez82/meeting-recorder-v2/releases).
+Starting with the universal2 build, **one DMG runs on every Mac** — Apple
+Silicon (M1, M2, M3, M4) and Intel:
 
-- `Meeting.Recorder_X.Y.Z_aarch64.dmg` — Apple Silicon (M1, M2, M3, M4)
-- `Meeting.Recorder_X.Y.Z_x64.dmg` — Intel Macs
+- `Meeting.Recorder_X.Y.Z_universal.dmg`
+
+(Older v2.1.0 release ships separate `_aarch64.dmg` / `_x64.dmg` files;
+both work on the matching architecture. From v2.1.1 onward only the
+universal DMG is published.)
 
 (GitHub Actions writes spaces as dots in the artifact filename — the
 app's display name is still "Meeting Recorder".)

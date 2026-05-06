@@ -1,19 +1,29 @@
 # Cross-platform release pipeline.
 #
 # Triggered by pushing a tag matching v*.*.* (e.g. `git tag v2.1.0 &&
-# git push --tags`). For each platform in the matrix, builds a
-# native-arch installer and uploads it to the corresponding GitHub
-# Release. The release body is sourced from release-notes-vX.Y.Z.md if
-# present in the repo root.
+# git push --tags`). Each matrix entry builds a native installer and
+# uploads to the GitHub Release named after the tag. Body is sourced
+# from release-notes-vX.Y.Z.md if present; otherwise GitHub's auto-
+# generated notes win.
 #
 # Platforms:
-#   - windows-latest   → NSIS .exe + MSI
-#   - macos-14         → Apple Silicon (aarch64) .dmg
-#   - macos-13         → Intel (x86_64) .dmg
+#   - windows-latest   → NSIS .exe + MSI, native x64 only.
+#   - macos-14         → universal-apple-darwin .dmg. ONE artifact runs
+#                        on both Apple Silicon and Intel Macs because
+#                        Tauri compiles + lipos both Rust targets into
+#                        a fat binary inside the .app.
 #
-# Mac builds are NOT signed or notarized. Recipients will need to
-# right-click → Open the first time. To enable signing later, set
-# bundle.macOS.signingIdentity in tauri.conf.json and add
+# We previously had a separate macos-13 (Intel) entry. That stopped
+# working when GitHub deprecated free-tier `macos-13` runners — the
+# job would silently fail to allocate while the other matrix entries
+# happily published, so v2.1.0 only shipped Apple Silicon Mac. The
+# universal2 path solves it on a single runner with no paid Intel
+# image.
+#
+# Mac builds are NOT signed or notarized. Recipients use either
+# System Settings → Privacy & Security → Open Anyway, or
+# `xattr -cr "/Applications/Meeting Recorder.app"`. To enable signing
+# later: set bundle.macOS.signingIdentity in tauri.conf.json + add
 # APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD secrets.
 
 name: Release
@@ -37,17 +47,22 @@ permissions:
 
 jobs:
   build:
-    name: Build (${{ matrix.platform }})
+    name: Build (${{ matrix.label }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-14            # Apple Silicon
-            label: macos-arm64
-          - platform: macos-13            # Intel
-            label: macos-x64
+          # Apple Silicon runner builds a universal2 fat binary that
+          # runs on both arm64 and x86_64 Macs. macos-13 (Intel) was
+          # dropped after GitHub deprecated the free runner.
+          - platform: macos-14
+            label: macos-universal
+            tauri-args: '--target universal-apple-darwin'
+            rust-targets: 'aarch64-apple-darwin x86_64-apple-darwin'
           - platform: windows-latest
             label: windows-x64
+            tauri-args: ''
+            rust-targets: ''
 
     runs-on: ${{ matrix.platform }}
 
@@ -71,6 +86,11 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          # Install both Mac targets when we're on a Mac runner so the
+          # universal2 build can lipo them together. Empty string on
+          # Windows leaves the toolchain at its default (msvc x64).
+          targets: ${{ matrix.rust-targets }}
 
       - name: Cache cargo target
         uses: Swatinem/rust-cache@v2
@@ -86,19 +106,18 @@ jobs:
       - name: Build the app
         # `npx tauri build` runs `beforeBuildCommand` from tauri.conf.json,
         # which is `npm run tauri-prebuild` (next build + zip-bundle.py).
-        # Tauri picks the right per-platform bundle targets automatically:
-        # nsis + msi on Windows, dmg + app on Mac (because targets="all"
-        # in tauri.conf.json).
-        run: npx tauri build
+        # On Mac we pass `--target universal-apple-darwin`; Tauri builds
+        # both arm64 and x86_64 binaries, lipos them into one fat binary,
+        # and produces a single .dmg. ~2 min slower than a native build.
+        run: npx tauri build ${{ matrix.tauri-args }}
 
       - name: Patch Info.plist (macOS)
         if: runner.os == 'macOS'
+        # The script walks src-tauri/target recursively, so it picks up
+        # the .app at target/universal-apple-darwin/release/bundle/macos/
+        # without needing any path tweaks here.
         run: ./scripts/macos-postbuild.sh
 
-      # The actual artifact paths differ by platform / bundler. Use a
-      # matching glob and let the action upload whatever exists. Empty
-      # globs would fail, but every platform always emits at least one
-      # of these by the time we get here.
       - name: Collect installer paths (Windows)
         if: runner.os == 'Windows'
         shell: bash
@@ -112,6 +131,11 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           mkdir -p artifacts
+          # Universal builds drop their bundle one level deeper under the
+          # target-triple directory. Cover both that and the legacy
+          # native path so this step keeps working if we ever drop
+          # universal2 in favour of native arm64.
+          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg artifacts/ 2>/dev/null || true
           cp src-tauri/target/release/bundle/dmg/*.dmg artifacts/ 2>/dev/null || true
           ls -la artifacts/
 
