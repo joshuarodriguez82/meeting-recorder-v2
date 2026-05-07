@@ -130,7 +130,7 @@ export function CommitmentsView({ onOpenSession }: Props) {
       <div className="flex items-center gap-3 flex-wrap text-xs">
         <Select
           value={statusFilter}
-          onValueChange={(v) => setStatusFilter(v as StatusFilter)}
+          onValueChange={(v) => v && setStatusFilter(v as StatusFilter)}
         >
           <SelectTrigger className="h-8 w-40 text-xs">
             <SelectValue />
@@ -145,7 +145,7 @@ export function CommitmentsView({ onOpenSession }: Props) {
 
         <Select
           value={client || "__all__"}
-          onValueChange={(v) => setClient(v === "__all__" ? "" : v)}
+          onValueChange={(v) => setClient(!v || v === "__all__" ? "" : v)}
         >
           <SelectTrigger className="h-8 w-44 text-xs">
             <SelectValue placeholder="All clients" />
@@ -160,7 +160,7 @@ export function CommitmentsView({ onOpenSession }: Props) {
 
         <Select
           value={side || "__any__"}
-          onValueChange={(v) => setSide(v === "__any__" ? "" : v as "internal" | "customer")}
+          onValueChange={(v) => setSide(!v || v === "__any__" ? "" : v as "internal" | "customer")}
         >
           <SelectTrigger className="h-8 w-40 text-xs">
             <SelectValue />
