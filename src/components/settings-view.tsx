@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api, formatBytes, type Settings, type TemplateEntry } from "@/lib/api";
+import { confirmDialog } from "@/lib/confirm";
 import { toast } from "sonner";
 import { Loader2, Save, Trash2, Plus, RotateCcw } from "lucide-react";
 import { GpuAccelerationCard } from "./gpu-acceleration-card";
@@ -880,7 +881,7 @@ function SummaryTemplatesCard() {
     const detail = t.is_default
       ? "This is a default template. Hiding it keeps the prompt on disk so you can restore it later."
       : "This permanently removes your custom template.";
-    if (!confirm(`${label} template "${t.name}"?\n\n${detail}`)) return;
+    if (!(await confirmDialog(`${label} template "${t.name}"?\n\n${detail}`, { title: label }))) return;
     try {
       await api.deleteTemplate(t.name);
       toast.success(t.is_default ? "Template hidden" : "Template deleted");
@@ -891,7 +892,7 @@ function SummaryTemplatesCard() {
   };
 
   const handleReset = async (t: TemplateEntry) => {
-    if (!confirm(`Reset "${t.name}" back to the shipped default prompt?`)) return;
+    if (!(await confirmDialog(`Reset "${t.name}" back to the shipped default prompt?`, { title: "Reset template" }))) return;
     try {
       const fresh = await api.resetTemplate(t.name);
       toast.success("Reset to default");
