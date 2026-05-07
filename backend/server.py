@@ -502,6 +502,13 @@ class SettingsDTO(BaseModel):
     # finds the live preview noisy / inaccurate (the canonical
     # post-stop transcript runs regardless).
     live_transcription_enabled: bool = True
+    # Auto-stop watchdog. Defaults match Settings.from_env: warnings on,
+    # auto-stops opt-in, 4h hard cap. 0 disables a given trigger.
+    silence_warn_min: int = 5
+    silence_stop_min: int = 0
+    overrun_warn_min: int = 5
+    overrun_stop_min: int = 0
+    hard_cap_hours: int = 4
 
 
 class StartRecordingRequest(BaseModel):
@@ -512,6 +519,11 @@ class StartRecordingRequest(BaseModel):
     client: str = ""
     project: str = ""
     attendees: list[str] = []
+    # ISO datetime when the meeting is scheduled to end, when this
+    # recording was started from a calendar entry. Optional. Used by
+    # the auto-stop watchdog to warn / stop after the meeting overruns
+    # by the user-configured grace period.
+    scheduled_end_iso: Optional[str] = None
 
 
 class RecordingStatus(BaseModel):
@@ -527,6 +539,14 @@ class RecordingStatus(BaseModel):
     # speakers…") so the UI can show progress during the long POST
     # /sessions/{id}/process call. Empty string when idle.
     current_status: str = ""
+    # Auto-stop / dead-air watchdog warnings, one per active condition.
+    # Each entry is a small dict the frontend renders as a banner +
+    # native notification. Codes are stable so the frontend can dedupe
+    # (only fire one notification per code per recording session).
+    #   {"code": "dead_air"|"meeting_overdue"|"hard_cap_warn"|"auto_stopped",
+    #    "message": "...",
+    #    "since_seconds": int}
+    warnings: list[dict] = []
 
 
 # ── Health ───────────────────────────────────────────────────────────
@@ -559,6 +579,11 @@ async def get_settings():
         openai_api_key=s.openai_api_key,
         openai_base_url=s.openai_base_url,
         live_transcription_enabled=s.live_transcription_enabled,
+        silence_warn_min=s.silence_warn_min,
+        silence_stop_min=s.silence_stop_min,
+        overrun_warn_min=s.overrun_warn_min,
+        overrun_stop_min=s.overrun_stop_min,
+        hard_cap_hours=s.hard_cap_hours,
     )
 
 
@@ -589,6 +614,11 @@ async def save_settings(payload: SettingsDTO):
         openai_api_key=payload.openai_api_key,
         openai_base_url=payload.openai_base_url,
         live_transcription_enabled=payload.live_transcription_enabled,
+        silence_warn_min=max(0, payload.silence_warn_min),
+        silence_stop_min=max(0, payload.silence_stop_min),
+        overrun_warn_min=max(0, payload.overrun_warn_min),
+        overrun_stop_min=max(0, payload.overrun_stop_min),
+        hard_cap_hours=max(0, payload.hard_cap_hours),
     )
     # Force reload
     svc.settings = None
@@ -984,6 +1014,37 @@ async def recording_status():
     if is_rec and svc.record_started_at:
         duration_s = int((datetime.now() - svc.record_started_at).total_seconds())
         started_iso = svc.record_started_at.isoformat()
+
+    # Tick the auto-stop watchdog every poll (frontend polls /status
+    # every 1s while recording — that's the heartbeat we use for
+    # condition evaluation, no separate background task needed).
+    # If the watchdog says we should stop, do it BEFORE returning the
+    # status so the UI sees is_recording=False on the same tick.
+    warnings: list[dict] = []
+    if is_rec and rec is not None:
+        try:
+            decision = await asyncio.to_thread(rec.watchdog_tick)
+            warnings = decision.get("warnings", []) or []
+            if decision.get("should_auto_stop"):
+                logger.info(
+                    f"Watchdog auto-stopping recording: "
+                    f"{decision.get('reason', '?')}")
+                # Trigger the same path the user's Stop button uses so
+                # the audio file finalises cleanly. Off-loop because
+                # stop_recording does I/O.
+                try:
+                    await asyncio.to_thread(_stop_recording_sync)
+                except Exception as e:
+                    logger.exception(
+                        f"Watchdog auto-stop raised: {e}")
+                # Re-read recording state so the response reflects the
+                # auto-stop that just happened.
+                is_rec = rec is not None and rec.is_recording
+                if not is_rec:
+                    svc.record_started_at = None
+        except Exception as e:
+            logger.exception(f"Watchdog tick failed: {e}")
+
     return RecordingStatus(
         is_recording=is_rec,
         session_id=session_id,
@@ -993,13 +1054,27 @@ async def recording_status():
         models_loading=svc.models_loading,
         models_error=svc.models_error,
         current_status=svc.current_status,
+        warnings=warnings,
     )
 
 
 def _start_recording_sync(req: StartRecordingRequest):
+    # Parse scheduled_end_iso into a datetime if present. Bad values
+    # silently degrade to None so the watchdog's overrun trigger
+    # doesn't fire — better than an opaque error from the start path.
+    scheduled_end = None
+    if req.scheduled_end_iso:
+        try:
+            scheduled_end = datetime.fromisoformat(req.scheduled_end_iso)
+        except ValueError:
+            logger.warning(
+                f"Could not parse scheduled_end_iso="
+                f"{req.scheduled_end_iso!r}; meeting-overrun watchdog "
+                f"will be inactive for this recording.")
     session = svc.recording_svc.start_recording(
         mic_device_index=req.mic_device_index,
         output_device_index=req.output_device_index,
+        scheduled_end=scheduled_end,
     )
     session.display_name = req.meeting_name or ""
     session.template = req.template or "General"

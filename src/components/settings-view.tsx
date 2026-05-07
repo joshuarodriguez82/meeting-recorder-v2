@@ -428,6 +428,65 @@ export function SettingsView() {
         </CardContent>
       </Card>
 
+      {/* Auto-stop watchdog — protects against forgotten recordings
+          running for hours. All trigger settings live together so
+          users see the full safety net at a glance, with the
+          always-on hard cap at the bottom. */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Auto-stop</CardTitle>
+          <p className="text-xs text-muted-foreground mt-1">
+            Catches forgotten recordings. Warnings appear in the app
+            and fire a native OS notification; auto-stops actually end
+            the recording (and run normal post-stop processing). All
+            values are minutes. Set to <strong>0</strong> to disable a
+            given trigger.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <NumberRow
+            label="Warn after silence"
+            description="Show a banner + native notification when the room has been quiet for this long. Default: 5 min."
+            value={settings.silence_warn_min}
+            onChange={(v) => update("silence_warn_min", v)}
+            unit="min"
+            max={120}
+          />
+          <NumberRow
+            label="Auto-stop after silence"
+            description="End the recording when the room has been quiet for this long. Off by default — opt in if you'd rather not deal with manually stopping."
+            value={settings.silence_stop_min}
+            onChange={(v) => update("silence_stop_min", v)}
+            unit="min"
+            max={120}
+          />
+          <NumberRow
+            label="Warn after meeting end"
+            description="When you start a recording from a calendar tile, warn this many minutes after the scheduled end time. Default: 5 min."
+            value={settings.overrun_warn_min}
+            onChange={(v) => update("overrun_warn_min", v)}
+            unit="min"
+            max={120}
+          />
+          <NumberRow
+            label="Auto-stop after meeting end"
+            description="Stop the recording N minutes after the scheduled end. Only fires when you started from a calendar tile. Off by default."
+            value={settings.overrun_stop_min}
+            onChange={(v) => update("overrun_stop_min", v)}
+            unit="min"
+            max={120}
+          />
+          <NumberRow
+            label="Hard cap (always on)"
+            description="Absolute maximum recording length. The safety net for 'I forgot the recording was running.' Default: 4 hours. Set to 0 to disable entirely (not recommended)."
+            value={settings.hard_cap_hours}
+            onChange={(v) => update("hard_cap_hours", v)}
+            unit="hr"
+            max={24}
+          />
+        </CardContent>
+      </Card>
+
       {/* GPU acceleration */}
       <GpuAccelerationCard />
 
@@ -519,6 +578,54 @@ function Toggle({
       <div>
         <div className="text-sm font-medium">{label}</div>
         {description && <div className="text-xs text-muted-foreground mt-0.5">{description}</div>}
+      </div>
+    </div>
+  );
+}
+
+// Compact label + number-input row for the auto-stop section. Used
+// instead of plain Toggle because each trigger has a numeric threshold
+// the user might want to tune (e.g. "warn at 10 min, not 5"). Setting
+// the value to 0 disables the trigger — handled by the backend.
+function NumberRow({
+  label,
+  description,
+  value,
+  onChange,
+  unit,
+  min = 0,
+  max = 60,
+}: {
+  label: string;
+  description?: string;
+  value: number;
+  onChange: (v: number) => void;
+  unit: string;
+  min?: number;
+  max?: number;
+}) {
+  return (
+    <div className="flex items-start gap-3">
+      <Input
+        type="number"
+        value={value}
+        min={min}
+        max={max}
+        onChange={(e) => onChange(Math.max(min, parseInt(e.target.value || "0", 10) || 0))}
+        className="w-20 h-8 text-sm tabular-nums shrink-0 mt-0.5"
+      />
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-medium">
+          {label}{" "}
+          <span className="text-xs font-normal text-muted-foreground">
+            ({unit})
+          </span>
+        </div>
+        {description && (
+          <div className="text-xs text-muted-foreground mt-0.5">
+            {description}
+          </div>
+        )}
       </div>
     </div>
   );
