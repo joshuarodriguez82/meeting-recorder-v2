@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Tauri 2 auto-merges this file with its default Info.plist at bundle
+  time. Each NS*UsageDescription string is what macOS shows in the
+  permission prompt for that capability. Without these strings, the
+  matching API call silently fails on macOS 14+ and the prompt never
+  appears — which is exactly what made v2.2.4's calendar integration
+  look broken on Tahoe.
+
+  Keep these in lock-step with src-tauri/Entitlements.plist:
+    audio-input                       → NSMicrophoneUsageDescription
+    automation.apple-events           → NSAppleEventsUsageDescription
+    personal-information.calendars    → NSCalendarsFullAccessUsageDescription
+                                        (+ legacy NSCalendarsUsageDescription
+                                        for macOS 13 and earlier)
+-->
+<plist version="1.0">
+<dict>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Meeting Recorder reads your Calendar to surface upcoming meetings, auto-tag recordings to the right client, and generate pre-meeting briefs from prior sessions on the same calendar.</string>
+
+    <key>NSCalendarsUsageDescription</key>
+    <string>Meeting Recorder reads your Calendar to surface upcoming meetings, auto-tag recordings to the right client, and generate pre-meeting briefs from prior sessions on the same calendar.</string>
+
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Meeting Recorder needs microphone access to record your side of the conversation. The mic stream is processed locally; nothing is sent off-device unless you've enabled cloud transcription.</string>
+
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Meeting Recorder uses Apple Events to draft follow-up emails in Mail.app or Outlook for Mac after a recording finishes. You'll be prompted the first time it tries to talk to the email app.</string>
+</dict>
+</plist>
