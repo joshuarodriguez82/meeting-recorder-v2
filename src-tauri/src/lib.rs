@@ -1,15 +1,56 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::net::{Shutdown, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::Manager;
 
 struct BackendProcess(Mutex<Option<Child>>);
 
-const BACKEND_PORT: u16 = 17645;
+/// The backend's TCP port, picked once at startup by binding to
+/// 127.0.0.1:0 and asking the OS for a free port. Stored in a OnceLock
+/// so every code path (initial spawn, watchdog respawn, the
+/// get_backend_port Tauri command, the port-in-use guard) sees the
+/// same value for the app's lifetime.
+///
+/// Why dynamic rather than the old hardcoded 17645: a stale backend
+/// from a previously-installed build (or a `tauri dev` session running
+/// alongside the production app) was holding the fixed port, so the
+/// Tauri shell would log "port already in use, skipping spawn" and
+/// silently bind the frontend to whatever older code was already on
+/// that port. Now each instance gets its own port and there's no
+/// cross-talk.
+static BACKEND_PORT: OnceLock<u16> = OnceLock::new();
+
+fn pick_free_port() -> u16 {
+    // Bind to port 0; the OS picks a currently-free ephemeral port and
+    // tells us which one via local_addr. We drop the listener so the
+    // Python child can bind it next. There's a tiny TOCTOU window
+    // between drop and Python's bind where another process could grab
+    // the port — in practice never observed on localhost. If it ever
+    // bites, re-running fixes it.
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .expect("Failed to bind 127.0.0.1:0 to discover a free port");
+    let port = listener
+        .local_addr()
+        .expect("Failed to read local_addr from free-port listener")
+        .port();
+    drop(listener);
+    port
+}
+
+fn backend_port() -> u16 {
+    *BACKEND_PORT.get_or_init(pick_free_port)
+}
+
+/// Tauri command surfaced to the frontend. Called once on app start
+/// (see api.ts → getBaseUrl) so the JS knows where the backend lives.
+#[tauri::command]
+fn get_backend_port() -> u16 {
+    backend_port()
+}
 
 /// Set while bootstrap_app_venv is running (can take several minutes on
 /// first launch). The watchdog respects this so it doesn't try to
@@ -686,13 +727,13 @@ pub fn run() {
         format!("=== Meeting Recorder launch ===\n"),
     );
     rlog(&format!("Log dir: {}", log_dir().display()));
-    rlog(&format!("Backend port: {}", BACKEND_PORT));
+    rlog(&format!("Backend port: {}", backend_port()));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(backend)
-        .invoke_handler(tauri::generate_handler![restart_backend])
+        .invoke_handler(tauri::generate_handler![restart_backend, get_backend_port])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -760,7 +801,7 @@ pub fn run() {
                               Check backend.log for the cause, reinstall if needed.");
                         break;
                     }
-                    if port_in_use(BACKEND_PORT) {
+                    if port_in_use(backend_port()) {
                         continue;
                     }
                     rlog(&format!("Respawning backend (attempt {})", consecutive_restarts));
@@ -809,7 +850,7 @@ fn restart_backend(
         }
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while port_in_use(BACKEND_PORT) && std::time::Instant::now() < deadline {
+    while port_in_use(backend_port()) && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     spawn_python_backend(&app).map_err(|e| e.to_string())?;
@@ -817,13 +858,19 @@ fn restart_backend(
 }
 
 fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    if port_in_use(BACKEND_PORT) {
+    let port = backend_port();
+    if port_in_use(port) {
+        // With dynamic ports this only fires if the OS handed us a port
+        // that another process grabbed in the TOCTOU window between
+        // pick_free_port's drop and the Python child's bind. Extremely
+        // rare; surface it instead of silently aborting like the old
+        // hardcoded-port code did.
         rlog(&format!(
-            "Port {} already in use — skipping spawn (another Meeting Recorder \
-             instance is probably running, or a zombie backend is holding the port)",
-            BACKEND_PORT
+            "ERROR: backend port {} is in use immediately after selection — \
+             aborting spawn. Restart the app to pick a fresh port.",
+            port
         ));
-        return Ok(());
+        return Err(format!("Port {} unavailable at spawn time", port).into());
     }
 
     let backend_dir = resolve_backend_dir().ok_or(
@@ -867,6 +914,10 @@ fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
     cmd.arg("-u")
        .arg(&server_py)
        .env("PYTHONUNBUFFERED", "1")
+       // Hand the chosen port to server.py via env. server.py reads
+       // MEETING_RECORDER_PORT and falls back to 17645 only if it's
+       // unset (e.g. running standalone for debugging).
+       .env("MEETING_RECORDER_PORT", port.to_string())
        // Intel Fortran runtime workarounds — Windows-only but harmless on
        // POSIX (FOR_DISABLE_* are simply ignored when MKL isn't present).
        .env("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "1")
