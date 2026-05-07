@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api, type SpeakerProfile } from "@/lib/api";
+import { confirmDialog } from "@/lib/confirm";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -53,7 +54,10 @@ export function KnownSpeakersSection() {
   };
 
   const doDelete = async (profile_id: string, name: string) => {
-    if (!confirm(`Delete the speaker profile for "${name}"? Sessions where they appear keep their existing labels — only the cross-session fingerprint goes away.`)) {
+    if (!(await confirmDialog(
+      `Delete the speaker profile for "${name}"? Sessions where they appear keep their existing labels — only the cross-session fingerprint goes away.`,
+      { title: "Delete speaker" }
+    ))) {
       return;
     }
     try {
