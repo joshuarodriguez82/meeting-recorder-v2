@@ -2267,7 +2267,15 @@ async def _extract_and_save(
     notes = session.notes or ""
     method = getattr(svc.summarizer, method_name)
     if method_name == "summarize":
-        result = await method(transcript, template=template, notes=notes)
+        # Resolve the template name to its current prompt the same way
+        # the standalone /sessions/{id}/summarize endpoint does — the
+        # summarizer no longer owns template storage. Passing
+        # `template=<name>` directly was a vestige of the old API.
+        prompt_text = await asyncio.to_thread(
+            svc.template_svc.get_prompt, template)
+        result = await method(
+            transcript, prompt=prompt_text,
+            notes=notes, template_name=template)
         session.template = template
     else:
         result = await method(transcript, notes=notes)
