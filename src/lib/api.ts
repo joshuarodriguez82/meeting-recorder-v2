@@ -1,9 +1,30 @@
 /**
  * Client for the Python FastAPI backend sidecar.
- * Runs at http://127.0.0.1:17645 alongside the Tauri app.
+ *
+ * Port is dynamic: the Tauri shell picks a free port at startup
+ * (lib.rs::pick_free_port), passes it to Python via the
+ * MEETING_RECORDER_PORT env var, and exposes it to JS via the
+ * `get_backend_port` Tauri command. The first call to getBaseUrl()
+ * resolves it once and caches forever. Falls back to 17645 only when
+ * running outside Tauri (e.g. plain `npm run dev` against a manually
+ * started backend), since `invoke` won't be available there.
  */
 
-const BASE_URL = "http://127.0.0.1:17645";
+let _baseUrlPromise: Promise<string> | null = null;
+
+function getBaseUrl(): Promise<string> {
+  if (_baseUrlPromise) return _baseUrlPromise;
+  _baseUrlPromise = (async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const port = await invoke<number>("get_backend_port");
+      return `http://127.0.0.1:${port}`;
+    } catch {
+      return "http://127.0.0.1:17645";
+    }
+  })();
+  return _baseUrlPromise;
+}
 
 export interface TemplateEntry {
   name: string;
@@ -101,7 +122,8 @@ export interface SessionSummary {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const baseUrl = await getBaseUrl();
+  const res = await fetch(`${baseUrl}${path}`, {
     headers: { "Content-Type": "application/json" },
     ...init,
   });
@@ -517,7 +539,7 @@ export const api = {
     const controller = new AbortController();
     (async () => {
       try {
-        const res = await fetch(`${BASE_URL}/qa/stream`, {
+        const res = await fetch(`${await getBaseUrl()}/qa/stream`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
@@ -594,7 +616,7 @@ export const api = {
     const controller = new AbortController();
     (async () => {
       try {
-        const res = await fetch(`${BASE_URL}/qa/inline-stream`, {
+        const res = await fetch(`${await getBaseUrl()}/qa/inline-stream`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
