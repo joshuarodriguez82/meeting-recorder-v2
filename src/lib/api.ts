@@ -210,6 +210,46 @@ export interface Commitment {
   session_project: string;
 }
 
+// Decision lifecycle. "active" is the implicit default for any
+// decision that has no override entry in item_status.json.
+export type DecisionStatus = "active" | "implemented" | "superseded";
+
+export interface FollowUpStatusEntry {
+  done: boolean;
+  updated_at: string;
+}
+
+export interface DecisionStatusEntry {
+  status: DecisionStatus;
+  updated_at: string;
+}
+
+// Per-session overlay for "is this follow-up done?" / "where is this
+// decision in its lifecycle?". Keys are SHA-1 digests of the normalized
+// item text — see `computeItemHash` below for the matching frontend
+// hashing rules. Backend is in services/item_status_service.py.
+export interface ItemStatusDoc {
+  follow_ups: Record<string, FollowUpStatusEntry>;
+  decisions: Record<string, DecisionStatusEntry>;
+}
+
+// Stable hash for a follow-up or decision item. Must match the Python
+// _normalize_item_text + sha1 in item_status_service.py exactly,
+// otherwise the override won't apply. Uses Web Crypto SubtleCrypto
+// which is available in Tauri's webview.
+export async function computeItemHash(text: string): Promise<string> {
+  const norm = (text || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[\s\.\,\;\:\!\?]+$/g, "");
+  const bytes = new TextEncoder().encode(norm);
+  const digest = await crypto.subtle.digest("SHA-1", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 // One retrieved chunk that the QA endpoint sent the LLM as context.
 // Same shape as a semantic search hit, with the addition that the QA
 // view renders these in a sources panel under the streamed answer.
@@ -685,6 +725,38 @@ export const api = {
     request<{ ok: boolean; extracted: number }>(
       `/sessions/${encodeURIComponent(session_id)}/extract-commitments`,
       { method: "POST" },
+    ),
+
+  // ── Item status overlays (per-session "checked off" state) ────────
+  // Follow-ups and decisions are parsed at render time from the LLM's
+  // markdown output, so there's no first-class record to flip a flag
+  // on. We persist a side-table of {item_hash → status} per session and
+  // overlay it at render time.
+  listAllItemStatus: () =>
+    request<{ sessions: Record<string, ItemStatusDoc> }>("/item-status"),
+  getItemStatus: (session_id: string) =>
+    request<ItemStatusDoc>(
+      `/sessions/${encodeURIComponent(session_id)}/item-status`,
+    ),
+  setFollowUpDone: (session_id: string, item_hash: string, done: boolean) =>
+    request<ItemStatusDoc>(
+      `/sessions/${encodeURIComponent(session_id)}/item-status`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ type: "follow_up", item_hash, done }),
+      },
+    ),
+  setDecisionStatus: (
+    session_id: string,
+    item_hash: string,
+    status: DecisionStatus,
+  ) =>
+    request<ItemStatusDoc>(
+      `/sessions/${encodeURIComponent(session_id)}/item-status`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ type: "decision", item_hash, status }),
+      },
     ),
 
   // Calendar-tile-driven prep brief: richer prompt + structured response
