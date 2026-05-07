@@ -348,6 +348,78 @@ class Summarizer:
         except Exception as e:
             raise RuntimeError(f"Decisions extraction failed: {e}") from e
 
+    async def meeting_prep_brief_from_calendar(
+        self,
+        upcoming_subject: str,
+        upcoming_attendees: list[str],
+        upcoming_when: str,
+        identified_client: str,
+        identified_project: str,
+        prior_notes: str,
+    ) -> str:
+        """Richer prep brief used by the click-from-calendar-tile flow.
+        Includes hot-topics + suggested-questions sections and asks
+        Claude to inline `[session_id]` citations the frontend turns
+        into click-to-jump links.
+
+        The simpler meeting_prep_brief() (string-only context) stays
+        for the existing /prep-brief endpoint; this one is its
+        structurally-richer cousin that knows about a specific
+        upcoming meeting.
+        """
+        logger.info(
+            f"Generating calendar-based prep brief: "
+            f"\"{upcoming_subject}\" via {self._provider}/{self._model}")
+        attendee_blob = ", ".join(upcoming_attendees) or "(no attendees listed)"
+        scope_blob = identified_client or "(no client identified)"
+        if identified_project:
+            scope_blob += f" / {identified_project}"
+        try:
+            result = await self._chat(
+                (
+                    "You're preparing a Solutions Architect for a specific "
+                    "upcoming meeting on their calendar. Use ONLY the prior "
+                    "meeting notes below; don't invent context. Output "
+                    "concise actionable markdown. When you reference a "
+                    "specific prior meeting, INLINE the citation as "
+                    "`[ABC123]` using the literal session ID from the "
+                    "header of that meeting's notes — the frontend "
+                    "turns those into click-to-jump links.\n\n"
+                    "Sections (use these exact headers):\n\n"
+                    "## The story so far\n"
+                    "3-5 bullets. The arc across these prior meetings — "
+                    "what was decided, what shifted, what's unresolved. "
+                    "Cite specific meetings with `[id]`.\n\n"
+                    "## Hot topics likely to come up\n"
+                    "Themes that recurred across multiple prior meetings, "
+                    "or topics that are still open. List with one-line "
+                    "context per item. Cite the meetings where each was "
+                    "raised.\n\n"
+                    "## Open commitments to / from this account\n"
+                    "Action items still outstanding from prior meetings, "
+                    "by owner. Format: `- [Owner]: <task> (from [id])`. "
+                    "Skip ones that look already-delivered or trivial. "
+                    "If none are open, write 'None.'\n\n"
+                    "## Questions to drive this meeting\n"
+                    "3-5 questions calibrated to unblock open commitments "
+                    "and pressure-test decisions. Specific to the people "
+                    "in the room.\n\n"
+                    "Keep ALL sections tight — every bullet should "
+                    "earn its place. Trim ruthlessly.\n\n"
+                    f"=== UPCOMING MEETING ===\n"
+                    f"Subject: {upcoming_subject}\n"
+                    f"When: {upcoming_when}\n"
+                    f"Attendees: {attendee_blob}\n"
+                    f"Account: {scope_blob}\n\n"
+                    f"=== PRIOR MEETING NOTES ===\n{prior_notes}"
+                ),
+                max_tokens=1500, timeout=90.0,
+            )
+            logger.info("Calendar-based prep brief generated.")
+            return result
+        except Exception as e:
+            raise RuntimeError(f"Prep brief generation failed: {e}") from e
+
     async def meeting_prep_brief(self, prior_notes: str, upcoming_subject: str) -> str:
         """Generate a prep brief from prior meeting notes for an upcoming meeting."""
         logger.info(f"Generating prep brief for: {upcoming_subject} via {self._provider}/{self._model}")
