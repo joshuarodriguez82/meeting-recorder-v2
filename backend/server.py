@@ -289,9 +289,12 @@ except Exception:
     pass
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from config.settings import Settings
 from core.audio_capture import list_input_devices, list_output_devices
@@ -337,6 +340,120 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── RFC 7807 Problem Details ────────────────────────────────────────
+#
+# Every error path now returns application/problem+json with a
+# structured body so the frontend (and any future API consumers) get a
+# consistent shape with title + detail + a stable type URI, instead of
+# the FastAPI default `{"detail": "..."}` for HTTPException and an
+# opaque 500 for unhandled exceptions. This is what made tonight's
+# `process_full: summary failed` debug a log dive — the route returned
+# 200 with no body shape; an RFC 7807 response would have surfaced the
+# TypeError straight to the UI.
+#
+# Wire-format (RFC 7807 §3):
+#   {
+#     "type":     "tag:meeting-recorder/errors/<slug>",  // stable per error class
+#     "title":    "<short human summary>",
+#     "status":   <int>,
+#     "detail":   "<specifics for this occurrence>",
+#     "instance": "/sessions/abc/process_full"
+#   }
+# Plus optional class-specific extensions (RFC 7807 §3.2 allows them).
+
+PROBLEM_CONTENT_TYPE = "application/problem+json"
+
+_HTTP_STATUS_PHRASE = {
+    400: "Bad Request",
+    401: "Unauthorized",
+    403: "Forbidden",
+    404: "Not Found",
+    409: "Conflict",
+    422: "Unprocessable Entity",
+    500: "Internal Server Error",
+    503: "Service Unavailable",
+}
+
+
+def _status_phrase(status: int) -> str:
+    return _HTTP_STATUS_PHRASE.get(status, f"HTTP {status}")
+
+
+def _problem_response(
+    request: Request,
+    *,
+    status: int,
+    title: str,
+    detail: str = "",
+    problem_type: str = "about:blank",
+    **extensions,
+) -> JSONResponse:
+    body = {
+        "type": problem_type,
+        "title": title,
+        "status": status,
+        "instance": str(request.url.path),
+    }
+    if detail:
+        body["detail"] = detail
+    body.update(extensions)
+    return JSONResponse(
+        content=body, status_code=status, media_type=PROBLEM_CONTENT_TYPE)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _problem_http_exception_handler(
+    request: Request, exc: StarletteHTTPException,
+):
+    """Convert FastAPI/Starlette HTTPException → RFC 7807. Existing
+    `raise HTTPException(status_code=…, detail=…)` calls keep working
+    unchanged; they just produce richer responses."""
+    detail = exc.detail if isinstance(exc.detail, str) else ""
+    return _problem_response(
+        request,
+        status=exc.status_code,
+        title=_status_phrase(exc.status_code),
+        detail=detail,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def _problem_validation_handler(
+    request: Request, exc: RequestValidationError,
+):
+    """Pydantic validation errors get the field-level detail attached
+    as an `errors` extension so the frontend can highlight the offending
+    field rather than just say "422"."""
+    return _problem_response(
+        request,
+        status=422,
+        title="Request validation failed",
+        detail="One or more fields failed validation; see `errors`.",
+        problem_type="tag:meeting-recorder/errors/validation",
+        errors=exc.errors(),
+    )
+
+
+@app.exception_handler(Exception)
+async def _problem_unhandled_handler(request: Request, exc: Exception):
+    """Catch-all for uncaught exceptions. Logs the full traceback then
+    returns a structured 500 with the exception class name as an
+    extension — useful for hardware errors ("Microphone in use by
+    another app"), library bugs, and anything else that bypassed an
+    explicit raise."""
+    logger.exception(
+        f"Unhandled {exc.__class__.__name__} during "
+        f"{request.method} {request.url.path}")
+    return _problem_response(
+        request,
+        status=500,
+        title="Internal server error",
+        detail=str(exc) or exc.__class__.__name__,
+        problem_type="tag:meeting-recorder/errors/unhandled",
+        exception_class=exc.__class__.__name__,
+    )
 
 
 # ── Lazy service container ──────────────────────────────────────────
