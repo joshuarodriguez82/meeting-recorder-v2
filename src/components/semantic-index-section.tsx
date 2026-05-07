@@ -94,7 +94,10 @@ export function SemanticIndexSection() {
           Voice-of-the-meeting search. Each processed session's transcript
           is embedded with a small (22 MB) MiniLM model that runs locally —
           nothing leaves your machine. New sessions auto-index when you
-          process them. Older sessions need a one-time backfill.
+          process them, and any older sessions get auto-indexed in the
+          background on backend startup. The button below is only here
+          for forcing a re-index after you&apos;ve manually edited
+          embeddings.
         </p>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -131,18 +134,19 @@ export function SemanticIndexSection() {
               <>
                 <Button
                   size="sm"
+                  variant="outline"
                   onClick={startBackfill}
                   disabled={running || missing === 0}
                 >
                   {running ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : null}
                   {running
                     ? "Indexing…"
-                    : `Index ${missing} session${missing === 1 ? "" : "s"}`}
+                    : `Index ${missing} session${missing === 1 ? "" : "s"} now`}
                 </Button>
                 <p className="text-xs text-muted-foreground">
                   {running
                     ? "Embedding batches of 25 — keep this open until it finishes."
-                    : "First run: ~30s per 100 sessions on CPU."}
+                    : "Background backfill is already running. This button just speeds it up if you want results immediately."}
                 </p>
               </>
             )}
