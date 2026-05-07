@@ -119,6 +119,18 @@ class RecordingService:
         # is untouched — full fidelity preserved for the canonical
         # post-stop transcript / processing.
         self._loopback_level_ema: float = 0.0
+        # Auto-stop watchdog state. The audio callback updates
+        # _last_speech_at whenever a chunk's RMS clears the silence
+        # threshold; the watchdog periodically reads that timestamp to
+        # decide whether the room has gone quiet. _meeting_scheduled_end
+        # is the calendar-derived end time when start_recording was
+        # called from a calendar tile; None for ad-hoc recordings.
+        # _watchdog_warnings is the live set of warning dicts surfaced
+        # via /recording/status to the frontend.
+        self._last_speech_at: Optional[datetime] = None
+        self._meeting_scheduled_end: Optional[datetime] = None
+        self._watchdog_warnings: List[dict] = []
+        self._watchdog_lock = threading.Lock()
 
     @property
     def current_session(self) -> Optional[Session]:
@@ -155,9 +167,18 @@ class RecordingService:
         self,
         mic_device_index: Optional[int],
         output_device_index: Optional[int],
+        scheduled_end: Optional[datetime] = None,
     ) -> Session:
         if self._recording:
             raise RuntimeError("A recording is already in progress.")
+        # Reset watchdog state at the start of every recording. We seed
+        # last_speech_at to "now" so the silence timer doesn't fire
+        # immediately on a freshly-started recording before any audio
+        # has come through.
+        self._last_speech_at = datetime.now()
+        self._meeting_scheduled_end = scheduled_end
+        with self._watchdog_lock:
+            self._watchdog_warnings = []
 
         session_id = uuid.uuid4().hex[:8].upper()
         self._session = Session(session_id=session_id)
@@ -460,6 +481,135 @@ class RecordingService:
                 f"Auto-matched {speaker_id} → {profile.display_name} "
                 f"(similarity={similarity:.2f})")
 
+    # ── Auto-stop watchdog ──────────────────────────────────────────
+    #
+    # Caller (server.py /recording/status handler) invokes
+    # watchdog_tick() on every poll. We compute the current set of
+    # active warnings against settings and return them. The server is
+    # responsible for actually stopping the recording (via
+    # stop_recording) when watchdog_tick reports an `auto_stopped` code
+    # — the watchdog itself stays in a pure-evaluation role so the
+    # logic is easy to test and doesn't fight the asyncio event loop
+    # over who owns the recording lifecycle.
+
+    def get_warnings(self) -> List[dict]:
+        """Read-only accessor for the latest warning set. Cheap; no
+        recomputation. Server.py exposes this through /recording/status
+        so the frontend renders banners + native notifications."""
+        with self._watchdog_lock:
+            return [dict(w) for w in self._watchdog_warnings]
+
+    def watchdog_tick(self) -> dict:
+        """Re-evaluate every watchdog condition against the current
+        recording state + Settings, update the cached warning list,
+        and return a decision dict:
+
+            {"warnings": [...], "should_auto_stop": bool, "reason": str}
+
+        Caller uses should_auto_stop to decide whether to invoke
+        stop_recording. Returns an empty / no-op dict when no recording
+        is active.
+        """
+        if not self._recording:
+            with self._watchdog_lock:
+                self._watchdog_warnings = []
+            return {"warnings": [], "should_auto_stop": False, "reason": ""}
+
+        s = self._settings
+        now = datetime.now()
+        warnings: List[dict] = []
+        should_stop = False
+        stop_reason = ""
+
+        # Hard cap — always-on safety net. If the user disabled it (set
+        # to 0) we skip; but the default is 4 hours, which is the
+        # main thing protecting against "I left the recording running
+        # overnight" scenarios.
+        hard_cap_h = max(0, getattr(s, "hard_cap_hours", 0))
+        # We need the recording start time. Fall back to session.started_at
+        # since RecordingService doesn't track it independently.
+        started_at = (self._session.started_at if self._session else None)
+        if started_at and hard_cap_h > 0:
+            elapsed_h = (now - started_at).total_seconds() / 3600.0
+            if elapsed_h >= hard_cap_h:
+                should_stop = True
+                stop_reason = "hard_cap"
+                warnings.append({
+                    "code": "hard_cap_hit",
+                    "message": (
+                        f"Recording auto-stopped at the {hard_cap_h}-hour "
+                        f"hard cap. Change in Settings → Workflow."),
+                    "since_seconds": int(elapsed_h * 3600),
+                })
+
+        # Dead-air: how long since the last chunk above the silence floor.
+        if self._last_speech_at:
+            silence_s = int((now - self._last_speech_at).total_seconds())
+        else:
+            silence_s = 0
+
+        silence_warn_min = max(0, getattr(s, "silence_warn_min", 0))
+        silence_stop_min = max(0, getattr(s, "silence_stop_min", 0))
+
+        if (silence_stop_min > 0 and not should_stop
+                and silence_s >= silence_stop_min * 60):
+            should_stop = True
+            stop_reason = "dead_air"
+            warnings.append({
+                "code": "dead_air_stop",
+                "message": (
+                    f"Recording auto-stopped — no speech detected for "
+                    f"{silence_stop_min} minute"
+                    f"{'s' if silence_stop_min != 1 else ''}."),
+                "since_seconds": silence_s,
+            })
+        elif silence_warn_min > 0 and silence_s >= silence_warn_min * 60:
+            warnings.append({
+                "code": "dead_air",
+                "message": (
+                    f"No speech detected for {silence_s // 60} minute"
+                    f"{'s' if silence_s // 60 != 1 else ''}. "
+                    f"Did the meeting end?"),
+                "since_seconds": silence_s,
+            })
+
+        # Meeting overrun (only meaningful when we have a scheduled end).
+        if self._meeting_scheduled_end is not None:
+            overrun_s = int((now - self._meeting_scheduled_end).total_seconds())
+            if overrun_s > 0:
+                overrun_warn_min = max(0, getattr(s, "overrun_warn_min", 0))
+                overrun_stop_min = max(0, getattr(s, "overrun_stop_min", 0))
+                if (overrun_stop_min > 0 and not should_stop
+                        and overrun_s >= overrun_stop_min * 60):
+                    should_stop = True
+                    stop_reason = "meeting_overrun"
+                    warnings.append({
+                        "code": "meeting_overrun_stop",
+                        "message": (
+                            f"Recording auto-stopped — your scheduled "
+                            f"meeting ended {overrun_s // 60} minute"
+                            f"{'s' if overrun_s // 60 != 1 else ''} ago."),
+                        "since_seconds": overrun_s,
+                    })
+                elif overrun_warn_min > 0 and overrun_s >= overrun_warn_min * 60:
+                    warnings.append({
+                        "code": "meeting_overrun",
+                        "message": (
+                            f"Your scheduled meeting ended "
+                            f"{overrun_s // 60} minute"
+                            f"{'s' if overrun_s // 60 != 1 else ''} ago. "
+                            f"Still recording."),
+                        "since_seconds": overrun_s,
+                    })
+
+        with self._watchdog_lock:
+            self._watchdog_warnings = warnings
+        return {
+            "warnings": warnings,
+            "should_auto_stop": should_stop,
+            "reason": stop_reason,
+        }
+
     def _on_audio_chunk(self, chunk: np.ndarray) -> None:
         if not self._recording:
             return
@@ -472,6 +622,22 @@ class RecordingService:
                 # faster-whisper's input is hardcoded to 16 kHz.
                 self._wav_writer.write(mono)
                 self._chunk_count += 1
+        # Auto-stop watchdog input: track the most recent moment we heard
+        # speech-level audio. Mic and loopback both contribute — if
+        # EITHER is hot, the room isn't dead. RMS in float space; -50 dB
+        # roughly maps to 0.003 amplitude. Calibrated for the typical
+        # mic noise floor — too aggressive a threshold treats
+        # background-fan noise as speech and the watchdog never fires;
+        # too loose treats whispered speech as silence and the watchdog
+        # fires while the user is still talking. 0.003 is the right
+        # order of magnitude empirically.
+        try:
+            rms = float(np.sqrt(np.mean(mono * mono))) if len(mono) else 0.0
+            if rms > 0.003:
+                self._last_speech_at = datetime.now()
+        except Exception:
+            # Don't let RMS math kill the audio path
+            pass
         # Live transcription path. We do this OUTSIDE the chunks_lock
         # because resampling is CPU work and we don't want to delay the
         # disk-writer thread waiting on it. push_audio is internally
