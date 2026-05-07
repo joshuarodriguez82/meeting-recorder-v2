@@ -43,7 +43,7 @@ use objc2::runtime::Bool;
 use objc2_event_kit::{
     EKAuthorizationStatus, EKEntityType, EKEvent, EKEventStore,
 };
-use objc2_foundation::{NSArray, NSDate, NSError, NSString};
+use objc2_foundation::{NSArray, NSDate, NSError};
 use serde::Serialize;
 
 const CACHE_FILENAME: &str = "calendar_cache.json";
@@ -112,7 +112,9 @@ fn polling_loop() {
              writing empty cache and giving up. User can re-enable \
              in System Settings → Privacy & Security → Calendars."
         );
-        write_empty_cache(EKAuthorizationStatus::Denied.0);
+        // EKAuthorizationStatus's inner `.0` is isize on this binding;
+        // cast to i64 to match what we serialize into the JSON cache.
+        write_empty_cache(EKAuthorizationStatus::Denied.0 as i64);
         return;
     }
 
@@ -128,7 +130,7 @@ fn polling_loop() {
         let events = fetch_events(&store, FETCH_HOURS);
         let auth = unsafe {
             EKEventStore::authorizationStatusForEntityType(EKEntityType::Event)
-        }.0;
+        }.0 as i64;
         write_cache(events, auth);
         thread::sleep(Duration::from_secs(POLL_INTERVAL_SECS));
     }
@@ -158,7 +160,10 @@ fn request_access_blocking(store: &EKEventStore) -> bool {
     });
 
     unsafe {
-        store.requestFullAccessToEventsWithCompletion(&block);
+        // The binding wants `*mut Block<...>` here; an `&RcBlock` won't
+        // coerce, but `&*block` derefs to `&Block<...>` which Rust will
+        // auto-coerce to the raw mut pointer the FFI expects.
+        store.requestFullAccessToEventsWithCompletion(&*block);
     }
 
     // Wait up to 60s for the user to click Allow / Don't Allow.
@@ -185,12 +190,10 @@ fn fetch_events(store: &EKEventStore, hours: i64) -> Vec<CalendarEvent> {
     let now = Local::now();
     let end = now + chrono::Duration::hours(hours);
 
-    let ns_start = unsafe {
-        NSDate::dateWithTimeIntervalSince1970(now.timestamp() as f64)
-    };
-    let ns_end = unsafe {
-        NSDate::dateWithTimeIntervalSince1970(end.timestamp() as f64)
-    };
+    let ns_start = NSDate::dateWithTimeIntervalSince1970(
+        now.timestamp() as f64);
+    let ns_end = NSDate::dateWithTimeIntervalSince1970(
+        end.timestamp() as f64);
 
     // Pass nil for calendars → "all calendars the app can see". On
     // macOS 14+ this also picks up subscribed/iCloud/Exchange
@@ -216,12 +219,13 @@ fn fetch_events(store: &EKEventStore, hours: i64) -> Vec<CalendarEvent> {
 fn serialize(ek: &EKEvent) -> Option<CalendarEvent> {
     use chrono::{DateTime, Local, TimeZone};
 
-    let title = unsafe { ek.title() }
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "Untitled Meeting".to_string());
-
-    let start_ns = unsafe { ek.startDate() }?;
-    let end_ns = unsafe { ek.endDate() }?;
+    // objc2-event-kit 0.3 returns these as Retained<…> directly rather
+    // than Option<Retained<…>>, so we use them without ? / .map(). If
+    // the runtime ever returns nil here, Retained's Deref will trip —
+    // hasn't been observed in practice for these methods.
+    let title = unsafe { ek.title() }.to_string();
+    let start_ns = unsafe { ek.startDate() };
+    let end_ns = unsafe { ek.endDate() };
     let start_ts = unsafe { start_ns.timeIntervalSince1970() };
     let end_ts = unsafe { end_ns.timeIntervalSince1970() };
 
@@ -236,33 +240,44 @@ fn serialize(ek: &EKEvent) -> Option<CalendarEvent> {
     let end = end_dt.format("%Y-%m-%dT%H:%M:%S").to_string();
     let duration = ((end_ts - start_ts) / 60.0).max(1.0) as i64;
 
+    // location/organizer ARE optional in this binding (Apple docs say
+    // both can be nil for events without a location or implicit
+    // organizer).
     let location = unsafe { ek.location() }
         .map(|s| s.to_string())
         .unwrap_or_default();
     let organizer = unsafe { ek.organizer() }
-        .and_then(|p| unsafe { p.name() })
-        .map(|s| s.to_string())
+        .map(|p| unsafe { p.name() }
+            .map(|s| s.to_string())
+            .unwrap_or_default())
         .unwrap_or_default();
 
     let attendees: Vec<String> = unsafe { ek.attendees() }
         .map(|arr| {
             arr.iter()
                 .filter_map(|p| {
-                    // Prefer email (URL = mailto:foo@bar) — Python
-                    // does the same so client-matching code keys on
-                    // the same value across platforms.
-                    if let Some(url) = unsafe { p.URL() } {
-                        let raw = url.absoluteString().to_string();
-                        if let Some(rest) = raw.strip_prefix("mailto:")
-                            .or_else(|| raw.strip_prefix("MAILTO:")) {
-                            return Some(rest.to_string());
-                        }
+                    // p.URL() is Retained<NSURL> non-optional in this
+                    // binding. p.name() is Option. Prefer email
+                    // (mailto:foo@bar) — Python does the same so
+                    // client-matching code keys on the same value
+                    // across platforms.
+                    let url = unsafe { p.URL() };
+                    let raw = unsafe { url.absoluteString() }.to_string();
+                    if let Some(rest) = raw.strip_prefix("mailto:")
+                        .or_else(|| raw.strip_prefix("MAILTO:")) {
+                        return Some(rest.to_string());
                     }
                     unsafe { p.name() }.map(|s| s.to_string())
                 })
                 .collect()
         })
         .unwrap_or_default();
+
+    let title = if title.is_empty() {
+        "Untitled Meeting".to_string()
+    } else {
+        title
+    };
 
     Some(CalendarEvent {
         subject: title,
