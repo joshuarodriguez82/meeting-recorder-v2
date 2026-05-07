@@ -1,7 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { type SessionSummary } from "@/lib/api";
+import { useEffect, useMemo, useState } from "react";
+import {
+  api, computeItemHash, type ItemStatusDoc, type SessionSummary,
+} from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
@@ -11,7 +13,9 @@ import { Badge } from "@/components/ui/badge";
 import { ChevronDown, ChevronRight, ExternalLink } from "lucide-react";
 
 interface ActionItem {
-  done: boolean;
+  done: boolean;        // effective state — markdown OR override applied
+  doneFromMarkdown: boolean;  // raw [x] state, shown for diff purposes if needed later
+  itemHash: string;
   owner: string;
   description: string;
   due: string;
@@ -25,9 +29,17 @@ const LINE_RE = /^\s*-\s*\[(?<status>[ xX])\]\s*(?<rest>.+)$/gm;
 const OWNER_RE = /\*\*(?<owner>[^*]+)\*\*\s*:\s*(?<desc>.+)/;
 const DUE_RE = /\(Due:\s*(?<due>[^)]+)\)/i;
 
-function parseActionItems(text: string, meta: Omit<ActionItem, "done" | "owner" | "description" | "due">): ActionItem[] {
+interface ParsedRaw {
+  doneFromMarkdown: boolean;
+  owner: string;
+  description: string;
+  due: string;
+  hashSource: string;
+}
+
+function parseRaw(text: string): ParsedRaw[] {
   if (!text) return [];
-  const items: ActionItem[] = [];
+  const items: ParsedRaw[] = [];
   for (const m of text.matchAll(LINE_RE)) {
     const status = (m.groups?.status || "").trim().toLowerCase();
     let rest = (m.groups?.rest || "").trim();
@@ -43,12 +55,18 @@ function parseActionItems(text: string, meta: Omit<ActionItem, "done" | "owner" 
       due = dueMatch.groups.due.trim();
       desc = desc.replace(DUE_RE, "").trim();
     }
+    // The hash is computed on a stable identity for the item: owner +
+    // description, not the LLM's [ ]/[x] prefix. That way flipping the
+    // checkbox in the markdown doesn't invalidate the override, and a
+    // new extraction that drops the [x] character still maps to the
+    // same row.
+    const hashSource = `${owner.trim()}|${desc.trim()}`;
     items.push({
-      done: status === "x",
+      doneFromMarkdown: status === "x",
       owner,
       description: desc,
       due,
-      ...meta,
+      hashSource,
     });
   }
   return items;
@@ -65,31 +83,75 @@ export function FollowUpsView({ sessions, onOpenSession }: Props) {
   const [ownerFilter, setOwnerFilter] = useState("All");
   const [search, setSearch] = useState("");
 
-  const allItems = useMemo(() => {
-    const out: ActionItem[] = [];
-    for (const s of sessions) {
-      if (!s.action_items) continue;
-      const parsed = parseActionItems(s.action_items, {
-        client: s.client,
-        meeting: s.display_name,
-        session_id: s.session_id,
-        session_date: s.started_at ? new Date(s.started_at).toLocaleDateString() : "",
-      });
-      out.push(...parsed);
-    }
-    return out;
+  // Per-session item-status overlay. Keyed by session_id, then by item
+  // hash. We fetch all of these once on mount because there are usually
+  // just a few hundred sessions and the file-per-session overhead is
+  // bounded — same pattern the commitments tracker uses.
+  const [overrides, setOverrides] = useState<Record<string, ItemStatusDoc>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    api.listAllItemStatus()
+      .then((res) => { if (!cancelled) setOverrides(res.sessions || {}); })
+      .catch(() => { /* leave empty; check-off still works locally */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Parse + hash every action item across every session. Hashing is
+  // async (Web Crypto) so we stash the resolved items in state.
+  const [allItems, setAllItems] = useState<ActionItem[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const out: ActionItem[] = [];
+      for (const s of sessions) {
+        if (!s.action_items) continue;
+        const meta = {
+          client: s.client,
+          meeting: s.display_name,
+          session_id: s.session_id,
+          session_date: s.started_at ? new Date(s.started_at).toLocaleDateString() : "",
+        };
+        const raws = parseRaw(s.action_items);
+        for (const r of raws) {
+          const h = await computeItemHash(r.hashSource);
+          out.push({
+            done: r.doneFromMarkdown,
+            doneFromMarkdown: r.doneFromMarkdown,
+            itemHash: h,
+            owner: r.owner,
+            description: r.description,
+            due: r.due,
+            ...meta,
+          });
+        }
+      }
+      if (!cancelled) setAllItems(out);
+    })();
+    return () => { cancelled = true; };
   }, [sessions]);
 
+  // Apply overrides on top. Pure derivation so we never lose the raw
+  // markdown signal if the override is removed later.
+  const itemsWithOverrides = useMemo(() => {
+    return allItems.map((it) => {
+      const sessionDoc = overrides[it.session_id];
+      const ov = sessionDoc?.follow_ups?.[it.itemHash];
+      if (ov) return { ...it, done: !!ov.done };
+      return it;
+    });
+  }, [allItems, overrides]);
+
   const clients = useMemo(
-    () => ["All", ...Array.from(new Set(allItems.map((i) => i.client).filter(Boolean))).sort()],
-    [allItems]
+    () => ["All", ...Array.from(new Set(itemsWithOverrides.map((i) => i.client).filter(Boolean))).sort()],
+    [itemsWithOverrides]
   );
   const owners = useMemo(
-    () => ["All", ...Array.from(new Set(allItems.map((i) => i.owner).filter(Boolean))).sort()],
-    [allItems]
+    () => ["All", ...Array.from(new Set(itemsWithOverrides.map((i) => i.owner).filter(Boolean))).sort()],
+    [itemsWithOverrides]
   );
 
-  const filtered = allItems.filter((i) => {
+  const filtered = itemsWithOverrides.filter((i) => {
     if (statusFilter === "Open" && i.done) return false;
     if (statusFilter === "Done" && !i.done) return false;
     if (clientFilter !== "All" && i.client !== clientFilter) return false;
@@ -102,7 +164,46 @@ export function FollowUpsView({ sessions, onOpenSession }: Props) {
     return true;
   });
 
-  const openCount = allItems.filter((i) => !i.done).length;
+  const openCount = itemsWithOverrides.filter((i) => !i.done).length;
+
+  // Optimistic toggle. Flip locally first, send to backend, roll back on
+  // failure. Done-state is persisted in the per-session sidecar; the
+  // markdown text is left alone so a re-extraction won't fight us.
+  const toggleDone = async (item: ActionItem) => {
+    const next = !item.done;
+    setOverrides((prev) => {
+      const sess = prev[item.session_id] ?? { follow_ups: {}, decisions: {} };
+      return {
+        ...prev,
+        [item.session_id]: {
+          follow_ups: {
+            ...sess.follow_ups,
+            [item.itemHash]: {
+              done: next,
+              updated_at: new Date().toISOString(),
+            },
+          },
+          decisions: sess.decisions || {},
+        },
+      };
+    });
+    try {
+      await api.setFollowUpDone(item.session_id, item.itemHash, next);
+    } catch (e) {
+      // Roll back on failure.
+      setOverrides((prev) => {
+        const sess = prev[item.session_id];
+        if (!sess) return prev;
+        const fu = { ...sess.follow_ups };
+        delete fu[item.itemHash];
+        return {
+          ...prev,
+          [item.session_id]: { ...sess, follow_ups: fu },
+        };
+      });
+      console.warn("setFollowUpDone failed", e);
+    }
+  };
 
   return (
     <div className="mx-auto max-w-6xl space-y-4">
@@ -136,7 +237,7 @@ export function FollowUpsView({ sessions, onOpenSession }: Props) {
       </div>
 
       <p className="text-xs text-muted-foreground">
-        {filtered.length} shown · {openCount} open of {allItems.length} total
+        {filtered.length} shown · {openCount} open of {itemsWithOverrides.length} total
       </p>
 
       <Card>
@@ -146,7 +247,11 @@ export function FollowUpsView({ sessions, onOpenSession }: Props) {
               No action items yet. Extract them from a processed session.
             </p>
           ) : (
-            <FollowUpGroups items={filtered} onOpenSession={onOpenSession} />
+            <FollowUpGroups
+              items={filtered}
+              onOpenSession={onOpenSession}
+              onToggle={toggleDone}
+            />
           )}
         </CardContent>
       </Card>
@@ -161,10 +266,11 @@ export function FollowUpsView({ sessions, onOpenSession }: Props) {
  * drowning the screen in duplicates.
  */
 function FollowUpGroups({
-  items, onOpenSession,
+  items, onOpenSession, onToggle,
 }: {
   items: ActionItem[];
   onOpenSession: (id: string, tab?: string) => void;
+  onToggle: (item: ActionItem) => void;
 }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
@@ -263,12 +369,17 @@ function FollowUpGroups({
                     key={idx}
                     className="flex items-start gap-3 text-sm py-1.5"
                   >
-                    <span
-                      className={`text-lg shrink-0 ${it.done ? "text-green-600" : "text-muted-foreground"}`}
+                    <button
+                      onClick={() => onToggle(it)}
+                      className={`text-lg shrink-0 leading-none w-6 h-6 inline-flex items-center justify-center rounded hover:bg-accent transition-colors ${
+                        it.done ? "text-green-600" : "text-muted-foreground hover:text-foreground"
+                      }`}
+                      title={it.done ? "Mark not done" : "Mark done"}
+                      aria-pressed={it.done}
                     >
                       {it.done ? "✓" : "○"}
-                    </span>
-                    <div className="flex-1 min-w-0 break-words">
+                    </button>
+                    <div className={`flex-1 min-w-0 break-words ${it.done ? "line-through text-muted-foreground" : ""}`}>
                       {it.description}
                       {it.due && (
                         <span className="text-muted-foreground">

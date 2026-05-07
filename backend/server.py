@@ -308,6 +308,9 @@ from services.recovery_service import recover_orphans
 from services.commitments_service import (
     CommitmentsService, extract_commitments_from_session,
 )
+from services.item_status_service import (
+    ItemStatusService, VALID_DECISION_STATUSES,
+)
 from services.qa_service import QAService
 from services.search_service import SearchService
 from services.session_service import SessionService
@@ -349,6 +352,7 @@ class Services:
         self.search_svc: Optional[SearchService] = None
         self.qa_svc: Optional[QAService] = None
         self.commitments_svc: Optional[CommitmentsService] = None
+        self.item_status_svc: Optional[ItemStatusService] = None
         self.transcription: Optional[TranscriptionEngine] = None
         self.diarization: Optional[DiarizationEngine] = None
         self.summarizer: Optional[Summarizer] = None
@@ -400,6 +404,9 @@ class Services:
             # CommitmentsService is the same shape — sidecar JSONs next
             # to session pickles. No state of its own.
             self.commitments_svc = CommitmentsService(self.session_svc)
+            # ItemStatusService overlays per-session "checked off" state
+            # on top of the markdown-parsed follow-ups and decisions.
+            self.item_status_svc = ItemStatusService(self.session_svc)
             self.recording_svc = RecordingService(
                 settings=self.settings,
                 profile_service=self.speaker_profile_svc,
@@ -1241,6 +1248,11 @@ async def delete_session(session_id: str):
     if svc.commitments_svc:
         await asyncio.to_thread(
             svc.commitments_svc.delete_session_commitments, session_id)
+    # Drop any item-status overrides (follow-up "done" / decision status)
+    # so a re-imported session with the same ID starts clean.
+    if svc.item_status_svc:
+        await asyncio.to_thread(
+            svc.item_status_svc.delete_for_session, session_id)
     return {"ok": True}
 
 
@@ -2514,6 +2526,77 @@ async def extract_session_commitments(session_id: str):
         svc.commitments_svc.replace_session_commitments,
         session_id, commits)
     return {"ok": True, "extracted": len(commits)}
+
+
+# ── Item status overlays (follow-up done, decision lifecycle) ────────
+
+class ItemStatusUpdate(BaseModel):
+    """Patch a single follow-up or decision's status. The frontend hashes
+    the parsed item text with the same normalization as
+    item_status_service.compute_item_hash and sends the digest back."""
+    type: str  # "follow_up" | "decision"
+    item_hash: str
+    done: Optional[bool] = None         # follow_up only
+    status: Optional[str] = None        # decision only
+
+
+@app.get("/item-status")
+async def list_all_item_status():
+    """Return every session's overrides in one shot, keyed by
+    session_id. The cross-session FollowUps / Decisions views call this
+    once on mount so they can render check-state without per-row
+    requests."""
+    svc.load_settings()
+    if not svc.item_status_svc:
+        return {"sessions": {}}
+    data = await asyncio.to_thread(svc.item_status_svc.list_all)
+    return {"sessions": data}
+
+
+@app.get("/sessions/{session_id}/item-status")
+async def get_item_status(session_id: str):
+    svc.load_settings()
+    if not svc.item_status_svc:
+        return {"follow_ups": {}, "decisions": {}}
+    return await asyncio.to_thread(svc.item_status_svc.get, session_id)
+
+
+@app.patch("/sessions/{session_id}/item-status")
+async def patch_item_status(session_id: str, req: ItemStatusUpdate):
+    svc.load_settings()
+    if not svc.item_status_svc:
+        raise HTTPException(status_code=500,
+                            detail="Item-status service unavailable")
+    if req.type == "follow_up":
+        if req.done is None:
+            raise HTTPException(status_code=400,
+                                detail="follow_up update requires `done`")
+        try:
+            doc = await asyncio.to_thread(
+                svc.item_status_svc.set_follow_up,
+                session_id, req.item_hash, req.done,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return doc
+    if req.type == "decision":
+        if not req.status:
+            raise HTTPException(status_code=400,
+                                detail="decision update requires `status`")
+        if req.status not in VALID_DECISION_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"status must be one of {sorted(VALID_DECISION_STATUSES)}")
+        try:
+            doc = await asyncio.to_thread(
+                svc.item_status_svc.set_decision,
+                session_id, req.item_hash, req.status,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return doc
+    raise HTTPException(
+        status_code=400, detail="type must be follow_up or decision")
 
 
 # ── Cross-meeting Q&A ────────────────────────────────────────────────
