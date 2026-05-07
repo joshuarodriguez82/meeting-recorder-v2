@@ -151,11 +151,11 @@ jobs:
           body_path: release-notes-${{ github.ref_name }}.md
           fail_on_unmatched_files: false
           files: artifacts/*
-          # Mark unsigned Mac builds as a draft you can review before
-          # publishing. Flip to `false` once you're confident in the
-          # pipeline. (Drafts are still per-tag — re-runs update the
-          # same draft, they don't pile up.)
-          draft: true
+          # Auto-publish on tag push. Pipeline has been steady and the
+          # manual review step was just adding friction. Flip back to
+          # `true` if a future bad build slips through and we want a
+          # gate again.
+          draft: false
           prerelease: false
 
       # Useful breadcrumbs in the run log if anything goes sideways —
