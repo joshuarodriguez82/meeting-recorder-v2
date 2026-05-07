@@ -25,3 +25,39 @@ tauri = { version = "2.10.3", features = ["devtools"] }
 tauri-plugin-log = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
+
+# macOS-only deps for the EventKit calendar bridge. Python's pyobjc
+# can't access EventKit reliably because the venv'd Python at
+# ~/Library/Application Support/MeetingRecorder/.venv/bin/python3
+# lives outside the .app bundle — macOS Tahoe TCC attributes by
+# code-signing identity, so Python's TCC requests aren't recognized
+# as part of com.joshuarodriguez.meeting-recorder and the user's
+# calendar grant never applies. The Rust binary at
+# Meeting Recorder.app/Contents/MacOS/meeting-recorder IS part of
+# the bundle, so it can read calendar events directly. See
+# src/calendar_macos.rs for the implementation; results are written
+# to a JSON sidecar that Python reads.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSArray",
+    "NSDate",
+    "NSError",
+    "NSObject",
+    "NSString",
+    "NSURL",
+    "block2",
+] }
+objc2-event-kit = { version = "0.3", features = [
+    "EKEventStore",
+    "EKEvent",
+    "EKCalendar",
+    "EKParticipant",
+    "EKCalendarItem",
+    "EKObject",
+    "EKTypes",
+    "block2",
+] }
+block2 = "0.6"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+dirs = "5"
