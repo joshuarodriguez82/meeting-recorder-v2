@@ -7,6 +7,9 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::Manager;
 
+#[cfg(target_os = "macos")]
+mod calendar_macos;
+
 struct BackendProcess(Mutex<Option<Child>>);
 
 /// The backend's TCP port, picked once at startup by binding to
@@ -759,6 +762,15 @@ pub fn run() {
                     Err(e) => rlog(&format!("ERROR: Backend startup failed: {}", e)),
                 }
             });
+            // macOS calendar bridge. Reads EventKit from inside the
+            // .app bundle (Python can't because its venv lives outside
+            // and TCC keys by code-signing identity, not parent
+            // process), writes events to a JSON sidecar Python reads.
+            // No-op on Windows — Python's _calendar_outlook.py path
+            // continues to handle calendar via Outlook COM there.
+            #[cfg(target_os = "macos")]
+            calendar_macos::spawn_polling_thread();
+
             // Watchdog: if the Python process dies unexpectedly (killed
             // by corporate AV, OOM, unhandled exception), respawn it
             // after a short delay.
