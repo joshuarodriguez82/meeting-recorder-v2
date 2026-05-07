@@ -232,12 +232,57 @@ def _fetch_events(start_dt: datetime.datetime,
 
     with _EK_LOCK:
         store = _get_event_store()
+
+        # Diagnostic snapshot of what EventKit thinks it has — helps
+        # distinguish "no calendars" from "predicate returned empty" from
+        # "auth dropped silently". Cheap; runs every fetch.
+        try:
+            auth_status = EventKit.EKEventStore.authorizationStatusForEntityType_(0)
+            cals = store.calendarsForEntityType_(0)
+            cal_count = len(cals) if cals is not None else 0
+            logger.info(
+                f"EventKit auth_status={auth_status} "
+                f"calendars_visible={cal_count}")
+        except Exception as e:
+            logger.warning(f"EventKit diagnostic call failed: {e}")
+            cals = None
+
+        # If EventKit reports zero visible calendars even though the user
+        # granted Full Access, the singleton store is stale (this happens
+        # on macOS 14+ when the store was constructed before the auth
+        # callback fully propagated). Recreate it once and retry.
+        if cals is not None and len(cals) == 0:
+            global _EVENT_STORE
+            logger.info(
+                "EventKit returned zero calendars — recreating event "
+                "store to clear stale auth state.")
+            _EVENT_STORE = None
+            store = _get_event_store()
+            try:
+                cals = store.calendarsForEntityType_(0)
+                logger.info(
+                    f"EventKit calendars after recreate: "
+                    f"{len(cals) if cals else 0}")
+            except Exception:
+                cals = None
+
         try:
             ns_start = _ns_date_from_datetime(start_dt)
             ns_end = _ns_date_from_datetime(end_dt)
+            # Pass the explicit calendar list rather than nil. nil is
+            # supposed to mean "all calendars", but on macOS 14+ a
+            # nil-calendars predicate occasionally returns empty when
+            # the store has freshly transitioned from notDetermined →
+            # fullAccess. Passing the explicit array is the documented
+            # workaround Apple's sample code uses.
             predicate = store.predicateForEventsWithStartDate_endDate_calendars_(
-                ns_start, ns_end, None)  # None = all calendars
+                ns_start, ns_end, cals)
             ek_events = store.eventsMatchingPredicate_(predicate)
+            raw_count = len(ek_events) if ek_events is not None else 0
+            logger.info(
+                f"EventKit predicate "
+                f"[{start_dt.isoformat()} → {end_dt.isoformat()}] "
+                f"returned {raw_count} events")
         except Exception as e:
             logger.error(f"EventKit query failed: {e}", exc_info=True)
             return []
