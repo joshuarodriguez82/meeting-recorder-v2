@@ -186,6 +186,30 @@ export interface UnprocessedSession {
   project: string;
 }
 
+// One commitment row in the cross-meeting tracker. Same shape the
+// /commitments endpoint returns — Commitment.to_dict + the synthetic
+// fields (is_overdue, session_*) that the aggregator adds for UI use.
+export interface Commitment {
+  commitment_id: string;
+  session_id: string;
+  owner: string;
+  side: "internal" | "customer" | "unknown";
+  description: string;
+  quote: string;
+  timestamp_seconds: number;
+  due_date_iso: string;
+  created_at: string;
+  status: "awaiting" | "delivered" | "dismissed";
+  resolved_at: string;
+  resolved_note: string;
+  // Synthetic, computed at query time:
+  is_overdue: boolean;
+  session_display_name: string;
+  session_started_at: string;
+  session_client: string;
+  session_project: string;
+}
+
 // One retrieved chunk that the QA endpoint sent the LLM as context.
 // Same shape as a semantic search hit, with the addition that the QA
 // view renders these in a sources panel under the streamed answer.
@@ -628,6 +652,65 @@ export const api = {
     request<{ brief: string; related_count: number }>("/prep-brief", {
       method: "POST",
       body: JSON.stringify({ subject, client, project }),
+    }),
+
+  // ── Commitments tracker ───────────────────────────────────────────
+  listCommitments: (filters: {
+    client?: string;
+    project?: string;
+    status?: string;   // comma-separated; supports "active" + "overdue" synthetic codes
+    owner?: string;
+    side?: "internal" | "customer" | "unknown";
+  } = {}) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(filters)) {
+      if (v) qs.set(k, v);
+    }
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return request<{ commitments: Commitment[] }>(`/commitments${suffix}`);
+  },
+  updateCommitment: (
+    commitment_id: string,
+    status: "awaiting" | "delivered" | "dismissed",
+    note?: string,
+  ) =>
+    request<Commitment>(
+      `/commitments/${encodeURIComponent(commitment_id)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ status, note: note || "" }),
+      },
+    ),
+  extractSessionCommitments: (session_id: string) =>
+    request<{ ok: boolean; extracted: number }>(
+      `/sessions/${encodeURIComponent(session_id)}/extract-commitments`,
+      { method: "POST" },
+    ),
+
+  // Calendar-tile-driven prep brief: richer prompt + structured response
+  // with referenced session metadata for click-to-jump rendering.
+  prepBriefFromMeeting: (body: {
+    subject: string;
+    attendees: string[];
+    scheduled_start_iso: string;
+    scheduled_end_iso?: string;
+    client: string;
+    project: string;
+  }) =>
+    request<{
+      markdown: string;
+      referenced_sessions: Array<{
+        session_id: string;
+        display_name: string;
+        started_at: string | null;
+      }>;
+      related_count: number;
+      identified_client: string;
+      identified_project: string;
+      last_meeting_at: string | null;
+    }>("/prep-brief/from-meeting", {
+      method: "POST",
+      body: JSON.stringify(body),
     }),
 
 
