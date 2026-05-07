@@ -3160,4 +3160,15 @@ async def startup():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    uvicorn.run(app, host="127.0.0.1", port=17645, log_level="info")
+    # The Tauri shell picks a free port at startup and hands it down via
+    # MEETING_RECORDER_PORT. Falls back to 17645 only when running this
+    # file standalone (manual `python server.py` for debugging).
+    _port_env = os.environ.get("MEETING_RECORDER_PORT", "").strip()
+    try:
+        _port = int(_port_env) if _port_env else 17645
+    except ValueError:
+        logger.warning(
+            f"Invalid MEETING_RECORDER_PORT={_port_env!r}; falling back to 17645")
+        _port = 17645
+    logger.info(f"Backend listening on 127.0.0.1:{_port}")
+    uvicorn.run(app, host="127.0.0.1", port=_port, log_level="info")
