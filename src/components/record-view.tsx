@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { LiveTranscriptPanel } from "./live-transcript-panel";
+import { MeetingBriefModal } from "./meeting-brief-modal";
 import { LiveSearchPanel } from "./live-search-panel";
 
 interface Props {
@@ -77,6 +78,11 @@ export function RecordView({
   const notifiedCodesRef = useRef<Set<string>>(new Set());
 
   const [session, setSession] = useState<SessionFull | null>(null);
+  // Currently-open Brief modal target. null = closed; a Meeting object
+  // means the modal is open and showing a brief for that meeting. We
+  // store the meeting itself rather than a separate "open" boolean so
+  // a fresh click on a different tile cleanly resets the modal state.
+  const [briefMeeting, setBriefMeeting] = useState<Meeting | null>(null);
 
   // Load initial data. Calendar data is owned by the parent (page.tsx)
   // so it survives nav switches; we only load local things here.
@@ -609,9 +615,22 @@ export function RecordView({
                     </div>
                     <span className="text-xs text-muted-foreground">{m.duration}m</span>
                     {!past && (
-                      <Button size="sm" variant="outline" onClick={() => useMeeting(m)} disabled={recording}>
-                        Use
-                      </Button>
+                      <>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setBriefMeeting(m)}
+                          disabled={recording}
+                          title="Generate a pre-meeting brief from prior calls with these attendees"
+                          className="px-2"
+                        >
+                          <Sparkles className="h-3.5 w-3.5 mr-1" />
+                          Brief
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => useMeeting(m)} disabled={recording}>
+                          Use
+                        </Button>
+                      </>
                     )}
                   </div>
                 );
@@ -640,6 +659,29 @@ export function RecordView({
           </CardContent>
         </Card>
       )}
+
+      {/* Pre-meeting brief — opens when the user clicks Brief on a
+          calendar tile. Self-contained: fetches the brief, resolves
+          client/project from attendees, and offers a "Use for
+          recording" handoff that pre-fills the recording form (same
+          effect as clicking Use directly). */}
+      <MeetingBriefModal
+        open={briefMeeting !== null}
+        onOpenChange={(open) => { if (!open) setBriefMeeting(null); }}
+        meeting={briefMeeting}
+        allSessions={allSessions}
+        onOpenSession={(id) => onOpenSession(id)}
+        onUseForRecording={(m, c, p) => {
+          // Mirror the behaviour of useMeeting() but skip the auto-tag
+          // round-trip — the modal already resolved client + project.
+          const date = new Date(m.start).toISOString().slice(0, 10);
+          setMeetingName(`${m.subject} - ${date}`);
+          setAttendees(m.attendees || []);
+          setScheduledEndIso(m.end || null);
+          if (c) setClient(c);
+          if (p) setProject(p);
+        }}
+      />
     </div>
   );
 }

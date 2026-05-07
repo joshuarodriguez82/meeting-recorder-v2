@@ -305,6 +305,9 @@ from services.export_service import ExportService
 from services.recording_service import RecordingService
 from services.retention_service import cleanup as run_retention_cleanup, folder_stats
 from services.recovery_service import recover_orphans
+from services.commitments_service import (
+    CommitmentsService, extract_commitments_from_session,
+)
 from services.qa_service import QAService
 from services.search_service import SearchService
 from services.session_service import SessionService
@@ -345,6 +348,7 @@ class Services:
         self.speaker_profile_svc: Optional[SpeakerProfileService] = None
         self.search_svc: Optional[SearchService] = None
         self.qa_svc: Optional[QAService] = None
+        self.commitments_svc: Optional[CommitmentsService] = None
         self.transcription: Optional[TranscriptionEngine] = None
         self.diarization: Optional[DiarizationEngine] = None
         self.summarizer: Optional[Summarizer] = None
@@ -393,6 +397,9 @@ class Services:
             # session embeddings live next to session JSONs, so it just
             # needs that handle. Lazy index load happens on first search.
             self.search_svc = SearchService(self.session_svc)
+            # CommitmentsService is the same shape — sidecar JSONs next
+            # to session pickles. No state of its own.
+            self.commitments_svc = CommitmentsService(self.session_svc)
             self.recording_svc = RecordingService(
                 settings=self.settings,
                 profile_service=self.speaker_profile_svc,
@@ -1229,6 +1236,11 @@ async def delete_session(session_id: str):
     if svc.search_svc:
         await asyncio.to_thread(
             svc.search_svc.delete_session_index, session_id)
+    # And the commitments sidecar — same reasoning. Stale commitments
+    # pointing at a deleted session would surface in the tracker.
+    if svc.commitments_svc:
+        await asyncio.to_thread(
+            svc.commitments_svc.delete_session_commitments, session_id)
     return {"ok": True}
 
 
@@ -1282,6 +1294,32 @@ class SpeakerRenameRequest(BaseModel):
     # sessions auto-recognize this voice. Default True — almost always
     # what the user wants; set False for one-off relabels (typo fixes).
     save_profile: bool = True
+
+
+async def _auto_extract_commitments(session) -> None:
+    """Background helper called by /process and /process_full to mine
+    commitments out of the freshly-processed session. Best-effort: if
+    the summarizer is None or the model returns junk, we just don't
+    have commitments for this session — the tracker shows fewer rows
+    until the user manually re-runs extraction.
+
+    The customer_hint field comes from the session's client tag so
+    Claude can label commitments as customer-side vs internal more
+    confidently. Empty client tag → "the customer organization" as
+    a generic placeholder; works less well but doesn't fail."""
+    try:
+        if not svc.commitments_svc or not svc.summarizer:
+            return
+        commits = await extract_commitments_from_session(
+            svc.summarizer, session,
+            customer_hint=session.client or "",
+        )
+        if commits:
+            await asyncio.to_thread(
+                svc.commitments_svc.replace_session_commitments,
+                session.session_id, commits)
+    except Exception as e:
+        logger.exception(f"Commitment auto-extract failed: {e}")
 
 
 def _serialize_speaker(sp) -> dict:
@@ -1999,6 +2037,11 @@ async def process_session(session_id: str):
         if svc.search_svc:
             asyncio.create_task(asyncio.to_thread(
                 svc.search_svc.index_session, result.session_id))
+        # Extract commitments in the background too (Claude pass over
+        # the transcript). Same fire-and-forget pattern as semantic
+        # indexing — if the LLM is unavailable or the model returns
+        # bad JSON, the commitments tracker just shows fewer entries.
+        asyncio.create_task(_auto_extract_commitments(result))
         return {"ok": True, "segments": len(result.segments),
                 "speakers": len(result.speakers)}
     except Exception as e:
@@ -2183,6 +2226,19 @@ async def process_full(session_id: str, req: ProcessFullRequest):
     if svc.search_svc:
         asyncio.create_task(asyncio.to_thread(
             svc.search_svc.index_session, session_id))
+    # Same for commitments — auto_process_after_stop now auto-mines
+    # commitments too. Need a fresh session load because the local
+    # `session` variable above may not reflect the latest extractions.
+    if svc.commitments_svc:
+        async def _do_commitments():
+            try:
+                fresh = await asyncio.to_thread(
+                    svc.session_svc.load_full, session_id)
+                if fresh:
+                    await _auto_extract_commitments(fresh)
+            except Exception as e:
+                logger.exception(f"process_full commitments failed: {e}")
+        asyncio.create_task(_do_commitments())
 
     return {"ok": True, "stages": stages}
 
@@ -2368,6 +2424,98 @@ async def search_index_backfill(limit: int = 50):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Commitments ──────────────────────────────────────────────────────
+
+
+@app.get("/commitments")
+async def list_commitments(
+    client: Optional[str] = None,
+    project: Optional[str] = None,
+    status: Optional[str] = None,  # comma-separated: "active", "awaiting", "delivered", "dismissed", "overdue"
+    owner: Optional[str] = None,
+    side: Optional[str] = None,    # "internal" | "customer" | "unknown"
+):
+    """Aggregated commitment list across every session, with optional
+    filters. status accepts a comma-separated list and supports two
+    synthetic values:
+      - "active"  → expands to awaiting + overdue
+      - "overdue" → awaiting commitments past their due_date_iso
+    """
+    svc.load_settings()
+    if not svc.commitments_svc:
+        return {"commitments": []}
+    status_list = (
+        [s.strip() for s in status.split(",") if s.strip()]
+        if status else None
+    )
+    items = await asyncio.to_thread(
+        svc.commitments_svc.list_all,
+        client or None,
+        project or None,
+        status_list,
+        owner or None,
+        side or None,
+    )
+    return {"commitments": items}
+
+
+class CommitmentStatusUpdate(BaseModel):
+    status: str        # "awaiting" | "delivered" | "dismissed"
+    note: str = ""
+
+
+@app.patch("/commitments/{commitment_id}")
+async def update_commitment(commitment_id: str, req: CommitmentStatusUpdate):
+    """Mark a commitment delivered, dismissed, or restore to awaiting.
+    Returns 404 when the commitment_id doesn't match any session's
+    sidecar — usually means the underlying session was deleted while
+    the user had the page open."""
+    svc.load_settings()
+    if not svc.commitments_svc:
+        raise HTTPException(status_code=500,
+                            detail="Commitments service unavailable")
+    if req.status not in {"awaiting", "delivered", "dismissed"}:
+        raise HTTPException(
+            status_code=400,
+            detail="status must be awaiting / delivered / dismissed")
+    updated = await asyncio.to_thread(
+        svc.commitments_svc.update_status,
+        commitment_id, req.status, req.note,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Commitment not found")
+    return updated
+
+
+@app.post("/sessions/{session_id}/extract-commitments")
+async def extract_session_commitments(session_id: str):
+    """Manually re-run commitment extraction over a session. Used by
+    the Sessions detail dialog when the user has corrected speaker
+    labels or edited segments and wants the tracker to re-mine the
+    transcript with the cleaner data.
+
+    Replaces all existing commitments for the session — re-running
+    isn't meant to merge with prior output, it supersedes it."""
+    svc.load_settings()
+    if not svc.commitments_svc:
+        raise HTTPException(status_code=500,
+                            detail="Commitments service unavailable")
+    if not svc.summarizer:
+        raise HTTPException(status_code=400,
+                            detail="AI provider not configured")
+    session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    commits = await extract_commitments_from_session(
+        svc.summarizer, session,
+        customer_hint=session.client or "",
+    )
+    await asyncio.to_thread(
+        svc.commitments_svc.replace_session_commitments,
+        session_id, commits)
+    return {"ok": True, "extracted": len(commits)}
+
+
 # ── Cross-meeting Q&A ────────────────────────────────────────────────
 
 
@@ -2501,6 +2649,180 @@ class PrepBriefRequest(BaseModel):
     subject: str
     client: str = ""
     project: str = ""
+
+
+class PrepBriefFromMeetingRequest(BaseModel):
+    """Body for the click-from-calendar-tile prep-brief flow.
+
+    The frontend resolves client/project from attendee email domains
+    (mirroring the existing useMeeting() auto-tag logic) before calling
+    this endpoint, so we get them as direct fields rather than having
+    to recompute. attendees + scheduled_start_iso are kept so the
+    Claude prompt can name the meeting and the people in the room
+    explicitly — that nudges the brief toward person-specific
+    context."""
+    subject: str
+    attendees: list[str] = []
+    scheduled_start_iso: str = ""
+    scheduled_end_iso: str = ""
+    client: str = ""
+    project: str = ""
+
+
+@app.post("/prep-brief/from-meeting")
+async def prep_brief_from_meeting(req: PrepBriefFromMeetingRequest):
+    """Generate a meeting-specific prep brief for a calendar entry.
+    Returns:
+        {
+          "markdown": str,            # The brief itself (markdown body)
+          "referenced_sessions": [    # Sessions Claude COULD cite —
+            {"session_id", "display_name", "started_at"},  # frontend
+            ...                       # uses these to render
+          ],                          # click-to-jump on the [id]
+          "related_count": int,       # citations.
+          "identified_client": str,   # echoed back so the modal can
+          "identified_project": str,  # show the resolved scope.
+          "last_meeting_at": str|null # ISO of the most recent prior
+        }                             # session in scope (header info).
+    """
+    svc.load_settings()
+    if not svc.summarizer:
+        raise HTTPException(status_code=400,
+                            detail="AI provider not configured")
+
+    sessions = svc.session_svc.list_sessions()
+    related = []
+    for s in sessions:
+        if not s.get("has_summary") and not s.get("has_transcript"):
+            continue
+        if req.client and (s.get("client") or "") != req.client:
+            continue
+        if req.project and (s.get("project") or "") != req.project:
+            continue
+        related.append(s)
+
+    # Sort by started_at desc so the brief sees the most recent context
+    # first — the LLM prioritises the head of its context. Cap at 8 to
+    # keep the prompt under 6-8 KB which is comfortably under any
+    # provider's context limit.
+    related.sort(key=lambda s: s.get("started_at") or "", reverse=True)
+    related = related[:8]
+
+    if not related:
+        # No client-scoped material AND no project-scoped material —
+        # fall back to the most recent processed sessions across the
+        # entire corpus. Less precise but still gives the user
+        # something actionable rather than a blank brief.
+        related = [s for s in sessions if s.get("has_summary")][:5]
+
+    if not related:
+        return {
+            "markdown": (
+                "_No prior meetings with summaries are available yet. "
+                "Process a few sessions and the brief will have material "
+                "to work from._"
+            ),
+            "referenced_sessions": [],
+            "related_count": 0,
+            "identified_client": req.client,
+            "identified_project": req.project,
+            "last_meeting_at": None,
+        }
+
+    # Build the prior_notes blob with session_id headers Claude can
+    # cite back. The frontend's [id] regex matcher pulls these out
+    # later for click-to-jump rendering.
+    parts = []
+    for s in related:
+        sid = s.get("session_id") or ""
+        date = (s.get("started_at") or "")[:10]
+        title = s.get("display_name") or "Untitled meeting"
+        block = [f"### [{sid}] {title}  ({date})"]
+        if s.get("summary"):
+            block.append(f"**Summary:**\n{s['summary']}")
+        if s.get("action_items"):
+            block.append(f"**Action Items:**\n{s['action_items']}")
+        if s.get("decisions"):
+            block.append(f"**Decisions:**\n{s['decisions']}")
+        parts.append("\n\n".join(block))
+
+    # Open commitments for this scope — the brief's "Open commitments"
+    # section pulls directly from the tracker rather than relying on
+    # Claude to re-derive them from action_items markdown. Cleaner +
+    # more accurate, since each entry already has a verbatim quote
+    # and resolved due date that survived the original extraction.
+    if svc.commitments_svc:
+        try:
+            open_commits = await asyncio.to_thread(
+                svc.commitments_svc.list_all,
+                req.client or None,
+                req.project or None,
+                ["active"],   # awaiting + overdue
+                None,
+                None,
+            )
+        except Exception as e:
+            logger.warning(f"Open-commitments lookup failed: {e}")
+            open_commits = []
+    else:
+        open_commits = []
+
+    if open_commits:
+        commit_lines = []
+        for c in open_commits[:20]:  # safety cap
+            sid = c.get("session_id") or ""
+            owner = c.get("owner", "") or "Unknown"
+            desc = c.get("description", "") or ""
+            due = c.get("due_date_iso") or "no deadline"
+            overdue = " (OVERDUE)" if c.get("is_overdue") else ""
+            commit_lines.append(
+                f"- [{sid}] {owner}: {desc} (due {due}){overdue}"
+            )
+        parts.append(
+            "### Open commitments still outstanding\n"
+            + "\n".join(commit_lines)
+        )
+
+    prior_notes = "\n\n---\n\n".join(parts)
+
+    # Friendly time string for the prompt — Claude does better with
+    # natural-language dates than ISO timestamps.
+    when_blob = req.scheduled_start_iso or "(time not specified)"
+    if req.scheduled_start_iso:
+        try:
+            dt = datetime.fromisoformat(req.scheduled_start_iso)
+            when_blob = dt.strftime("%A %b %d at %I:%M %p")
+        except ValueError:
+            pass
+
+    try:
+        markdown = await svc.summarizer.meeting_prep_brief_from_calendar(
+            upcoming_subject=req.subject,
+            upcoming_attendees=req.attendees,
+            upcoming_when=when_blob,
+            identified_client=req.client,
+            identified_project=req.project,
+            prior_notes=prior_notes,
+        )
+    except Exception as e:
+        logger.exception("Calendar prep brief failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "markdown": markdown,
+        "referenced_sessions": [
+            {
+                "session_id": s.get("session_id"),
+                "display_name": s.get("display_name") or "Untitled meeting",
+                "started_at": s.get("started_at"),
+            }
+            for s in related
+        ],
+        "related_count": len(related),
+        "identified_client": req.client,
+        "identified_project": req.project,
+        "last_meeting_at": (related[0].get("started_at") if related else None),
+    }
 
 
 @app.post("/prep-brief")
