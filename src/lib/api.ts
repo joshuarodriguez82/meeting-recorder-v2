@@ -45,6 +45,15 @@ export interface Settings {
   // When false the live panel doesn't render and the backend doesn't
   // spin up the LiveTranscriber thread (saves CPU).
   live_transcription_enabled: boolean;
+  // Auto-stop watchdog. All in minutes except hard_cap_hours; 0 disables
+  // each individual trigger. The hard cap is the always-on safety net
+  // — defaults to 4 hours so users who forget the recording is running
+  // don't end up with overnight files.
+  silence_warn_min: number;
+  silence_stop_min: number;
+  overrun_warn_min: number;
+  overrun_stop_min: number;
+  hard_cap_hours: number;
 }
 
 export interface AudioDevice {
@@ -112,6 +121,15 @@ export interface RecordingStatus {
   models_loading: boolean;
   models_error: string | null;
   current_status?: string;
+  // Auto-stop watchdog: zero or more active warnings. Codes are stable
+  // per condition (`dead_air`, `meeting_overrun`, `hard_cap_hit`,
+  // `dead_air_stop`, `meeting_overrun_stop`) so the frontend can dedupe
+  // its native-OS notifications on code, not on message text.
+  warnings?: Array<{
+    code: string;
+    message: string;
+    since_seconds: number;
+  }>;
 }
 
 export interface SessionFull {
@@ -245,6 +263,11 @@ export const api = {
     client: string;
     project: string;
     attendees: string[];
+    // ISO datetime when the calendar meeting is scheduled to end.
+    // Optional; only meaningful when the recording was started from a
+    // calendar tile. The backend's auto-stop watchdog uses this for
+    // the meeting-overrun trigger.
+    scheduled_end_iso?: string;
   }) =>
     request<{ session_id: string }>("/recording/start", {
       method: "POST",
