@@ -121,6 +121,38 @@ export interface SessionSummary {
   attendees: string[];
 }
 
+/**
+ * RFC 7807 Problem Details — what the backend returns on every error
+ * path now (see backend/server.py). `type` is a stable URI identifying
+ * the error class so callers can branch on it without string-matching
+ * `detail`. Extensions like `errors` (validation) and
+ * `exception_class` (unhandled) ride alongside the standard fields.
+ */
+export interface ProblemDetail {
+  type: string;
+  title: string;
+  status: number;
+  detail?: string;
+  instance?: string;
+  // Class-specific extensions are permitted by RFC 7807 §3.2; surface
+  // them through index access rather than enumerating each one.
+  [extension: string]: unknown;
+}
+
+/** Error type the api.* helpers throw on non-2xx responses. Carries
+ * the parsed Problem document so callers that want to show field-level
+ * validation errors or branch on `problem.type` can do so. */
+export class ApiError extends Error {
+  status: number;
+  problem?: ProblemDetail;
+  constructor(message: string, status: number, problem?: ProblemDetail) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.problem = problem;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const baseUrl = await getBaseUrl();
   const res = await fetch(`${baseUrl}${path}`, {
@@ -128,8 +160,23 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText);
-    throw new Error(`${res.status}: ${text}`);
+    const ct = res.headers.get("content-type") || "";
+    const bodyText = await res.text().catch(() => "");
+    if (ct.includes("application/problem+json") && bodyText) {
+      try {
+        const problem = JSON.parse(bodyText) as ProblemDetail;
+        const detail = problem.detail || "";
+        const msg = detail
+          ? `${problem.title}: ${detail}`
+          : problem.title || `${res.status}`;
+        throw new ApiError(msg, res.status, problem);
+      } catch (e) {
+        if (e instanceof ApiError) throw e;
+        // JSON.parse failed — fall through to the plain-text path.
+      }
+    }
+    throw new ApiError(
+      `${res.status}: ${bodyText || res.statusText}`, res.status);
   }
   return res.json();
 }
