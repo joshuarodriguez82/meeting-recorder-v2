@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api, formatDuration, type SessionSummary } from "@/lib/api";
+import { confirmDialog } from "@/lib/confirm";
 import { toast } from "sonner";
 import { Loader2, Trash2, FolderOpen, Upload, Pencil, Check, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -169,7 +170,7 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
 
   const bulkProcess = async () => {
     if (!unprocessed.length) return;
-    if (!confirm(`Process ${unprocessed.length} unprocessed sessions?`)) return;
+    if (!(await confirmDialog(`Process ${unprocessed.length} unprocessed sessions?`, { title: "Bulk process" }))) return;
     setBulkRunning(true);
     let done = 0, failed = 0;
     for (const s of unprocessed) {
@@ -187,7 +188,7 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
   };
 
   const del = async (id: string, name: string) => {
-    if (!confirm(`Delete "${name}"? This removes audio + transcript.`)) return;
+    if (!(await confirmDialog(`Delete "${name}"? This removes audio + transcript.`, { title: "Delete session", kind: "warning" }))) return;
     try {
       await api.deleteSession(id);
       toast.success("Session deleted");
