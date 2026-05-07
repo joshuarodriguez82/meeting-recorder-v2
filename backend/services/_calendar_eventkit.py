@@ -296,6 +296,121 @@ def _fetch_events(start_dt: datetime.datetime,
         return results
 
 
+# ── Rust-EventKit cache reader ──────────────────────────────────────
+#
+# The Python venv lives outside the .app bundle, so EventKit calls from
+# pyobjc are attributed by macOS Tahoe TCC to a separate identity that
+# has no usage description and no calendar grant — auth_status comes
+# back as 0 (NotDetermined) even when the user has explicitly toggled
+# Full Access on for Meeting Recorder. The Rust binary at
+# Meeting Recorder.app/Contents/MacOS/meeting-recorder IS part of the
+# bundle, so it reads EventKit successfully and dumps events to a JSON
+# sidecar at ~/Library/Application Support/MeetingRecorder/
+# calendar_cache.json. We read from that here, falling back to the
+# pyobjc path (which mostly works in `npx tauri dev` because Terminal
+# inherits its TCC) if the cache is missing.
+#
+# See src-tauri/src/calendar_macos.rs for the writer side.
+
+import json as _json
+from pathlib import Path
+
+_RUST_CACHE_PATH = (
+    Path.home() / "Library" / "Application Support" / "MeetingRecorder"
+    / "calendar_cache.json"
+)
+# How long after the Rust writer's last successful poll we still trust
+# the cache. Rust polls every 5 minutes (POLL_INTERVAL_SECS in
+# calendar_macos.rs), so ~15 minutes covers two missed polls before we
+# flag the data as stale and fall through to pyobjc.
+_RUST_CACHE_MAX_AGE_SECONDS = 15 * 60
+
+
+def _load_from_rust_cache(
+    start_dt: datetime.datetime,
+    end_dt: datetime.datetime,
+) -> Optional[List[dict]]:
+    """Return events from the Rust-written cache, or None if the cache
+    is missing/stale/unreadable. Caller falls back to pyobjc on None."""
+    try:
+        if not _RUST_CACHE_PATH.exists():
+            return None
+        raw = _json.loads(_RUST_CACHE_PATH.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.debug(f"calendar cache unreadable: {e}")
+        return None
+
+    generated_at = raw.get("generated_at", "")
+    try:
+        gen_dt = datetime.datetime.strptime(
+            generated_at, "%Y-%m-%dT%H:%M:%S")
+        age = (datetime.datetime.now() - gen_dt).total_seconds()
+        if age > _RUST_CACHE_MAX_AGE_SECONDS:
+            logger.info(
+                f"calendar cache is {age:.0f}s old (> "
+                f"{_RUST_CACHE_MAX_AGE_SECONDS}s); falling back to pyobjc")
+            return None
+    except Exception:
+        # Bad timestamp; treat as stale.
+        return None
+
+    auth = raw.get("auth_status", 0)
+    if auth == 0:
+        # Rust reported NotDetermined — user hasn't responded to the
+        # prompt yet. Don't return an empty list (which would look like
+        # "no meetings") — fall through so pyobjc can take a fresh
+        # crack and the prompt can re-fire if needed.
+        logger.info(
+            "calendar cache reports auth_status=0; falling back to pyobjc")
+        return None
+
+    out: List[dict] = []
+    for ev in raw.get("events", []):
+        try:
+            start = datetime.datetime.strptime(
+                ev["start"], "%Y-%m-%dT%H:%M:%S")
+            end = datetime.datetime.strptime(
+                ev["end"], "%Y-%m-%dT%H:%M:%S")
+        except Exception:
+            continue
+        if end < start_dt or start >= end_dt:
+            continue
+        out.append({
+            "subject": ev.get("subject", "Untitled Meeting"),
+            "start": start,
+            "end": end,
+            "location": ev.get("location", "") or "",
+            "organizer": ev.get("organizer", "") or "",
+            "attendees": list(ev.get("attendees") or []),
+            "duration": int(
+                ev.get("duration") or
+                max(1, (end - start).total_seconds() // 60)
+            ),
+        })
+    out.sort(key=lambda m: m["start"])
+    logger.info(
+        f"Loaded {len(out)} events from Rust calendar cache "
+        f"(generated_at={generated_at}, auth_status={auth})")
+    return out
+
+
+# Wrap the existing _fetch_events with a Rust-cache-first lookup. The
+# original is still used for `npx tauri dev` (Terminal-inherited TCC
+# happens to work there) and as a defensive fallback if the Rust
+# polling thread hasn't written its first cache yet.
+_fetch_events_pyobjc = _fetch_events
+
+
+def _fetch_events(
+    start_dt: datetime.datetime,
+    end_dt: datetime.datetime,
+) -> List[dict]:
+    cached = _load_from_rust_cache(start_dt, end_dt)
+    if cached is not None:
+        return cached
+    return _fetch_events_pyobjc(start_dt, end_dt)
+
+
 # ── Public surface (matches _calendar_outlook.py) ────────────────────
 
 def invalidate_calendar_cache():
