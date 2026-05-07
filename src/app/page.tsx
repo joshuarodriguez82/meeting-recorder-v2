@@ -6,7 +6,7 @@ import { api, formatBytes, type Meeting, type SessionSummary } from "@/lib/api";
 import {
   Mic, History, CheckSquare, Target, Search,
   LayoutDashboard, Settings as SettingsIcon, HelpCircle, Loader2,
-  Sparkles, MessageCircle,
+  Sparkles, MessageCircle, Handshake,
 } from "lucide-react";
 import { RecordView } from "@/components/record-view";
 import { SettingsView } from "@/components/settings-view";
@@ -17,6 +17,7 @@ import { SearchView } from "@/components/search-view";
 import { ClientsView } from "@/components/clients-view";
 import { PrepBriefView } from "@/components/prep-brief-view";
 import { QAView } from "@/components/qa-view";
+import { CommitmentsView } from "@/components/commitments-view";
 import { UsageGuideView } from "@/components/usage-guide-view";
 import { CalendarMonitor } from "@/components/calendar-monitor";
 import { SessionDetailDialog } from "@/components/session-detail-dialog";
@@ -26,6 +27,7 @@ const NAV_ITEMS = [
   { id: "record", label: "Record", icon: Mic },
   { id: "sessions", label: "Sessions", icon: History },
   { id: "follow-ups", label: "Follow-Ups", icon: CheckSquare },
+  { id: "commitments", label: "Commitments", icon: Handshake },
   { id: "decisions", label: "Decisions", icon: Target },
   { id: "search", label: "Search", icon: Search },
   { id: "qa", label: "Ask", icon: MessageCircle },
@@ -396,6 +398,7 @@ export default function Home() {
               {nav === "record" && "Start a new recording or pick one from your calendar"}
               {nav === "sessions" && "Browse every meeting you've recorded"}
               {nav === "follow-ups" && "Track action items across every meeting"}
+              {nav === "commitments" && "Every promise made in your meetings — who owes what, by when, status"}
               {nav === "decisions" && "Every decision, auto-generated ADR log"}
               {nav === "search" && "Search across all transcripts"}
               {nav === "qa" && "Ask Claude questions about your meetings — answers come with citations"}
@@ -427,6 +430,7 @@ export default function Home() {
           {nav === "follow-ups" && (
             <FollowUpsView sessions={sessions} onOpenSession={openSession} />
           )}
+          {nav === "commitments" && <CommitmentsView onOpenSession={openSession} />}
           {nav === "decisions" && (
             <DecisionsView sessions={sessions} onOpenSession={openSession} />
           )}
