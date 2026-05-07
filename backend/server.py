@@ -2101,6 +2101,14 @@ async def process_full(session_id: str, req: ProcessFullRequest):
             logger.exception("process_full: follow_up_drafts failed")
             stages["follow_up_drafts"] = f"failed: {e}"
 
+    # Auto-index for semantic search (mirrors what /process does for the
+    # one-shot path). Fire-and-forget; missing semantic index never
+    # blocks the user's main flow. Catches the auto_process_after_stop
+    # path which previously skipped indexing entirely.
+    if svc.search_svc:
+        asyncio.create_task(asyncio.to_thread(
+            svc.search_svc.index_session, session_id))
+
     return {"ok": True, "stages": stages}
 
 
@@ -2616,6 +2624,58 @@ async def startup():
     # the in-flight dedup short wait keep the UI responsive.
 
     _t.Thread(target=_prewarm_audio, daemon=True).start()
+
+    def _backfill_search_index():
+        """Walk every processed session that doesn't have an embedding
+        sidecar yet and index it. Runs once at startup, in the
+        background, so the user never has to click 'Index N sessions'
+        manually — it just happens.
+
+        Cheap: each session takes ~0.1-1s on CPU MiniLM. A user with
+        100 unindexed sessions sees the count tick down over ~1 minute
+        in Settings → Semantic Index without lifting a finger.
+
+        We avoid logging the per-session loop at INFO level — only the
+        start/end of the run, and only when there's actual work to do.
+        Otherwise this would spam backend.log on every launch even when
+        the index is already complete.
+        """
+        try:
+            if svc.search_svc is None:
+                return
+            # Quick gate before doing anything: only do this work if the
+            # AI provider is actually configured. Otherwise the embedding
+            # backend hasn't been used and there's nothing meaningful
+            # to index against.
+            recordings_dir = svc.search_svc._session_service.recordings_dir
+            all_sessions = svc.search_svc._session_service.list_sessions()
+            missing = [
+                s for s in all_sessions
+                if s.get("has_transcript")
+                and not (recordings_dir / f"session_{s['session_id']}.embeddings.pkl").exists()
+            ]
+            if not missing:
+                return
+            logger.info(
+                f"Background search-index backfill: {len(missing)} "
+                f"processed session(s) need embeddings.")
+            indexed = 0
+            for s in missing:
+                try:
+                    if svc.search_svc.index_session(s["session_id"]):
+                        indexed += 1
+                except Exception as e:
+                    logger.warning(
+                        f"Backfill failed for {s['session_id']}: {e}")
+            logger.info(
+                f"Background search-index backfill: indexed {indexed} "
+                f"of {len(missing)} session(s).")
+        except Exception as e:
+            # Never let this background pass take the backend down —
+            # search index isn't critical for app usability.
+            logger.exception(f"Background backfill aborted: {e}")
+
+    _t.Thread(target=_backfill_search_index, daemon=True).start()
 
 
 if __name__ == "__main__":
