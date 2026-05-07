@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, type AudioDevice, type Meeting, type SessionFull, type SessionSummary } from "@/lib/api";
+import { api, type AudioDevice, type Meeting, type RecordingStatus, type SessionFull, type SessionSummary } from "@/lib/api";
 import { toast } from "sonner";
 import {
   Calendar as CalendarIcon,
@@ -60,10 +60,21 @@ export function RecordView({
   const [micIdx, setMicIdx] = useState<number | null>(null);
   const [outIdx, setOutIdx] = useState<number | null>(null);
   const [attendees, setAttendees] = useState<string[]>([]);
+  // ISO datetime of the calendar meeting's scheduled end, when the
+  // user clicked Use on a calendar tile. Threaded through to
+  // /recording/start so the backend's auto-stop watchdog knows when
+  // to start nagging about meeting overrun. null for ad-hoc recordings.
+  const [scheduledEndIso, setScheduledEndIso] = useState<string | null>(null);
 
   const [recording, setRecording] = useState(false);
   const [duration, setDuration] = useState(0);
   const [modelsLoading, setModelsLoading] = useState(false);
+  // Auto-stop watchdog warnings, polled from /recording/status while
+  // recording. Used to render a banner under the recording bar and
+  // to fire native OS notifications (once per code per session, so
+  // we don't spam the user with the same toast every second).
+  const [watchdogWarnings, setWatchdogWarnings] = useState<RecordingStatus["warnings"]>([]);
+  const notifiedCodesRef = useRef<Set<string>>(new Set());
 
   const [session, setSession] = useState<SessionFull | null>(null);
 
@@ -187,11 +198,38 @@ export function RecordView({
       try {
         const s = await api.recordingStatus();
         setDuration(s.duration_s);
-        if (!s.is_recording) setRecording(false);
+        // Auto-stop watchdog warnings — render banners + fire native
+        // notifications. Codes are stable per condition so we only
+        // notify once per code per recording session (the user
+        // doesn't want a beep every second while the meeting runs over).
+        const warns = s.warnings || [];
+        setWatchdogWarnings(warns);
+        for (const w of warns) {
+          if (notifiedCodesRef.current.has(w.code)) continue;
+          notifiedCodesRef.current.add(w.code);
+          fireNativeNotification(w.code, w.message);
+        }
+        if (!s.is_recording) {
+          setRecording(false);
+          // If the watchdog auto-stopped us, the last poll's warning
+          // is what we want to surface as an explanatory toast — the
+          // user wasn't watching the screen, that's the whole point.
+          const stopWarn = warns.find(
+            (w) => w.code.endsWith("_stop") || w.code === "hard_cap_hit"
+          );
+          if (stopWarn) {
+            toast.warning("Recording auto-stopped", {
+              description: stopWarn.message,
+            });
+            // Auto-stopped sessions still need the post-stop processing
+            // path to kick off (auto_process / refresh sessions list).
+            onSessionsChanged();
+          }
+        }
       } catch {}
     }, 1000);
     return () => clearInterval(t);
-  }, [recording]);
+  }, [recording, onSessionsChanged]);
 
   // Poll for model readiness
   useEffect(() => {
@@ -216,10 +254,13 @@ export function RecordView({
         client,
         project,
         attendees,
+        scheduled_end_iso: scheduledEndIso ?? undefined,
       });
       setRecording(true);
       setDuration(0);
       setSession(null);
+      setWatchdogWarnings([]);
+      notifiedCodesRef.current = new Set();
       toast.success("Recording started", { description: `Session ${res.session_id}` });
     } catch (e) {
       toast.error(`Start failed: ${e instanceof Error ? e.message : e}`);
@@ -304,6 +345,10 @@ export function RecordView({
     const date = new Date(m.start).toISOString().slice(0, 10);
     setMeetingName(`${m.subject} - ${date}`);
     setAttendees(m.attendees || []);
+    // Stash the calendar end time so the auto-stop watchdog can warn
+    // / stop us if the meeting runs long. m.end is already an ISO
+    // string per the calendar service.
+    setScheduledEndIso(m.end || null);
 
     // Auto-tag Client from attendee email domains using your own
     // tagging history. Intentionally no config — it just learns from
@@ -340,6 +385,27 @@ export function RecordView({
             <Square className="h-3.5 w-3.5 mr-2" />
             Stop
           </Button>
+        </div>
+      )}
+
+      {/* Auto-stop watchdog warning banner — appears underneath the
+          recording bar when the backend detects dead air, meeting
+          overrun, or imminent hard cap. Render order is "most recent
+          warning at the top" because the watchdog only emits one or
+          two warnings at a time and stacking is rare. */}
+      {recording && (watchdogWarnings?.length ?? 0) > 0 && (
+        <div className="space-y-2">
+          {(watchdogWarnings || []).map((w) => (
+            <div
+              key={w.code}
+              className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm dark:border-amber-900/60 dark:bg-amber-950/30"
+            >
+              <span className="mt-0.5 text-amber-600 dark:text-amber-400">⚠</span>
+              <div className="flex-1 text-amber-900 dark:text-amber-100">
+                {w.message}
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
@@ -669,4 +735,32 @@ function extractDomains(addresses: string[]): Set<string> {
     if (domain) out.add(domain);
   }
   return out;
+}
+
+// Fire an OS-native notification for an auto-stop watchdog event.
+// Mirrors the calendar-monitor pattern: dynamic-import the Tauri
+// notification plugin so the web build doesn't pull it in, request
+// permission lazily, then send. Best-effort — errors are silently
+// swallowed; the in-app banner is the canonical surfacing of warnings,
+// and the toast layer also fires alongside.
+async function fireNativeNotification(code: string, message: string) {
+  try {
+    const { sendNotification, isPermissionGranted, requestPermission } =
+      await import("@tauri-apps/plugin-notification");
+    let granted = await isPermissionGranted();
+    if (!granted) {
+      const perm = await requestPermission();
+      granted = perm === "granted";
+    }
+    if (!granted) return;
+    // Keep titles short and consistent so users can distinguish auto-
+    // stop alerts from calendar pre-meeting pings at a glance.
+    const title = code.endsWith("_stop") || code === "hard_cap_hit"
+      ? "Recording auto-stopped"
+      : "Recording warning";
+    await sendNotification({ title, body: message });
+  } catch {
+    // Plugin not available in this context (web preview, etc.) —
+    // banner + toast are still showing inside the app.
+  }
 }

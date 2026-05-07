@@ -146,6 +146,16 @@ class Settings:
     # which saves CPU on long calls. The canonical post-stop transcript
     # always runs regardless.
     live_transcription_enabled: bool
+    # ── Auto-stop watchdog ────────────────────────────────────────
+    # Warn (and optionally auto-stop) when a recording has been silent
+    # for too long, run past its scheduled end time, or exceeded the
+    # hard cap. All values are minutes except hard_cap_hours. 0
+    # disables a given trigger; the hard cap is always-on.
+    silence_warn_min: int           # warn at N min of silence; 0 = off
+    silence_stop_min: int           # auto-stop at N min of silence; 0 = off
+    overrun_warn_min: int           # warn N min after scheduled end; 0 = off
+    overrun_stop_min: int           # auto-stop N min after scheduled end; 0 = off
+    hard_cap_hours: int             # never let a recording exceed this; 0 = off
     # Which LLM family powers summaries/extractions.
     #   "anthropic"         → native Anthropic SDK, uses anthropic_api_key +
     #                         claude_model (e.g. claude-haiku-4-5)
@@ -244,6 +254,16 @@ class Settings:
             # the live preview. Explicit "false" in config.env disables.
             live_transcription_enabled=_get_bool(
                 "LIVE_TRANSCRIPTION_ENABLED", True),
+            # Auto-stop defaults: warnings on, auto-stops opt-in, 4h hard cap.
+            # The user reported real "I forgot the recording was still going
+            # for hours" pain — these defaults catch the common case while
+            # leaving the more aggressive auto-stop behaviour off until the
+            # user explicitly opts in.
+            silence_warn_min=_get_int("SILENCE_WARN_MIN", 5),
+            silence_stop_min=_get_int("SILENCE_STOP_MIN", 0),
+            overrun_warn_min=_get_int("OVERRUN_WARN_MIN", 5),
+            overrun_stop_min=_get_int("OVERRUN_STOP_MIN", 0),
+            hard_cap_hours=_get_int("HARD_CAP_HOURS", 4),
         )
 
     @property
@@ -300,6 +320,11 @@ class Settings:
         openai_api_key: str = "",
         openai_base_url: str = "",
         live_transcription_enabled: bool = True,
+        silence_warn_min: int = 5,
+        silence_stop_min: int = 0,
+        overrun_warn_min: int = 5,
+        overrun_stop_min: int = 0,
+        hard_cap_hours: int = 4,
     ) -> None:
         """Write settings back to the .env file.
 
@@ -339,6 +364,11 @@ class Settings:
             f"OPENAI_API_KEY={env_openai}\n"
             f"OPENAI_BASE_URL={openai_base_url}\n"
             f"LIVE_TRANSCRIPTION_ENABLED={'true' if live_transcription_enabled else 'false'}\n"
+            f"SILENCE_WARN_MIN={silence_warn_min}\n"
+            f"SILENCE_STOP_MIN={silence_stop_min}\n"
+            f"OVERRUN_WARN_MIN={overrun_warn_min}\n"
+            f"OVERRUN_STOP_MIN={overrun_stop_min}\n"
+            f"HARD_CAP_HOURS={hard_cap_hours}\n"
         )
         # Write to the canonical LOCALAPPDATA location first. In rare cases
         # a Tauri-spawned Python child cannot open files under LOCALAPPDATA
