@@ -168,6 +168,7 @@ class RecordingService:
         mic_device_index: Optional[int],
         output_device_index: Optional[int],
         scheduled_end: Optional[datetime] = None,
+        conference_room_mode: bool = False,
     ) -> Session:
         if self._recording:
             raise RuntimeError("A recording is already in progress.")
@@ -254,7 +255,12 @@ class RecordingService:
                     self._live_transcriber = LiveTranscriber(
                         engine_provider=lambda: self._transcription,
                     )
-                self._live_transcriber.start(LIVE_SR)
+                # In conference room mode the mic is capturing multiple
+                # in-room people, not "you" specifically — pass the room
+                # label so live segments render with a neutral badge
+                # rather than "You".
+                self._live_transcriber.start(
+                    LIVE_SR, conference_room_mode=conference_room_mode)
         except Exception as e:
             # Live transcription failure is never fatal — recording must
             # still proceed even if streaming text doesn't.

@@ -401,6 +401,10 @@ export const api = {
     // calendar tile. The backend's auto-stop watchdog uses this for
     // the meeting-overrun trigger.
     scheduled_end_iso?: string;
+    // Conference room mode: skip system-audio loopback entirely (mic
+    // captures everyone in the room, nobody is on speakers). Backend
+    // ignores output_device_index when this is true.
+    conference_room_mode?: boolean;
   }) =>
     request<{ session_id: string }>("/recording/start", {
       method: "POST",

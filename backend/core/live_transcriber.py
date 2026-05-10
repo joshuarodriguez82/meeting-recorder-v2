@@ -76,10 +76,15 @@ TARGET_SR = 16000
 MIN_TAIL_SECONDS = 1.0
 
 # Speaker labels published on each segment. The frontend uses them to
-# render a "You" / "Them" badge. Stable string constants so the JSON
-# contract with the frontend is explicit.
+# render a "You" / "Them" / "Room" badge. Stable string constants so
+# the JSON contract with the frontend is explicit.
 SPEAKER_YOU = "you"
 SPEAKER_THEM = "them"
+# Conference-room recordings: mic captures multiple in-room speakers,
+# no system-audio loopback. We use a single "room" label for the
+# whole live preview; the post-stop pyannote pass splits the audio
+# into proper SPEAKER_00/01/… for the canonical transcript.
+SPEAKER_ROOM = "room"
 
 
 class _SourceBuffer:
@@ -184,12 +189,28 @@ class LiveTranscriber:
     def is_running(self) -> bool:
         return self._running
 
-    def start(self, samplerate: int) -> None:
-        """Reset state and spawn the worker. Idempotent if already running."""
+    def start(
+        self,
+        samplerate: int,
+        conference_room_mode: bool = False,
+    ) -> None:
+        """Reset state and spawn the worker. Idempotent if already running.
+
+        conference_room_mode flips the mic source's label from "you" to
+        "room" so the live transcript UI doesn't tag every line with
+        "You" when the mic is actually capturing multiple in-room
+        speakers. The loopback buffer is still created so the existing
+        on_loopback_chunk plumbing has somewhere to write — but no
+        loopback chunks ever arrive in this mode (RecordingService
+        passes output_device_index=None upstream), so the buffer stays
+        empty and the loopback transcription pipeline is effectively
+        a no-op.
+        """
         if self._running:
             return
         self._sr = samplerate
-        self._mic = _SourceBuffer(SPEAKER_YOU, samplerate)
+        mic_label = SPEAKER_ROOM if conference_room_mode else SPEAKER_YOU
+        self._mic = _SourceBuffer(mic_label, samplerate)
         self._loopback = _SourceBuffer(SPEAKER_THEM, samplerate)
         self._running = True
         self._worker = threading.Thread(
