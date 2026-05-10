@@ -35,7 +35,7 @@ type Segment = {
   start: number;
   end: number;
   text: string;
-  speaker?: "you" | "them";
+  speaker?: "you" | "them" | "room";
 };
 
 // Three search scopes:
@@ -124,7 +124,10 @@ export function LiveSearchPanel({ recording }: { recording: boolean }) {
       // canonical pass.
       const lines = segments.map((s) => {
         const tag =
-          s.speaker === "you" ? "YOU" : s.speaker === "them" ? "THEM" : "?";
+          s.speaker === "you" ? "YOU"
+            : s.speaker === "them" ? "THEM"
+            : s.speaker === "room" ? "ROOM"
+            : "?";
         const t = formatTime(s.start);
         return `[${tag} ${t}] ${s.text}`;
       });
