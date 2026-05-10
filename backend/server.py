@@ -655,6 +655,15 @@ class StartRecordingRequest(BaseModel):
     # the auto-stop watchdog to warn / stop after the meeting overruns
     # by the user-configured grace period.
     scheduled_end_iso: Optional[str] = None
+    # Conference room mode: laptop sits in the middle of a room, mic
+    # picks up everyone, no one is on speakers. We skip system-audio
+    # loopback capture entirely (no double-recording = no echo possible
+    # by construction) and tell the live transcriber that the mic is
+    # capturing multiple in-room speakers rather than just "you". The
+    # post-stop pyannote diarization pass is unchanged — it already
+    # splits a single mic stream into SPEAKER_00, SPEAKER_01, … which
+    # is exactly what we want here.
+    conference_room_mode: bool = False
 
 
 class RecordingStatus(BaseModel):
@@ -1202,10 +1211,17 @@ def _start_recording_sync(req: StartRecordingRequest):
                 f"Could not parse scheduled_end_iso="
                 f"{req.scheduled_end_iso!r}; meeting-overrun watchdog "
                 f"will be inactive for this recording.")
+    # Conference room mode forces system-audio loopback off no matter
+    # what the UI sent for output_device_index — the whole point of
+    # the mode is "we're in a room with the laptop on the table; the
+    # mic captures everyone; there's nothing meaningful to record off
+    # the system output."
+    output_idx = None if req.conference_room_mode else req.output_device_index
     session = svc.recording_svc.start_recording(
         mic_device_index=req.mic_device_index,
-        output_device_index=req.output_device_index,
+        output_device_index=output_idx,
         scheduled_end=scheduled_end,
+        conference_room_mode=req.conference_room_mode,
     )
     session.display_name = req.meeting_name or ""
     session.template = req.template or "General"
