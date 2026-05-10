@@ -27,15 +27,21 @@ import { api } from "@/lib/api";
 
 const BACKEND = "http://127.0.0.1:17645";
 
-type Speaker = "you" | "them";
+type Speaker = "you" | "them" | "room";
 
 type Segment = {
   start: number;
   end: number;
   text: string;
-  // "you" = your mic, "them" = system-audio loopback (everyone else on
-  // the call). Older backends (before dual-stream live transcription)
-  // didn't tag segments — those render without a label.
+  // "you"  = your mic (default mode)
+  // "them" = system-audio loopback (everyone else on the call)
+  // "room" = conference-room mode: mic captures multiple in-room
+  //          people and nobody is on speakers, so labelling individual
+  //          live segments as "you" would be misleading. Pyannote
+  //          splits the canonical post-stop transcript into proper
+  //          per-speaker labels.
+  // Older backends (before dual-stream live transcription) didn't tag
+  // segments — those render without a label.
   speaker?: Speaker;
 };
 
@@ -233,10 +239,14 @@ export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
                       "shrink-0 px-1.5 rounded text-[10px] font-medium uppercase tracking-wide self-start mt-1 "
                       + (seg.speaker === "you"
                         ? "bg-primary/15 text-primary"
+                        : seg.speaker === "room"
+                        ? "bg-amber-500/15 text-amber-700 dark:text-amber-400"
                         : "bg-muted-foreground/15 text-foreground/70")
                     }
                   >
-                    {seg.speaker === "you" ? "You" : "Them"}
+                    {seg.speaker === "you" ? "You"
+                      : seg.speaker === "room" ? "Room"
+                      : "Them"}
                   </span>
                 ) : null}
                 <span className="break-words">{seg.text}</span>
