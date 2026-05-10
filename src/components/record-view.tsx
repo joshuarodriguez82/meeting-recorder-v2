@@ -23,6 +23,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { LiveTranscriptPanel } from "./live-transcript-panel";
 import { MeetingBriefModal } from "./meeting-brief-modal";
@@ -60,6 +61,14 @@ export function RecordView({
   const [project, setProject] = useState("");
   const [micIdx, setMicIdx] = useState<number | null>(null);
   const [outIdx, setOutIdx] = useState<number | null>(null);
+  // Conference room mode: laptop in middle of a room, mic captures
+  // everyone, no system audio to record. Persisted across sessions
+  // since it's a deliberate choice tied to physical setup, not a
+  // per-meeting toggle most of the time.
+  const [conferenceRoomMode, setConferenceRoomMode] = useState<boolean>(() => {
+    try { return localStorage.getItem("conferenceRoomMode") === "1"; }
+    catch { return false; }
+  });
   const [attendees, setAttendees] = useState<string[]>([]);
   // ISO datetime of the calendar meeting's scheduled end, when the
   // user clicked Use on a calendar tile. Threaded through to
@@ -254,13 +263,18 @@ export function RecordView({
     try {
       const res = await api.startRecording({
         mic_device_index: micIdx,
-        output_device_index: outIdx,
+        // Conference room mode: backend ignores output_device_index
+        // anyway, but send null so the request payload reflects
+        // intent (and the live preview never tries to subscribe to a
+        // loopback that won't exist).
+        output_device_index: conferenceRoomMode ? null : outIdx,
         meeting_name: meetingName || new Date().toISOString().slice(0, 10) + " Meeting",
         template,
         client,
         project,
         attendees,
         scheduled_end_iso: scheduledEndIso ?? undefined,
+        conference_room_mode: conferenceRoomMode,
       });
       setRecording(true);
       setDuration(0);
@@ -532,15 +546,19 @@ export function RecordView({
             </Select>
           </div>
           <div className="space-y-2">
-            <Label>System Audio (loopback)</Label>
+            <Label className={conferenceRoomMode ? "opacity-50" : ""}>
+              System Audio (loopback)
+            </Label>
             <Select
               value={outIdx?.toString() ?? ""}
               onValueChange={(v: string | null) => setOutIdx(v ? parseInt(v) : null)}
-              disabled={recording}
+              disabled={recording || conferenceRoomMode}
             >
               <SelectTrigger className="w-full">
                 <span className="truncate text-left">
-                  {selectedOut ? selectedOut.name : "Select speaker..."}
+                  {conferenceRoomMode
+                    ? "Disabled (conference room mode)"
+                    : selectedOut ? selectedOut.name : "Select speaker..."}
                 </span>
               </SelectTrigger>
               <SelectContent>
@@ -551,6 +569,28 @@ export function RecordView({
                 ))}
               </SelectContent>
             </Select>
+          </div>
+          <div className="flex items-start gap-3 pt-1">
+            <Switch
+              id="conference-room-mode"
+              checked={conferenceRoomMode}
+              disabled={recording}
+              onCheckedChange={(v) => {
+                setConferenceRoomMode(v);
+                try { localStorage.setItem("conferenceRoomMode", v ? "1" : "0"); }
+                catch { /* localStorage may be unavailable; toggle still works */ }
+              }}
+            />
+            <div className="space-y-0.5 leading-tight">
+              <Label htmlFor="conference-room-mode" className="cursor-pointer">
+                Conference room mode
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                Mic captures everyone in the room. System-audio loopback
+                is skipped — use this when nobody is on speakers and the
+                laptop sits in the middle of the table.
+              </p>
+            </div>
           </div>
         </CardContent>
         {!recording && !session && (
