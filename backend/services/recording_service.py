@@ -4,6 +4,7 @@ Orchestrates the full recording lifecycle.
 
 import asyncio
 import logging
+import os
 import threading
 import uuid
 from datetime import datetime
@@ -363,13 +364,20 @@ class RecordingService:
             finally:
                 # Clean up temps whether or not merge succeeded; any failure
                 # leaves them on disk for startup recovery to retry.
-                if self._session.audio_path:
+                # KEEP_AUDIO_TEMPS=1 preserves them for offline AEC validation
+                # via backend/scripts/measure_aec.py.
+                keep_temps = os.environ.get("KEEP_AUDIO_TEMPS") == "1"
+                if self._session.audio_path and not keep_temps:
                     for temp in (self._wav_temp_path, loopback_path):
                         if temp and Path(temp).exists():
                             try:
                                 Path(temp).unlink()
                             except OSError:
                                 pass
+                elif keep_temps:
+                    logger.info(
+                        "[stop] KEEP_AUDIO_TEMPS=1 set — preserving "
+                        f"{self._wav_temp_path} + {loopback_path}")
         elif self._session and self._chunk_count == 0:
             logger.warning("Recording stopped with no audio chunks captured.")
             self._on_status("No audio was captured. Try again.")
