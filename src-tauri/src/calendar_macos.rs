@@ -98,7 +98,11 @@ fn polling_loop() {
     // required, just keeps the launch trace readable.
     thread::sleep(Duration::from_secs(1));
 
-    let store = EKEventStore::new();
+    // objc2-event-kit 0.3.2 marks `EKEventStore::new` unsafe (it allocates
+    // a system-wide store; misuse can violate EventKit's threading model).
+    // We only call it from this single polling thread, so the safety
+    // contract is met.
+    let store = unsafe { EKEventStore::new() };
     let store = Arc::new(store);
 
     // Fire the permission prompt. macOS shows it against the
@@ -160,10 +164,12 @@ fn request_access_blocking(store: &EKEventStore) -> bool {
     });
 
     unsafe {
-        // The binding wants `*mut Block<...>` here; an `&RcBlock` won't
-        // coerce, but `&*block` derefs to `&Block<...>` which Rust will
-        // auto-coerce to the raw mut pointer the FFI expects.
-        store.requestFullAccessToEventsWithCompletion(&*block);
+        // The binding wants `*mut Block<...>` (objc2-event-kit 0.3.2).
+        // RcBlock derefs to `&Block<...>` but Rust won't auto-coerce a
+        // shared reference to a raw mut pointer, so we cast explicitly.
+        // Safe because the completion handler doesn't mutate the block.
+        let block_ptr = &*block as *const _ as *mut _;
+        store.requestFullAccessToEventsWithCompletion(block_ptr);
     }
 
     // Wait up to 60s for the user to click Allow / Don't Allow.
@@ -257,15 +263,21 @@ fn serialize(ek: &EKEvent) -> Option<CalendarEvent> {
             arr.iter()
                 .filter_map(|p| {
                     // p.URL() is Retained<NSURL> non-optional in this
-                    // binding. p.name() is Option. Prefer email
-                    // (mailto:foo@bar) — Python does the same so
-                    // client-matching code keys on the same value
-                    // across platforms.
+                    // binding, but NSURL::absoluteString() returns
+                    // Option<Retained<NSString>>. p.name() is also
+                    // Option. Prefer email (mailto:foo@bar) — Python
+                    // does the same so client-matching code keys on
+                    // the same value across platforms. Fall back to
+                    // p.name() if either the URL has no absoluteString
+                    // or it isn't a mailto: link.
                     let url = unsafe { p.URL() };
-                    let raw = unsafe { url.absoluteString() }.to_string();
-                    if let Some(rest) = raw.strip_prefix("mailto:")
-                        .or_else(|| raw.strip_prefix("MAILTO:")) {
-                        return Some(rest.to_string());
+                    if let Some(raw) = unsafe { url.absoluteString() }
+                        .map(|s| s.to_string())
+                    {
+                        if let Some(rest) = raw.strip_prefix("mailto:")
+                            .or_else(|| raw.strip_prefix("MAILTO:")) {
+                            return Some(rest.to_string());
+                        }
                     }
                     unsafe { p.name() }.map(|s| s.to_string())
                 })
