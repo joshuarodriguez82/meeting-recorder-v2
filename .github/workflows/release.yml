@@ -55,9 +55,17 @@ jobs:
           # Apple Silicon runner builds a universal2 fat binary that
           # runs on both arm64 and x86_64 Macs. macos-13 (Intel) was
           # dropped after GitHub deprecated the free runner.
+          #
+          # We pass `--bundles app` to skip Tauri's DMG packaging step.
+          # Tauri's bundle_dmg.sh chronically fails on macos-14 runners
+          # (the AppleScript-against-Finder window-layout step gives up
+          # in the headless CI environment with no useful error), so we
+          # ship a ditto-zipped .app instead. Apple recommends ditto for
+          # un-notarized distribution anyway because it preserves the
+          # bundle's extended attributes and (future) code signature.
           - platform: macos-14
             label: macos-universal
-            tauri-args: '--target universal-apple-darwin'
+            tauri-args: '--target universal-apple-darwin --bundles app'
             rust-targets: 'aarch64-apple-darwin x86_64-apple-darwin'
           - platform: windows-latest
             label: windows-x64
@@ -129,14 +137,30 @@ jobs:
 
       - name: Collect installer paths (macOS)
         if: runner.os == 'macOS'
+        shell: bash
         run: |
+          set -e
           mkdir -p artifacts
-          # Universal builds drop their bundle one level deeper under the
-          # target-triple directory. Cover both that and the legacy
-          # native path so this step keeps working if we ever drop
-          # universal2 in favour of native arm64.
-          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg artifacts/ 2>/dev/null || true
-          cp src-tauri/target/release/bundle/dmg/*.dmg artifacts/ 2>/dev/null || true
+          # `--bundles app` drops the .app under bundle/macos/. We
+          # ditto-zip it ourselves (preserves macOS extended attrs +
+          # any future code signature; plain `zip` does not).
+          APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/Meeting Recorder.app"
+          if [ ! -d "$APP" ]; then
+            # Native-target fallback in case --target is ever dropped.
+            APP="src-tauri/target/release/bundle/macos/Meeting Recorder.app"
+          fi
+          if [ ! -d "$APP" ]; then
+            echo "ERROR: no Meeting Recorder.app under expected paths" >&2
+            exit 1
+          fi
+          # Strip leading 'v' from the tag (v2.3.2 -> 2.3.2) so the
+          # filename matches the Windows installer convention. On a
+          # workflow_dispatch run from a branch, GITHUB_REF_NAME is the
+          # branch name; the resulting filename is ugly but the upload
+          # step is gated on refs/tags/v* anyway so it never publishes.
+          VERSION="${GITHUB_REF_NAME#v}"
+          OUT="artifacts/Meeting.Recorder_${VERSION}_universal.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT"
           ls -la artifacts/
 
       - name: Upload to GitHub Release
@@ -166,6 +190,7 @@ jobs:
         run: |
           echo "--- src-tauri/target tree ---"
           find src-tauri/target -maxdepth 6 -name "bundle" -print 2>/dev/null || true
-          find src-tauri/target -maxdepth 8 -name "*.dmg" -print 2>/dev/null || true
+          find src-tauri/target -maxdepth 8 -name "*.app" -print 2>/dev/null || true
+          find src-tauri/target -maxdepth 8 -name "*.zip" -print 2>/dev/null || true
           find src-tauri/target -maxdepth 8 -name "*.exe" -print 2>/dev/null || true
           find src-tauri/target -maxdepth 8 -name "*.msi" -print 2>/dev/null || true

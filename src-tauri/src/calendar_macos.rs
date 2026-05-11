@@ -232,8 +232,8 @@ fn serialize(ek: &EKEvent) -> Option<CalendarEvent> {
     let title = unsafe { ek.title() }.to_string();
     let start_ns = unsafe { ek.startDate() };
     let end_ns = unsafe { ek.endDate() };
-    let start_ts = unsafe { start_ns.timeIntervalSince1970() };
-    let end_ts = unsafe { end_ns.timeIntervalSince1970() };
+    let start_ts = start_ns.timeIntervalSince1970();
+    let end_ts = end_ns.timeIntervalSince1970();
 
     let start_dt: DateTime<Local> = Local
         .timestamp_opt(start_ts as i64, 0)
@@ -271,7 +271,7 @@ fn serialize(ek: &EKEvent) -> Option<CalendarEvent> {
                     // p.name() if either the URL has no absoluteString
                     // or it isn't a mailto: link.
                     let url = unsafe { p.URL() };
-                    if let Some(raw) = unsafe { url.absoluteString() }
+                    if let Some(raw) = url.absoluteString()
                         .map(|s| s.to_string())
                     {
                         if let Some(rest) = raw.strip_prefix("mailto:")
