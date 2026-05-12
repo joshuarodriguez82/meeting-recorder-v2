@@ -246,12 +246,109 @@ const SECTIONS: Section[] = [
         <p>Every recording becomes part of a searchable knowledge base:</p>
         <ul className="list-disc pl-5 space-y-1">
           <li><strong>Sessions</strong> — full history, filter by name/client/project, bulk-process, click any row to open. Hover a row to see a pencil icon for inline rename. Top-right has two utilities: <strong>Open Recordings Folder</strong> (jumps to <code>%LOCALAPPDATA%\MeetingRecorder\recordings</code> in Explorer) and <strong>Load Session</strong> (imports an external <code>.wav</code> / <code>.mp3</code> / <code>.m4a</code> / <code>.flac</code> file — it&apos;s copied into the recordings folder and becomes a session you can transcribe like any other).</li>
-          <li><strong>Follow-Ups</strong> — action items grouped by (meeting, owner). Five tasks for one person from one meeting = one expandable card. Click the external-link icon to jump to the source session&apos;s Actions tab.</li>
-          <li><strong>Decisions</strong> — ADR log, click a decision to see full context. &quot;Open Meeting →&quot; to jump in.</li>
+          <li><strong>Follow-Ups</strong> — action items grouped by (meeting, owner). Five tasks for one person from one meeting = one expandable card. Click the external-link icon to jump to the source session&apos;s Actions tab. Each item has a <strong>checkbox</strong> to mark it done — state persists in a per-session sidecar so it survives re-processing.</li>
+          <li><strong>Commitments</strong> — see the dedicated <strong>&quot;Tracking Commitments, Follow-Ups &amp; Decisions&quot;</strong> section below. Cross-meeting tracker for things people promised, with status, due dates, and overdue alerts.</li>
+          <li><strong>Decisions</strong> — ADR log, click a decision to see full context. &quot;Open Meeting →&quot; to jump in. Status can be set to <strong>active</strong> (default), <strong>implemented</strong>, or <strong>superseded</strong> directly from the row — the state shows in the badge alongside.</li>
           <li><strong>Search</strong> — type a phrase, it searches every transcript + summary + extraction. Click a result to open that session.</li>
           <li><strong>Clients</strong> — create clients, nest projects inside each one, tag meetings manually or via <strong>AI Suggest</strong>. Each client has a dashboard with stats, meetings, and a chip row for drilling into individual projects.</li>
           <li><strong>Prep Brief</strong> — filter by client and (optionally) project. The project dropdown is scoped to the selected client, so you can never cross-contaminate contexts. Generates a pre-meeting brief with recent context, open items, risks, and suggested discussion points.</li>
         </ul>
+      </>
+    ),
+  },
+  {
+    id: "tracking-items",
+    title: "Tracking Commitments, Follow-Ups & Decisions",
+    content: (
+      <>
+        <p>
+          Three sidebar sections give you cross-meeting views over the items Claude extracts
+          when you process a recording. They&apos;re related but distinct — pick the right
+          tool for the job:
+        </p>
+        <div className="grid grid-cols-1 gap-3 mt-3">
+          <div className="border rounded-md p-3 space-y-2">
+            <p className="font-medium">Follow-Ups — &quot;what action items haven&apos;t I closed?&quot;</p>
+            <p className="text-sm text-muted-foreground">
+              Action items extracted from each session, grouped by (meeting, owner). Best for
+              the personal-task view: open the section, scan what&apos;s on your plate, check
+              boxes as you finish each item. State persists per item in a sidecar JSON
+              (<code>session_&lt;id&gt;.item_status.json</code>) so it survives re-processing
+              of the parent session — re-running Action Items won&apos;t un-check items
+              you&apos;ve already marked done.
+            </p>
+            <p className="text-sm text-muted-foreground">
+              <strong>Per-item state:</strong> done / not done (a single checkbox).
+            </p>
+          </div>
+          <div className="border rounded-md p-3 space-y-2">
+            <p className="font-medium">Commitments — &quot;who promised me what and is it overdue?&quot;</p>
+            <p className="text-sm text-muted-foreground">
+              A richer cross-meeting tracker for things people promised on-mic with the
+              metadata you need to chase them: WHO promised (with inferred email), WHAT
+              (paraphrased + verbatim quote), source session + timestamp, DUE date resolved
+              from natural-language phrases (&quot;by Friday&quot;, &quot;end of next week&quot;), SIDE
+              (internal vs customer), and a status state machine.
+            </p>
+            <p className="text-sm text-muted-foreground">
+              <strong>Per-item state:</strong> active (default — includes awaiting + overdue),
+              awaiting (in-flight, before due date), overdue (past due, still awaiting),
+              delivered (you marked it done), dismissed (you decided it&apos;s no longer
+              relevant). Filter the view by any of those plus &quot;all,&quot; and by side
+              (what they owe me vs what I owe them).
+            </p>
+            <p className="text-sm text-muted-foreground">
+              <strong>Updating:</strong> open the Commitments tab, find the row, click the
+              status badge to flip it. Optimistic UI — the change is reflected immediately
+              and saved to the sidecar JSON (<code>session_&lt;id&gt;.commitments.json</code>)
+              in the background.
+            </p>
+            <p className="text-sm text-muted-foreground italic">
+              Commitments are a <em>superset</em> of action items. Claude re-runs a richer
+              extraction over the raw transcript when you process a session, because the
+              standard Action Items extraction throws away the verbatim quote and inferred
+              due date that the tracker uniquely needs.
+            </p>
+          </div>
+          <div className="border rounded-md p-3 space-y-2">
+            <p className="font-medium">Decisions — &quot;what did we agree to, and is it still the plan?&quot;</p>
+            <p className="text-sm text-muted-foreground">
+              ADR-style decision log. Each entry has Decided / Rationale / Alternatives /
+              Owner / Impact, extracted by Claude during processing. Cross-meeting view in
+              the sidebar; per-session view in the Decisions tab of the session dialog.
+            </p>
+            <p className="text-sm text-muted-foreground">
+              <strong>Per-item state:</strong> active (default), implemented, superseded.
+              &quot;Superseded&quot; is the right call when a later decision overrules an earlier
+              one — keeps the audit trail without cluttering &quot;current plan&quot; views.
+            </p>
+            <p className="text-sm text-muted-foreground">
+              <strong>Updating:</strong> click the status badge on the row to cycle through
+              the three options. Like commitments, stored in a per-session sidecar
+              (<code>session_&lt;id&gt;.item_status.json</code>) so re-processing the session
+              doesn&apos;t wipe your state.
+            </p>
+          </div>
+        </div>
+        <Tip>
+          <strong>State survives sync.</strong> All three state sidecars
+          (<code>*.item_status.json</code> and <code>*.commitments.json</code>) live in the
+          recordings folder, so when you point the recordings folder at OneDrive / iCloud,
+          your &quot;Mike still owes me the SOW&quot; tracking and your &quot;item X done&quot;
+          checkboxes follow you across devices automatically. See Sync Across Devices.
+        </Tip>
+        <Tip>
+          <strong>Status updates don&apos;t trigger re-processing.</strong> Marking a follow-up
+          done or flipping a decision to &quot;superseded&quot; only updates the sidecar — it
+          doesn&apos;t re-run Whisper / Claude. Cheap, instant, no Claude tokens burned.
+        </Tip>
+        <Warn>
+          The state is keyed by a stable hash of the item&apos;s text. If you edit the
+          underlying markdown that Claude wrote (in the session detail Actions / Decisions
+          tab) and the text changes substantively, the hash changes and the &quot;done&quot;
+          state for the old text won&apos;t map to the new one. Re-check the box after large
+          edits.
+        </Warn>
       </>
     ),
   },
