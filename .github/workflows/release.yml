@@ -206,36 +206,6 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT"
           ls -la artifacts/
 
-      # Sign each installer with the Tauri updater's minisign key so
-      # the in-app updater can verify downloads before installing them.
-      # Skips silently if TAURI_SIGNING_PRIVATE_KEY isn't configured —
-      # the build still produces installable artifacts; the updater
-      # just stays inert until the secret is set on the repo.
-      - name: Sign artifacts for updater
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        shell: bash
-        run: |
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "TAURI_SIGNING_PRIVATE_KEY secret is not set — skipping updater signing."
-            echo "Set the secret (and TAURI_SIGNING_PRIVATE_KEY_PASSWORD) to enable in-app updates."
-            exit 0
-          fi
-          set -e
-          for f in artifacts/*; do
-            case "$f" in
-              *.sig) continue ;;
-              *.exe|*.msi|*.zip)
-                echo "Signing $f"
-                npx --yes tauri signer sign "$f"
-                ;;
-            esac
-          done
-          echo "--- artifacts/ after signing ---"
-          ls -la artifacts/
-
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         # Only attach to the release on tag-triggered runs. Manual
@@ -247,9 +217,6 @@ jobs:
           # falls back to GitHub's auto-generated notes.
           body_path: release-notes-${{ github.ref_name }}.md
           fail_on_unmatched_files: false
-          # `artifacts/*` picks up the installer AND its .sig file from
-          # the signing step above — both get attached to the release
-          # so the manifest job below can consume the .sig contents.
           files: artifacts/*
           # Auto-publish on tag push. Pipeline has been steady and the
           # manual review step was just adding friction. Flip back to
@@ -270,74 +237,3 @@ jobs:
           find src-tauri/target -maxdepth 8 -name "*.zip" -print 2>/dev/null || true
           find src-tauri/target -maxdepth 8 -name "*.exe" -print 2>/dev/null || true
           find src-tauri/target -maxdepth 8 -name "*.msi" -print 2>/dev/null || true
-
-  # After both platform builds finish and upload their signed artifacts
-  # to the release, consolidate the per-platform .sig files into a
-  # single latest.json manifest that the Tauri updater reads at
-  # check-for-updates time. The manifest URL is hardcoded in
-  # tauri.conf.json: github.com/.../releases/latest/download/latest.json
-  # which always redirects to the newest release's latest.json.
-  manifest:
-    name: Build updater manifest
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build and upload latest.json
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
-        shell: bash
-        run: |
-          set -e
-          VERSION="${TAG#v}"
-
-          # Pull the .sig files that the build job just attached to the
-          # release. If signing was skipped (secret not set), there
-          # won't be any .sig files and this job exits without
-          # publishing latest.json — the updater stays inert, the
-          # release still installs fine via direct download.
-          mkdir -p sigs
-          gh release download "$TAG" -p "*.sig" --dir sigs || true
-          if [ -z "$(ls -A sigs 2>/dev/null)" ]; then
-            echo "No .sig files in release — signing was skipped."
-            echo "Skipping latest.json publication."
-            exit 0
-          fi
-
-          read_sig() {
-            local f="sigs/$1"
-            if [ -f "$f" ]; then cat "$f"; else echo ""; fi
-          }
-
-          NOTES="$(head -c 2000 "release-notes-${TAG}.md" 2>/dev/null || echo '')"
-          PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          BASE="https://github.com/joshuarodriguez82/meeting-recorder-v2/releases/download/${TAG}"
-
-          jq -n \
-            --arg version "$VERSION" \
-            --arg notes "$NOTES" \
-            --arg pub_date "$PUB_DATE" \
-            --arg win_sig "$(read_sig Meeting.Recorder_${VERSION}_x64-setup.exe.sig)" \
-            --arg win_url "${BASE}/Meeting.Recorder_${VERSION}_x64-setup.exe" \
-            --arg mac_sig "$(read_sig Meeting.Recorder_${VERSION}_universal.zip.sig)" \
-            --arg mac_url "${BASE}/Meeting.Recorder_${VERSION}_universal.zip" \
-            '{
-              version: $version,
-              notes: $notes,
-              pub_date: $pub_date,
-              platforms: {
-                "windows-x86_64": { signature: $win_sig, url: $win_url },
-                "darwin-aarch64": { signature: $mac_sig, url: $mac_url },
-                "darwin-x86_64":  { signature: $mac_sig, url: $mac_url }
-              }
-            }' > latest.json
-
-          echo "--- latest.json ---"
-          cat latest.json
-
-          gh release upload "$TAG" latest.json --clobber
