@@ -141,6 +141,17 @@ const SECTIONS: Section[] = [
           If System Audio is &quot;Skip&quot;, only your voice is captured — not the other participants.
           Enable Stereo Mix in Windows Sound settings or install VB-Cable.
         </Warn>
+        <Tip>
+          <strong>Conference room mode</strong> (toggle below the device selectors): turns off
+          system-audio loopback entirely and captures only the mic. Use it when you&apos;re in a
+          physical conference room with the laptop on the table, the remote party is on
+          speakers, and your mic is picking everyone up acoustically. Avoids the double-capture
+          (mic + loopback both recording the same far-end audio) that produces a 1–2s echo on
+          playback in that setup. Live transcript labels segments as <strong>Room</strong>
+          rather than <strong>You</strong>, and the post-stop pyannote pass diarizes everyone
+          into proper SPEAKER_00 / SPEAKER_01 / … labels you can rename afterwards. The toggle
+          persists across sessions in localStorage.
+        </Tip>
       </>
     ),
   },
@@ -525,6 +536,81 @@ const SECTIONS: Section[] = [
     ),
   },
   {
+    id: "sync-across-devices",
+    title: "Sync Across Devices",
+    content: (
+      <>
+        <p>
+          Point the recordings folder at a cloud-synced directory (OneDrive, iCloud Drive,
+          Dropbox, Google Drive) and your sessions, clients, and summary templates will roam
+          across every device that has the same folder mounted. No login, no backend, no
+          subscription — file sync via whatever cloud client you already have.
+        </p>
+        <p className="font-medium mt-3">Setup on the primary device (where your sessions live today)</p>
+        <ol className="list-decimal pl-5 space-y-2">
+          <li>Make sure your cloud client (OneDrive, iCloud for Windows, etc.) is signed in
+            and syncing.</li>
+          <li>In Meeting Recorder, open <strong>Settings &gt; Recordings Folder</strong>.
+            Click <strong>Browse…</strong> and pick a folder inside your cloud-synced root —
+            something like <code>C:\Users\YOU\OneDrive\MeetingRecorder</code> on Windows or
+            <code>~/OneDrive/MeetingRecorder</code> on Mac. Click <strong>Save</strong> at
+            the bottom of Settings, then restart the app.</li>
+          <li>On Save, the app automatically copies <code>client_configs.json</code> and
+            <code>summary_templates.json</code> from your previous recordings folder into the
+            new one — so your client list and custom templates carry over. (Copy, not move —
+            the old files stay where they are in case you want to revert.)</li>
+          <li>Existing session WAVs and JSON files are <em>not</em> moved automatically.
+            See &quot;Moving existing recordings&quot; below.</li>
+          <li>Wait for the cloud client to upload everything. With long recordings this can
+            take a while — WAVs are big (~115 MB per hour at 16 kHz mono).</li>
+        </ol>
+        <p className="font-medium mt-3">Setup on the secondary device</p>
+        <ol className="list-decimal pl-5 space-y-2">
+          <li>Install Meeting Recorder. Install / sign in to the same cloud client as the
+            primary device.</li>
+          <li>Wait for the cloud client to finish syncing down everything the primary device
+            uploaded. Verify in File Explorer / Finder that the
+            <code>MeetingRecorder/</code> folder is present locally with the session files
+            inside.</li>
+          <li>Open Settings &gt; Recordings Folder, point at the same synced folder, Save,
+            restart.</li>
+          <li>Your PC&apos;s clients, templates, and sessions all appear.</li>
+        </ol>
+        <p className="font-medium mt-3">Moving existing recordings</p>
+        <p>
+          The folder picker only changes <em>future</em> recording targets. To bring your
+          existing library along, copy or move the contents of the old recordings folder into
+          the new one — everything in there (<code>session_*.json</code>,
+          <code>session_*.wav</code>, <code>*.commitments.json</code>,
+          <code>*.item_status.json</code>, <code>*.embeddings.pkl</code>) is portable. The
+          sessions list will pick them up on next launch.
+        </p>
+        <p className="text-sm text-muted-foreground">
+          Windows PowerShell (with the app fully quit):
+        </p>
+        <pre className="text-xs bg-muted/40 rounded p-2 overflow-x-auto"><code>{`# Confirm source — wherever your old recordings_dir was
+$source = "C:\\meeting_recorder\\recordings"   # or %LOCALAPPDATA%\\MeetingRecorder\\recordings
+$target = "$env:OneDrive\\MeetingRecorder"
+Copy-Item -Path "$source\\*" -Destination $target -Recurse -Force`}</code></pre>
+        <Tip>
+          <strong>Speaker profiles stay per-machine.</strong> Voice fingerprints
+          (<code>speaker_profiles.json</code>) live outside the recordings folder and don&apos;t
+          sync. They&apos;re tied to the mic hardware that captured them — a profile trained on
+          a Yeti mic may not match the same person captured through a MacBook&apos;s built-in
+          array, so syncing them across mics would produce false positives. Re-enroll on each
+          device as you record there.
+        </Tip>
+        <Warn>
+          <strong>No conflict resolution.</strong> If two devices record at the same instant
+          and both write to the same cloud folder, OneDrive / iCloud will produce a conflict
+          file (something like <code>session_ABC123-PC.json</code>) rather than merging.
+          Session JSONs are tiny so this is rare in practice, but be aware. Sync is not
+          real-time — expect minutes of lag.
+        </Warn>
+      </>
+    ),
+  },
+  {
     id: "notifications",
     title: "Notifications & Reliability",
     content: (
@@ -699,13 +785,29 @@ const SECTIONS: Section[] = [
             </dd>
           </div>
           <div>
-            <dt className="font-medium text-sm">Calendar shows no meetings</dt>
+            <dt className="font-medium text-sm">Calendar shows no meetings (Windows)</dt>
             <dd className="text-sm text-muted-foreground mt-1">
               The Upcoming Meetings panel shows the next 7 days. If you genuinely have nothing
               scheduled in that window (common late Friday through Sunday), that&apos;s the
               expected empty state. Otherwise: requires Classic Outlook — New Outlook doesn&apos;t
               support the COM API we use. Switch in Outlook settings → File → Info → Toggle off
               &quot;Try the new Outlook&quot;, then restart.
+            </dd>
+          </div>
+          <div>
+            <dt className="font-medium text-sm">Calendar shows no meetings (macOS)</dt>
+            <dd className="text-sm text-muted-foreground mt-1">
+              First check System Settings → Privacy &amp; Security → Calendars. Meeting Recorder
+              should be listed with its toggle on. If not, launch the app once to trigger the
+              permission prompt and click <strong>Allow</strong>. If the toggle <em>is</em> on
+              but calendar still shows no meetings: macOS TCC has a stale code-signature entry
+              for an older build. Reset and re-grant:
+              <pre className="text-xs bg-muted/40 rounded p-2 mt-2 overflow-x-auto"><code>{`tccutil reset Calendar com.joshuarodriguez.meeting-recorder
+# Quit Meeting Recorder (Cmd-Q), then:
+open "/Applications/Meeting Recorder.app"
+# Click Allow on the prompt; calendar populates within ~30 seconds.`}</code></pre>
+              v2.3.5+ ad-hoc signs the .app with an identifier-based Designated Requirement
+              so this should be a one-time fix on upgrade from a pre-2.3.5 build.
             </dd>
           </div>
           <div>
