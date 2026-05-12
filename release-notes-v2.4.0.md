@@ -114,6 +114,27 @@ backend (Supabase + R2) — that's a v3.0 work item, not v2.4.
 > **Windows users**: download `Meeting.Recorder_2.4.0_x64-setup.exe` or
 > `.msi` and double-click. No Gatekeeper-style hoops.
 
+## In-app Usage Guide updated
+
+v2.4.0 also ships catch-up documentation for features that had been
+shipping ahead of the in-app Usage Guide:
+
+- **Conference Room Mode** (v2.3.0 feature) — when to use it, what
+  it changes, persistence.
+- **New "Sync Across Devices" section** — full setup walkthrough for
+  the v2.4.0 cross-device sync flow (primary + secondary device,
+  automatic clients/templates migration, manual session move).
+- **New "Tracking Commitments, Follow-Ups & Decisions" section** —
+  covers the three trackers and their per-item state machines
+  (Follow-Ups done-or-not checkbox, Commitments
+  active/awaiting/overdue/delivered/dismissed, Decisions
+  active/implemented/superseded), including how to update state and
+  the fact that state survives re-processing and rides with
+  cross-device sync.
+- **Troubleshooting** — split Calendar entry into Windows-specific
+  (Classic Outlook vs New Outlook) and macOS-specific (TCC stale
+  grant + `tccutil reset` recovery command).
+
 ## Roadmap pointer
 
 v3.0 plan, not started: a small Capacitor-wrapped Android app for
