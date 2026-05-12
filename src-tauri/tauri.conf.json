@@ -54,15 +54,5 @@
       "entitlements": "Entitlements.plist",
       "frameworks": []
     }
-  },
-  "plugins": {
-    "updater": {
-      "active": true,
-      "endpoints": [
-        "https://github.com/joshuarodriguez82/meeting-recorder-v2/releases/latest/download/latest.json"
-      ],
-      "dialog": false,
-      "pubkey": ""
-    }
   }
 }

@@ -1,100 +1,56 @@
-# v2.4.1 — In-app auto-updater
+# v2.4.1 — In-app update notifications
 
-Adds a self-update flow so future releases install themselves with one
-click instead of you re-downloading installers from the GitHub releases
-page. From v2.4.1 onwards, the app checks GitHub for newer releases at
-launch and surfaces a small toast if one is available; you confirm in
-Settings → App Updates and the new version downloads, signature-
-verifies, replaces the install, and relaunches.
-
-> **The first install of v2.4.1 still has to be manual.** The updater
-> only works once the user is on a build that contains it. After this,
-> v2.4.2 / v2.5.0 / etc. flow through the updater automatically.
+Adds a lightweight "you're out of date, click to grab the new one"
+nudge on app launch so you don't have to remember to check the
+releases page manually. Deliberately not a full in-place installer
+— the keypair management and CI signing that an in-place updater
+requires aren't worth it for a small-team tool. See the architecture
+note below.
 
 ## What it does
 
-- **On launch**: silently asks GitHub if there's a newer release. If
-  yes, shows a non-blocking toast that points at Settings → App
-  Updates. If no (or no network), shows nothing. Never blocks startup.
+- **On launch**: silently queries
+  `api.github.com/repos/joshuarodriguez82/meeting-recorder-v2/releases/latest`
+  and compares against the running app version. If newer, surfaces a
+  non-blocking toast: `Update available: v2.4.2 — [Download]`. Click
+  the Download action and the GitHub release page opens in your
+  default browser.
 - **In Settings → App Updates** (new card): shows the current version,
-  has a **Check Now** button, and an **Install & Restart** button when
-  an update is available. Release notes from the next version preview
+  has a **Check Now** button, and an **Open Download Page** button
+  when an update exists. Release notes from the next version preview
   inline with an expandable details disclosure.
-- **Install flow**: downloads the platform-appropriate installer,
-  verifies its embedded minisign signature against the public key
-  baked into the running binary, replaces the install on disk, and
-  relaunches the app.
+- **Failures collapse silently.** No network, GitHub rate-limit, repo
+  temporarily unreachable — the toast just doesn't appear. No error
+  popups at startup.
 
-## Trust model
+## What it does NOT do
 
-The updater downloads from
-`github.com/joshuarodriguez82/meeting-recorder-v2/releases/latest/download/latest.json`.
-That URL always redirects to the manifest of the latest release. Each
-manifest entry includes a base64-encoded minisign signature over the
-installer file. The signature is verified locally against a public key
-that's compiled into the running app — there's no trust placed in
-GitHub serving the right file, just in the keypair we control.
+It does not download and install the new version for you. You still
+download the installer from the GitHub release page (`.exe` / `.msi`
+/ `.zip` for Mac) and run it manually, same as today. The nudge is
+the value-add — you no longer have to remember to check.
 
-A MitM attacker who substitutes a malicious installer can't sign it
-without our private key, and the verification step rejects it.
+## Architecture note: why no in-place install
 
-## Repo setup required before v2.4.1 actually self-updates
+A signed in-place updater (the Tauri updater plugin) would let users
+click "Install & Restart" and skip the manual download. But it requires:
 
-The CI workflow has the signing + manifest plumbing wired up, but the
-keypair has to be generated once and the private key stored as a
-GitHub Actions secret. Until that happens, builds will succeed but
-silently skip signing — the updater plugin is loaded but stays inert
-(no `latest.json` published, no signatures to verify).
+- Generating a minisign keypair and never losing the private key
+  (lose it → no v2.4.1+ user can ever auto-update again, they all
+  have to reinstall from a fresh build with a new pubkey)
+- Setting two GitHub Actions secrets that sign every release artifact
+- Per-platform `.sig` files attached to each release
+- A `latest.json` manifest published with each release
 
-### One-time setup steps
+For a personal / small-team tool where the threat model is thin
+(attacker has to MitM your team's GitHub traffic AND not be detected),
+the maintenance cost outweighs the convenience win. The notification
+model is one-time write, zero ongoing key management.
 
-1. **Generate the keypair locally** (any machine with the Tauri CLI):
-
-   ```sh
-   cd meeting-recorder-v2
-   npx tauri signer generate -w ~/meeting-recorder-updater.key
-   ```
-
-   You'll be prompted for a password — pick a strong one, write it
-   down. The command produces:
-   - A **private key** at `~/meeting-recorder-updater.key`. **Treat as
-     secret.** Never commit it.
-   - A **public key** printed to stdout (base64). Looks like
-     `dW50cnVzdGVkIGNvbW1lbnQ6...`
-
-2. **Commit the public key to `tauri.conf.json`**. Open it, find:
-
-   ```json
-   "updater": { ..., "pubkey": "" }
-   ```
-
-   Replace the empty string with the public key from step 1.
-   Commit + push.
-
-3. **Set GitHub Actions secrets** at
-   `https://github.com/joshuarodriguez82/meeting-recorder-v2/settings/secrets/actions`:
-
-   - `TAURI_SIGNING_PRIVATE_KEY` → entire content of
-     `~/meeting-recorder-updater.key`
-   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` → the password you chose
-
-4. **Re-tag v2.4.1** (or cut v2.4.2 if v2.4.1 has already been built
-   without signing) so CI re-runs with the secrets configured. After
-   the new run finishes, the release should have a `latest.json` file
-   attached, and from then on the updater works end-to-end.
-
-5. **Back up `~/meeting-recorder-updater.key`** somewhere safe (a
-   password manager). If the private key is lost, you can't ship
-   updates that any v2.4.1+ user can install — they'd have to do a
-   fresh install from the GitHub releases page using a build with the
-   new pubkey. So don't lose it.
-
-## What's also in this release
-
-Nothing else. This is a focused infrastructure release so the next
-features can flow to users without manual re-installs. The Android
-companion (v3.0 plan) will benefit from this too — once it lands,
-it'll have its own update channel that mirrors this same mechanism.
+If the user base grows or the threat surface changes — e.g., enterprise
+deployment where corporate proxies might inject — revisit and swap in
+the signed updater. The frontend abstraction (`src/lib/updater.ts`)
+isolates the check logic so swapping it later is local.
 
 ## Install (macOS)
 
@@ -102,9 +58,8 @@ it'll have its own update channel that mirrors this same mechanism.
 > (Apple Silicon and Intel). On the [Releases page](https://github.com/joshuarodriguez82/meeting-recorder-v2/releases),
 > grab `Meeting.Recorder_2.4.1_universal.zip`.
 >
-> The build is still unsigned for Gatekeeper purposes (ad-hoc
-> signature doesn't satisfy notarization). First launch needs the
-> Gatekeeper bypass as before.
+> Still unsigned for Gatekeeper purposes. First launch needs the
+> Gatekeeper bypass.
 >
 > **Path A — Finder:** double-click the `.zip`, drag the `.app` to
 > `/Applications`, double-click, dismiss the "damaged" warning, then
@@ -122,6 +77,15 @@ it'll have its own update channel that mirrors this same mechanism.
 > **Windows users**: download `Meeting.Recorder_2.4.1_x64-setup.exe`
 > or `.msi` and double-click.
 
-Once installed, the v2.4.1 → v2.4.2 update (and every release after
-that) will flow through the in-app updater. Last manual install per
-machine.
+## After install
+
+Open Settings → App Updates. You should see your current version and
+"You're on the latest release." From now on, when v2.4.2 (or later)
+ships, you'll see a toast on launch nudging you to download it.
+
+## Repo maintainer note
+
+This release intentionally requires **zero secret/key management on
+the repo**. No new GitHub Actions secrets, no keypair to generate,
+no manifest files to attach to releases. Just tag and ship as
+normal.
