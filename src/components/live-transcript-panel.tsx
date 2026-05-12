@@ -25,8 +25,6 @@ import { api } from "@/lib/api";
 //   - On error, retry up to 3 times with exponential backoff before
 //     giving up. The backend's 5s heartbeat will catch most stalls.
 
-const BACKEND = "http://127.0.0.1:17645";
-
 type Speaker = "you" | "them" | "room";
 
 type Segment = {
@@ -100,9 +98,15 @@ export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
     let attempt = 0;
     let cancelled = false;
 
-    const connect = () => {
+    const connect = async () => {
       if (cancelled) return;
-      es = new EventSource(`${BACKEND}/recording/transcript/stream`);
+      // Backend port is OS-picked at app startup (lib.rs::pick_free_port)
+      // and exposed via the get_backend_port Tauri command. We MUST
+      // resolve it dynamically — the old hardcoded 17645 only worked
+      // by accident on pre-dynamic-port builds.
+      const baseUrl = await api.getBaseUrl();
+      if (cancelled) return;
+      es = new EventSource(`${baseUrl}/recording/transcript/stream`);
 
       es.onopen = () => {
         attempt = 0;
