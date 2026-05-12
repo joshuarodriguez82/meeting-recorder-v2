@@ -126,6 +126,49 @@ jobs:
         # without needing any path tweaks here.
         run: ./scripts/macos-postbuild.sh
 
+      - name: Codesign with stable identifier-based DR (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        # Ad-hoc sign the .app with a Designated Requirement that
+        # matches by bundle identifier instead of cdhash. Without this,
+        # every unsigned build has a fresh cdhash and macOS Tahoe TCC
+        # silently invalidates the user's previously-granted Calendar /
+        # Mic / AppleEvents permissions on every update — the toggle
+        # in System Settings stays on, but authorizationStatusForEntityType
+        # returns NotDetermined because the recorded cdhash doesn't
+        # match the running binary.
+        #
+        # The custom requirement string tells codesign to embed
+        # "identifier == com.joshuarodriguez.meeting-recorder" as the
+        # Designated Requirement. TCC then uses bundle identity, not
+        # cdhash, when matching grants — so a user who grants permission
+        # on v2.3.5 still has it after upgrading to v2.3.6, v2.4.0, etc.
+        #
+        # This is still an ad-hoc signature (no Apple Developer cert,
+        # no notarization). Users still get the "damaged" Gatekeeper
+        # warning on first launch and need the xattr -cr workaround.
+        # Signing only fixes the TCC drift; doesn't bypass Gatekeeper.
+        # When we eventually buy a Developer cert, this step gets
+        # replaced with `--sign "Developer ID Application: ..."`.
+        run: |
+          set -e
+          APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/Meeting Recorder.app"
+          if [ ! -d "$APP" ]; then
+            APP="src-tauri/target/release/bundle/macos/Meeting Recorder.app"
+          fi
+          if [ ! -d "$APP" ]; then
+            echo "ERROR: no Meeting Recorder.app under expected paths" >&2
+            exit 1
+          fi
+          codesign --force --deep --sign - \
+            --identifier com.joshuarodriguez.meeting-recorder \
+            --requirements '=designated => identifier "com.joshuarodriguez.meeting-recorder"' \
+            "$APP"
+          # Print the resulting DR so a future regression to
+          # cdhash-based matching is obvious in the CI log.
+          echo "--- Designated Requirement on signed app ---"
+          codesign -d -r- "$APP" 2>&1 | grep -i designated || true
+
       - name: Collect installer paths (Windows)
         if: runner.os == 'Windows'
         shell: bash
