@@ -317,6 +317,56 @@ export function SettingsView() {
         </CardContent>
       </Card>
 
+      {/* Recordings folder (v2.4: cross-device sync support) */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Recordings Folder</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="space-y-2">
+            <Label>Where Meeting Recorder saves session audio, transcripts, and client list</Label>
+            <div className="flex gap-2">
+              <Input
+                value={settings.recordings_dir}
+                onChange={(e) => update("recordings_dir", e.target.value)}
+                placeholder="/path/to/recordings"
+                className="font-mono text-sm"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                onClick={async () => {
+                  try {
+                    const { open } = await import("@tauri-apps/plugin-dialog");
+                    const picked = await open({
+                      directory: true,
+                      multiple: false,
+                      defaultPath: settings.recordings_dir || undefined,
+                      title: "Choose recordings folder",
+                    });
+                    if (typeof picked === "string" && picked) {
+                      update("recordings_dir", picked);
+                    }
+                  } catch (e) {
+                    toast.error(
+                      `Folder picker unavailable: ${(e as Error).message ?? e}`);
+                  }
+                }}
+              >
+                Browse…
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Point this at a cloud-synced folder (OneDrive, iCloud Drive,
+              Dropbox) to sync sessions, clients, and summary templates
+              across your devices. Existing sessions stay where they are —
+              new recordings go to the new location starting after Save.
+              The app needs to restart for the change to take full effect.
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Models */}
       <Card>
         <CardHeader>
