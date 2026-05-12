@@ -99,22 +99,26 @@ export default function Home() {
   }, []);
 
   // Quiet check-for-updates on app launch. If a newer release exists on
-  // GitHub, surface a single non-blocking toast with a "Settings →" link
-  // for the user to act on. Failures (no network, plugin not loaded,
-  // missing pubkey) collapse silently — we don't want to nag users about
-  // transient issues at startup. The full UI lives in Settings → App
-  // Updates; this is just the "nudge."
+  // GitHub, surface a single non-blocking toast with a Download action
+  // that opens the GitHub release page in the default browser. Failures
+  // (no network, GitHub rate-limit, deleted repo) collapse silently —
+  // we don't want to nag users about transient issues at startup. The
+  // full UI lives in Settings → App Updates; this is just the "nudge."
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const { checkForUpdate } = await import("@/lib/updater");
+        const { checkForUpdate, openReleaseInBrowser } = await import("@/lib/updater");
         const result = await checkForUpdate();
         if (cancelled) return;
         if (result.kind === "available") {
-          toast.message(`Update available: v${result.version}`, {
-            description: "Open Settings → App Updates to install.",
-            duration: 8000,
+          toast.message(`Update available: v${result.release.version}`, {
+            description: "Click Download to grab the new installer.",
+            duration: 12000,
+            action: {
+              label: "Download",
+              onClick: () => openReleaseInBrowser(result.release.url),
+            },
           });
         }
       } catch {

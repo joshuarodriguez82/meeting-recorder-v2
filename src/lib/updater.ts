@@ -1,105 +1,138 @@
-// Thin wrapper around @tauri-apps/plugin-updater so the rest of the app
-// can ask "is an update available?" / "install it" without each call
-// site needing to know the plugin's API surface or how to dynamic-import
-// it for `npm run dev` browser sessions where Tauri isn't present.
+// Lightweight update-availability check.
 //
-// All Tauri imports are lazy because the React UI can also run under
-// `next dev` against a manually-started backend (no Tauri shell). In
-// that context the updater plugin doesn't exist; checks resolve to
-// `notAvailable` rather than throwing.
+// Deliberately NOT a signed in-place updater (no Tauri updater plugin,
+// no key management, no CI signing). The model here is:
+//
+//   1. App launch → query GitHub Releases API for the latest tag.
+//   2. Compare to the running app version.
+//   3. If newer: toast / show "Update available" in Settings.
+//   4. User clicks → opens the GitHub release page in the default
+//      browser. They download and run the installer manually.
+//
+// That keeps the maintenance cost at zero (no keypair to back up, no
+// secrets to set in CI) while still nudging users to upgrade. For a
+// small-team / personal-use tool this is the right tradeoff vs the
+// full signed-updater dance. Re-evaluate when the user base grows
+// or the threat model includes hostile networks.
+
+const GITHUB_API_URL =
+  "https://api.github.com/repos/joshuarodriguez82/meeting-recorder-v2/releases/latest";
+const RELEASE_PAGE_URL =
+  "https://github.com/joshuarodriguez82/meeting-recorder-v2/releases/latest";
+
+export type LatestRelease = {
+  tag: string;
+  version: string;
+  url: string;
+  body: string;
+  publishedAt: string;
+};
 
 export type UpdateCheckResult =
-  | { kind: "available"; version: string; notes: string; date?: string }
-  | { kind: "up-to-date"; current: string }
-  | { kind: "not-available"; reason: string };
-
-let _cachedUpdater: unknown | null = null;
-let _cachedCheck: ReturnType<typeof loadUpdaterCheck> | null = null;
+  | { kind: "available"; release: LatestRelease; currentVersion: string }
+  | { kind: "up-to-date"; currentVersion: string }
+  | { kind: "unknown"; reason: string; currentVersion: string };
 
 /**
- * Lazy-load the updater plugin. Returns null when not running under Tauri
- * (e.g. `next dev` browser session), or when the plugin failed to load
- * because the build didn't include it.
+ * Compare two semver-like strings. Returns 1 if a > b, -1 if a < b,
+ * 0 if equal. Handles "v2.4.0", "2.4.0", and "2.4.0-rc1" style strings.
+ * Non-numeric chunks compare lexicographically.
  */
-async function loadUpdaterCheck(): Promise<typeof import("@tauri-apps/plugin-updater")["check"] | null> {
+function compareVersions(a: string, b: string): number {
+  const norm = (v: string): (string | number)[] =>
+    v.replace(/^v/, "").split(/[.-]/).map((p) => {
+      const n = parseInt(p, 10);
+      return Number.isNaN(n) ? p : n;
+    });
+  const na = norm(a);
+  const nb = norm(b);
+  const len = Math.max(na.length, nb.length);
+  for (let i = 0; i < len; i++) {
+    const x = na[i] ?? 0;
+    const y = nb[i] ?? 0;
+    if (x < y) return -1;
+    if (x > y) return 1;
+  }
+  return 0;
+}
+
+async function getCurrentVersion(): Promise<string> {
   try {
-    const mod = await import("@tauri-apps/plugin-updater");
-    _cachedUpdater = mod;
-    return mod.check;
+    const { getVersion } = await import("@tauri-apps/api/app");
+    return await getVersion();
   } catch {
-    return null;
+    // Running under `next dev` against a non-Tauri shell — no version.
+    return "0.0.0";
   }
 }
 
 /**
- * Ask GitHub if there's a newer release than the one we're running.
- * Memoizes the loaded plugin handle so subsequent calls don't re-import.
- *
- * `silent` controls error visibility — startup auto-checks pass true so
- * a transient network failure doesn't toast; the user-initiated
- * "Check for Updates" button passes false.
+ * Hit the GitHub Releases API and compare against the running version.
+ * Failures (no network, rate-limited, deleted repo) return "unknown"
+ * so the caller can fall back to silence rather than throwing.
  */
 export async function checkForUpdate(): Promise<UpdateCheckResult> {
-  if (!_cachedCheck) _cachedCheck = loadUpdaterCheck();
-  const check = await _cachedCheck;
-  if (!check) {
+  const currentVersion = await getCurrentVersion();
+  let res: Response;
+  try {
+    res = await fetch(GITHUB_API_URL, {
+      headers: { Accept: "application/vnd.github+json" },
+    });
+  } catch (e) {
     return {
-      kind: "not-available",
-      reason: "Updater plugin not loaded (running outside Tauri shell?)",
+      kind: "unknown",
+      currentVersion,
+      reason: `Network error: ${e instanceof Error ? e.message : e}`,
     };
   }
-  try {
-    const update = await check();
-    if (update) {
-      return {
-        kind: "available",
-        version: update.version,
-        notes: update.body ?? "",
-        date: update.date ?? undefined,
-      };
-    }
-    // No update returned = we're already current.
-    return { kind: "up-to-date", current: "" };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return { kind: "not-available", reason: msg };
+  if (!res.ok) {
+    return {
+      kind: "unknown",
+      currentVersion,
+      reason: `GitHub API returned ${res.status}`,
+    };
   }
+  type ReleasePayload = {
+    tag_name?: string;
+    html_url?: string;
+    body?: string;
+    published_at?: string;
+  };
+  const data: ReleasePayload = await res.json();
+  const tag = (data.tag_name ?? "").trim();
+  if (!tag) {
+    return {
+      kind: "unknown",
+      currentVersion,
+      reason: "Latest release has no tag_name",
+    };
+  }
+  if (compareVersions(tag, currentVersion) > 0) {
+    return {
+      kind: "available",
+      currentVersion,
+      release: {
+        tag,
+        version: tag.replace(/^v/, ""),
+        url: data.html_url || RELEASE_PAGE_URL,
+        body: data.body || "",
+        publishedAt: data.published_at || "",
+      },
+    };
+  }
+  return { kind: "up-to-date", currentVersion };
 }
 
 /**
- * Download + install the available update, then relaunch the app.
- * Throws on failure (signature verification, network error, disk
- * write error, etc.) — callers should toast the error.
- *
- * The Tauri plugin handles the platform-specific replacement dance
- * (Windows file rename trick, macOS .app extraction). We just kick
- * it off and trust the result.
+ * Open the GitHub release page in the user's default browser. Tauri's
+ * webview intercepts navigations to external URLs via `window.open`
+ * with a non-self target and routes them to the OS browser.
  */
-export async function installUpdate(
-  onProgress?: (downloaded: number, total: number | null) => void,
-): Promise<void> {
-  const mod = (_cachedUpdater ?? (await import("@tauri-apps/plugin-updater"))) as
-    typeof import("@tauri-apps/plugin-updater");
-  _cachedUpdater = mod;
-  const update = await mod.check();
-  if (!update) throw new Error("No update available");
-  let downloaded = 0;
-  let total: number | null = null;
-  await update.downloadAndInstall((event) => {
-    if (event.event === "Started") {
-      total = event.data.contentLength ?? null;
-      onProgress?.(0, total);
-    } else if (event.event === "Progress") {
-      downloaded += event.data.chunkLength;
-      onProgress?.(downloaded, total);
-    }
-  });
-  // downloadAndInstall on Windows replaces the exe and queues a relaunch
-  // automatically; on macOS we have to ask for the relaunch ourselves.
+export function openReleaseInBrowser(url: string = RELEASE_PAGE_URL): void {
   try {
-    const { relaunch } = await import("@tauri-apps/plugin-process");
-    await relaunch();
+    window.open(url, "_blank", "noopener");
   } catch {
-    // No process plugin available; user can quit + reopen manually.
+    // Should never trip; left as a defensive fallback.
+    location.href = url;
   }
 }

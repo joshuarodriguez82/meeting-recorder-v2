@@ -897,81 +897,57 @@ function AIProviderSection({
 }
 
 /**
- * Self-update card. Shows the current app version, lets the user check
- * GitHub for a newer release, and offers a one-click install path
- * (download + signature-verify + replace + relaunch) via the Tauri
- * updater plugin. Auto-check on first mount; user can re-check manually.
+ * Update-availability card. Queries GitHub Releases on mount, compares
+ * to the running app version, and surfaces a button that opens the
+ * release page in the user's default browser when a newer version
+ * exists. Intentionally NOT an in-place updater — see src/lib/updater.ts
+ * for the rationale.
  *
- * Three render states:
- *   - "loading" — initial check in flight
- *   - "up-to-date" — current version is the latest
- *   - "available" — newer version found; show install button + release notes
- *
- * Failures (no network, plugin not loaded under `next dev`, missing
- * pubkey in tauri.conf.json) collapse to "up-to-date" with a debug note
- * rather than an error toast — the updater shouldn't yell at users
- * about transient failures.
+ * Failures (no network, GitHub rate limit, deleted repo) collapse to
+ * an "Update check unavailable" line rather than an error toast.
  */
 function AppUpdatesCard() {
+  type LatestRelease = {
+    tag: string;
+    version: string;
+    url: string;
+    body: string;
+    publishedAt: string;
+  };
   type State =
-    | { kind: "loading" }
-    | { kind: "up-to-date"; current: string; reason?: string }
-    | { kind: "available"; version: string; notes: string; date?: string }
-    | { kind: "installing"; pct: number };
-  const [state, setState] = useState<State>({ kind: "loading" });
-  const [currentVersion, setCurrentVersion] = useState<string>("");
-
-  // Pull the installed Tauri app version so we have something to render
-  // even before the GitHub check completes.
-  useEffect(() => {
-    (async () => {
-      try {
-        const { getVersion } = await import("@tauri-apps/api/app");
-        setCurrentVersion(await getVersion());
-      } catch {
-        setCurrentVersion("dev");
-      }
-    })();
-  }, []);
+    | { kind: "loading"; current: string }
+    | { kind: "up-to-date"; current: string }
+    | { kind: "available"; current: string; release: LatestRelease }
+    | { kind: "unknown"; current: string; reason: string };
+  const [state, setState] = useState<State>({ kind: "loading", current: "…" });
 
   const runCheck = async () => {
-    setState({ kind: "loading" });
+    setState((prev) => ({ kind: "loading", current: prev.current }));
     const { checkForUpdate } = await import("@/lib/updater");
     const result = await checkForUpdate();
     if (result.kind === "available") {
       setState({
         kind: "available",
-        version: result.version,
-        notes: result.notes,
-        date: result.date,
+        current: result.currentVersion,
+        release: result.release,
       });
     } else if (result.kind === "up-to-date") {
-      setState({ kind: "up-to-date", current: currentVersion || "(unknown)" });
+      setState({ kind: "up-to-date", current: result.currentVersion });
     } else {
       setState({
-        kind: "up-to-date",
-        current: currentVersion || "(unknown)",
+        kind: "unknown",
+        current: result.currentVersion,
         reason: result.reason,
       });
     }
   };
 
-  // Run a check on mount so users see status without clicking.
   useEffect(() => { runCheck(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
 
-  const handleInstall = async () => {
-    setState({ kind: "installing", pct: 0 });
-    try {
-      const { installUpdate } = await import("@/lib/updater");
-      await installUpdate((downloaded, total) => {
-        const pct = total ? Math.floor((downloaded / total) * 100) : 0;
-        setState({ kind: "installing", pct });
-      });
-      toast.success("Update installed. Relaunching…");
-    } catch (e) {
-      toast.error(`Update failed: ${e instanceof Error ? e.message : e}`);
-      runCheck();
-    }
+  const openDownload = async () => {
+    if (state.kind !== "available") return;
+    const { openReleaseInBrowser } = await import("@/lib/updater");
+    openReleaseInBrowser(state.release.url);
   };
 
   return (
@@ -980,9 +956,11 @@ function AppUpdatesCard() {
         <CardTitle className="text-base">App Updates</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="text-sm">
-            <div>Current version: <strong>v{currentVersion || "…"}</strong></div>
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-sm min-w-0">
+            <div>
+              Current version: <strong>v{state.current || "…"}</strong>
+            </div>
             {state.kind === "loading" && (
               <div className="text-xs text-muted-foreground mt-1">
                 <Loader2 className="inline h-3 w-3 animate-spin mr-1" />
@@ -991,49 +969,48 @@ function AppUpdatesCard() {
             )}
             {state.kind === "up-to-date" && (
               <div className="text-xs text-muted-foreground mt-1">
-                {state.reason
-                  ? `Update check unavailable: ${state.reason}`
-                  : "You're on the latest version."}
+                You&apos;re on the latest release.
               </div>
             )}
             {state.kind === "available" && (
               <div className="text-xs text-primary mt-1">
-                Update available: <strong>v{state.version}</strong>
-                {state.date ? ` · ${state.date}` : ""}
+                Update available: <strong>v{state.release.version}</strong>
+                {state.release.publishedAt
+                  ? ` · ${new Date(state.release.publishedAt).toLocaleDateString()}`
+                  : ""}
               </div>
             )}
-            {state.kind === "installing" && (
+            {state.kind === "unknown" && (
               <div className="text-xs text-muted-foreground mt-1">
-                Downloading… {state.pct}%
+                Update check unavailable: {state.reason}
               </div>
             )}
           </div>
-          {state.kind !== "installing" && (
-            <Button
-              type="button"
-              variant={state.kind === "available" ? "default" : "outline"}
-              onClick={state.kind === "available" ? handleInstall : runCheck}
-              disabled={state.kind === "loading"}
-            >
-              {state.kind === "available" ? "Install & Restart" : "Check Now"}
-            </Button>
-          )}
+          <Button
+            type="button"
+            variant={state.kind === "available" ? "default" : "outline"}
+            onClick={state.kind === "available" ? openDownload : runCheck}
+            disabled={state.kind === "loading"}
+          >
+            {state.kind === "available" ? "Open Download Page" : "Check Now"}
+          </Button>
         </div>
-        {state.kind === "available" && state.notes && (
+        {state.kind === "available" && state.release.body && (
           <details className="text-xs">
             <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
               Release notes
             </summary>
             <pre className="mt-2 whitespace-pre-wrap font-sans bg-muted/40 rounded p-2 max-h-64 overflow-y-auto">
-              {state.notes}
+              {state.release.body}
             </pre>
           </details>
         )}
         <p className="text-xs text-muted-foreground">
-          Updates are downloaded from{" "}
-          <code>github.com/joshuarodriguez82/meeting-recorder-v2/releases</code>{" "}
-          and signature-verified before install. Disable check-on-launch in
-          a future build if you want fully manual updates.
+          Update check queries{" "}
+          <code>github.com/joshuarodriguez82/meeting-recorder-v2/releases</code>.
+          Clicking <strong>Open Download Page</strong> opens the release in
+          your default browser — pick the installer for your platform and run
+          it. The current app keeps running until you replace it.
         </p>
       </CardContent>
     </Card>
