@@ -98,6 +98,32 @@ export default function Home() {
     })();
   }, []);
 
+  // Quiet check-for-updates on app launch. If a newer release exists on
+  // GitHub, surface a single non-blocking toast with a "Settings →" link
+  // for the user to act on. Failures (no network, plugin not loaded,
+  // missing pubkey) collapse silently — we don't want to nag users about
+  // transient issues at startup. The full UI lives in Settings → App
+  // Updates; this is just the "nudge."
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { checkForUpdate } = await import("@/lib/updater");
+        const result = await checkForUpdate();
+        if (cancelled) return;
+        if (result.kind === "available") {
+          toast.message(`Update available: v${result.version}`, {
+            description: "Open Settings → App Updates to install.",
+            duration: 8000,
+          });
+        }
+      } catch {
+        // Silent.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   // Poll /recording/status so the sidebar can show what the backend is
   // currently doing — model warmup on cold start, transcription progress
   // during processing, etc. The user wanted visible feedback instead of
