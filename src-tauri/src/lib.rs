@@ -735,6 +735,15 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        // Self-update over HTTPS against the GitHub releases manifest.
+        // Endpoint + signing pubkey live in tauri.conf.json. Without a
+        // valid pubkey in config, this plugin loads but every update
+        // attempt fails verification — safe-by-default.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        // Needed by the updater flow to relaunch the app after an
+        // in-place install. Without it the user has to quit and reopen
+        // manually after a downloadAndInstall.
+        .plugin(tauri_plugin_process::init())
         .manage(backend)
         .invoke_handler(tauri::generate_handler![restart_backend, get_backend_port])
         .setup(|app| {
