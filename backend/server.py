@@ -754,6 +754,24 @@ async def get_settings():
 
 @app.post("/settings")
 async def save_settings(payload: SettingsDTO):
+    # Refuse if a recording is in progress. save_settings re-instantiates
+    # the RecordingService inside load_settings(), which would orphan the
+    # active capture threads — they keep writing to temp WAVs but no one
+    # in the new service instance can finalize them on Stop, and the UI
+    # loses track of the recording entirely. Surfaced as 409 so the
+    # frontend can show "stop your recording first" instead of silently
+    # half-saving and wedging the session.
+    if svc.recording_svc is not None and svc.recording_svc.is_recording:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A recording is currently in progress. Stop it before "
+                "saving Settings — otherwise the in-flight capture loses "
+                "track of where it's writing and the audio can't be "
+                "finalized cleanly."
+            ),
+        )
+
     # Capture the previous launch_on_startup value BEFORE writing the new
     # one — we only call into the OS to install/remove the auto-launch
     # entry when it actually changes. Otherwise every Save Settings click
@@ -958,7 +976,7 @@ def _current_gpu_backend() -> str:
     """Introspect the installed torch to report what flavour is live."""
     try:
         import torch
-        v = torch.__version__  # e.g. "2.2.2+cpu", "2.2.2+cu121"
+        v = torch.__version__  # e.g. "2.6.0+cpu", "2.6.0+cu124"
         if "+cu" in v:
             return "cuda"
         if "+rocm" in v:
@@ -1054,7 +1072,7 @@ async def gpu_install(req: GpuInstallRequest):
         args = [
             "--index-url", "https://download.pytorch.org/whl/cpu",
             "--force-reinstall", "--no-deps",
-            "torch==2.2.2", "torchaudio==2.2.2",
+            "torch==2.6.0", "torchaudio==2.6.0",
         ]
         # Also remove torch-directml if present
         post = ["uninstall", "-y", "torch-directml"]
@@ -1075,9 +1093,14 @@ async def gpu_install(req: GpuInstallRequest):
                 ),
             )
         args = [
-            "--index-url", "https://download.pytorch.org/whl/cu121",
+            # cu124 is the 12.x flavor PyTorch ships for torch 2.6.0;
+            # cu121 was dropped from the index for this release. Bumped
+            # from torch 2.2.2 because PyTorch only added Python 3.13
+            # wheels starting at torch 2.5.0, and our bundled runtime
+            # is Python 3.13.
+            "--index-url", "https://download.pytorch.org/whl/cu124",
             "--force-reinstall", "--no-deps",
-            "torch==2.2.2", "torchaudio==2.2.2",
+            "torch==2.6.0", "torchaudio==2.6.0",
         ]
         post = ["uninstall", "-y", "torch-directml"]
     elif backend_id == "directml":
