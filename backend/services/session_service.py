@@ -102,11 +102,27 @@ class SessionService:
         """
         results: List[dict] = []
         for path in self._recordings_dir.glob("session_*.json"):
+            # Skip sidecar files (session_<id>.commitments.json,
+            # session_<id>.item_status.json, …) that share the
+            # session_*.json glob but aren't canonical session records.
+            # Canonical session IDs are dotless hex; a dot in the stem
+            # means a sidecar suffix.
+            if "." in path.stem:
+                continue
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning(f"Skipping unreadable session {path.name}: {e}")
+                continue
+            if not isinstance(data, dict):
+                # Belt-and-braces: anything that loads as valid JSON but
+                # isn't a dict (legacy list-rooted file, future sidecar
+                # we forgot to add to the dotted-stem skip above) gets
+                # skipped instead of 500ing the whole endpoint.
+                logger.warning(
+                    f"Skipping non-dict session file {path.name} "
+                    f"(root is {type(data).__name__}, expected dict)")
                 continue
 
             session_id = data.get("session_id") or path.stem.replace("session_", "")
