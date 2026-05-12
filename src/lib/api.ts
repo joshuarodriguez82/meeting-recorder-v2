@@ -369,6 +369,10 @@ export interface ProcessFullStages {
 }
 
 export const api = {
+  // Resolve the cached backend base URL. Exposed for non-`request`
+  // callers that need the URL directly — most notably the live
+  // transcript SSE EventSource, which can't go through `request`.
+  getBaseUrl,
   health: () => request<{ status: string; version: string }>("/health"),
   // Templates
   getTemplates: () => request<TemplateEntry[]>("/templates"),
