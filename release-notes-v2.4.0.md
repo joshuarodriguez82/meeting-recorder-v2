@@ -135,6 +135,27 @@ shipping ahead of the in-app Usage Guide:
   (Classic Outlook vs New Outlook) and macOS-specific (TCC stale
   grant + `tccutil reset` recovery command).
 
+## Fixes folded into this build
+
+Two bugs caught during v2.4.0 testing and patched before the retag:
+
+- **GPU install for NVIDIA was broken** — `Settings → Transcription
+  Acceleration → Use This (NVIDIA CUDA)` failed with `ERROR: Could not
+  find a version that satisfies the requirement torch==2.2.2`. The
+  install path was still pinning torch 2.2.2 against the cu121 wheel
+  index. PyTorch only added Python 3.13 wheels starting at torch 2.5.0
+  (our bundled runtime is 3.13), and the cu121 index was dropped for
+  torch 2.6.0+ in favor of cu124. Bumped both pins to `torch==2.6.0` +
+  `torchaudio==2.6.0` (matching the CPU requirements file) and switched
+  the index to `https://download.pytorch.org/whl/cu124`.
+- **Saving Settings during an active recording wedged the session** —
+  the save handler re-instantiated `RecordingService` as part of its
+  reload-everything pass, which orphaned the in-flight capture threads.
+  The old threads kept writing audio to temp WAVs, but the new service
+  instance had no reference to them, so the Record view stopped showing
+  the active recording. Now save returns HTTP 409 with a clear
+  "stop your recording first" message instead of allowing the wedge.
+
 ## Roadmap pointer
 
 v3.0 plan, not started: a small Capacitor-wrapped Android app for
