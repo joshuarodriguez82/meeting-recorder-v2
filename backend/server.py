@@ -508,11 +508,36 @@ class Services:
             self.settings = Settings.from_env()
             self.session_svc = SessionService(self.settings.recordings_dir)
             self.export_svc = ExportService(self.settings.recordings_dir)
-            # Per-client configs live next to config.env / logs so they
-            # roam with the user profile, not under `recordings/`.
+            # Per-client configs and user-authored templates live ALONGSIDE
+            # the recordings dir so they sync with the user's session
+            # library — point RECORDINGS_DIR at a cloud-synced folder
+            # (iCloud / OneDrive) and clients + templates roam across
+            # devices automatically. Migration on first v2.4 launch (or on
+            # a recordings_dir change) copies the file from the legacy
+            # USER_DATA_DIR location, leaving the old copy as a fallback
+            # in case the user downgrades.
             from config.settings import USER_DATA_DIR
-            self.client_cfg_svc = ClientConfigService(USER_DATA_DIR)
-            self.template_svc = TemplateService(USER_DATA_DIR)
+            from pathlib import Path as _Path
+            import shutil as _shutil
+            _recordings_dir = _Path(self.settings.recordings_dir)
+            for _filename in ("client_configs.json", "summary_templates.json"):
+                _new = _recordings_dir / _filename
+                _old = USER_DATA_DIR / _filename
+                if not _new.exists() and _old.exists():
+                    try:
+                        _new.parent.mkdir(parents=True, exist_ok=True)
+                        _shutil.copy2(_old, _new)
+                        logger.info(
+                            f"Migrated {_filename}: {_old} -> {_new}")
+                    except Exception as _e:
+                        logger.warning(
+                            f"Migration of {_filename} failed ({_e}); "
+                            f"reading from legacy USER_DATA_DIR location.")
+            self.client_cfg_svc = ClientConfigService(_recordings_dir)
+            self.template_svc = TemplateService(_recordings_dir)
+            # Speaker profiles stay per-machine: voice fingerprints are
+            # mic-hardware-dependent, syncing them across devices with
+            # different mics risks false positives.
             self.speaker_profile_svc = SpeakerProfileService(USER_DATA_DIR)
             # SearchService stays a thin wrapper around session_service —
             # session embeddings live next to session JSONs, so it just
@@ -735,6 +760,15 @@ async def save_settings(payload: SettingsDTO):
     # would hammer the LaunchAgent / Startup folder.
     prev_launch = bool(svc.settings.launch_on_startup) if svc.settings else False
 
+    # Capture previous recordings_dir so we can migrate client/template
+    # state if the user is changing folders. load_settings()'s own
+    # migration path only knows about the legacy USER_DATA_DIR location;
+    # it can't see the *previously-active* recordings_dir, which is what
+    # holds the live state when a user changes folders mid-session.
+    prev_recordings_dir = (
+        svc.settings.recordings_dir if svc.settings else None
+    )
+
     Settings.save_to_env(
         anthropic_api_key=payload.anthropic_api_key,
         hf_token=payload.hf_token,
@@ -760,6 +794,32 @@ async def save_settings(payload: SettingsDTO):
         overrun_stop_min=max(0, payload.overrun_stop_min),
         hard_cap_hours=max(0, payload.hard_cap_hours),
     )
+    # If the recordings folder changed, migrate client + template state
+    # from the previous folder to the new one. Copy, not move, so the
+    # old location keeps working if the user reverts. load_settings()'s
+    # own migration covers the USER_DATA_DIR→recordings_dir first-launch
+    # path; this handles the recordings_dir→other-recordings_dir change.
+    new_recordings_dir = (payload.recordings_dir or "").strip()
+    if (prev_recordings_dir
+            and new_recordings_dir
+            and prev_recordings_dir != new_recordings_dir):
+        import shutil as _shutil
+        from pathlib import Path as _Path
+        for _filename in ("client_configs.json", "summary_templates.json"):
+            _old = _Path(prev_recordings_dir) / _filename
+            _new = _Path(new_recordings_dir) / _filename
+            if _old.exists() and not _new.exists():
+                try:
+                    _new.parent.mkdir(parents=True, exist_ok=True)
+                    _shutil.copy2(_old, _new)
+                    logger.info(
+                        f"Migrated {_filename} on folder change: "
+                        f"{_old} -> {_new}")
+                except Exception as _e:
+                    logger.warning(
+                        f"Migration of {_filename} on folder change "
+                        f"failed: {_e}")
+
     # Force reload
     svc.settings = None
     svc.models_ready = False
