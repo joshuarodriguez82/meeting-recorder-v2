@@ -6,8 +6,9 @@ import { api, formatBytes, type Meeting, type SessionSummary } from "@/lib/api";
 import {
   Mic, History, CheckSquare, Target, Search,
   LayoutDashboard, Settings as SettingsIcon, HelpCircle, Loader2,
-  Sparkles, MessageCircle, Handshake,
+  Sparkles, MessageCircle, Handshake, BarChart3,
 } from "lucide-react";
+import { InsightsView } from "@/components/insights-view";
 import { RecordView } from "@/components/record-view";
 import { SettingsView } from "@/components/settings-view";
 import { SessionsView } from "@/components/sessions-view";
@@ -32,6 +33,7 @@ const NAV_ITEMS = [
   { id: "search", label: "Search", icon: Search },
   { id: "qa", label: "Ask", icon: MessageCircle },
   { id: "clients", label: "Clients", icon: LayoutDashboard },
+  { id: "insights", label: "Insights", icon: BarChart3 },
   { id: "prep-brief", label: "Prep Brief", icon: Sparkles },
 ];
 
@@ -455,6 +457,7 @@ export default function Home() {
               {nav === "search" && "Search across all transcripts"}
               {nav === "qa" && "Ask Claude questions about your meetings — answers come with citations"}
               {nav === "clients" && "Clients and their projects — drill in to see meetings"}
+              {nav === "insights" && "Cross-meeting analytics — time allocation, recurring topics, open loops"}
               {nav === "prep-brief" && "Generate a pre-meeting brief from past sessions"}
               {nav === "settings" && "Configure API keys, devices, and workflow"}
               {nav === "help" && "How to use Meeting Recorder"}
@@ -490,6 +493,12 @@ export default function Home() {
           {nav === "qa" && <QAView onOpenSession={openSession} />}
           {nav === "clients" && (
             <ClientsView sessions={sessions} onReload={reloadSessions} onOpenSession={openSession} />
+          )}
+          {nav === "insights" && (
+            <InsightsView
+              onOpenSession={openSession}
+              existingClients={existingClients}
+            />
           )}
           {nav === "prep-brief" && <PrepBriefView sessions={sessions} />}
           {nav === "settings" && <SettingsView />}
