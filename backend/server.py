@@ -470,6 +470,9 @@ class Services:
         self.qa_svc: Optional[QAService] = None
         self.commitments_svc: Optional[CommitmentsService] = None
         self.item_status_svc: Optional[ItemStatusService] = None
+        # Insights aggregator — typed loosely to keep the heavy import
+        # off the module level (mirrors how RecordingService is held).
+        self.insights_svc = None
         self.transcription: Optional[TranscriptionEngine] = None
         self.diarization: Optional[DiarizationEngine] = None
         self.summarizer: Optional[Summarizer] = None
@@ -549,6 +552,12 @@ class Services:
             # ItemStatusService overlays per-session "checked off" state
             # on top of the markdown-parsed follow-ups and decisions.
             self.item_status_svc = ItemStatusService(self.session_svc)
+            # InsightsService — pure aggregator over the three services
+            # above. No file state, no warmup; instantiated at the same
+            # time so the /insights endpoints have a target right away.
+            from services.insights_service import InsightsService
+            self.insights_svc = InsightsService(
+                self.session_svc, self.commitments_svc, self.item_status_svc)
             self.recording_svc = RecordingService(
                 settings=self.settings,
                 profile_service=self.speaker_profile_svc,
@@ -2765,6 +2774,45 @@ class ItemStatusUpdate(BaseModel):
     item_hash: str
     done: Optional[bool] = None         # follow_up only
     status: Optional[str] = None        # decision only
+
+
+@app.get("/insights/summary")
+async def insights_summary(
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    client: Optional[str] = None,
+):
+    """Cross-meeting analytics for the Insights view.
+
+    Query params:
+      - since / until: ISO 8601 datetimes bounding the window (both
+        optional; absence means no bound on that end).
+      - client: when set, scope time-allocation and open-loops to a
+        single client. Recurring topics ignore this param and always
+        return per-client buckets.
+
+    The response shape is consumed by src/components/insights-view.tsx.
+    Computation is bounded by the number of session JSONs on disk
+    (sub-1k for the foreseeable future), so we keep this synchronous —
+    no caching, no warmup.
+    """
+    svc.load_settings()
+    if not svc.insights_svc:
+        raise HTTPException(status_code=503, detail="Insights service not ready")
+    def _parse(s: Optional[str]) -> Optional[datetime]:
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid ISO datetime: {s!r}")
+    since_dt = _parse(since)
+    until_dt = _parse(until)
+    return await asyncio.to_thread(
+        svc.insights_svc.summary,
+        since_dt, until_dt, client)
 
 
 @app.get("/item-status")
