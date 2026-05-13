@@ -119,12 +119,18 @@ def _extract_topics(summary: str) -> List[str]:
 # ── Helpers ───────────────────────────────────────────────────────────
 
 def _parse_iso(s: Optional[str]) -> Optional[_dt.datetime]:
+    # Always return a naive (local-time) datetime so window comparisons
+    # don't mix tz-aware and tz-naive values. Session JSONs can carry
+    # either flavor depending on when they were written.
     if not s:
         return None
     try:
-        return _dt.datetime.fromisoformat(s)
+        dt = _dt.datetime.fromisoformat(s)
     except (TypeError, ValueError):
         return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt
 
 
 def _in_window(
