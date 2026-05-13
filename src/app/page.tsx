@@ -6,8 +6,9 @@ import { api, formatBytes, type Meeting, type SessionSummary } from "@/lib/api";
 import {
   Mic, History, CheckSquare, Target, Search,
   LayoutDashboard, Settings as SettingsIcon, HelpCircle, Loader2,
-  Sparkles, MessageCircle, Handshake,
+  Sparkles, MessageCircle, Handshake, BarChart3,
 } from "lucide-react";
+import { InsightsView } from "@/components/insights-view";
 import { RecordView } from "@/components/record-view";
 import { SettingsView } from "@/components/settings-view";
 import { SessionsView } from "@/components/sessions-view";
@@ -32,6 +33,7 @@ const NAV_ITEMS = [
   { id: "search", label: "Search", icon: Search },
   { id: "qa", label: "Ask", icon: MessageCircle },
   { id: "clients", label: "Clients", icon: LayoutDashboard },
+  { id: "insights", label: "Insights", icon: BarChart3 },
   { id: "prep-brief", label: "Prep Brief", icon: Sparkles },
 ];
 
@@ -39,6 +41,11 @@ export default function Home() {
   const [backendReady, setBackendReady] = useState(false);
   const [nav, setNav] = useState<string>("record");
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  // Configured clients (from client_configs.json). Merged into
+  // existingClients so the Sessions detail dialog's client picker also
+  // surfaces clients that were created but haven't been tagged on a
+  // session yet. Refreshed alongside sessions.
+  const [clientConfigs, setClientConfigs] = useState<Record<string, { export_folder: string; display_name?: string }>>({});
   const [storage, setStorage] = useState<{
     total_bytes: number;
     session_count: number;
@@ -63,7 +70,22 @@ export default function Home() {
     setDetailOpen(true);
   };
 
-  const existingClients = Array.from(new Set(sessions.map((s) => s.client).filter(Boolean))).sort();
+  const existingClients = (() => {
+    const seen = new Map<string, string>();
+    for (const s of sessions) {
+      const name = (s.client || "").trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (!seen.has(key)) seen.set(key, name);
+    }
+    for (const cfg of Object.values(clientConfigs)) {
+      const name = (cfg.display_name || "").trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (!seen.has(key)) seen.set(key, name);
+    }
+    return Array.from(seen.values()).sort((a, b) => a.localeCompare(b));
+  })();
   // Scope projects to the client they were tagged under so the detail
   // dialog's Project dropdown doesn't offer a project from a different
   // customer (which would silently mis-tag the session on save).
@@ -190,13 +212,15 @@ export default function Home() {
 
   const reloadSessions = async () => {
     try {
-      const [s, stats, settings] = await Promise.all([
+      const [s, stats, settings, cfgs] = await Promise.all([
         api.listSessions(),
         api.getRetentionStats().catch(() => null),
         api.getSettings().catch(() => null),
+        api.getClientConfigs().catch(() => ({} as Record<string, { export_folder: string; display_name?: string }>)),
       ]);
       setSessions(s);
       setStorage(stats);
+      setClientConfigs(cfgs);
       if (settings) setNotifyMinutes(settings.notify_minutes_before);
     } catch (e) {
       console.error(e);
@@ -433,6 +457,7 @@ export default function Home() {
               {nav === "search" && "Search across all transcripts"}
               {nav === "qa" && "Ask Claude questions about your meetings — answers come with citations"}
               {nav === "clients" && "Clients and their projects — drill in to see meetings"}
+              {nav === "insights" && "Cross-meeting analytics — time allocation, recurring topics, open loops"}
               {nav === "prep-brief" && "Generate a pre-meeting brief from past sessions"}
               {nav === "settings" && "Configure API keys, devices, and workflow"}
               {nav === "help" && "How to use Meeting Recorder"}
@@ -468,6 +493,12 @@ export default function Home() {
           {nav === "qa" && <QAView onOpenSession={openSession} />}
           {nav === "clients" && (
             <ClientsView sessions={sessions} onReload={reloadSessions} onOpenSession={openSession} />
+          )}
+          {nav === "insights" && (
+            <InsightsView
+              onOpenSession={openSession}
+              existingClients={existingClients}
+            />
           )}
           {nav === "prep-brief" && <PrepBriefView sessions={sessions} />}
           {nav === "settings" && <SettingsView />}
