@@ -201,10 +201,11 @@ class SessionService:
         src = Path(source_path)
         if not src.exists():
             raise FileNotFoundError(f"File not found: {source_path}")
-        if src.suffix.lower() not in (".wav", ".mp3", ".m4a", ".flac"):
+        if src.suffix.lower() not in (
+                ".wav", ".mp3", ".m4a", ".flac", ".mp4", ".mov"):
             raise ValueError(
                 f"Unsupported audio format: {src.suffix}. "
-                "Use .wav, .mp3, .m4a, or .flac.")
+                "Use .wav, .mp3, .m4a, .flac, .mp4, or .mov.")
 
         session_id = uuid.uuid4().hex[:8].upper()
         # Keep the original extension so downstream tooling doesn't
