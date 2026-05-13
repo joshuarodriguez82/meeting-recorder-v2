@@ -99,6 +99,18 @@ export function RecordView({
   // a fresh click on a different tile cleanly resets the modal state.
   const [briefMeeting, setBriefMeeting] = useState<Meeting | null>(null);
 
+  // Calendar-driven auto-record toggle. Persisted server-side via
+  // Settings.auto_record_enabled; mirrored here so the Switch can flip
+  // optimistically. `autoRecordNext` is the next qualifying event, shown
+  // as a small hint under the toggle.
+  const [autoRecord, setAutoRecord] = useState<boolean>(false);
+  const [autoRecordNext, setAutoRecordNext] = useState<{
+    subject: string;
+    start: string;
+    end: string;
+  } | null>(null);
+  const [autoRecordSaving, setAutoRecordSaving] = useState<boolean>(false);
+
   // Load initial data. Calendar data is owned by the parent (page.tsx)
   // so it survives nav switches; we only load local things here.
   useEffect(() => {
@@ -224,6 +236,66 @@ export function RecordView({
     const dev = outputDevices.find((d) => d.index === outIdx);
     if (dev) window.localStorage.setItem("mr.outputDeviceName", dev.name);
   }, [outIdx, outputDevices]);
+
+  // Auto-record toggle: hydrate from persisted Settings on mount, then
+  // poll /recording/auto-status every 30s so the "next: <subject>" hint
+  // stays current as the calendar evolves. The poll is cheap (no
+  // calendar fetch — the service exposes its cached next_event).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const s = await api.getSettings();
+        if (cancelled) return;
+        setAutoRecord(Boolean(s.auto_record_enabled));
+      } catch {
+        // Settings unreachable — leave toggle off. The /settings
+        // failure path already surfaces elsewhere.
+      }
+    })();
+    const refresh = async () => {
+      try {
+        const st = await api.getAutoRecordStatus();
+        if (cancelled) return;
+        setAutoRecordNext(st.next_event);
+      } catch {
+        // Backend not ready — try again next tick.
+      }
+    };
+    refresh();
+    const id = window.setInterval(refresh, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  const handleAutoRecordToggle = async (next: boolean) => {
+    if (recording && next) {
+      // Avoid the confusing "turn it on while manually recording, then
+      // wonder why nothing changed" case. Refuse the flip until Stop.
+      toast.info(
+        "Stop the current recording before enabling auto-record.");
+      return;
+    }
+    setAutoRecord(next); // optimistic
+    setAutoRecordSaving(true);
+    try {
+      const current = await api.getSettings();
+      await api.saveSettings({ ...current, auto_record_enabled: next });
+      // Pull a fresh status so the "next: …" hint populates immediately
+      // when the user flips on.
+      const st = await api.getAutoRecordStatus();
+      setAutoRecordNext(st.next_event);
+      toast.success(next ? "Auto-record on" : "Auto-record off");
+    } catch (e: unknown) {
+      setAutoRecord(!next); // rollback
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`Couldn't save auto-record setting: ${msg}`);
+    } finally {
+      setAutoRecordSaving(false);
+    }
+  };
 
   // Look up the currently selected device objects for display.
   const selectedMic = inputDevices.find((d) => d.index === micIdx);
@@ -654,12 +726,44 @@ export function RecordView({
             <CalendarIcon className="h-4 w-4 text-primary" />
             Upcoming Meetings
           </CardTitle>
-          <CardAction>
+          <CardAction className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <Switch
+                id="auto-record-toggle"
+                checked={autoRecord}
+                disabled={autoRecordSaving}
+                onCheckedChange={handleAutoRecordToggle}
+              />
+              <Label
+                htmlFor="auto-record-toggle"
+                className="text-xs font-medium cursor-pointer select-none"
+                title={
+                  "Auto-start recording at each calendar meeting's scheduled time. " +
+                  "Filters: skip all-day events; require a Teams/Zoom/Meet link. " +
+                  "Manual recordings always win — auto-start won't fire while you're already recording."
+                }
+              >
+                Auto-record
+              </Label>
+            </div>
             <Button size="sm" variant="outline" onClick={() => onRefreshCalendar(false)} disabled={meetingsLoading}>
               {meetingsLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Refresh"}
             </Button>
           </CardAction>
         </CardHeader>
+        {autoRecord && autoRecordNext && (
+          <div className="px-6 -mt-2 mb-2 text-xs text-muted-foreground">
+            Auto-record on — next:{" "}
+            <span className="font-medium text-foreground">
+              {autoRecordNext.subject}
+            </span>{" "}
+            at{" "}
+            {new Date(autoRecordNext.start).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
+          </div>
+        )}
         <CardContent>
           {meetings.length === 0 ? (
             <p className="text-sm text-muted-foreground text-center py-8">
