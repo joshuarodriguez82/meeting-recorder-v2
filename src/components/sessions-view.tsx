@@ -326,17 +326,49 @@ function ImportSessionDialog({
         </DialogHeader>
         <div className="space-y-3 py-2">
           <div className="space-y-2">
-            <Label>Audio file path</Label>
-            <Input
-              value={path}
-              onChange={(e) => setPath(e.target.value)}
-              placeholder="C:\\Users\\<you>\Downloads\teams-recording.m4a"
-              autoFocus
-              autoComplete="off"
-            />
+            <Label>Audio / video file</Label>
+            <div className="flex gap-2">
+              <Input
+                value={path}
+                onChange={(e) => setPath(e.target.value)}
+                placeholder="C:\\Users\\<you>\Downloads\teams-recording.mp4"
+                autoFocus
+                autoComplete="off"
+                className="flex-1"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                onClick={async () => {
+                  try {
+                    const { open } = await import("@tauri-apps/plugin-dialog");
+                    const picked = await open({
+                      multiple: false,
+                      directory: false,
+                      title: "Choose recording to import",
+                      filters: [
+                        {
+                          name: "Audio / video",
+                          extensions: ["wav", "mp3", "m4a", "flac", "mp4", "mov"],
+                        },
+                      ],
+                    });
+                    if (typeof picked === "string" && picked) {
+                      setPath(picked);
+                    }
+                  } catch (e) {
+                    toast.error(
+                      `File picker unavailable: ${(e as Error).message ?? e}`);
+                  }
+                }}
+              >
+                Browse…
+              </Button>
+            </div>
             <p className="text-[11px] text-muted-foreground">
-              Accepts .wav, .mp3, .m4a, or .flac. The file is copied into your
-              recordings folder — the original stays where it is.
+              Accepts .wav, .mp3, .m4a, .flac, .mp4, or .mov. The file is
+              copied into your recordings folder — the original stays where
+              it is.
             </p>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
