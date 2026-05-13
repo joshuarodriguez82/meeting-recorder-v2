@@ -2800,14 +2800,21 @@ async def insights_summary(
     if not svc.insights_svc:
         raise HTTPException(status_code=503, detail="Insights service not ready")
     def _parse(s: Optional[str]) -> Optional[datetime]:
+        # Session `started_at` is stored as naive local time (see
+        # SessionService), so any tz-aware input from the frontend
+        # (toISOString() emits a trailing 'Z') must be converted to
+        # local time and stripped of tzinfo to be comparable.
         if not s:
             return None
         try:
-            return datetime.fromisoformat(s)
+            dt = datetime.fromisoformat(s)
         except ValueError:
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid ISO datetime: {s!r}")
+        if dt.tzinfo is not None:
+            dt = dt.astimezone().replace(tzinfo=None)
+        return dt
     since_dt = _parse(since)
     until_dt = _parse(until)
     return await asyncio.to_thread(
