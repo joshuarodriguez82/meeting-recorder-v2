@@ -83,7 +83,7 @@ export function InsightsView({ onOpenSession, existingClients }: Props) {
           </div>
           <div className="flex items-center gap-2">
             <span className="text-xs text-muted-foreground">Client</span>
-            <Select value={clientFilter} onValueChange={setClientFilter}>
+            <Select value={clientFilter} onValueChange={(v) => setClientFilter(v ?? "__all__")}>
               <SelectTrigger className="w-[200px] h-8 text-sm"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="__all__">All clients</SelectItem>
