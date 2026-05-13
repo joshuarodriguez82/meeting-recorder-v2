@@ -33,6 +33,12 @@ def _normalize(name: str) -> str:
 @dataclass
 class ClientConfig:
     export_folder: str = ""
+    # Preserved original casing of the client name. Stored at write
+    # time so the UI can list clients that have been created but not
+    # yet tagged onto any session, without losing the user's chosen
+    # capitalization (the dict is keyed on the normalized lowercase
+    # form for case-insensitive lookup).
+    display_name: str = ""
 
 
 class ClientConfigService:
@@ -77,6 +83,7 @@ class ClientConfigService:
         return {
             name: ClientConfig(
                 export_folder=(entry or {}).get("export_folder", "") or "",
+                display_name=(entry or {}).get("display_name", "") or name,
             )
             for name, entry in raw.items()
         }
@@ -91,19 +98,23 @@ class ClientConfigService:
         if not entry:
             return None
         return ClientConfig(
-            export_folder=entry.get("export_folder", "") or "")
+            export_folder=entry.get("export_folder", "") or "",
+            display_name=entry.get("display_name", "") or client.strip())
 
     def set(self, client: str, cfg: ClientConfig) -> None:
         """Write a client's config. Creates the entry if missing."""
         if not client:
             raise ValueError("client name required")
         key = _normalize(client)
+        entry = asdict(cfg)
+        # Prefer the dataclass's display_name; fall back to the
+        # URL/path-supplied client name so existing callers that don't
+        # set display_name still get a sensible label.
+        if not entry.get("display_name"):
+            entry["display_name"] = client.strip()
         with self._lock:
             raw = self._read_all()
-            raw[key] = {
-                "display_name": client.strip(),
-                **asdict(cfg),
-            }
+            raw[key] = entry
             self._write_all(raw)
 
     def rename(self, old: str, new: str) -> None:
