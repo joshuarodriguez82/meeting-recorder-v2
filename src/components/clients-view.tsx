@@ -21,7 +21,14 @@ interface Props {
 
 export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
   // Per-client configs (keyed by normalized name; matches backend).
-  const [clientConfigs, setClientConfigs] = useState<Record<string, { export_folder: string }>>({});
+  const [clientConfigs, setClientConfigs] = useState<Record<string, { export_folder: string; display_name?: string }>>({});
+
+  const refreshClientConfigs = async () => {
+    try {
+      const cfgs = await api.getClientConfigs();
+      setClientConfigs(cfgs);
+    } catch { /* non-fatal */ }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -38,10 +45,26 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
   );
   // Additional names the user has created this session that aren't tagged yet
   const [pendingClients, setPendingClients] = useState<string[]>([]);
+  // Clients that have been persisted via PUT /clients/config but don't
+  // yet have any tagged sessions. Their display_name comes from the
+  // backend; we dedupe against taggedClients case-insensitively so a
+  // configured client that later gets a session doesn't show twice.
+  const configuredClients = useMemo<string[]>(() => {
+    const out: string[] = [];
+    for (const cfg of Object.values(clientConfigs)) {
+      const name = cfg.display_name || "";
+      if (name) out.push(name);
+    }
+    return out;
+  }, [clientConfigs]);
   const clients = useMemo(() => {
-    const merged = new Set([...taggedClients, ...pendingClients]);
-    return Array.from(merged).sort();
-  }, [taggedClients, pendingClients]);
+    const seen = new Map<string, string>();
+    for (const name of [...taggedClients, ...configuredClients, ...pendingClients]) {
+      const key = name.toLowerCase();
+      if (!seen.has(key)) seen.set(key, name);
+    }
+    return Array.from(seen.values()).sort((a, b) => a.localeCompare(b));
+  }, [taggedClients, configuredClients, pendingClients]);
   const [selected, setSelected] = useState<string>("");
   const [showNewClient, setShowNewClient] = useState(false);
   const [newClientName, setNewClientName] = useState("");
@@ -67,15 +90,31 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
     if (!selected && clients.length > 0) setSelected(clients[0]);
   }, [clients, selected]);
 
-  const handleCreate = () => {
+  const handleCreate = async () => {
     const n = newClientName.trim();
     if (!n) return;
+    // Persist immediately so the client survives a reload even if the
+    // user closes the "Tag Meetings" dialog without tagging anything.
+    // The empty export_folder is fine — it just means "no designated
+    // export folder yet", same as any tagged client that hasn't had
+    // one configured.
+    try {
+      await api.setClientConfig(n, { export_folder: "" });
+    } catch (e) {
+      toast.error(`Could not save client: ${e instanceof Error ? e.message : e}`);
+      return;
+    }
+    // Optimistic local update so the new client shows up immediately
+    // without waiting on the refetch round-trip.
     setPendingClients((prev) => Array.from(new Set([...prev, n])));
     setSelected(n);
     setShowNewClient(false);
     setNewClientName("");
     setShowTagMeetings(true);
-    toast.success(`Client "${n}" ready — tag meetings to it`);
+    toast.success(`Client "${n}" created — tag meetings to it (or close to add later)`);
+    // Refresh from backend so configuredClients picks up the new entry
+    // and the optimistic pendingClients slot becomes redundant.
+    refreshClientConfigs();
   };
 
   if (clients.length === 0 && !showNewClient) {
