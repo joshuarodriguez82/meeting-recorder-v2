@@ -2061,7 +2061,10 @@ async def get_client_configs():
     svc.load_settings()
     def _do():
         return {
-            name: {"export_folder": cfg.export_folder}
+            name: {
+                "export_folder": cfg.export_folder,
+                "display_name": cfg.display_name or name,
+            }
             for name, cfg in svc.client_cfg_svc.get_all().items()
         }
     return await asyncio.to_thread(_do)

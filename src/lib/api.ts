@@ -952,7 +952,8 @@ export const api = {
 
   // Per-client configs (designated export folders, etc.)
   getClientConfigs: () =>
-    request<Record<string, { export_folder: string }>>("/clients/config"),
+    request<Record<string, { export_folder: string; display_name?: string }>>(
+      "/clients/config"),
   setClientConfig: (name: string, cfg: { export_folder: string }) =>
     request<{ ok: boolean; export_folder: string }>(
       `/clients/config/${encodeURIComponent(name)}`,
