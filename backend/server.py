@@ -473,6 +473,9 @@ class Services:
         # Insights aggregator — typed loosely to keep the heavy import
         # off the module level (mirrors how RecordingService is held).
         self.insights_svc = None
+        # Calendar-driven auto-recorder. Started/stopped from the
+        # /settings handler whenever auto_record_enabled flips.
+        self.auto_record_svc = None
         self.transcription: Optional[TranscriptionEngine] = None
         self.diarization: Optional[DiarizationEngine] = None
         self.summarizer: Optional[Summarizer] = None
@@ -674,6 +677,9 @@ class SettingsDTO(BaseModel):
     overrun_warn_min: int = 5
     overrun_stop_min: int = 0
     hard_cap_hours: int = 4
+    # Calendar-driven auto-start. Defaults off — user opts in via the
+    # toggle on the Record view. Persisted across restarts.
+    auto_record_enabled: bool = False
 
 
 class StartRecordingRequest(BaseModel):
@@ -758,6 +764,7 @@ async def get_settings():
         overrun_warn_min=s.overrun_warn_min,
         overrun_stop_min=s.overrun_stop_min,
         hard_cap_hours=s.hard_cap_hours,
+        auto_record_enabled=s.auto_record_enabled,
     )
 
 
@@ -820,6 +827,7 @@ async def save_settings(payload: SettingsDTO):
         overrun_warn_min=max(0, payload.overrun_warn_min),
         overrun_stop_min=max(0, payload.overrun_stop_min),
         hard_cap_hours=max(0, payload.hard_cap_hours),
+        auto_record_enabled=bool(payload.auto_record_enabled),
     )
     # If the recordings folder changed, migrate client + template state
     # from the previous folder to the new one. Copy, not move, so the
@@ -851,6 +859,12 @@ async def save_settings(payload: SettingsDTO):
     svc.settings = None
     svc.models_ready = False
     svc.load_settings()
+
+    # Toggle the auto-record loop to match the freshly-saved flag.
+    try:
+        _ensure_auto_record_service()
+    except Exception as e:
+        logger.warning(f"AutoRecordService toggle failed: {e}")
 
     # Apply launch-on-login state to the OS only on actual transitions.
     # The startup_shortcut module is platform-aware: Windows installs a
@@ -1325,6 +1339,53 @@ def _start_recording_sync(req: StartRecordingRequest):
     return session
 
 
+def _auto_record_start(meeting: dict) -> None:
+    """Adapter the AutoRecordService calls when a meeting window opens.
+    Synthesizes a StartRecordingRequest from the calendar event and hands
+    it to the same sync start path the HTTP route uses, so the watchdog
+    (overrun + silence) gets the same scheduled_end_iso treatment as a
+    user-driven start. Runs in a worker thread (called via to_thread)."""
+    from services.calendar_service import make_session_name
+    end = meeting.get("end")
+    end_iso = end.isoformat() if hasattr(end, "isoformat") else None
+    name = make_session_name(meeting) if meeting.get("start") else (meeting.get("subject") or "")
+    req = StartRecordingRequest(
+        meeting_name=name,
+        attendees=list(meeting.get("attendees") or []),
+        scheduled_end_iso=end_iso,
+    )
+    # Mirror the HTTP route's pre-warm step so live transcription has
+    # Whisper ready when the first window completes.
+    if (svc.settings and svc.settings.is_configured
+            and not svc.models_ready and not svc.models_loading):
+        threading.Thread(target=svc.ensure_models_loaded, daemon=True).start()
+    _start_recording_sync(req)
+
+
+def _ensure_auto_record_service() -> None:
+    """Lazily build the AutoRecordService once settings exist, and
+    start/stop its loop to match the current `auto_record_enabled` flag.
+    Safe to call from any HTTP handler — it's idempotent."""
+    from services.auto_record_service import AutoRecordService
+    from services import calendar_service
+    if svc.auto_record_svc is None:
+        svc.auto_record_svc = AutoRecordService(
+            get_upcoming_meetings=calendar_service.get_upcoming_meetings,
+            is_recording=lambda: bool(
+                svc.recording_svc and svc.recording_svc.is_recording),
+            start_recording=_auto_record_start,
+            is_enabled=lambda: bool(
+                svc.settings and svc.settings.auto_record_enabled),
+        )
+    want_on = bool(svc.settings and svc.settings.auto_record_enabled)
+    if want_on and not svc.auto_record_svc.running:
+        svc.auto_record_svc.start()
+    elif not want_on and svc.auto_record_svc.running:
+        # Schedule the stop without awaiting — the loop unwinds on its
+        # own cancellation; we don't want to block the settings handler.
+        asyncio.create_task(svc.auto_record_svc.stop())
+
+
 @app.post("/recording/start")
 async def start_recording(req: StartRecordingRequest):
     svc.load_settings()
@@ -1348,6 +1409,22 @@ async def start_recording(req: StartRecordingRequest):
     except Exception as e:
         logger.exception("Start recording failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/recording/auto-status")
+async def recording_auto_status():
+    """Lightweight status feed for the auto-record toggle on the main
+    page. Returns whether the loop is currently running and, when on,
+    the next qualifying calendar event (so the UI can render
+    'Auto-record on — next: <subject> at <time>')."""
+    svc.load_settings()
+    running = bool(svc.auto_record_svc and svc.auto_record_svc.running)
+    next_event = svc.auto_record_svc.next_event if svc.auto_record_svc else None
+    return {
+        "enabled": bool(svc.settings and svc.settings.auto_record_enabled),
+        "running": running,
+        "next_event": next_event,
+    }
 
 
 @app.get("/recording/transcript/stream")
@@ -3338,6 +3415,13 @@ async def startup():
         logger.info("Backend started")
     except Exception as e:
         logger.warning(f"Settings not yet configured: {e}")
+
+    # Start the calendar-driven auto-recorder if the user left it on
+    # last session. Safe no-op when settings load failed above.
+    try:
+        _ensure_auto_record_service()
+    except Exception as e:
+        logger.warning(f"AutoRecordService bootstrap failed: {e}")
 
     # Crash recovery: if a previous run died mid-`/recording/stop`, merge
     # the orphan `_recording_*.wav` / `_loopback_*.wav` temp files into
