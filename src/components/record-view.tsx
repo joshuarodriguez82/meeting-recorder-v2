@@ -54,6 +54,12 @@ export function RecordView({
   // the currently-selected client (rather than showing every project
   // anyone's ever used, regardless of customer).
   const [allSessions, setAllSessions] = useState<SessionSummary[]>([]);
+  // Clients that have been persisted to client_configs.json. Lets a
+  // freshly-created client name (one with no sessions yet) show up in
+  // the autocomplete here, and gives us the canonical set we check
+  // against when deciding whether to persist a newly-typed name on
+  // start().
+  const [clientConfigs, setClientConfigs] = useState<Record<string, { export_folder: string; display_name?: string }>>({});
 
   const [meetingName, setMeetingName] = useState("");
   const [template, setTemplate] = useState("General");
@@ -99,12 +105,14 @@ export function RecordView({
     (async () => {
       try {
         // Fast-path: everything local (device list, templates, sessions)
-        const [devices, tpls, status, sessionsList] = await Promise.all([
+        const [devices, tpls, status, sessionsList, cfgs] = await Promise.all([
           api.getAudioDevices(),
           api.getTemplates(),
           api.recordingStatus(),
           api.listSessions().catch(() => []),
+          api.getClientConfigs().catch(() => ({} as Record<string, { export_folder: string; display_name?: string }>)),
         ]);
+        setClientConfigs(cfgs);
         setInputDevices(devices.input);
         setOutputDevices(devices.output);
         // Templates endpoint now returns full {name, prompt, ...} entries
@@ -161,10 +169,25 @@ export function RecordView({
   // When no client is chosen we fall back to every project — so you can
   // still pick a project first and have the client auto-fill on the next
   // render once you've typed it.
-  const existingClients = useMemo(
-    () => Array.from(new Set(allSessions.map((s) => s.client).filter(Boolean))).sort(),
-    [allSessions],
-  );
+  const existingClients = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const s of allSessions) {
+      const name = (s.client || "").trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (!seen.has(key)) seen.set(key, name);
+    }
+    // Merge in configured clients (e.g. created via Clients view but
+    // never tagged on a session yet) so the autocomplete here knows
+    // about them too.
+    for (const cfg of Object.values(clientConfigs)) {
+      const name = (cfg.display_name || "").trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (!seen.has(key)) seen.set(key, name);
+    }
+    return Array.from(seen.values()).sort((a, b) => a.localeCompare(b));
+  }, [allSessions, clientConfigs]);
   const existingProjects = useMemo(() => {
     const target = (client || "").trim().toLowerCase();
     const scoped = target
@@ -282,6 +305,27 @@ export function RecordView({
       setWatchdogWarnings([]);
       notifiedCodesRef.current = new Set();
       toast.success("Recording started", { description: `Session ${res.session_id}` });
+
+      // If the user typed a client name that hasn't been persisted yet,
+      // create it now so it survives even if this recording is later
+      // deleted, and so it syncs to other devices via client_configs.json.
+      // Fire-and-forget — failure here shouldn't block the recording.
+      const trimmedClient = (client || "").trim();
+      if (trimmedClient) {
+        const knownKeys = new Set(
+          Object.values(clientConfigs)
+            .map((c) => (c.display_name || "").trim().toLowerCase())
+            .filter(Boolean));
+        if (!knownKeys.has(trimmedClient.toLowerCase())) {
+          api.setClientConfig(trimmedClient, { export_folder: "" })
+            .then(() => api.getClientConfigs().then(setClientConfigs).catch(() => {}))
+            .catch((e) => {
+              // Surface but don't disrupt — the client is still on the
+              // session JSON; this only affects the configured store.
+              console.warn("Could not persist new client", trimmedClient, e);
+            });
+        }
+      }
     } catch (e) {
       toast.error(`Start failed: ${e instanceof Error ? e.message : e}`);
     }
@@ -484,7 +528,7 @@ export function RecordView({
                 list="clients-list"
                 value={client}
                 onChange={(e) => setClient(e.target.value)}
-                placeholder="e.g. Initech"
+                placeholder="Type new or pick existing"
                 disabled={recording}
                 autoComplete="off"
               />
@@ -501,7 +545,7 @@ export function RecordView({
                 list="projects-list"
                 value={project}
                 onChange={(e) => setProject(e.target.value)}
-                placeholder="e.g. AWS Connect PoC"
+                placeholder="Type new or pick existing"
                 disabled={recording}
                 autoComplete="off"
               />
