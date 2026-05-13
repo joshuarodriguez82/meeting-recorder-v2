@@ -142,6 +142,18 @@ const SECTIONS: Section[] = [
           Enable Stereo Mix in Windows Sound settings or install VB-Cable.
         </Warn>
         <Tip>
+          <strong>Auto-record from calendar</strong> (toggle in the Upcoming Meetings card
+          header). When on, the app watches your calendar and starts a recording automatically
+          at each meeting&apos;s scheduled start time, with the meeting name, attendees, and
+          scheduled end already wired up — so the auto-stop watchdog catches overrun + silence
+          for free. Filters out all-day events and only fires for events that include a
+          Teams / Zoom / Meet / Webex / GoToMeeting / BlueJeans / Whereby link. Manual
+          recordings always win: while you&apos;re already recording (manually or auto), no new
+          auto-start fires, and a calendar meeting that opens during a manual recording is
+          marked handled so it won&apos;t pounce the moment you hit Stop. The toggle state
+          persists across restarts.
+        </Tip>
+        <Tip>
           <strong>Conference room mode</strong> (toggle below the device selectors): turns off
           system-audio loopback entirely and captures only the mic. Use it when you&apos;re in a
           physical conference room with the laptop on the table, the remote party is on
@@ -349,6 +361,41 @@ const SECTIONS: Section[] = [
           state for the old text won&apos;t map to the new one. Re-check the box after large
           edits.
         </Warn>
+      </>
+    ),
+  },
+  {
+    id: "insights",
+    title: "Insights",
+    content: (
+      <>
+        <p>
+          The <strong>Insights</strong> tab is a cross-meeting trend dashboard. Pick a date
+          window (or leave it open) and optionally scope to one client; the page renders three
+          aggregated views computed live over your session library:
+        </p>
+        <ul className="list-disc pl-5 space-y-1">
+          <li>
+            <strong>Time allocation</strong> — total recorded time bucketed by client and by
+            summary template, so you can see where your meeting hours are actually going.
+          </li>
+          <li>
+            <strong>Recurring topics</strong> — common phrases extracted from summaries,
+            grouped per client. Useful for noticing which threads keep coming back without
+            being closed out.
+          </li>
+          <li>
+            <strong>Open loops</strong> — follow-ups and decisions that are still unchecked
+            past a staleness threshold (30 days by default). Pulled from the same
+            per-item state you maintain in the Follow-Ups / Decisions tabs, so checking an
+            item off there removes it here.
+          </li>
+        </ul>
+        <Tip>
+          Everything is computed on demand from the session JSONs you already have on disk —
+          no separate index to build, no separate database to back up. Open Insights and the
+          aggregation runs in under a second on a typical library.
+        </Tip>
       </>
     ),
   },
@@ -620,6 +667,7 @@ const SECTIONS: Section[] = [
       <>
         <p>In <strong>Settings &gt; Workflow</strong>:</p>
         <ul className="list-disc pl-5 space-y-1">
+          <li><strong>Auto-record from calendar</strong> — see the toggle in the Upcoming Meetings card on the Record view. Starts recording automatically at each meeting&apos;s scheduled start (filters: skip all-day events, require a Teams/Zoom/Meet/Webex/GoToMeeting/BlueJeans/Whereby link). Auto-stop is handled by the existing silence + overrun watchdog with the meeting&apos;s scheduled end pre-filled. Manual recordings always win.</li>
           <li><strong>Auto-process after stop</strong> — transcribe → speaker-diarize → summary → action items → decisions → requirements all run automatically when you stop recording. Each stage is independent; a failure on one (rate-limit on Claude, etc.) doesn&apos;t stop the others.</li>
           <li><strong>Auto-draft follow-up email</strong> — after processing, Claude generates a per-attendee follow-up email with their specific action items and meeting context, then creates Outlook drafts (one per person) in your Drafts folder. You review and hit Send. Requires Classic Outlook.</li>
           <li><strong>Launch on Windows startup</strong> — adds a shortcut to the Startup folder via in-process COM (no subprocess at all since v2.0.14 — eliminates the occasional CMD flash and the AV-kill risk on locked-down laptops).</li>
