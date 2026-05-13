@@ -75,6 +75,12 @@ export interface Settings {
   overrun_warn_min: number;
   overrun_stop_min: number;
   hard_cap_hours: number;
+  // Calendar-driven auto-start. When true, a backend loop polls the
+  // user's calendar every 30s and starts a recording at the scheduled
+  // start time of any non-all-day event with a Teams/Zoom/Meet link.
+  // Manual recordings always win — auto-start is suppressed while a
+  // recording is already in progress.
+  auto_record_enabled: boolean;
 }
 
 export interface AudioDevice {
@@ -910,6 +916,22 @@ export const api = {
   isCalendarAvailable: () =>
     request<{ available: boolean }>("/calendar/available"),
 
+  // Auto-record loop status. `enabled` mirrors Settings.auto_record_enabled;
+  // `running` confirms the backend loop is actually live (they can briefly
+  // disagree during a settings toggle). `next_event` is null when nothing
+  // qualifies in the next 24h.
+  getAutoRecordStatus: () =>
+    request<{
+      enabled: boolean;
+      running: boolean;
+      next_event: {
+        subject: string;
+        start: string;
+        end: string;
+        location: string;
+      } | null;
+    }>("/recording/auto-status"),
+
   // Sessions
   listSessions: () => request<SessionSummary[]>("/sessions"),
   deleteSession: (id: string) =>
@@ -952,7 +974,8 @@ export const api = {
 
   // Per-client configs (designated export folders, etc.)
   getClientConfigs: () =>
-    request<Record<string, { export_folder: string }>>("/clients/config"),
+    request<Record<string, { export_folder: string; display_name?: string }>>(
+      "/clients/config"),
   setClientConfig: (name: string, cfg: { export_folder: string }) =>
     request<{ ok: boolean; export_folder: string }>(
       `/clients/config/${encodeURIComponent(name)}`,
@@ -963,7 +986,86 @@ export const api = {
     request<{ ok: boolean; target_dir: string; paths: string[] }>(
       `/sessions/${id}/export`, { method: "POST" }
     ),
+
+  // Cross-meeting analytics for the Insights view. Computed
+  // server-side from session JSONs + commitments/item-status
+  // sidecars. The result is small (a few KB at most), so we don't
+  // bother with caching on the client.
+  getInsights: (params: { since?: string; until?: string; client?: string } = {}) => {
+    const q = new URLSearchParams();
+    if (params.since) q.set("since", params.since);
+    if (params.until) q.set("until", params.until);
+    if (params.client) q.set("client", params.client);
+    const qs = q.toString();
+    return request<InsightsSummary>(
+      `/insights/summary${qs ? `?${qs}` : ""}`);
+  },
 };
+
+export interface InsightsRow {
+  label: string;
+  seconds: number;
+}
+export interface InsightsTopic {
+  phrase: string;
+  count: number;
+}
+export interface StaleCommitment {
+  commitment_id: string;
+  session_id: string;
+  owner: string;
+  side: string;
+  description: string;
+  due_date_iso: string;
+  is_overdue: boolean;
+  session_display_name: string;
+  session_client: string;
+  session_started_at: string;
+}
+export interface OpenDecision {
+  session_id: string;
+  session_display_name: string;
+  session_client: string;
+  session_started_at: string;
+  title: string;
+  decided: string;
+  item_hash: string;
+}
+export interface OpenActionItem {
+  session_id: string;
+  session_display_name: string;
+  session_client: string;
+  session_started_at: string;
+  owner: string;
+  description: string;
+  due: string;
+  item_hash: string;
+}
+export interface InsightsSummary {
+  window: {
+    since: string | null;
+    until: string | null;
+    client: string | null;
+    session_count: number;
+    total_seconds: number;
+  };
+  time_allocation: {
+    by_client: InsightsRow[];
+    by_template: InsightsRow[];
+    by_project: InsightsRow[];
+  };
+  topics: Record<string, InsightsTopic[]>;
+  open_loops: {
+    stale_commitments: StaleCommitment[];
+    un_implemented_decisions: OpenDecision[];
+    unchecked_action_items: OpenActionItem[];
+    counts: {
+      stale_commitments: number;
+      un_implemented_decisions: number;
+      unchecked_action_items: number;
+    };
+  };
+}
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;

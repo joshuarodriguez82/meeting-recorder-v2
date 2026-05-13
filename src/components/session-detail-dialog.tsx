@@ -192,6 +192,20 @@ export function SessionDetailDialog({
         display_name: displayName,
         client, project, template, notes,
       });
+      // If the user typed a brand-new client name (one not already in
+      // the existingClients list passed down from the page), persist it
+      // to client_configs.json so it shows up alongside the configured
+      // clients and syncs across devices. Fire-and-forget; the tag
+      // itself is already saved on the session JSON above.
+      const trimmedClient = (client || "").trim();
+      if (trimmedClient) {
+        const knownKeys = new Set(
+          existingClients.map((c) => c.trim().toLowerCase()).filter(Boolean));
+        if (!knownKeys.has(trimmedClient.toLowerCase())) {
+          api.setClientConfig(trimmedClient, { export_folder: "" })
+            .catch((e) => console.warn("Could not persist new client", trimmedClient, e));
+        }
+      }
       toast.success("Saved");
       setDirty(false);
       await reload();
