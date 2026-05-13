@@ -39,6 +39,11 @@ export default function Home() {
   const [backendReady, setBackendReady] = useState(false);
   const [nav, setNav] = useState<string>("record");
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  // Configured clients (from client_configs.json). Merged into
+  // existingClients so the Sessions detail dialog's client picker also
+  // surfaces clients that were created but haven't been tagged on a
+  // session yet. Refreshed alongside sessions.
+  const [clientConfigs, setClientConfigs] = useState<Record<string, { export_folder: string; display_name?: string }>>({});
   const [storage, setStorage] = useState<{
     total_bytes: number;
     session_count: number;
@@ -63,7 +68,22 @@ export default function Home() {
     setDetailOpen(true);
   };
 
-  const existingClients = Array.from(new Set(sessions.map((s) => s.client).filter(Boolean))).sort();
+  const existingClients = (() => {
+    const seen = new Map<string, string>();
+    for (const s of sessions) {
+      const name = (s.client || "").trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (!seen.has(key)) seen.set(key, name);
+    }
+    for (const cfg of Object.values(clientConfigs)) {
+      const name = (cfg.display_name || "").trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (!seen.has(key)) seen.set(key, name);
+    }
+    return Array.from(seen.values()).sort((a, b) => a.localeCompare(b));
+  })();
   // Scope projects to the client they were tagged under so the detail
   // dialog's Project dropdown doesn't offer a project from a different
   // customer (which would silently mis-tag the session on save).
@@ -190,13 +210,15 @@ export default function Home() {
 
   const reloadSessions = async () => {
     try {
-      const [s, stats, settings] = await Promise.all([
+      const [s, stats, settings, cfgs] = await Promise.all([
         api.listSessions(),
         api.getRetentionStats().catch(() => null),
         api.getSettings().catch(() => null),
+        api.getClientConfigs().catch(() => ({} as Record<string, { export_folder: string; display_name?: string }>)),
       ]);
       setSessions(s);
       setStorage(stats);
+      setClientConfigs(cfgs);
       if (settings) setNotifyMinutes(settings.notify_minutes_before);
     } catch (e) {
       console.error(e);
