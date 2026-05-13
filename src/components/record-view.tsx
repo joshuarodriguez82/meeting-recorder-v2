@@ -54,6 +54,12 @@ export function RecordView({
   // the currently-selected client (rather than showing every project
   // anyone's ever used, regardless of customer).
   const [allSessions, setAllSessions] = useState<SessionSummary[]>([]);
+  // Clients that have been persisted to client_configs.json. Lets a
+  // freshly-created client name (one with no sessions yet) show up in
+  // the autocomplete here, and gives us the canonical set we check
+  // against when deciding whether to persist a newly-typed name on
+  // start().
+  const [clientConfigs, setClientConfigs] = useState<Record<string, { export_folder: string; display_name?: string }>>({});
 
   const [meetingName, setMeetingName] = useState("");
   const [template, setTemplate] = useState("General");
@@ -93,18 +99,32 @@ export function RecordView({
   // a fresh click on a different tile cleanly resets the modal state.
   const [briefMeeting, setBriefMeeting] = useState<Meeting | null>(null);
 
+  // Calendar-driven auto-record toggle. Persisted server-side via
+  // Settings.auto_record_enabled; mirrored here so the Switch can flip
+  // optimistically. `autoRecordNext` is the next qualifying event, shown
+  // as a small hint under the toggle.
+  const [autoRecord, setAutoRecord] = useState<boolean>(false);
+  const [autoRecordNext, setAutoRecordNext] = useState<{
+    subject: string;
+    start: string;
+    end: string;
+  } | null>(null);
+  const [autoRecordSaving, setAutoRecordSaving] = useState<boolean>(false);
+
   // Load initial data. Calendar data is owned by the parent (page.tsx)
   // so it survives nav switches; we only load local things here.
   useEffect(() => {
     (async () => {
       try {
         // Fast-path: everything local (device list, templates, sessions)
-        const [devices, tpls, status, sessionsList] = await Promise.all([
+        const [devices, tpls, status, sessionsList, cfgs] = await Promise.all([
           api.getAudioDevices(),
           api.getTemplates(),
           api.recordingStatus(),
           api.listSessions().catch(() => []),
+          api.getClientConfigs().catch(() => ({} as Record<string, { export_folder: string; display_name?: string }>)),
         ]);
+        setClientConfigs(cfgs);
         setInputDevices(devices.input);
         setOutputDevices(devices.output);
         // Templates endpoint now returns full {name, prompt, ...} entries
@@ -161,10 +181,25 @@ export function RecordView({
   // When no client is chosen we fall back to every project — so you can
   // still pick a project first and have the client auto-fill on the next
   // render once you've typed it.
-  const existingClients = useMemo(
-    () => Array.from(new Set(allSessions.map((s) => s.client).filter(Boolean))).sort(),
-    [allSessions],
-  );
+  const existingClients = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const s of allSessions) {
+      const name = (s.client || "").trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (!seen.has(key)) seen.set(key, name);
+    }
+    // Merge in configured clients (e.g. created via Clients view but
+    // never tagged on a session yet) so the autocomplete here knows
+    // about them too.
+    for (const cfg of Object.values(clientConfigs)) {
+      const name = (cfg.display_name || "").trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (!seen.has(key)) seen.set(key, name);
+    }
+    return Array.from(seen.values()).sort((a, b) => a.localeCompare(b));
+  }, [allSessions, clientConfigs]);
   const existingProjects = useMemo(() => {
     const target = (client || "").trim().toLowerCase();
     const scoped = target
@@ -201,6 +236,66 @@ export function RecordView({
     const dev = outputDevices.find((d) => d.index === outIdx);
     if (dev) window.localStorage.setItem("mr.outputDeviceName", dev.name);
   }, [outIdx, outputDevices]);
+
+  // Auto-record toggle: hydrate from persisted Settings on mount, then
+  // poll /recording/auto-status every 30s so the "next: <subject>" hint
+  // stays current as the calendar evolves. The poll is cheap (no
+  // calendar fetch — the service exposes its cached next_event).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const s = await api.getSettings();
+        if (cancelled) return;
+        setAutoRecord(Boolean(s.auto_record_enabled));
+      } catch {
+        // Settings unreachable — leave toggle off. The /settings
+        // failure path already surfaces elsewhere.
+      }
+    })();
+    const refresh = async () => {
+      try {
+        const st = await api.getAutoRecordStatus();
+        if (cancelled) return;
+        setAutoRecordNext(st.next_event);
+      } catch {
+        // Backend not ready — try again next tick.
+      }
+    };
+    refresh();
+    const id = window.setInterval(refresh, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  const handleAutoRecordToggle = async (next: boolean) => {
+    if (recording && next) {
+      // Avoid the confusing "turn it on while manually recording, then
+      // wonder why nothing changed" case. Refuse the flip until Stop.
+      toast.info(
+        "Stop the current recording before enabling auto-record.");
+      return;
+    }
+    setAutoRecord(next); // optimistic
+    setAutoRecordSaving(true);
+    try {
+      const current = await api.getSettings();
+      await api.saveSettings({ ...current, auto_record_enabled: next });
+      // Pull a fresh status so the "next: …" hint populates immediately
+      // when the user flips on.
+      const st = await api.getAutoRecordStatus();
+      setAutoRecordNext(st.next_event);
+      toast.success(next ? "Auto-record on" : "Auto-record off");
+    } catch (e: unknown) {
+      setAutoRecord(!next); // rollback
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`Couldn't save auto-record setting: ${msg}`);
+    } finally {
+      setAutoRecordSaving(false);
+    }
+  };
 
   // Look up the currently selected device objects for display.
   const selectedMic = inputDevices.find((d) => d.index === micIdx);
@@ -282,6 +377,27 @@ export function RecordView({
       setWatchdogWarnings([]);
       notifiedCodesRef.current = new Set();
       toast.success("Recording started", { description: `Session ${res.session_id}` });
+
+      // If the user typed a client name that hasn't been persisted yet,
+      // create it now so it survives even if this recording is later
+      // deleted, and so it syncs to other devices via client_configs.json.
+      // Fire-and-forget — failure here shouldn't block the recording.
+      const trimmedClient = (client || "").trim();
+      if (trimmedClient) {
+        const knownKeys = new Set(
+          Object.values(clientConfigs)
+            .map((c) => (c.display_name || "").trim().toLowerCase())
+            .filter(Boolean));
+        if (!knownKeys.has(trimmedClient.toLowerCase())) {
+          api.setClientConfig(trimmedClient, { export_folder: "" })
+            .then(() => api.getClientConfigs().then(setClientConfigs).catch(() => {}))
+            .catch((e) => {
+              // Surface but don't disrupt — the client is still on the
+              // session JSON; this only affects the configured store.
+              console.warn("Could not persist new client", trimmedClient, e);
+            });
+        }
+      }
     } catch (e) {
       toast.error(`Start failed: ${e instanceof Error ? e.message : e}`);
     }
@@ -484,7 +600,7 @@ export function RecordView({
                 list="clients-list"
                 value={client}
                 onChange={(e) => setClient(e.target.value)}
-                placeholder="e.g. Initech"
+                placeholder="Type new or pick existing"
                 disabled={recording}
                 autoComplete="off"
               />
@@ -501,7 +617,7 @@ export function RecordView({
                 list="projects-list"
                 value={project}
                 onChange={(e) => setProject(e.target.value)}
-                placeholder="e.g. AWS Connect PoC"
+                placeholder="Type new or pick existing"
                 disabled={recording}
                 autoComplete="off"
               />
@@ -610,12 +726,44 @@ export function RecordView({
             <CalendarIcon className="h-4 w-4 text-primary" />
             Upcoming Meetings
           </CardTitle>
-          <CardAction>
+          <CardAction className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <Switch
+                id="auto-record-toggle"
+                checked={autoRecord}
+                disabled={autoRecordSaving}
+                onCheckedChange={handleAutoRecordToggle}
+              />
+              <Label
+                htmlFor="auto-record-toggle"
+                className="text-xs font-medium cursor-pointer select-none"
+                title={
+                  "Auto-start recording at each calendar meeting's scheduled time. " +
+                  "Filters: skip all-day events; require a Teams/Zoom/Meet link. " +
+                  "Manual recordings always win — auto-start won't fire while you're already recording."
+                }
+              >
+                Auto-record
+              </Label>
+            </div>
             <Button size="sm" variant="outline" onClick={() => onRefreshCalendar(false)} disabled={meetingsLoading}>
               {meetingsLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Refresh"}
             </Button>
           </CardAction>
         </CardHeader>
+        {autoRecord && autoRecordNext && (
+          <div className="px-6 -mt-2 mb-2 text-xs text-muted-foreground">
+            Auto-record on — next:{" "}
+            <span className="font-medium text-foreground">
+              {autoRecordNext.subject}
+            </span>{" "}
+            at{" "}
+            {new Date(autoRecordNext.start).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
+          </div>
+        )}
         <CardContent>
           {meetings.length === 0 ? (
             <p className="text-sm text-muted-foreground text-center py-8">
