@@ -167,6 +167,12 @@ class Settings:
     ai_provider: str
     openai_api_key: str
     openai_base_url: str
+    # When True, a background loop watches the connected calendar and
+    # auto-starts a recording at each qualifying event's scheduled start
+    # time (filtered to non-all-day events with a conference link).
+    # Manual recordings always win — auto-start is a no-op while
+    # `recording_svc.is_recording` is True.
+    auto_record_enabled: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -264,6 +270,7 @@ class Settings:
             overrun_warn_min=_get_int("OVERRUN_WARN_MIN", 5),
             overrun_stop_min=_get_int("OVERRUN_STOP_MIN", 0),
             hard_cap_hours=_get_int("HARD_CAP_HOURS", 4),
+            auto_record_enabled=_get_bool("AUTO_RECORD_ENABLED", False),
         )
 
     @property
@@ -325,6 +332,7 @@ class Settings:
         overrun_warn_min: int = 5,
         overrun_stop_min: int = 0,
         hard_cap_hours: int = 4,
+        auto_record_enabled: bool = False,
     ) -> None:
         """Write settings back to the .env file.
 
@@ -369,6 +377,7 @@ class Settings:
             f"OVERRUN_WARN_MIN={overrun_warn_min}\n"
             f"OVERRUN_STOP_MIN={overrun_stop_min}\n"
             f"HARD_CAP_HOURS={hard_cap_hours}\n"
+            f"AUTO_RECORD_ENABLED={'true' if auto_record_enabled else 'false'}\n"
         )
         # Write to the canonical LOCALAPPDATA location first. In rare cases
         # a Tauri-spawned Python child cannot open files under LOCALAPPDATA

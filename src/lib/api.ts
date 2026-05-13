@@ -75,6 +75,12 @@ export interface Settings {
   overrun_warn_min: number;
   overrun_stop_min: number;
   hard_cap_hours: number;
+  // Calendar-driven auto-start. When true, a backend loop polls the
+  // user's calendar every 30s and starts a recording at the scheduled
+  // start time of any non-all-day event with a Teams/Zoom/Meet link.
+  // Manual recordings always win — auto-start is suppressed while a
+  // recording is already in progress.
+  auto_record_enabled: boolean;
 }
 
 export interface AudioDevice {
@@ -909,6 +915,22 @@ export const api = {
     ),
   isCalendarAvailable: () =>
     request<{ available: boolean }>("/calendar/available"),
+
+  // Auto-record loop status. `enabled` mirrors Settings.auto_record_enabled;
+  // `running` confirms the backend loop is actually live (they can briefly
+  // disagree during a settings toggle). `next_event` is null when nothing
+  // qualifies in the next 24h.
+  getAutoRecordStatus: () =>
+    request<{
+      enabled: boolean;
+      running: boolean;
+      next_event: {
+        subject: string;
+        start: string;
+        end: string;
+        location: string;
+      } | null;
+    }>("/recording/auto-status"),
 
   // Sessions
   listSessions: () => request<SessionSummary[]>("/sessions"),
