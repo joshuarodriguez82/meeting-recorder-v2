@@ -913,6 +913,9 @@ function AppUpdatesCard() {
     url: string;
     body: string;
     publishedAt: string;
+    // Mirrors src/lib/updater.ts LatestRelease — needed so the value
+    // can be handed to downloadUpdate() without a type error.
+    assets: { name: string; url: string }[];
   };
   type State =
     | { kind: "loading"; current: string }
