@@ -19,7 +19,7 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Loader2, Cog, Sparkles, ClipboardList, FileText, Target,
-  Users, Save, X, Pencil, Check, StickyNote, Mail,
+  Users, Save, X, Pencil, Check, StickyNote, Mail, Image as ImageIcon,
 } from "lucide-react";
 
 interface Props {
@@ -304,6 +304,17 @@ export function SessionDetailDialog({
                 <TabsTrigger value="speakers" disabled={Object.keys(session.speakers).length === 0}>
                   Speakers {Object.keys(session.speakers).length > 0 && <span className="ml-1 text-muted-foreground">({Object.keys(session.speakers).length})</span>}
                 </TabsTrigger>
+                <TabsTrigger
+                  value="screenshots"
+                  disabled={(session.screenshots?.length ?? 0) === 0}
+                >
+                  <ImageIcon className="h-3.5 w-3.5 mr-1" />
+                  Screenshots {(session.screenshots?.length ?? 0) > 0 && (
+                    <span className="ml-1 text-muted-foreground">
+                      ({session.screenshots?.length})
+                    </span>
+                  )}
+                </TabsTrigger>
                 <TabsTrigger value="summary" disabled={!session.summary}>Summary</TabsTrigger>
                 <TabsTrigger value="actions" disabled={!session.action_items}>Actions</TabsTrigger>
                 <TabsTrigger value="decisions" disabled={!session.decisions}>Decisions</TabsTrigger>
@@ -479,6 +490,10 @@ export function SessionDetailDialog({
                   />
                 </TabsContent>
 
+                <TabsContent value="screenshots" className="mt-0">
+                  <ScreenshotsView session={session} />
+                </TabsContent>
+
                 <TabsContent value="summary" className="mt-0">
                   <MarkdownBlock content={session.summary || ""} />
                 </TabsContent>
@@ -500,6 +515,89 @@ export function SessionDetailDialog({
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+function ScreenshotsView({ session }: { session: SessionFull }) {
+  const shots = session.screenshots ?? [];
+  const [baseUrl, setBaseUrl] = useState<string>("");
+  // Index of the screenshot shown full-size in the lightbox; null = grid.
+  const [zoomed, setZoomed] = useState<number | null>(null);
+
+  useEffect(() => {
+    // Images stream from the backend (dynamic port in production), same
+    // approach as the audio player — never read local file paths from
+    // the webview.
+    api.getBaseUrl().then(setBaseUrl).catch(() => {});
+  }, []);
+
+  if (shots.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground text-center py-8">
+        No screenshots were captured during this meeting.
+      </p>
+    );
+  }
+
+  const srcFor = (i: number) =>
+    `${baseUrl}/sessions/${session.session_id}/screenshots/${i}`;
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        {shots.length} screenshot{shots.length !== 1 ? "s" : ""} captured during
+        this meeting. These are included as visual context when generating the
+        summary, and stay with the recording for future reference.
+      </p>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+        {shots.map((_, i) => (
+          <button
+            key={i}
+            type="button"
+            onClick={() => setZoomed(i)}
+            className="group relative overflow-hidden rounded-lg border bg-muted/30 transition hover:ring-2 hover:ring-primary"
+            title="Click to enlarge"
+          >
+            {baseUrl && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={srcFor(i)}
+                alt={`Screenshot ${i + 1}`}
+                className="h-36 w-full object-cover"
+                loading="lazy"
+              />
+            )}
+            <span className="absolute bottom-1 right-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white">
+              {i + 1}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      {zoomed !== null && baseUrl && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-6"
+          onClick={() => setZoomed(null)}
+          role="dialog"
+          aria-modal="true"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={srcFor(zoomed)}
+            alt={`Screenshot ${zoomed + 1}`}
+            className="max-h-full max-w-full rounded-lg object-contain shadow-2xl"
+          />
+          <button
+            type="button"
+            onClick={() => setZoomed(null)}
+            className="absolute right-4 top-4 rounded-full bg-white/10 p-2 text-white hover:bg-white/20"
+            aria-label="Close"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
