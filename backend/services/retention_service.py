@@ -90,11 +90,26 @@ def _is_processed(session_data: dict) -> bool:
     return bool(session_data.get("segments"))
 
 
+def _base_name(data: dict) -> str:
+    """Recreate ExportService._base_name from a session JSON so we can
+    recognise the recorder's own audio copies sitting in a client's
+    Designated Folder. MUST stay in sync with
+    services/export_service.py:_base_name."""
+    display = (data.get("display_name") or "").strip()
+    if display:
+        safe = "".join(
+            c if c.isalnum() or c in " -_" else "" for c in display
+        ).strip()
+        return safe or str(data.get("session_id") or "")
+    return f"session_{data.get('session_id') or ''}"
+
+
 def cleanup(
     recordings_dir: str,
     processed_days: int = 7,
     unprocessed_days: int = 30,
     dry_run: bool = False,
+    client_export_dirs: Optional[List[str]] = None,
 ) -> Dict[str, int]:
     """
     Apply retention policy. Returns stats dict:
@@ -103,6 +118,16 @@ def cleanup(
 
     - processed_days <= 0  →  never delete processed audio
     - unprocessed_days <= 0 →  never delete unprocessed audio
+
+    `client_export_dirs`: the configured per-client Designated Folders.
+    Following only the `exported_audio_paths` recorded on a session
+    misses copies an older app version made before that tracking
+    existed (or whose session JSON was since deleted) — they orphan in
+    the client folder forever. When these dirs are supplied we also
+    sweep them directly, but ONLY delete files whose name exactly
+    matches a recorder-generated export name (reconstructed from a
+    session's display name) and that are older than the policy — never
+    the user's own files that happen to live in that folder.
     """
     path = Path(recordings_dir)
     if not path.exists():
@@ -210,6 +235,87 @@ def cleanup(
                 )
             except OSError as e:
                 logger.warning(f"Retention: could not delete {fpath}: {e}")
+
+    # 1b. Sweep configured client Designated Folders for the recorder's
+    #     own audio copies that the per-session pass above can't see
+    #     (untracked: older app version, or the session JSON is gone).
+    #     Safety: a file is deleted ONLY if its name exactly matches an
+    #     export name we can reconstruct from a session JSON and it's
+    #     past the age policy — the user's unrelated files in that
+    #     folder are never touched.
+    if client_export_dirs:
+        # name -> (processed, age_days_from_started_at_or_None)
+        expected: Dict[str, tuple] = {}
+        for json_path in path.glob("session_*.json"):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            ap = data.get("audio_path") or ""
+            suffix = Path(ap).suffix.lower() or ".wav"
+            fname = f"{_base_name(data)}{suffix}"
+            base_age: Optional[float] = None
+            started = data.get("started_at")
+            if started:
+                try:
+                    dt = datetime.datetime.fromisoformat(started)
+                    if dt.tzinfo is not None:
+                        dt = dt.replace(tzinfo=None)
+                    base_age = (now - dt).total_seconds() / 86400
+                except ValueError:
+                    pass
+            expected[fname] = (_is_processed(data), base_age)
+
+        seen_dirs: set = set()
+        rec_resolved = str(path.resolve())
+        for d in client_export_dirs:
+            if not d:
+                continue
+            try:
+                cdir = Path(d)
+                rkey = str(cdir.resolve())
+            except Exception:
+                continue
+            # Skip the recordings dir itself (handled above) and dupes.
+            if rkey == rec_resolved or rkey in seen_dirs:
+                continue
+            seen_dirs.add(rkey)
+            if not cdir.is_dir():
+                continue
+            for fpath in cdir.iterdir():
+                try:
+                    if not fpath.is_file():
+                        continue
+                    meta = expected.get(fpath.name)
+                    if meta is None:
+                        continue  # not a recorder-created file — leave it
+                    processed, age_days = meta
+                    if age_days is None:
+                        age_days = (now - datetime.datetime.fromtimestamp(
+                            fpath.stat().st_mtime)).total_seconds() / 86400
+                    threshold = processed_days if processed else unprocessed_days
+                    if threshold <= 0 or age_days < threshold:
+                        continue
+                    size = fpath.stat().st_size
+                    if not dry_run:
+                        fpath.unlink()
+                    bytes_freed += size
+                    deleted_count += 1
+                    if processed:
+                        processed_deleted += 1
+                    else:
+                        unprocessed_deleted += 1
+                    logger.info(
+                        f"Retention: {'(dry run) ' if dry_run else ''}deleted "
+                        f"untracked client-folder copy {fpath} "
+                        f"({age_days:.1f} days old, {format_bytes(size)})"
+                    )
+                except OSError as e:
+                    logger.warning(
+                        f"Retention: could not sweep {fpath}: {e}")
 
     # 2. Orphaned temp files older than 1 day
     for pattern in ("_recording_*.wav", "_loopback_*.wav"):
