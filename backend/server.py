@@ -1210,10 +1210,14 @@ async def get_calendar_upcoming(hours: int = 168, refresh: bool = False):
     Refresh button in the UI when the user added a meeting in Outlook
     and needs it reflected immediately).
 
-    Wrapped in a 15s asyncio timeout so a hung Outlook COM call never
-    leaves the frontend with a dead fetch. On timeout we return [] and
-    let the user Refresh again; the underlying thread finishes at its
-    own pace and populates the cache for next time.
+    Wrapped in an asyncio timeout so a truly hung Outlook COM call never
+    leaves the frontend with a dead fetch. The cap was 15s, but a user
+    with many shared/resource Exchange calendars sees first-fetch times
+    of ~30s+ — so every cold start timed out to an empty list and the
+    panel looked permanently broken until a manual Refresh. 45s clears
+    the realistic slow case while still bounding a genuine hang. On
+    timeout we still return [] (the background thread keeps going and
+    populates the 5-min cache, so the next call is instant).
     """
     try:
         if refresh:
@@ -1222,11 +1226,11 @@ async def get_calendar_upcoming(hours: int = 168, refresh: bool = False):
         try:
             meetings = await asyncio.wait_for(
                 asyncio.to_thread(get_upcoming_meetings, hours),
-                timeout=15.0,
+                timeout=45.0,
             )
         except asyncio.TimeoutError:
             logger.warning(
-                f"Calendar fetch ({hours}h) exceeded 15s — returning empty. "
+                f"Calendar fetch ({hours}h) exceeded 45s — returning empty. "
                 f"Outlook/Exchange likely slow to respond. Retry in a moment.")
             return []
         return _serialize_meetings(meetings)
@@ -3558,7 +3562,24 @@ async def retention_cleanup(processed_days: int = 7, unprocessed_days: int = 30)
         s.recordings_dir,
         processed_days=processed_days,
         unprocessed_days=unprocessed_days,
+        client_export_dirs=_client_export_dirs(),
     )
+
+
+def _client_export_dirs() -> list[str]:
+    """Configured per-client Designated Folders, so retention can sweep
+    untracked recorder copies that orphaned in them."""
+    try:
+        if not svc.client_cfg_svc:
+            return []
+        return [
+            cfg.export_folder
+            for cfg in svc.client_cfg_svc.get_all().values()
+            if getattr(cfg, "export_folder", "")
+        ]
+    except Exception as e:
+        logger.warning(f"Could not enumerate client export dirs: {e}")
+        return []
 
 
 # Re-check roughly twice a day. Retention is day-granular so this is
@@ -3588,6 +3609,7 @@ async def _retention_loop():
                         s.recordings_dir,
                         processed_days=s.retention_processed_days,
                         unprocessed_days=s.retention_unprocessed_days,
+                        client_export_dirs=_client_export_dirs(),
                     )
                     if res.get("deleted_count"):
                         logger.info(
