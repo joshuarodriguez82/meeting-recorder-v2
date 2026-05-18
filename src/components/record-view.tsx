@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, type AudioDevice, type Meeting, type RecordingStatus, type SessionFull, type SessionSummary } from "@/lib/api";
+import { api, openExternal, type AudioDevice, type Meeting, type RecordingStatus, type SessionFull, type SessionSummary } from "@/lib/api";
 import { toast } from "sonner";
 import {
   Calendar as CalendarIcon,
@@ -11,6 +11,11 @@ import {
   Play,
   Mic,
   FileText,
+  Camera,
+  Ban,
+  ChevronRight,
+  ChevronDown,
+  ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -25,6 +30,9 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
+} from "@/components/ui/dialog";
 import { LiveTranscriptPanel } from "./live-transcript-panel";
 import { MeetingBriefModal } from "./meeting-brief-modal";
 import { LiveSearchPanel } from "./live-search-panel";
@@ -38,6 +46,17 @@ interface Props {
   // where an Outlook hiccup should keep the current list instead of
   // flashing to empty. Silent mode also suppresses toast feedback.
   onRefreshCalendar: (silent?: boolean) => void;
+}
+
+// One physical display, as reported by Tauri's monitor list. Bounds are
+// in physical pixels; the Rust capture command converts as needed.
+interface ScreenMonitor {
+  name: string | null;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  scale: number;
 }
 
 export function RecordView({
@@ -84,6 +103,64 @@ export function RecordView({
 
   const [recording, setRecording] = useState(false);
   const [duration, setDuration] = useState(0);
+  // Screenshots captured during the current recording. Count is shown
+  // on the button; the files themselves are attached server-side and
+  // fed to the summarizer as visual context.
+  const [screenshotBusy, setScreenshotBusy] = useState(false);
+  const [screenshotCount, setScreenshotCount] = useState(0);
+  // When the user has >1 monitor, clicking Screenshot opens this picker
+  // so they choose which display to capture (rather than us guessing).
+  const [monitorPicker, setMonitorPicker] = useState<{
+    dir: string;
+    monitors: ScreenMonitor[];
+  } | null>(null);
+  // Subjects flagged "never auto-record" (permanent, server-persisted,
+  // matched by subject so a recurring series stays blocked).
+  const [blockedSubjects, setBlockedSubjects] = useState<string[]>([]);
+  // Lazy per-meeting detail (agenda/body, attendees, join link). Keyed
+  // by subject|start. Only the expanded meeting is fetched, so the
+  // calendar list stays fast.
+  const [expandedMeeting, setExpandedMeeting] = useState<string | null>(null);
+  const [meetingDetails, setMeetingDetails] = useState<
+    Record<
+      string,
+      {
+        loading: boolean;
+        data?: { attendees: string[]; body: string; join_url: string | null };
+        error?: string;
+      }
+    >
+  >({});
+
+  const meetingKey = (m: Meeting) => `${m.subject}|${m.start}`;
+
+  const toggleMeetingDetail = (m: Meeting) => {
+    const key = meetingKey(m);
+    if (expandedMeeting === key) {
+      setExpandedMeeting(null);
+      return;
+    }
+    setExpandedMeeting(key);
+    if (meetingDetails[key]?.data || meetingDetails[key]?.loading) return;
+    setMeetingDetails((prev) => ({ ...prev, [key]: { loading: true } }));
+    api
+      .getMeetingDetail(m.subject, m.start)
+      .then((d) =>
+        setMeetingDetails((prev) => ({
+          ...prev,
+          [key]: { loading: false, data: d },
+        })),
+      )
+      .catch((e) =>
+        setMeetingDetails((prev) => ({
+          ...prev,
+          [key]: {
+            loading: false,
+            error: e instanceof Error ? e.message : String(e),
+          },
+        })),
+      );
+  };
   const [modelsLoading, setModelsLoading] = useState(false);
   // Auto-stop watchdog warnings, polled from /recording/status while
   // recording. Used to render a banner under the recording bar and
@@ -373,6 +450,7 @@ export function RecordView({
       });
       setRecording(true);
       setDuration(0);
+      setScreenshotCount(0);
       setSession(null);
       setWatchdogWarnings([]);
       notifiedCodesRef.current = new Set();
@@ -459,6 +537,104 @@ export function RecordView({
     }
   };
 
+  // Capture a screenshot of the user's screen and attach it to the
+  // active recording. The capture runs in the Tauri shell (macOS
+  // attributes Screen Recording permission to the signed bundle, not
+  // the Python sidecar); the backend owns the destination folder and
+  // session bookkeeping.
+  // Capture `m` (or the whole primary screen when m is null) and attach
+  // it to the active recording.
+  const captureMonitor = async (dir: string, m: ScreenMonitor | null) => {
+    setScreenshotBusy(true);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const path = await invoke<string>("capture_screenshot", {
+        dir,
+        x: m ? Math.round(m.x) : 0,
+        y: m ? Math.round(m.y) : 0,
+        width: m ? Math.round(m.width) : 0,
+        height: m ? Math.round(m.height) : 0,
+        scale: m ? m.scale : 1,
+      });
+      const res = await api.attachScreenshot(path);
+      setScreenshotCount(res.count);
+      toast.success("Screenshot captured", {
+        description: `${res.count} attached — included in the summary to Claude`,
+      });
+    } catch (e) {
+      toast.error(
+        `Screenshot failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setScreenshotBusy(false);
+    }
+  };
+
+  const takeScreenshot = async () => {
+    setScreenshotBusy(true);
+    try {
+      const { dir } = await api.getScreenshotDir();
+      // Enumerate displays so the user can pick. availableMonitors is
+      // Tauri-only; outside Tauri (plain web dev) we just grab primary.
+      let monitors: ScreenMonitor[] = [];
+      try {
+        const win = await import("@tauri-apps/api/window");
+        const list = await win.availableMonitors();
+        monitors = list.map((mon) => ({
+          name: mon.name ?? null,
+          x: mon.position.x,
+          y: mon.position.y,
+          width: mon.size.width,
+          height: mon.size.height,
+          scale: mon.scaleFactor,
+        }));
+      } catch {
+        monitors = [];
+      }
+
+      if (monitors.length <= 1) {
+        // Nothing to choose — capture the one (or primary fallback).
+        await captureMonitor(dir, monitors[0] ?? null);
+        return;
+      }
+      // Multiple displays: let the user pick. The dialog drives the
+      // actual capture; release the busy state until they choose.
+      setScreenshotBusy(false);
+      setMonitorPicker({ dir, monitors });
+    } catch (e) {
+      toast.error(
+        `Screenshot failed: ${e instanceof Error ? e.message : String(e)}`);
+      setScreenshotBusy(false);
+    }
+  };
+
+  const isBlocked = (subject: string) =>
+    blockedSubjects.some(
+      (s) => s.trim().toLowerCase() === (subject || "").trim().toLowerCase());
+
+  const toggleBlock = async (subject: string) => {
+    const blocked = isBlocked(subject);
+    try {
+      const res = blocked
+        ? await api.removeAutoRecordBlocklist(subject)
+        : await api.addAutoRecordBlocklist(subject);
+      setBlockedSubjects(res.subjects);
+      toast.success(
+        blocked
+          ? "Auto-record re-enabled for this meeting"
+          : "Won't auto-record this meeting anymore");
+    } catch (e) {
+      toast.error(
+        `Couldn't update: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  // Load the persisted "never auto-record" list once on mount.
+  useEffect(() => {
+    api.getAutoRecordBlocklist()
+      .then((r) => setBlockedSubjects(r.subjects))
+      .catch(() => {});
+  }, []);
+
   // Silent auto-refresh when the app window regains focus. When the user
   // tabs back from Outlook after accepting a new meeting, the calendar
   // panel updates without them having to click Refresh. Debounced at
@@ -517,6 +693,20 @@ export function RecordView({
               {formatDur(duration)} · {meetingName || "Untitled"}
             </div>
           </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={takeScreenshot}
+            disabled={screenshotBusy}
+            title="Capture your screen and attach it to this meeting — included as visual context in the summary to Claude"
+          >
+            {screenshotBusy ? (
+              <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />
+            ) : (
+              <Camera className="h-3.5 w-3.5 mr-2" />
+            )}
+            {screenshotCount > 0 ? `Screenshot (${screenshotCount})` : "Screenshot"}
+          </Button>
           <Button variant="destructive" size="sm" onClick={stop}>
             <Square className="h-3.5 w-3.5 mr-2" />
             Stop
@@ -777,48 +967,156 @@ export function RecordView({
                 const now = new Date();
                 const live = start <= now && now <= end;
                 const past = end < now;
+                const key = meetingKey(m);
+                const open = expandedMeeting === key;
+                const det = meetingDetails[key];
                 return (
                   <div
                     key={i}
-                    className={`flex items-center gap-4 rounded-lg border p-3 transition-colors ${
+                    className={`rounded-lg border transition-colors ${
                       live ? "bg-red-50 border-red-200 dark:bg-red-950/40 dark:border-red-900"
                         : past ? "opacity-60" : "hover:bg-muted/40"
                     }`}
                   >
-                    <div className="flex flex-col items-start w-24 text-xs font-medium">
-                      <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                        {dayLabel(start)}
-                      </span>
-                      <span>{start.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-                      <span className="text-muted-foreground">
-                        {end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                      </span>
-                    </div>
-                    {live && <Badge variant="destructive" className="text-[10px]">LIVE</Badge>}
-                    <div className="flex-1 min-w-0">
-                      <div className="truncate text-sm font-medium">{m.subject}</div>
-                      {m.location && (
-                        <div className="text-xs text-muted-foreground truncate">{m.location}</div>
+                    <div className="flex items-center gap-4 p-3">
+                      <div className="flex flex-col items-start w-24 text-xs font-medium">
+                        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                          {dayLabel(start)}
+                        </span>
+                        <span>{start.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                        <span className="text-muted-foreground">
+                          {end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                      </div>
+                      {live && <Badge variant="destructive" className="text-[10px]">LIVE</Badge>}
+                      <button
+                        type="button"
+                        onClick={() => toggleMeetingDetail(m)}
+                        className="flex-1 min-w-0 flex items-start gap-2 text-left"
+                        title="Show attendees, agenda, and join link"
+                      >
+                        {open
+                          ? <ChevronDown className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
+                          : <ChevronRight className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />}
+                        <span className="min-w-0">
+                          <span className="block truncate text-sm font-medium">{m.subject}</span>
+                          {m.location && (
+                            <span className="block text-xs text-muted-foreground truncate">{m.location}</span>
+                          )}
+                        </span>
+                      </button>
+                      <span className="text-xs text-muted-foreground">{m.duration}m</span>
+                      {!past && (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setBriefMeeting(m)}
+                            disabled={recording}
+                            title="Generate a pre-meeting brief from prior calls with these attendees"
+                            className="px-2"
+                          >
+                            <Sparkles className="h-3.5 w-3.5 mr-1" />
+                            Brief
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => toggleBlock(m.subject)}
+                            title={
+                              isBlocked(m.subject)
+                                ? "On your never-auto-record list. Click to allow auto-record again."
+                                : "Never auto-record this meeting (applies to the whole recurring series, permanently)"
+                            }
+                            className={`px-2 ${
+                              isBlocked(m.subject)
+                                ? "text-amber-600 dark:text-amber-500"
+                                : "text-muted-foreground"
+                            }`}
+                          >
+                            <Ban className="h-3.5 w-3.5 mr-1" />
+                            {isBlocked(m.subject) ? "Auto-record off" : "No auto"}
+                          </Button>
+                          <Button size="sm" variant="outline" onClick={() => useMeeting(m)} disabled={recording}>
+                            Use
+                          </Button>
+                        </>
                       )}
                     </div>
-                    <span className="text-xs text-muted-foreground">{m.duration}m</span>
-                    {!past && (
-                      <>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => setBriefMeeting(m)}
-                          disabled={recording}
-                          title="Generate a pre-meeting brief from prior calls with these attendees"
-                          className="px-2"
-                        >
-                          <Sparkles className="h-3.5 w-3.5 mr-1" />
-                          Brief
-                        </Button>
-                        <Button size="sm" variant="outline" onClick={() => useMeeting(m)} disabled={recording}>
-                          Use
-                        </Button>
-                      </>
+
+                    {open && (
+                      <div className="border-t px-4 py-3 space-y-3 text-sm">
+                        {det?.loading && (
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            Loading meeting details…
+                          </div>
+                        )}
+                        {det?.error && (
+                          <div className="text-xs text-destructive">
+                            Couldn&apos;t load details: {det.error}
+                          </div>
+                        )}
+                        {det?.data && (
+                          <>
+                            {det.data.join_url && (
+                              <div className="space-y-1">
+                                <button
+                                  type="button"
+                                  onClick={() => openExternal(det.data!.join_url!)}
+                                  className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90"
+                                >
+                                  <ExternalLink className="h-3.5 w-3.5" />
+                                  Join meeting
+                                </button>
+                                {/* The raw URL as an actual clickable
+                                    link (the app-wide handler opens it
+                                    in the real browser) and still
+                                    selectable to copy as a fallback. */}
+                                <a
+                                  href={det.data.join_url}
+                                  className="block text-[11px] text-primary underline break-all select-all hover:opacity-80"
+                                >
+                                  {det.data.join_url}
+                                </a>
+                              </div>
+                            )}
+                            <div>
+                              <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
+                                Attendees ({det.data.attendees.length})
+                              </div>
+                              {det.data.attendees.length === 0 ? (
+                                <div className="text-xs text-muted-foreground">None listed.</div>
+                              ) : (
+                                <div className="flex flex-wrap gap-1 max-h-28 overflow-auto">
+                                  {det.data.attendees.map((a, ai) => (
+                                    <span
+                                      key={ai}
+                                      className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-foreground/80"
+                                    >
+                                      {a}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                            <div>
+                              <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
+                                Agenda / invite body
+                              </div>
+                              {det.data.body ? (
+                                <div className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/40 p-2 text-xs leading-relaxed">
+                                  {det.data.body}
+                                </div>
+                              ) : (
+                                <div className="text-xs text-muted-foreground">
+                                  (No description on this invite.)
+                                </div>
+                              )}
+                            </div>
+                          </>
+                        )}
+                      </div>
                     )}
                   </div>
                 );
@@ -870,6 +1168,60 @@ export function RecordView({
           if (p) setProject(p);
         }}
       />
+
+      <Dialog
+        open={monitorPicker !== null}
+        onOpenChange={(open) => { if (!open) setMonitorPicker(null); }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Which screen?</DialogTitle>
+            <DialogDescription>
+              You have {monitorPicker?.monitors.length ?? 0} displays. Pick the
+              one to capture — it&apos;s attached to this meeting and sent to
+              Claude as visual context.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            {monitorPicker && monitorPicker.monitors.map((m, i) => {
+              const primary = m.x === 0 && m.y === 0;
+              const side =
+                m.x > 0 ? "right" : m.x < 0 ? "left"
+                  : m.y > 0 ? "below" : m.y < 0 ? "above" : "primary";
+              return (
+                <button
+                  key={i}
+                  type="button"
+                  disabled={screenshotBusy}
+                  onClick={async () => {
+                    const dir = monitorPicker.dir;
+                    setMonitorPicker(null);
+                    await captureMonitor(dir, m);
+                  }}
+                  className="flex w-full items-center justify-between rounded-lg border p-3 text-left transition hover:bg-muted/50 disabled:opacity-60"
+                >
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium truncate">
+                      Display {i + 1}
+                      {m.name ? ` — ${m.name}` : ""}
+                      {primary && (
+                        <span className="ml-2 text-[10px] uppercase tracking-wide text-muted-foreground">
+                          primary
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {Math.round(m.width)}×{Math.round(m.height)}
+                      {!primary && ` · ${side} of main`}
+                    </div>
+                  </div>
+                  <Camera className="h-4 w-4 shrink-0 text-muted-foreground" />
+                </button>
+              );
+            })}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

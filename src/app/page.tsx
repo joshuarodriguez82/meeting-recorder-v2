@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
-import { api, formatBytes, type Meeting, type SessionSummary } from "@/lib/api";
+import { api, formatBytes, openExternal, type Meeting, type SessionSummary } from "@/lib/api";
 import {
   Mic, History, CheckSquare, Target, Search,
   LayoutDashboard, Settings as SettingsIcon, HelpCircle, Loader2,
@@ -105,6 +105,26 @@ export default function Home() {
   const [pipelineStatus, setPipelineStatus] = useState<{
     loading: boolean; text: string;
   }>({ loading: false, text: "" });
+
+  // App-wide external-link handler. In a Tauri webview a plain
+  // <a target="_blank"> never reaches the system browser, so EVERY
+  // external link in the app (Join meeting, Settings/API console
+  // links, Usage Guide, etc.) silently did nothing in the packaged
+  // build. One delegated listener routes any http(s) anchor click
+  // through the real OS opener — no per-component changes needed.
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (e.defaultPrevented || e.button !== 0) return;
+      const a = (e.target as HTMLElement | null)?.closest?.("a");
+      const href = a?.getAttribute("href") || "";
+      if (/^https?:\/\//i.test(href)) {
+        e.preventDefault();
+        openExternal(href);
+      }
+    };
+    document.addEventListener("click", onClick);
+    return () => document.removeEventListener("click", onClick);
+  }, []);
 
   // Pull the installed Tauri app version so the sidebar shows the real
   // build number instead of a stale hardcoded string.
@@ -210,7 +230,7 @@ export default function Home() {
     return () => { cancelled = true; };
   }, []);
 
-  const reloadSessions = async () => {
+  const reloadSessions = useCallback(async () => {
     try {
       const [s, stats, settings, cfgs] = await Promise.all([
         api.listSessions(),
@@ -225,7 +245,45 @@ export default function Home() {
     } catch (e) {
       console.error(e);
     }
-  };
+  }, []);
+
+  // Sessions carry the AI-extracted fields (summary / action_items /
+  // decisions) that the Follow-ups & Decisions tabs parse. Those tabs
+  // read the page-level `sessions`, so without a refresh they show
+  // whatever was loaded at startup — a call that auto-processed in the
+  // background wouldn't appear until a full reload. Re-pull sessions
+  // when the user opens one of those tabs, and when the app window
+  // regains focus (e.g. tabbing back after a call finished processing).
+  useEffect(() => {
+    if (!backendReady) return;
+    if (
+      nav === "sessions" || nav === "follow-ups"
+      || nav === "decisions" || nav === "clients"
+    ) {
+      reloadSessions();
+    }
+  }, [nav, backendReady, reloadSessions]);
+
+  useEffect(() => {
+    if (!backendReady) return;
+    let last = 0;
+    const refresh = () => {
+      // Debounce: focus + visibilitychange can both fire on one tab-back.
+      const now = Date.now();
+      if (now - last < 10_000) return;
+      last = now;
+      reloadSessions();
+    };
+    const onVis = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [backendReady, reloadSessions]);
 
   // Calendar loader. Kept here so the list survives nav switches. On
   // errors or empty responses from a transient COM hiccup, we preserve
@@ -304,7 +362,7 @@ export default function Home() {
                 <br />
                 • Another instance is running (check Task Manager for meeting-recorder.exe / pythonw.exe)
                 <br />
-                • Port 17645 held by a zombie process
+                • A stale backend process is holding the app&apos;s port (it&apos;s chosen automatically at startup)
               </div>
             </div>
             <div className="flex gap-2">

@@ -736,7 +736,12 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(backend)
-        .invoke_handler(tauri::generate_handler![restart_backend, get_backend_port])
+        .invoke_handler(tauri::generate_handler![
+            restart_backend,
+            get_backend_port,
+            capture_screenshot,
+            open_external
+        ])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -867,6 +872,211 @@ fn restart_backend(
     }
     spawn_python_backend(&app).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Tauri command: capture a screenshot of the user's screen into `dir`
+/// and return the saved file's absolute path.
+///
+/// Capture lives in the Rust shell on purpose. On macOS, Screen
+/// Recording permission (TCC) is attributed to the signed app bundle —
+/// the same reason the calendar bridge moved here. The Python sidecar
+/// runs from a venv outside the bundle and its capture would be denied.
+/// We shell out to the OS screenshot tool rather than pull in a heavy
+/// capture crate: keeps the CI bundle small and avoids the macos-14
+/// runner brittleness called out in AGENTS.md.
+/// `x`/`y`/`width`/`height` are the chosen monitor's bounds in PHYSICAL
+/// pixels (from the frontend's Tauri monitor list); `scale` is that
+/// monitor's scale factor. When `width`/`height` are 0 we fall back to
+/// a full primary-screen grab — covers the single-monitor / no-info
+/// path so the button never silently no-ops.
+#[tauri::command]
+fn capture_screenshot(
+    dir: String,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    scale: f64,
+) -> Result<String, String> {
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let target_dir = PathBuf::from(&dir);
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("Could not create screenshot dir: {}", e))?;
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let out_path = target_dir.join(format!("screenshot_{}.png", millis));
+    let out = out_path.to_string_lossy().to_string();
+
+    let region = width > 0 && height > 0;
+
+    #[cfg(target_os = "macos")]
+    let result = {
+        // screencapture -R takes points; Tauri bounds are physical
+        // pixels, so divide by the monitor's scale factor. Only the
+        // macOS path needs this, so it's scoped here to avoid an
+        // unused-variable warning on Windows/Linux builds.
+        let sc = if scale > 0.0 { scale } else { 1.0 };
+        if region {
+            let rx = (x as f64 / sc).round() as i64;
+            let ry = (y as f64 / sc).round() as i64;
+            let rw = (width as f64 / sc).round() as i64;
+            let rh = (height as f64 / sc).round() as i64;
+            let r = format!("-R{},{},{},{}", rx, ry, rw, rh);
+            Command::new("screencapture")
+                .args(["-x", "-t", "png", r.as_str(), out.as_str()])
+                .status()
+        } else {
+            Command::new("screencapture")
+                .args(["-x", "-t", "png", out.as_str()])
+                .status()
+        }
+    };
+
+    #[cfg(target_os = "windows")]
+    let result = {
+        // SetProcessDPIAware so CopyFromScreen coordinates are physical
+        // pixels and line up with the Tauri monitor bounds. Falls back
+        // to the primary screen when no region was supplied.
+        let grab = if region {
+            format!(
+                "$bmp = New-Object System.Drawing.Bitmap {w}, {h}; \
+                 $g = [System.Drawing.Graphics]::FromImage($bmp); \
+                 $g.CopyFromScreen({x}, {y}, 0, 0, $bmp.Size);",
+                w = width, h = height, x = x, y = y
+            )
+        } else {
+            "$b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; \
+             $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height; \
+             $g = [System.Drawing.Graphics]::FromImage($bmp); \
+             $g.CopyFromScreen($b.X, $b.Y, 0, 0, $bmp.Size);"
+                .to_string()
+        };
+        let ps = format!(
+            "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
+             Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] \
+             public static extern bool SetProcessDPIAware();' \
+             -Name U -Namespace W; [W.U]::SetProcessDPIAware() | Out-Null; \
+             {grab} \
+             $bmp.Save('{out}', [System.Drawing.Imaging.ImageFormat]::Png); \
+             $g.Dispose(); $bmp.Dispose()",
+            grab = grab,
+            out = out.replace('\'', "''")
+        );
+        Command::new("powershell")
+            .args(["-NoProfile", "-STA", "-Command", ps.as_str()])
+            .status()
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = {
+        // Try the common Wayland/X11 tools in turn; first one that's
+        // installed and succeeds wins. With a region we pass the
+        // geometry; without one we grab everything.
+        let mut last: std::io::Result<std::process::ExitStatus> =
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no screenshot tool",
+            ));
+        let geom_grim = format!("{},{} {}x{}", x, y, width, height);
+        let geom_im = format!("{}x{}+{}+{}", width, height, x, y);
+        let geom_scrot = format!("{},{},{},{}", x, y, width, height);
+        let attempts: Vec<(&str, Vec<&str>)> = if region {
+            vec![
+                ("grim", vec!["-g", geom_grim.as_str(), out.as_str()]),
+                ("import", vec!["-window", "root", "-crop",
+                                geom_im.as_str(), out.as_str()]),
+                ("scrot", vec!["-a", geom_scrot.as_str(), out.as_str()]),
+            ]
+        } else {
+            vec![
+                ("grim", vec![out.as_str()]),
+                ("gnome-screenshot", vec!["-f", out.as_str()]),
+                ("scrot", vec![out.as_str()]),
+                ("import", vec!["-window", "root", out.as_str()]),
+            ]
+        };
+        for (bin, args) in attempts.iter() {
+            match Command::new(bin).args(args).status() {
+                Ok(s) if s.success() => {
+                    last = Ok(s);
+                    break;
+                }
+                other => last = other,
+            }
+        }
+        last
+    };
+
+    match result {
+        Ok(status) if status.success() => {
+            if std::path::Path::new(&out).exists() {
+                rlog(&format!("Screenshot captured: {}", out));
+                Ok(out)
+            } else {
+                Err("Screenshot tool reported success but no file was \
+                     written. On macOS, grant Screen Recording permission \
+                     in System Settings → Privacy & Security."
+                    .to_string())
+            }
+        }
+        Ok(status) => Err(format!(
+            "Screenshot tool exited with status {}. On macOS, grant \
+             Screen Recording permission in System Settings → Privacy \
+             & Security, then try again.",
+            status
+        )),
+        Err(e) => Err(format!("Could not run screenshot tool: {}", e)),
+    }
+}
+
+/// Tauri command: open an http(s) URL in the user's default browser.
+///
+/// In a Tauri webview a plain `<a target="_blank">` does NOT reach the
+/// system browser, so the "Join meeting" link (and every other external
+/// link in the app) silently did nothing in the packaged build. We
+/// shell out to the OS handler — same no-extra-crates approach as the
+/// screenshot command. The URL is passed as a single argument (no shell
+/// re-parsing) and scheme-validated so this can't be turned into an
+/// arbitrary-command/launch primitive from the web layer.
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    let u = url.trim();
+    let low = u.to_ascii_lowercase();
+    if !(low.starts_with("https://") || low.starts_with("http://")) {
+        return Err("Only http/https URLs can be opened.".to_string());
+    }
+    // Defense-in-depth: reject control chars / whitespace that could
+    // confuse a downstream handler.
+    if u.chars().any(|c| c.is_control() || c == '"') {
+        return Err("URL contains invalid characters.".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    // rundll32 FileProtocolHandler takes the URL as ONE opaque arg and
+    // launches the default browser — unlike `cmd /c start`, it doesn't
+    // re-parse `&` in the query string (Teams/Zoom links are full of
+    // them).
+    let res = Command::new("rundll32.exe")
+        .args(["url.dll,FileProtocolHandler", u])
+        .spawn();
+
+    #[cfg(target_os = "macos")]
+    let res = Command::new("open").arg(u).spawn();
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let res = Command::new("xdg-open").arg(u).spawn();
+
+    match res {
+        Ok(_) => {
+            rlog(&format!("Opened external URL: {}", u));
+            Ok(())
+        }
+        Err(e) => Err(format!("Could not open browser: {}", e)),
+    }
 }
 
 fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
