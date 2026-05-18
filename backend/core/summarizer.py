@@ -424,6 +424,7 @@ class Summarizer:
         identified_client: str,
         identified_project: str,
         prior_notes: str,
+        agenda: str = "",
     ) -> str:
         """Richer prep brief used by the click-from-calendar-tile flow.
         Includes hot-topics + suggested-questions sections and asks
@@ -442,12 +443,24 @@ class Summarizer:
         scope_blob = identified_client or "(no client identified)"
         if identified_project:
             scope_blob += f" / {identified_project}"
+        agenda = (agenda or "").strip()
+        # Keep the invite body bounded so it can't crowd out the prior
+        # notes in the context window.
+        if len(agenda) > 4000:
+            agenda = agenda[:4000] + "\n…(truncated)"
+        agenda_block = (
+            f"\n\n=== MEETING INVITE / AGENDA ===\n{agenda}" if agenda else ""
+        )
         try:
             result = await self._chat(
                 (
                     "You're preparing a Solutions Architect for a specific "
-                    "upcoming meeting on their calendar. Use ONLY the prior "
-                    "meeting notes below; don't invent context. Output "
+                    "upcoming meeting on their calendar. Ground the brief "
+                    "in the prior meeting notes below (and the meeting "
+                    "invite/agenda if one is provided); don't invent "
+                    "context. When an agenda is present, let it steer the "
+                    "'Hot topics' and 'Questions' sections toward what "
+                    "this specific meeting is actually about. Output "
                     "concise actionable markdown. When you reference a "
                     "specific prior meeting, INLINE the citation as "
                     "`[ABC123]` using the literal session ID from the "
@@ -478,7 +491,8 @@ class Summarizer:
                     f"Subject: {upcoming_subject}\n"
                     f"When: {upcoming_when}\n"
                     f"Attendees: {attendee_blob}\n"
-                    f"Account: {scope_blob}\n\n"
+                    f"Account: {scope_blob}"
+                    f"{agenda_block}\n\n"
                     f"=== PRIOR MEETING NOTES ===\n{prior_notes}"
                 ),
                 max_tokens=1500, timeout=90.0,

@@ -13,6 +13,9 @@ import {
   FileText,
   Camera,
   Ban,
+  ChevronRight,
+  ChevronDown,
+  ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -114,6 +117,50 @@ export function RecordView({
   // Subjects flagged "never auto-record" (permanent, server-persisted,
   // matched by subject so a recurring series stays blocked).
   const [blockedSubjects, setBlockedSubjects] = useState<string[]>([]);
+  // Lazy per-meeting detail (agenda/body, attendees, join link). Keyed
+  // by subject|start. Only the expanded meeting is fetched, so the
+  // calendar list stays fast.
+  const [expandedMeeting, setExpandedMeeting] = useState<string | null>(null);
+  const [meetingDetails, setMeetingDetails] = useState<
+    Record<
+      string,
+      {
+        loading: boolean;
+        data?: { attendees: string[]; body: string; join_url: string | null };
+        error?: string;
+      }
+    >
+  >({});
+
+  const meetingKey = (m: Meeting) => `${m.subject}|${m.start}`;
+
+  const toggleMeetingDetail = (m: Meeting) => {
+    const key = meetingKey(m);
+    if (expandedMeeting === key) {
+      setExpandedMeeting(null);
+      return;
+    }
+    setExpandedMeeting(key);
+    if (meetingDetails[key]?.data || meetingDetails[key]?.loading) return;
+    setMeetingDetails((prev) => ({ ...prev, [key]: { loading: true } }));
+    api
+      .getMeetingDetail(m.subject, m.start)
+      .then((d) =>
+        setMeetingDetails((prev) => ({
+          ...prev,
+          [key]: { loading: false, data: d },
+        })),
+      )
+      .catch((e) =>
+        setMeetingDetails((prev) => ({
+          ...prev,
+          [key]: {
+            loading: false,
+            error: e instanceof Error ? e.message : String(e),
+          },
+        })),
+      );
+  };
   const [modelsLoading, setModelsLoading] = useState(false);
   // Auto-stop watchdog warnings, polled from /recording/status while
   // recording. Used to render a banner under the recording bar and
@@ -920,66 +967,145 @@ export function RecordView({
                 const now = new Date();
                 const live = start <= now && now <= end;
                 const past = end < now;
+                const key = meetingKey(m);
+                const open = expandedMeeting === key;
+                const det = meetingDetails[key];
                 return (
                   <div
                     key={i}
-                    className={`flex items-center gap-4 rounded-lg border p-3 transition-colors ${
+                    className={`rounded-lg border transition-colors ${
                       live ? "bg-red-50 border-red-200 dark:bg-red-950/40 dark:border-red-900"
                         : past ? "opacity-60" : "hover:bg-muted/40"
                     }`}
                   >
-                    <div className="flex flex-col items-start w-24 text-xs font-medium">
-                      <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                        {dayLabel(start)}
-                      </span>
-                      <span>{start.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-                      <span className="text-muted-foreground">
-                        {end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                      </span>
-                    </div>
-                    {live && <Badge variant="destructive" className="text-[10px]">LIVE</Badge>}
-                    <div className="flex-1 min-w-0">
-                      <div className="truncate text-sm font-medium">{m.subject}</div>
-                      {m.location && (
-                        <div className="text-xs text-muted-foreground truncate">{m.location}</div>
+                    <div className="flex items-center gap-4 p-3">
+                      <div className="flex flex-col items-start w-24 text-xs font-medium">
+                        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                          {dayLabel(start)}
+                        </span>
+                        <span>{start.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                        <span className="text-muted-foreground">
+                          {end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                      </div>
+                      {live && <Badge variant="destructive" className="text-[10px]">LIVE</Badge>}
+                      <button
+                        type="button"
+                        onClick={() => toggleMeetingDetail(m)}
+                        className="flex-1 min-w-0 flex items-start gap-2 text-left"
+                        title="Show attendees, agenda, and join link"
+                      >
+                        {open
+                          ? <ChevronDown className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
+                          : <ChevronRight className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />}
+                        <span className="min-w-0">
+                          <span className="block truncate text-sm font-medium">{m.subject}</span>
+                          {m.location && (
+                            <span className="block text-xs text-muted-foreground truncate">{m.location}</span>
+                          )}
+                        </span>
+                      </button>
+                      <span className="text-xs text-muted-foreground">{m.duration}m</span>
+                      {!past && (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setBriefMeeting(m)}
+                            disabled={recording}
+                            title="Generate a pre-meeting brief from prior calls with these attendees"
+                            className="px-2"
+                          >
+                            <Sparkles className="h-3.5 w-3.5 mr-1" />
+                            Brief
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => toggleBlock(m.subject)}
+                            title={
+                              isBlocked(m.subject)
+                                ? "On your never-auto-record list. Click to allow auto-record again."
+                                : "Never auto-record this meeting (applies to the whole recurring series, permanently)"
+                            }
+                            className={`px-2 ${
+                              isBlocked(m.subject)
+                                ? "text-amber-600 dark:text-amber-500"
+                                : "text-muted-foreground"
+                            }`}
+                          >
+                            <Ban className="h-3.5 w-3.5 mr-1" />
+                            {isBlocked(m.subject) ? "Auto-record off" : "No auto"}
+                          </Button>
+                          <Button size="sm" variant="outline" onClick={() => useMeeting(m)} disabled={recording}>
+                            Use
+                          </Button>
+                        </>
                       )}
                     </div>
-                    <span className="text-xs text-muted-foreground">{m.duration}m</span>
-                    {!past && (
-                      <>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => setBriefMeeting(m)}
-                          disabled={recording}
-                          title="Generate a pre-meeting brief from prior calls with these attendees"
-                          className="px-2"
-                        >
-                          <Sparkles className="h-3.5 w-3.5 mr-1" />
-                          Brief
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => toggleBlock(m.subject)}
-                          title={
-                            isBlocked(m.subject)
-                              ? "On your never-auto-record list. Click to allow auto-record again."
-                              : "Never auto-record this meeting (applies to the whole recurring series, permanently)"
-                          }
-                          className={`px-2 ${
-                            isBlocked(m.subject)
-                              ? "text-amber-600 dark:text-amber-500"
-                              : "text-muted-foreground"
-                          }`}
-                        >
-                          <Ban className="h-3.5 w-3.5 mr-1" />
-                          {isBlocked(m.subject) ? "Auto-record off" : "No auto"}
-                        </Button>
-                        <Button size="sm" variant="outline" onClick={() => useMeeting(m)} disabled={recording}>
-                          Use
-                        </Button>
-                      </>
+
+                    {open && (
+                      <div className="border-t px-4 py-3 space-y-3 text-sm">
+                        {det?.loading && (
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            Loading meeting details…
+                          </div>
+                        )}
+                        {det?.error && (
+                          <div className="text-xs text-destructive">
+                            Couldn&apos;t load details: {det.error}
+                          </div>
+                        )}
+                        {det?.data && (
+                          <>
+                            {det.data.join_url && (
+                              <a
+                                href={det.data.join_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90"
+                              >
+                                <ExternalLink className="h-3.5 w-3.5" />
+                                Join meeting
+                              </a>
+                            )}
+                            <div>
+                              <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
+                                Attendees ({det.data.attendees.length})
+                              </div>
+                              {det.data.attendees.length === 0 ? (
+                                <div className="text-xs text-muted-foreground">None listed.</div>
+                              ) : (
+                                <div className="flex flex-wrap gap-1 max-h-28 overflow-auto">
+                                  {det.data.attendees.map((a, ai) => (
+                                    <span
+                                      key={ai}
+                                      className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-foreground/80"
+                                    >
+                                      {a}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                            <div>
+                              <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
+                                Agenda / invite body
+                              </div>
+                              {det.data.body ? (
+                                <div className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/40 p-2 text-xs leading-relaxed">
+                                  {det.data.body}
+                                </div>
+                              ) : (
+                                <div className="text-xs text-muted-foreground">
+                                  (No description on this invite.)
+                                </div>
+                              )}
+                            </div>
+                          </>
+                        )}
+                      </div>
                     )}
                   </div>
                 );

@@ -1240,6 +1240,16 @@ async def calendar_available():
     return await asyncio.to_thread(is_outlook_available)
 
 
+@app.get("/calendar/meeting-detail")
+async def calendar_meeting_detail(subject: str, start: str):
+    """Lazy detail for one calendar invite — agenda/body, attendees, and
+    a parsed one-click join link. Fetched on demand (per meeting) so the
+    bulk calendar list stays fast: pulling Outlook bodies for every
+    meeting in the window would blow the 15s COM budget."""
+    from services.calendar_service import get_meeting_detail
+    return await asyncio.to_thread(get_meeting_detail, subject, start)
+
+
 # ── Recording ────────────────────────────────────────────────────────
 def _load_models_async():
     """Fire-and-forget model load on a thread."""
@@ -3316,6 +3326,10 @@ class PrepBriefFromMeetingRequest(BaseModel):
     scheduled_end_iso: str = ""
     client: str = ""
     project: str = ""
+    # The invite body/agenda, when the user opened the meeting's
+    # detail. Optional — older callers / meetings without a body just
+    # omit it and the brief behaves exactly as before.
+    body: str = ""
 
 
 @app.post("/prep-brief/from-meeting")
@@ -3452,6 +3466,7 @@ async def prep_brief_from_meeting(req: PrepBriefFromMeetingRequest):
             identified_client=req.client,
             identified_project=req.project,
             prior_notes=prior_notes,
+            agenda=req.body or "",
         )
     except Exception as e:
         logger.exception("Calendar prep brief failed")
