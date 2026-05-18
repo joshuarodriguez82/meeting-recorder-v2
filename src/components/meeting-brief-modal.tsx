@@ -91,28 +91,40 @@ export function MeetingBriefModal({
     setBrief("");
     setReferenced([]);
     setLastMeetingAt(null);
-    api
-      .prepBriefFromMeeting({
-        subject: meeting.subject,
-        attendees: meeting.attendees || [],
-        scheduled_start_iso: meeting.start,
-        scheduled_end_iso: meeting.end,
-        client,
-        project,
-      })
-      .then((res) => {
+    (async () => {
+      // Pull the invite agenda/body first so Claude can tailor the
+      // brief to what THIS meeting is actually about. Best-effort —
+      // if it fails (no body, calendar hiccup), the brief still
+      // generates from prior-meeting context exactly as before.
+      let body = "";
+      try {
+        const d = await api.getMeetingDetail(meeting.subject, meeting.start);
+        if (cancelled) return;
+        body = d.body || "";
+      } catch {
+        /* agenda is a bonus, not required */
+      }
+      try {
+        const res = await api.prepBriefFromMeeting({
+          subject: meeting.subject,
+          attendees: meeting.attendees || [],
+          scheduled_start_iso: meeting.start,
+          scheduled_end_iso: meeting.end,
+          client,
+          project,
+          body,
+        });
         if (cancelled) return;
         setBrief(res.markdown || "");
         setReferenced(res.referenced_sessions || []);
         setLastMeetingAt(res.last_meeting_at);
-      })
-      .catch((e) => {
+      } catch (e) {
         if (cancelled) return;
         setError(e instanceof Error ? e.message : String(e));
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setLoading(false);
-      });
+      }
+    })();
     return () => { cancelled = true; };
   }, [open, meeting, client, project]);
 
