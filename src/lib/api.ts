@@ -26,6 +26,21 @@ function getBaseUrl(): Promise<string> {
   return _baseUrlPromise;
 }
 
+/**
+ * Open an http(s) URL in the user's real browser. A plain
+ * <a target="_blank"> does nothing in the Tauri webview, so the
+ * "Join meeting" link (and any external link) needs this. Falls back
+ * to window.open outside Tauri (plain `npm run dev`).
+ */
+export async function openExternal(url: string): Promise<void> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("open_external", { url });
+  } catch {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
+
 export interface TemplateEntry {
   name: string;
   prompt: string;

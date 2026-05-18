@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, type AudioDevice, type Meeting, type RecordingStatus, type SessionFull, type SessionSummary } from "@/lib/api";
+import { api, openExternal, type AudioDevice, type Meeting, type RecordingStatus, type SessionFull, type SessionSummary } from "@/lib/api";
 import { toast } from "sonner";
 import {
   Calendar as CalendarIcon,
@@ -1060,15 +1060,22 @@ export function RecordView({
                         {det?.data && (
                           <>
                             {det.data.join_url && (
-                              <a
-                                href={det.data.join_url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90"
-                              >
-                                <ExternalLink className="h-3.5 w-3.5" />
-                                Join meeting
-                              </a>
+                              <div className="space-y-1">
+                                <button
+                                  type="button"
+                                  onClick={() => openExternal(det.data!.join_url!)}
+                                  className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90"
+                                >
+                                  <ExternalLink className="h-3.5 w-3.5" />
+                                  Join meeting
+                                </button>
+                                {/* Always show the raw link too — selectable
+                                    so it can be copied even if launching the
+                                    browser is blocked by the environment. */}
+                                <div className="text-[11px] text-muted-foreground break-all select-all">
+                                  {det.data.join_url}
+                                </div>
+                              </div>
                             )}
                             <div>
                               <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
