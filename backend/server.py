@@ -3523,17 +3523,67 @@ async def prep_brief(req: PrepBriefRequest):
 @app.get("/retention/stats")
 async def retention_stats():
     s = svc.load_settings()
-    return folder_stats(s.recordings_dir)
+    # folder_stats walks the recordings dir (stat() per file). Off-loop
+    # so a large library can't block the event loop / trip the Tauri
+    # backend watchdog.
+    return await asyncio.to_thread(folder_stats, s.recordings_dir)
 
 
 @app.post("/retention/cleanup")
 async def retention_cleanup(processed_days: int = 7, unprocessed_days: int = 30):
     s = svc.load_settings()
-    return run_retention_cleanup(
+    # The cleanup walks every session JSON and unlinks WAVs — seconds to
+    # minutes on a big library. Running it synchronously in this async
+    # handler blocked the whole event loop, so the Tauri shell's backend
+    # watchdog saw the server as unresponsive, killed + respawned it, and
+    # the in-flight request died as a "failed to fetch" in the UI. Run it
+    # in a worker thread instead.
+    return await asyncio.to_thread(
+        run_retention_cleanup,
         s.recordings_dir,
         processed_days=processed_days,
         unprocessed_days=unprocessed_days,
     )
+
+
+# Re-check roughly twice a day. Retention is day-granular so this is
+# plenty; the first pass runs ~1 min after startup so a freshly-opened
+# app reclaims space without waiting out the whole interval.
+RETENTION_INTERVAL_S = 12 * 3600
+
+
+async def _retention_loop():
+    """Background auto-retention. The `retention_enabled` setting existed
+    and was persisted, but nothing ever consumed it — so 'automatic
+    cleanup' silently never happened. This loop is that missing piece.
+
+    Reads settings fresh from disk each cycle so toggling the setting
+    (or changing the day thresholds) takes effect on the next pass
+    without an app restart."""
+    await asyncio.sleep(60)  # let startup prewarm settle first
+    try:
+        while True:
+            try:
+                s = Settings.from_env()
+                if (s.retention_enabled
+                        and (s.retention_processed_days > 0
+                             or s.retention_unprocessed_days > 0)):
+                    res = await asyncio.to_thread(
+                        run_retention_cleanup,
+                        s.recordings_dir,
+                        processed_days=s.retention_processed_days,
+                        unprocessed_days=s.retention_unprocessed_days,
+                    )
+                    if res.get("deleted_count"):
+                        logger.info(
+                            f"Auto-retention: deleted "
+                            f"{res['deleted_count']} file(s), freed "
+                            f"{res.get('bytes_freed', 0)} bytes")
+            except Exception as e:
+                logger.warning(f"Auto-retention pass failed: {e}")
+            await asyncio.sleep(RETENTION_INTERVAL_S)
+    except asyncio.CancelledError:
+        raise
 
 
 # ── Templates ────────────────────────────────────────────────────────
@@ -3629,6 +3679,15 @@ async def startup():
         _ensure_auto_record_service()
     except Exception as e:
         logger.warning(f"AutoRecordService bootstrap failed: {e}")
+
+    # Automatic old-audio cleanup. Previously the retention_enabled
+    # setting was saved but never acted on; this task is what makes it
+    # real. Independent of settings success above — it reads config
+    # fresh each cycle and no-ops while disabled.
+    try:
+        asyncio.create_task(_retention_loop())
+    except Exception as e:
+        logger.warning(f"Auto-retention bootstrap failed: {e}")
 
     # Crash recovery: if a previous run died mid-`/recording/stop`, merge
     # the orphan `_recording_*.wav` / `_loopback_*.wav` temp files into
