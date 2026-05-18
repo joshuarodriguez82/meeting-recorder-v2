@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="mr_accessibility_description">Lets Meeting Recorder capture phone-call audio (including the other party) and automatically start/stop recording when a call begins and ends. It does not read screen content.</string>
+</resources>

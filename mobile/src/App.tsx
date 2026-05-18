@@ -44,6 +44,13 @@ export function App() {
   // is the ground truth — if it says VOICE_CALL, your Pixel let us tap
   // the call directly; anything else means acoustic capture.
   const [audioSource, setAudioSource] = useState<string | null>(null);
+  // Accessibility-service status — the non-root path to capturing the
+  // far side of a call on a stock Pixel (same mechanism Talker ACR
+  // uses). null until first probed.
+  const [acc, setAcc] = useState<{
+    enabled: boolean;
+    autoRecordCalls: boolean;
+  } | null>(null);
   const recStart = useRef(0);
   const sessionIdRef = useRef<string>("");
   const timer = useRef<number | null>(null);
@@ -77,6 +84,58 @@ export function App() {
       })
       .catch(() => {});
   }, []);
+
+  // Accessibility status + adopt any auto-recorded calls. Auto calls
+  // are captured by the AccessibilityService while the WebView is dead,
+  // so on every resume we sweep the cache for orphan recordings, give
+  // them a session JSON, and run them through the normal sync queue.
+  const adoptPending = useCallback(async () => {
+    try {
+      const st = await Recorder.accessibilityStatus();
+      setAcc(st);
+    } catch { /* not native / no plugin */ }
+    try {
+      const { captures } = await Recorder.pendingCaptures();
+      if (!captures.length) return;
+      for (const c of captures) {
+        const now = new Date();
+        const baseName = `session_${c.sessionId}`;
+        const json = buildSessionJson({
+          sessionId: c.sessionId,
+          displayName: `Call ${now.toLocaleString()}`,
+          startedAt: now,
+          endedAt: now,
+          client: defaults.client,
+          project: defaults.project,
+          notes: "Auto-recorded call (Meeting Recorder).",
+        });
+        store.enqueue({
+          sessionId: c.sessionId,
+          baseName,
+          audioPath: c.path,
+          json,
+          displayName: `Call ${now.toLocaleString()}`,
+          createdAt: Date.now(),
+          attempts: 0,
+          lastError: null,
+        });
+      }
+      setPendingDesc(describePending(store.getQueue()));
+      flash(`Found ${captures.length} auto-recorded call(s) — syncing…`);
+      await sync(false);
+      await refreshSynced();
+    } catch { /* nothing to adopt */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaults.client, defaults.project, flash]);
+
+  useEffect(() => {
+    adoptPending();
+    const onVis = () => {
+      if (document.visibilityState === "visible") adoptPending();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [adoptPending]);
 
   useEffect(() => {
     if (!recording) {
@@ -514,6 +573,70 @@ export function App() {
               <p className="hint" style={{ margin: "4px 0 0 20px" }}>
                 Skip the call-tap attempts entirely. Reliable on any device;
                 far side requires speakerphone.
+              </p>
+            </div>
+
+            <h2>Automatic call recording (beta)</h2>
+            <div className="card">
+              <p className="hint" style={{ marginTop: 0 }}>
+                Capturing the <strong>other person</strong> on a regular
+                cellular call (off speaker) needs an Accessibility service —
+                the same mechanism Talker/Cube ACR use. Enable it and calls
+                record automatically, hands-free.
+              </p>
+              <p className="hint">
+                Accessibility service:{" "}
+                <span className={`pill ${acc?.enabled ? "ok" : "warn"}`}>
+                  {acc == null ? "checking…" : acc.enabled ? "on" : "off"}
+                </span>
+              </p>
+              <button
+                className="ghost"
+                onClick={async () => {
+                  try {
+                    await Recorder.openAccessibilitySettings();
+                    flash(
+                      "Turn ON 'Meeting Recorder call capture'. On Android 13+ " +
+                        "also tap ⋮ → Allow restricted settings first.",
+                    );
+                  } catch (e) {
+                    flash(`Couldn't open settings: ${e instanceof Error ? e.message : e}`);
+                  }
+                }}
+              >
+                Open Accessibility settings
+              </button>
+              <p className="hint" style={{ marginTop: 10 }}>
+                <strong>Android 13+:</strong> if the toggle is greyed out, open
+                this app's info → ⋮ menu → <strong>Allow restricted
+                settings</strong>, then enable it.
+              </p>
+              <p className="hint" style={{ marginTop: 10 }}>
+                Phone permission:{" "}
+                <span className={`pill ${perm?.phone === "granted" ? "ok" : "warn"}`}>
+                  {perm?.phone ?? "unknown"}
+                </span>{" "}
+                — lets it auto start/stop on a call.
+              </p>
+              {acc && (
+                <label style={{ display: "block", marginTop: 10 }}>
+                  <input
+                    type="checkbox"
+                    checked={acc.autoRecordCalls}
+                    onChange={async (e) => {
+                      const on = e.target.checked;
+                      await Recorder.setAutoRecordCalls({ enabled: on });
+                      setAcc({ ...acc, autoRecordCalls: on });
+                    }}
+                  />{" "}
+                  Auto-record every phone call
+                </label>
+              )}
+              <p className="hint" style={{ marginTop: 10 }}>
+                After a call, the recording syncs to OneDrive automatically
+                next time this app is open. The recording screen&apos;s pill
+                shows whether your device gave us the real call stream
+                (VOICE_CALL) or fell back to mic.
               </p>
             </div>
 
