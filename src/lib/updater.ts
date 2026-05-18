@@ -1,24 +1,29 @@
 // Lightweight update-availability check.
 //
 // Deliberately NOT a signed in-place updater (no Tauri updater plugin,
-// no key management, no CI signing). The model here is:
+// no key management, no CI signing — builds are unsigned). The model:
 //
 //   1. App launch → query GitHub Releases API for the latest tag.
 //   2. Compare to the running app version.
 //   3. If newer: toast / show "Update available" in Settings.
-//   4. User clicks → opens the GitHub release page in the default
-//      browser. They download and run the installer manually.
+//   4. User clicks Download → we open the correct installer asset for
+//      their OS directly (download starts immediately, no release page
+//      to dig through), in the real browser.
 //
-// That keeps the maintenance cost at zero (no keypair to back up, no
-// secrets to set in CI) while still nudging users to upgrade. For a
-// small-team / personal-use tool this is the right tradeoff vs the
-// full signed-updater dance. Re-evaluate when the user base grows
-// or the threat model includes hostile networks.
+// A true download-and-install-in-place updater needs the Tauri updater
+// plugin + a signing keypair + signed update manifests in CI, which
+// also fights the current unsigned/Gatekeeper setup — a separate,
+// larger piece of work. This keeps maintenance at zero while making
+// "Download" actually work and land the right file.
+
+import { openExternal } from "@/lib/api";
 
 const GITHUB_API_URL =
   "https://api.github.com/repos/joshuarodriguez82/meeting-recorder-v2/releases/latest";
 const RELEASE_PAGE_URL =
   "https://github.com/joshuarodriguez82/meeting-recorder-v2/releases/latest";
+
+export type ReleaseAsset = { name: string; url: string };
 
 export type LatestRelease = {
   tag: string;
@@ -26,6 +31,7 @@ export type LatestRelease = {
   url: string;
   body: string;
   publishedAt: string;
+  assets: ReleaseAsset[];
 };
 
 export type UpdateCheckResult =
@@ -97,6 +103,7 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
     html_url?: string;
     body?: string;
     published_at?: string;
+    assets?: { name?: string; browser_download_url?: string }[];
   };
   const data: ReleasePayload = await res.json();
   const tag = (data.tag_name ?? "").trim();
@@ -117,6 +124,12 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
         url: data.html_url || RELEASE_PAGE_URL,
         body: data.body || "",
         publishedAt: data.published_at || "",
+        assets: (data.assets || [])
+          .filter((a) => a.name && a.browser_download_url)
+          .map((a) => ({
+            name: a.name as string,
+            url: a.browser_download_url as string,
+          })),
       },
     };
   }
@@ -124,15 +137,56 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
 }
 
 /**
- * Open the GitHub release page in the user's default browser. Tauri's
- * webview intercepts navigations to external URLs via `window.open`
- * with a non-self target and routes them to the OS browser.
+ * Pick the installer asset for the running OS so the download lands the
+ * right file instead of dumping the user on a release page. Asset names
+ * follow the build's convention:
+ *   Windows → Meeting.Recorder_X.Y.Z_x64-setup.exe / ..._x64_*.msi
+ *   macOS   → Meeting.Recorder_X.Y.Z_universal.zip
  */
-export function openReleaseInBrowser(url: string = RELEASE_PAGE_URL): void {
-  try {
-    window.open(url, "_blank", "noopener");
-  } catch {
-    // Should never trip; left as a defensive fallback.
-    location.href = url;
+export function pickInstallerAsset(
+  assets: ReleaseAsset[],
+): ReleaseAsset | null {
+  if (!assets || assets.length === 0) return null;
+  const ua = (typeof navigator !== "undefined" && navigator.userAgent) || "";
+  const isWin = /Windows/i.test(ua);
+  const isMac = /Mac OS X|Macintosh|Mac_PowerPC/i.test(ua);
+  const byExt = (re: RegExp) =>
+    assets.find((a) => re.test(a.name.toLowerCase())) || null;
+  if (isWin) {
+    return byExt(/\.exe$/) || byExt(/\.msi$/) || null;
   }
+  if (isMac) {
+    return (
+      assets.find((a) => /universal.*\.zip$/i.test(a.name)) ||
+      byExt(/\.dmg$/) ||
+      byExt(/\.zip$/) ||
+      null
+    );
+  }
+  return null;
+}
+
+/**
+ * Start the update download. Opens the matched installer asset URL
+ * directly in the real browser (the download begins immediately — no
+ * release page to navigate), via the OS opener (window.open does
+ * nothing inside the Tauri webview). Falls back to the release page
+ * only when no matching asset is found.
+ *
+ * Returns the asset name we kicked off, or null if we fell back to the
+ * release page, so the UI can tell the user what's downloading.
+ */
+export async function downloadUpdate(
+  release: Pick<LatestRelease, "url" | "assets">,
+): Promise<string | null> {
+  const asset = pickInstallerAsset(release.assets || []);
+  await openExternal(asset?.url || release.url || RELEASE_PAGE_URL);
+  return asset?.name ?? null;
+}
+
+/** Open the GitHub release page in the user's default browser. */
+export async function openReleaseInBrowser(
+  url: string = RELEASE_PAGE_URL,
+): Promise<void> {
+  await openExternal(url);
 }
