@@ -913,6 +913,9 @@ function AppUpdatesCard() {
     url: string;
     body: string;
     publishedAt: string;
+    // Mirrors src/lib/updater.ts LatestRelease — needed so the value
+    // can be handed to downloadUpdate() without a type error.
+    assets: { name: string; url: string }[];
   };
   type State =
     | { kind: "loading"; current: string }
@@ -946,8 +949,13 @@ function AppUpdatesCard() {
 
   const openDownload = async () => {
     if (state.kind !== "available") return;
-    const { openReleaseInBrowser } = await import("@/lib/updater");
-    openReleaseInBrowser(state.release.url);
+    const { downloadUpdate } = await import("@/lib/updater");
+    const asset = await downloadUpdate(state.release);
+    toast.success(
+      asset
+        ? `Downloading ${asset} — run it when it finishes to update.`
+        : "Opened the releases page — pick the installer for your platform.",
+    );
   };
 
   return (
@@ -992,7 +1000,7 @@ function AppUpdatesCard() {
             onClick={state.kind === "available" ? openDownload : runCheck}
             disabled={state.kind === "loading"}
           >
-            {state.kind === "available" ? "Open Download Page" : "Check Now"}
+            {state.kind === "available" ? "Download Update" : "Check Now"}
           </Button>
         </div>
         {state.kind === "available" && state.release.body && (
@@ -1008,9 +1016,12 @@ function AppUpdatesCard() {
         <p className="text-xs text-muted-foreground">
           Update check queries{" "}
           <code>github.com/joshuarodriguez82/meeting-recorder-v2/releases</code>.
-          Clicking <strong>Open Download Page</strong> opens the release in
-          your default browser — pick the installer for your platform and run
-          it. The current app keeps running until you replace it.
+          Clicking <strong>Download Update</strong> downloads the correct
+          installer for your OS directly (Windows <code>.exe</code>/
+          <code>.msi</code>, macOS <code>.zip</code>) — run it to update.
+          The current app keeps running until you replace it. (Not a
+          silent in-place updater — that needs code signing the build
+          doesn&apos;t have yet.)
         </p>
       </CardContent>
     </Card>
