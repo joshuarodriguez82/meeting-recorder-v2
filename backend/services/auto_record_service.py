@@ -85,11 +85,25 @@ class AutoRecordService:
         is_recording: Callable[[], bool],
         start_recording: Callable[[dict], Any],
         is_enabled: Callable[[], bool],
+        get_todays_meetings: Optional[Callable[[], list[dict]]] = None,
+        is_blocked: Optional[Callable[[dict], bool]] = None,
     ):
         self._get_upcoming = get_upcoming_meetings
+        # `get_upcoming_meetings` deliberately drops events that have
+        # already started (see _calendar_*backends). That filtering made
+        # the in-window check below impossible to satisfy — by the time
+        # an event's window is open it's no longer "upcoming", so
+        # auto-record never actually fired. Today's-meetings includes
+        # in-progress events, so we scan THAT for the start trigger and
+        # keep upcoming only for the "next: …" UI hint.
+        self._get_todays = get_todays_meetings
         self._is_recording = is_recording
         self._start_recording = start_recording
         self._is_enabled = is_enabled
+        # Returns True for meetings the user flagged "never auto-record"
+        # (permanent skip — survives restarts, matches recurring series
+        # by subject). Default: nothing is blocked.
+        self._is_blocked = is_blocked or (lambda _m: False)
         self._task: Optional[asyncio.Task] = None
         # (subject, start_iso) tuples we've already attempted in this
         # backend lifetime. Bounded growth — one entry per meeting per day.
@@ -153,17 +167,28 @@ class AutoRecordService:
         if not self._is_enabled():
             self._next_event = None
             return
-        # Pull today + a small look-ahead so "next meeting" remains
-        # populated even if the next call is tomorrow morning. 24h is
-        # enough — overnight the user will have closed the laptop.
-        meetings = await asyncio.to_thread(self._get_upcoming, 24)
-        qualifying = [m for m in meetings if self._qualifies(m)]
-        qualifying.sort(key=lambda m: m["start"])
         now = _dt.datetime.now()
 
-        # Refresh next_event for the UI.
-        upcoming = [m for m in qualifying if m["start"] > now]
+        # Pull a small look-ahead so the "next meeting" hint remains
+        # populated even if the next call is tomorrow morning. 24h is
+        # enough — overnight the user will have closed the laptop.
+        upcoming_raw = await asyncio.to_thread(self._get_upcoming, 24)
+        upcoming = [m for m in upcoming_raw
+                    if self._qualifies(m) and m["start"] > now]
+        upcoming.sort(key=lambda m: m["start"])
         self._next_event = upcoming[0] if upcoming else None
+
+        # The start trigger scans TODAY's meetings, which (unlike
+        # get_upcoming_meetings) still includes events that have already
+        # started. Without this, an event was never visible while its
+        # window was actually open. Fall back to upcoming if the host
+        # didn't supply a today's-meetings source.
+        if self._get_todays is not None:
+            today_raw = await asyncio.to_thread(self._get_todays)
+        else:
+            today_raw = upcoming_raw
+        qualifying = [m for m in today_raw if self._qualifies(m)]
+        qualifying.sort(key=lambda m: m["start"])
 
         # In-window event? Start it (unless we already handled this one
         # or a recording is in progress).
@@ -192,12 +217,19 @@ class AutoRecordService:
             # overlap we'll catch the next one on the following poll.
             break
 
-    @staticmethod
-    def _qualifies(m: dict) -> bool:
+    def _qualifies(self, m: dict) -> bool:
         if _is_all_day(m):
             return False
         if not _has_conference_link(m):
             return False
+        try:
+            if self._is_blocked(m):
+                return False
+        except Exception as e:
+            # A flaky blocklist lookup must not silently disable
+            # auto-record for every meeting — log and treat as not
+            # blocked.
+            logger.warning(f"auto-record blocklist check failed: {e}")
         return True
 
     @staticmethod

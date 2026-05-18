@@ -11,6 +11,8 @@ import {
   Play,
   Mic,
   FileText,
+  Camera,
+  Ban,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -84,6 +86,14 @@ export function RecordView({
 
   const [recording, setRecording] = useState(false);
   const [duration, setDuration] = useState(0);
+  // Screenshots captured during the current recording. Count is shown
+  // on the button; the files themselves are attached server-side and
+  // fed to the summarizer as visual context.
+  const [screenshotBusy, setScreenshotBusy] = useState(false);
+  const [screenshotCount, setScreenshotCount] = useState(0);
+  // Subjects flagged "never auto-record" (permanent, server-persisted,
+  // matched by subject so a recurring series stays blocked).
+  const [blockedSubjects, setBlockedSubjects] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   // Auto-stop watchdog warnings, polled from /recording/status while
   // recording. Used to render a banner under the recording bar and
@@ -373,6 +383,7 @@ export function RecordView({
       });
       setRecording(true);
       setDuration(0);
+      setScreenshotCount(0);
       setSession(null);
       setWatchdogWarnings([]);
       notifiedCodesRef.current = new Set();
@@ -459,6 +470,58 @@ export function RecordView({
     }
   };
 
+  // Capture a screenshot of the user's screen and attach it to the
+  // active recording. The capture runs in the Tauri shell (macOS
+  // attributes Screen Recording permission to the signed bundle, not
+  // the Python sidecar); the backend owns the destination folder and
+  // session bookkeeping.
+  const takeScreenshot = async () => {
+    setScreenshotBusy(true);
+    try {
+      const { dir } = await api.getScreenshotDir();
+      const { invoke } = await import("@tauri-apps/api/core");
+      const path = await invoke<string>("capture_screenshot", { dir });
+      const res = await api.attachScreenshot(path);
+      setScreenshotCount(res.count);
+      toast.success("Screenshot captured", {
+        description: `${res.count} attached — included in the summary to Claude`,
+      });
+    } catch (e) {
+      toast.error(
+        `Screenshot failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setScreenshotBusy(false);
+    }
+  };
+
+  const isBlocked = (subject: string) =>
+    blockedSubjects.some(
+      (s) => s.trim().toLowerCase() === (subject || "").trim().toLowerCase());
+
+  const toggleBlock = async (subject: string) => {
+    const blocked = isBlocked(subject);
+    try {
+      const res = blocked
+        ? await api.removeAutoRecordBlocklist(subject)
+        : await api.addAutoRecordBlocklist(subject);
+      setBlockedSubjects(res.subjects);
+      toast.success(
+        blocked
+          ? "Auto-record re-enabled for this meeting"
+          : "Won't auto-record this meeting anymore");
+    } catch (e) {
+      toast.error(
+        `Couldn't update: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  // Load the persisted "never auto-record" list once on mount.
+  useEffect(() => {
+    api.getAutoRecordBlocklist()
+      .then((r) => setBlockedSubjects(r.subjects))
+      .catch(() => {});
+  }, []);
+
   // Silent auto-refresh when the app window regains focus. When the user
   // tabs back from Outlook after accepting a new meeting, the calendar
   // panel updates without them having to click Refresh. Debounced at
@@ -517,6 +580,20 @@ export function RecordView({
               {formatDur(duration)} · {meetingName || "Untitled"}
             </div>
           </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={takeScreenshot}
+            disabled={screenshotBusy}
+            title="Capture your screen and attach it to this meeting — included as visual context in the summary to Claude"
+          >
+            {screenshotBusy ? (
+              <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />
+            ) : (
+              <Camera className="h-3.5 w-3.5 mr-2" />
+            )}
+            {screenshotCount > 0 ? `Screenshot (${screenshotCount})` : "Screenshot"}
+          </Button>
           <Button variant="destructive" size="sm" onClick={stop}>
             <Square className="h-3.5 w-3.5 mr-2" />
             Stop
@@ -814,6 +891,24 @@ export function RecordView({
                         >
                           <Sparkles className="h-3.5 w-3.5 mr-1" />
                           Brief
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => toggleBlock(m.subject)}
+                          title={
+                            isBlocked(m.subject)
+                              ? "On your never-auto-record list. Click to allow auto-record again."
+                              : "Never auto-record this meeting (applies to the whole recurring series, permanently)"
+                          }
+                          className={`px-2 ${
+                            isBlocked(m.subject)
+                              ? "text-amber-600 dark:text-amber-500"
+                              : "text-muted-foreground"
+                          }`}
+                        >
+                          <Ban className="h-3.5 w-3.5 mr-1" />
+                          {isBlocked(m.subject) ? "Auto-record off" : "No auto"}
                         </Button>
                         <Button size="sm" variant="outline" onClick={() => useMeeting(m)} disabled={recording}>
                           Use
