@@ -1,0 +1,98 @@
+# Fast validation that runs on every pull request.
+#
+# release.yml only fires on tag pushes, so until now nothing verified a
+# PR before it was merged — build/typecheck breakage was only caught
+# when a release was cut. This workflow closes that gap with the cheap
+# half of the release pipeline (no bundling, signing, or notarization):
+#
+#   - frontend: eslint, strict tsc typecheck, and a real `next build`
+#                (the same step release runs via tauri-prebuild).
+#   - backend:  byte-compile every Python module (catches syntax errors
+#                in the FastAPI sidecar without installing the heavy
+#                ML deps).
+#   - rust:     `cargo check` on Linux, macOS, AND Windows. All three
+#                matter here because the screenshot capture command is
+#                heavily #[cfg]-gated per OS — a Linux-only check would
+#                miss a broken macOS/Windows branch.
+#
+# generate_context!() embeds the frontend dist at compile time, so the
+# rust job drops a tiny stub into ../out rather than building Next three
+# times just to satisfy the macro.
+
+name: PR Checks
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (lint · typecheck · build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies
+        run: npm install
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npx tsc -p tsconfig.json
+      - name: Build
+        run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+
+  backend:
+    name: Backend (compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Byte-compile backend
+        run: python -m compileall -q backend
+
+  rust:
+    name: Rust (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+      - name: Install Tauri system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+      - name: Stub frontend dist
+        shell: bash
+        # tauri::generate_context!() reads frontendDist (../out) at
+        # compile time. A one-line index is enough for `cargo check`.
+        run: |
+          mkdir -p out
+          echo '<!doctype html><title>stub</title>' > out/index.html
+      - name: cargo check
+        run: cargo check --manifest-path src-tauri/Cargo.toml --locked
