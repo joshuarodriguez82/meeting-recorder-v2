@@ -454,6 +454,15 @@ def get_meeting_detail(subject: str, start_iso: str) -> dict:
         return empty
     want_subj = (subject or "").strip().lower()
 
+    # Cache so a meeting opened twice (or re-rendered) is instant and
+    # doesn't re-queue behind the periodic calendar scan for the single
+    # Outlook COM lock — that contention is what made first-vs-repeat
+    # opens feel ~30s slow.
+    cache_key = ("detail", want_subj, target.isoformat())
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     if not _OUTLOOK_LOCK.acquire(timeout=30):
         logger.warning("meeting-detail: Outlook lock timeout")
         return empty
@@ -504,7 +513,7 @@ def get_meeting_detail(subject: str, start_iso: str) -> dict:
                 # attendee panel. Cap so a 200+ person invite can't make
                 # the detail call crawl through hundreds of AddressEntry
                 # lookups.
-                _ATT_CAP = 80
+                _ATT_CAP = 25
                 idx = 0
                 for r in item.Recipients:
                     idx += 1
@@ -528,11 +537,16 @@ def get_meeting_detail(subject: str, start_iso: str) -> dict:
             join_url = _extract_join_url(location, body)
             if len(body) > _BODY_CAP:
                 body = body[:_BODY_CAP] + "\n…(truncated)"
-            return {
+            result = {
                 "attendees": attendees,
                 "body": body,
                 "join_url": join_url,
             }
+            _cache_put(cache_key, result)
+            return result
+        # No match — cache the miss briefly so repeated clicks during a
+        # slow Outlook window don't all pile onto the COM lock.
+        _cache_put(cache_key, empty, ttl=30)
         return empty
     except Exception as e:
         logger.warning(f"meeting-detail failed: {e}")
