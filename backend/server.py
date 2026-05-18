@@ -315,6 +315,7 @@ from services.item_status_service import (
     ItemStatusService, VALID_DECISION_STATUSES,
 )
 from services.qa_service import QAService
+from services.auto_record_blocklist_service import AutoRecordBlocklistService
 from services.search_service import SearchService
 from services.session_service import SessionService
 from services.speaker_profile_service import (
@@ -466,6 +467,7 @@ class Services:
         self.template_svc: Optional[TemplateService] = None
         self.recording_svc: Optional[RecordingService] = None
         self.speaker_profile_svc: Optional[SpeakerProfileService] = None
+        self.auto_record_blocklist_svc: Optional[AutoRecordBlocklistService] = None
         self.search_svc: Optional[SearchService] = None
         self.qa_svc: Optional[QAService] = None
         self.commitments_svc: Optional[CommitmentsService] = None
@@ -545,6 +547,11 @@ class Services:
             # mic-hardware-dependent, syncing them across devices with
             # different mics risks false positives.
             self.speaker_profile_svc = SpeakerProfileService(USER_DATA_DIR)
+            # "Never auto-record this meeting" list. Per-machine like
+            # speaker profiles — it's tied to how this user works, not
+            # account data worth syncing.
+            self.auto_record_blocklist_svc = AutoRecordBlocklistService(
+                USER_DATA_DIR)
             # SearchService stays a thin wrapper around session_service —
             # session embeddings live next to session JSONs, so it just
             # needs that handle. Lazy index load happens on first search.
@@ -1203,10 +1210,14 @@ async def get_calendar_upcoming(hours: int = 168, refresh: bool = False):
     Refresh button in the UI when the user added a meeting in Outlook
     and needs it reflected immediately).
 
-    Wrapped in a 15s asyncio timeout so a hung Outlook COM call never
-    leaves the frontend with a dead fetch. On timeout we return [] and
-    let the user Refresh again; the underlying thread finishes at its
-    own pace and populates the cache for next time.
+    Wrapped in an asyncio timeout so a truly hung Outlook COM call never
+    leaves the frontend with a dead fetch. The cap was 15s, but a user
+    with many shared/resource Exchange calendars sees first-fetch times
+    of ~30s+ — so every cold start timed out to an empty list and the
+    panel looked permanently broken until a manual Refresh. 45s clears
+    the realistic slow case while still bounding a genuine hang. On
+    timeout we still return [] (the background thread keeps going and
+    populates the 5-min cache, so the next call is instant).
     """
     try:
         if refresh:
@@ -1215,11 +1226,11 @@ async def get_calendar_upcoming(hours: int = 168, refresh: bool = False):
         try:
             meetings = await asyncio.wait_for(
                 asyncio.to_thread(get_upcoming_meetings, hours),
-                timeout=15.0,
+                timeout=45.0,
             )
         except asyncio.TimeoutError:
             logger.warning(
-                f"Calendar fetch ({hours}h) exceeded 15s — returning empty. "
+                f"Calendar fetch ({hours}h) exceeded 45s — returning empty. "
                 f"Outlook/Exchange likely slow to respond. Retry in a moment.")
             return []
         return _serialize_meetings(meetings)
@@ -1231,6 +1242,16 @@ async def get_calendar_upcoming(hours: int = 168, refresh: bool = False):
 @app.get("/calendar/available")
 async def calendar_available():
     return await asyncio.to_thread(is_outlook_available)
+
+
+@app.get("/calendar/meeting-detail")
+async def calendar_meeting_detail(subject: str, start: str):
+    """Lazy detail for one calendar invite — agenda/body, attendees, and
+    a parsed one-click join link. Fetched on demand (per meeting) so the
+    bulk calendar list stays fast: pulling Outlook bodies for every
+    meeting in the window would blow the 15s COM budget."""
+    from services.calendar_service import get_meeting_detail
+    return await asyncio.to_thread(get_meeting_detail, subject, start)
 
 
 # ── Recording ────────────────────────────────────────────────────────
@@ -1371,11 +1392,15 @@ def _ensure_auto_record_service() -> None:
     if svc.auto_record_svc is None:
         svc.auto_record_svc = AutoRecordService(
             get_upcoming_meetings=calendar_service.get_upcoming_meetings,
+            get_todays_meetings=calendar_service.get_todays_meetings,
             is_recording=lambda: bool(
                 svc.recording_svc and svc.recording_svc.is_recording),
             start_recording=_auto_record_start,
             is_enabled=lambda: bool(
                 svc.settings and svc.settings.auto_record_enabled),
+            is_blocked=lambda m: bool(
+                svc.auto_record_blocklist_svc
+                and svc.auto_record_blocklist_svc.is_blocked(m)),
         )
     want_on = bool(svc.settings and svc.settings.auto_record_enabled)
     if want_on and not svc.auto_record_svc.running:
@@ -1425,6 +1450,83 @@ async def recording_auto_status():
         "running": running,
         "next_event": next_event,
     }
+
+
+class BlocklistRequest(BaseModel):
+    subject: str
+
+
+@app.get("/auto-record/blocklist")
+async def get_auto_record_blocklist():
+    """Subjects the user flagged 'never auto-record'. Matched
+    case/whitespace-insensitively by subject so a recurring series stays
+    blocked every occurrence."""
+    if not svc.auto_record_blocklist_svc:
+        return {"subjects": []}
+    subjects = await asyncio.to_thread(svc.auto_record_blocklist_svc.list_all)
+    return {"subjects": subjects}
+
+
+@app.post("/auto-record/blocklist")
+async def add_auto_record_blocklist(req: BlocklistRequest):
+    if not svc.auto_record_blocklist_svc:
+        raise HTTPException(status_code=503,
+                            detail="Blocklist service not initialized")
+    subject = (req.subject or "").strip()
+    if not subject:
+        raise HTTPException(status_code=400, detail="subject is required")
+    await asyncio.to_thread(svc.auto_record_blocklist_svc.add, subject)
+    subjects = await asyncio.to_thread(svc.auto_record_blocklist_svc.list_all)
+    return {"ok": True, "subjects": subjects}
+
+
+@app.delete("/auto-record/blocklist")
+async def remove_auto_record_blocklist(req: BlocklistRequest):
+    if not svc.auto_record_blocklist_svc:
+        raise HTTPException(status_code=503,
+                            detail="Blocklist service not initialized")
+    await asyncio.to_thread(
+        svc.auto_record_blocklist_svc.remove, (req.subject or "").strip())
+    subjects = await asyncio.to_thread(svc.auto_record_blocklist_svc.list_all)
+    return {"ok": True, "subjects": subjects}
+
+
+@app.get("/recording/screenshot/dir")
+async def get_screenshot_dir():
+    """Where the Tauri shell should write a screenshot for the active
+    recording. The actual screen capture happens in the Rust layer
+    (macOS attributes Screen Recording permission to the signed app
+    bundle, not the Python child), so Python only owns the destination
+    path + session bookkeeping."""
+    if not svc.recording_svc or not svc.recording_svc.is_recording:
+        raise HTTPException(status_code=409, detail="Not recording")
+    d = await asyncio.to_thread(svc.recording_svc.screenshot_dir)
+    if d is None:
+        raise HTTPException(status_code=409, detail="No active session")
+    sess = svc.recording_svc.current_session
+    return {"dir": str(d), "session_id": sess.session_id if sess else None}
+
+
+class ScreenshotRequest(BaseModel):
+    path: str
+
+
+@app.post("/recording/screenshot")
+async def attach_screenshot(req: ScreenshotRequest):
+    """Register a screenshot the shell just captured against the active
+    session. It's persisted with the session JSON on stop, then fed to
+    the summarizer as visual context."""
+    if not svc.recording_svc or not svc.recording_svc.is_recording:
+        raise HTTPException(status_code=409, detail="Not recording")
+    ok = await asyncio.to_thread(
+        svc.recording_svc.add_screenshot, (req.path or "").strip())
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail="Screenshot file not found or no active session")
+    sess = svc.recording_svc.current_session
+    count = len(sess.screenshots) if sess else 0
+    return {"ok": True, "count": count}
 
 
 @app.get("/recording/transcript/stream")
@@ -1573,6 +1675,32 @@ async def get_session_audio(session_id: str):
     return FileResponse(audio_path, media_type="audio/wav", filename=_P(audio_path).name)
 
 
+@app.get("/sessions/{session_id}/screenshots/{index}")
+async def get_session_screenshot(session_id: str, index: int):
+    """Serve one screenshot the user captured during this session, by
+    its position in the session's screenshots list. Serving by index
+    (rather than an arbitrary path) means we only ever hand back files
+    the session actually recorded — no path-traversal surface."""
+    from fastapi.responses import FileResponse
+    from pathlib import Path as _P
+    svc.load_settings()
+    data = svc.session_svc.load(session_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Session not found")
+    shots = list(data.get("screenshots") or [])
+    if index < 0 or index >= len(shots):
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    path = _P(shots[index])
+    if not path.is_file():
+        raise HTTPException(status_code=404,
+                            detail="Screenshot file missing on disk")
+    media = {
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".gif": "image/gif", ".webp": "image/webp",
+    }.get(path.suffix.lower(), "application/octet-stream")
+    return FileResponse(str(path), media_type=media, filename=path.name)
+
+
 class SessionPatchRequest(BaseModel):
     display_name: Optional[str] = None
     client: Optional[str] = None
@@ -1634,6 +1762,85 @@ async def _auto_extract_commitments(session) -> None:
                 session.session_id, commits)
     except Exception as e:
         logger.exception(f"Commitment auto-extract failed: {e}")
+
+
+async def _auto_identify_and_save_speakers(session) -> int:
+    """Ask the LLM who each diarized speaker is — from an explicit
+    self-introduction ("Hi, I'm Sarah") or a direct-address hand-off
+    ("Sarah, your thoughts?" → the next speaker is Sarah) — then label
+    the speaker AND persist their voice fingerprint to the known-speaker
+    store so future meetings auto-match without the user typing anything.
+
+    Mirrors the create/link/refine logic of the manual rename endpoint.
+    Best-effort: returns the number of speakers named; logs and continues
+    on any failure."""
+    if not svc.summarizer or not svc.speaker_profile_svc:
+        return 0
+    if not session.segments or not session.speakers:
+        return 0
+    try:
+        mapping = await svc.summarizer.identify_speakers(
+            session.full_transcript())
+    except Exception as e:
+        logger.warning(f"auto speaker-id call failed: {e}")
+        return 0
+    if not mapping:
+        return 0
+
+    import numpy as np
+    named = 0
+    for speaker_id, raw_name in mapping.items():
+        speaker = session.speakers.get(speaker_id)
+        if speaker is None:
+            continue
+        new_name = (raw_name or "").strip()
+        if not new_name:
+            continue
+        # Never override a name the user already confirmed by hand.
+        if speaker.match_confirmed and speaker.profile_id:
+            continue
+
+        speaker.display_name = new_name
+        speaker.match_confirmed = True
+        speaker.match_confidence = None
+
+        if not speaker.embedding:
+            # Spoke too briefly to fingerprint (<1.5s). Keep the label;
+            # we just can't save a reusable voiceprint this time.
+            named += 1
+            continue
+        try:
+            emb = np.asarray(speaker.embedding, dtype=np.float32)
+            existing = (svc.speaker_profile_svc.get(speaker.profile_id)
+                        if speaker.profile_id else None)
+            if existing is not None:
+                # Already linked (e.g. an auto-match) — trust the
+                # explicit name and refine the centroid.
+                svc.speaker_profile_svc.rename(existing.profile_id, new_name)
+                svc.speaker_profile_svc.confirm_match(
+                    existing.profile_id, emb, session.session_id)
+            else:
+                wanted = new_name.lower()
+                same_name = next(
+                    (p for p in svc.speaker_profile_svc.list_all()
+                     if p.display_name.lower() == wanted), None)
+                if same_name is not None:
+                    speaker.profile_id = same_name.profile_id
+                    svc.speaker_profile_svc.confirm_match(
+                        same_name.profile_id, emb, session.session_id)
+                else:
+                    profile = svc.speaker_profile_svc.create(
+                        new_name, emb, session.session_id)
+                    speaker.profile_id = profile.profile_id
+            named += 1
+        except Exception as e:
+            logger.warning(
+                f"auto-save profile for {speaker_id} ({new_name}) failed: {e}")
+
+    if named:
+        logger.info(f"Auto-identified + saved {named} speaker(s) for "
+                    f"session {session.session_id}")
+    return named
 
 
 def _serialize_speaker(sp) -> dict:
@@ -2344,6 +2551,14 @@ async def process_session(session_id: str):
     svc.current_session = session
     try:
         result = await svc.recording_svc.process_session()
+        # Auto-name speakers from explicit introductions / direct-address
+        # hand-offs and persist their voiceprints to the known-speakers
+        # store so the next meeting auto-matches them. Best-effort — a
+        # failure here must not block saving the processed session.
+        try:
+            await _auto_identify_and_save_speakers(result)
+        except Exception as e:
+            logger.warning(f"auto speaker identification skipped: {e}")
         await asyncio.to_thread(svc.session_svc.save, result)
         _auto_export_to_client(result, copy_audio=False)
         # Build the semantic-search index entry for this session in the
@@ -2423,6 +2638,7 @@ async def summarize_session(session_id: str, req: TemplateRequest):
             prompt=prompt_text,
             notes=session.notes or "",
             template_name=req.template,
+            image_paths=list(session.screenshots or []),
         )
         session.summary = result
         session.template = req.template
@@ -2495,6 +2711,10 @@ async def process_full(session_id: str, req: ProcessFullRequest):
         svc.current_session = session
         try:
             session = await svc.recording_svc.process_session()
+            try:
+                await _auto_identify_and_save_speakers(session)
+            except Exception as e:
+                logger.warning(f"auto speaker identification skipped: {e}")
             await asyncio.to_thread(svc.session_svc.save, session)
             stages["transcribe_diarize"] = "ok"
         except Exception as e:
@@ -2580,7 +2800,8 @@ async def _extract_and_save(
             svc.template_svc.get_prompt, template)
         result = await method(
             transcript, prompt=prompt_text,
-            notes=notes, template_name=template)
+            notes=notes, template_name=template,
+            image_paths=list(session.screenshots or []))
         session.template = template
     else:
         result = await method(transcript, notes=notes)
@@ -3109,6 +3330,10 @@ class PrepBriefFromMeetingRequest(BaseModel):
     scheduled_end_iso: str = ""
     client: str = ""
     project: str = ""
+    # The invite body/agenda, when the user opened the meeting's
+    # detail. Optional — older callers / meetings without a body just
+    # omit it and the brief behaves exactly as before.
+    body: str = ""
 
 
 @app.post("/prep-brief/from-meeting")
@@ -3245,6 +3470,7 @@ async def prep_brief_from_meeting(req: PrepBriefFromMeetingRequest):
             identified_client=req.client,
             identified_project=req.project,
             prior_notes=prior_notes,
+            agenda=req.body or "",
         )
     except Exception as e:
         logger.exception("Calendar prep brief failed")
@@ -3316,17 +3542,85 @@ async def prep_brief(req: PrepBriefRequest):
 @app.get("/retention/stats")
 async def retention_stats():
     s = svc.load_settings()
-    return folder_stats(s.recordings_dir)
+    # folder_stats walks the recordings dir (stat() per file). Off-loop
+    # so a large library can't block the event loop / trip the Tauri
+    # backend watchdog.
+    return await asyncio.to_thread(folder_stats, s.recordings_dir)
 
 
 @app.post("/retention/cleanup")
 async def retention_cleanup(processed_days: int = 7, unprocessed_days: int = 30):
     s = svc.load_settings()
-    return run_retention_cleanup(
+    # The cleanup walks every session JSON and unlinks WAVs — seconds to
+    # minutes on a big library. Running it synchronously in this async
+    # handler blocked the whole event loop, so the Tauri shell's backend
+    # watchdog saw the server as unresponsive, killed + respawned it, and
+    # the in-flight request died as a "failed to fetch" in the UI. Run it
+    # in a worker thread instead.
+    return await asyncio.to_thread(
+        run_retention_cleanup,
         s.recordings_dir,
         processed_days=processed_days,
         unprocessed_days=unprocessed_days,
+        client_export_dirs=_client_export_dirs(),
     )
+
+
+def _client_export_dirs() -> list[str]:
+    """Configured per-client Designated Folders, so retention can sweep
+    untracked recorder copies that orphaned in them."""
+    try:
+        if not svc.client_cfg_svc:
+            return []
+        return [
+            cfg.export_folder
+            for cfg in svc.client_cfg_svc.get_all().values()
+            if getattr(cfg, "export_folder", "")
+        ]
+    except Exception as e:
+        logger.warning(f"Could not enumerate client export dirs: {e}")
+        return []
+
+
+# Re-check roughly twice a day. Retention is day-granular so this is
+# plenty; the first pass runs ~1 min after startup so a freshly-opened
+# app reclaims space without waiting out the whole interval.
+RETENTION_INTERVAL_S = 12 * 3600
+
+
+async def _retention_loop():
+    """Background auto-retention. The `retention_enabled` setting existed
+    and was persisted, but nothing ever consumed it — so 'automatic
+    cleanup' silently never happened. This loop is that missing piece.
+
+    Reads settings fresh from disk each cycle so toggling the setting
+    (or changing the day thresholds) takes effect on the next pass
+    without an app restart."""
+    await asyncio.sleep(60)  # let startup prewarm settle first
+    try:
+        while True:
+            try:
+                s = Settings.from_env()
+                if (s.retention_enabled
+                        and (s.retention_processed_days > 0
+                             or s.retention_unprocessed_days > 0)):
+                    res = await asyncio.to_thread(
+                        run_retention_cleanup,
+                        s.recordings_dir,
+                        processed_days=s.retention_processed_days,
+                        unprocessed_days=s.retention_unprocessed_days,
+                        client_export_dirs=_client_export_dirs(),
+                    )
+                    if res.get("deleted_count"):
+                        logger.info(
+                            f"Auto-retention: deleted "
+                            f"{res['deleted_count']} file(s), freed "
+                            f"{res.get('bytes_freed', 0)} bytes")
+            except Exception as e:
+                logger.warning(f"Auto-retention pass failed: {e}")
+            await asyncio.sleep(RETENTION_INTERVAL_S)
+    except asyncio.CancelledError:
+        raise
 
 
 # ── Templates ────────────────────────────────────────────────────────
@@ -3422,6 +3716,15 @@ async def startup():
         _ensure_auto_record_service()
     except Exception as e:
         logger.warning(f"AutoRecordService bootstrap failed: {e}")
+
+    # Automatic old-audio cleanup. Previously the retention_enabled
+    # setting was saved but never acted on; this task is what makes it
+    # real. Independent of settings success above — it reads config
+    # fresh each cycle and no-ops while disabled.
+    try:
+        asyncio.create_task(_retention_loop())
+    except Exception as e:
+        logger.warning(f"Auto-retention bootstrap failed: {e}")
 
     # Crash recovery: if a previous run died mid-`/recording/stop`, merge
     # the orphan `_recording_*.wav` / `_loopback_*.wav` temp files into

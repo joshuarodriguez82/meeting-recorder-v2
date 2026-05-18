@@ -33,6 +33,11 @@ class Session:
         # Tracked here so retention can clean them up alongside the main
         # file — without this list the copies would stick around forever.
         self.exported_audio_paths: List[str] = []
+        # Absolute paths to screenshots the user captured during the
+        # meeting. Stored alongside the recording so they can be fed to
+        # the summarizer as visual context and reused later like any
+        # other artifact.
+        self.screenshots: List[str] = []
 
     def get_or_create_speaker(self, speaker_id: str) -> Speaker:
         if speaker_id not in self.speakers:
@@ -74,6 +79,7 @@ class Session:
             "decisions": self.decisions,
             "notes": self.notes,
             "exported_audio_paths": list(self.exported_audio_paths),
+            "screenshots": list(self.screenshots),
         }
 
     @classmethod
@@ -104,6 +110,7 @@ class Session:
         session.decisions = data.get("decisions")
         session.notes = data.get("notes") or ""
         session.exported_audio_paths = list(data.get("exported_audio_paths") or [])
+        session.screenshots = list(data.get("screenshots") or [])
 
         # Rebuild speakers
         speakers_data = data.get("speakers") or {}

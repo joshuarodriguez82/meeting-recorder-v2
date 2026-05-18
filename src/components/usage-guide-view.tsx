@@ -154,6 +154,32 @@ const SECTIONS: Section[] = [
           persists across restarts.
         </Tip>
         <Tip>
+          <strong>Screenshots during a recording.</strong> While recording,
+          a <strong>Screenshot</strong> button sits next to Stop. Click it
+          to capture your screen — on a multi-monitor setup a small
+          chooser asks which display. Each shot is saved with the meeting
+          and, on processing, sent to Claude as visual context so the
+          summary can reference what was on screen (diagrams, dashboards,
+          slides). Review them anytime on the session&apos;s new
+          <strong>Screenshots</strong> tab. macOS asks for Screen
+          Recording permission the first time.
+        </Tip>
+        <Tip>
+          <strong>Click a calendar meeting to expand it.</strong> The
+          chevron on each Upcoming Meeting opens its attendees, the
+          invite&apos;s agenda/body, and a one-click <strong>Join
+          meeting</strong> button (the join link is auto-detected from the
+          invite). The agenda is also fed into the AI <strong>Brief</strong>
+          so it&apos;s tailored to what that specific meeting is about.
+          Details load on demand to keep the list fast.
+        </Tip>
+        <Tip>
+          <strong>Never auto-record a meeting.</strong> Each calendar tile
+          has a <strong>No auto</strong> toggle. Flag a meeting (e.g. a
+          recurring 1:1) and it&apos;s permanently skipped by auto-record,
+          including every future occurrence. Survives restarts.
+        </Tip>
+        <Tip>
           <strong>Conference room mode</strong> (toggle below the device selectors): turns off
           system-audio loopback entirely and captures only the mic. Use it when you&apos;re in a
           physical conference room with the laptop on the table, the remote party is on
@@ -179,12 +205,21 @@ const SECTIONS: Section[] = [
         <ul className="list-disc pl-5 space-y-1">
           <li><strong>Overview</strong> — audio player (scrub/replay), edit meeting name, template, client, project tags, and run any AI extraction.</li>
           <li><strong>Transcript</strong> — full speaker-labeled timestamped transcript.</li>
-          <li><strong>Speakers</strong> — who was detected, how many segments each spoke. <strong>Click any speaker name to rename them</strong> — the new label flows into the transcript and all future AI outputs.</li>
+          <li><strong>Speakers</strong> — who was detected, how many segments each spoke. <strong>Click any speaker name to rename them</strong> — the new label flows into the transcript and all future AI outputs. Speakers who introduce themselves (&quot;Hi, I&apos;m Sarah&quot;) or are called on by name are now auto-named and their voiceprint saved automatically, so they&apos;re recognized in future meetings with no manual labeling.</li>
+          <li><strong>Screenshots</strong> — any screenshots you captured during the meeting; click a thumbnail to enlarge. These are also sent to Claude as visual context for the summary.</li>
           <li><strong>Summary</strong> — AI summary tailored to the template.</li>
           <li><strong>Actions</strong> — extracted action items (owner + task + due date).</li>
           <li><strong>Decisions</strong> — ADR-style decision log.</li>
           <li><strong>Requirements</strong> — FR/NFR tables.</li>
         </ul>
+        <Tip>
+          <strong>Auto-process is on by default.</strong> When you Stop a
+          recording the full pipeline (transcribe → speakers → summary →
+          actions → decisions → requirements → commitments) now runs
+          automatically — no need to open each session and click Process.
+          Toggle it under Settings → &quot;Auto-process after recording
+          stops&quot; if you&apos;d rather do it manually.
+        </Tip>
         <Tip>
           Tabs are disabled if their content hasn&apos;t been generated yet. Go to the Overview tab and
           click the matching AI Action button to generate it.

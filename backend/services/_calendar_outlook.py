@@ -10,6 +10,7 @@ Works with Classic Outlook. Gracefully fails with New Outlook.
 """
 
 import datetime
+import re
 import time
 import threading
 import pythoncom            # noqa: F401  Windows-only
@@ -132,6 +133,67 @@ def _get_outlook(retries: int = 3, delay: float = 1.0):
     return None
 
 
+def _looks_smtp(s: str) -> bool:
+    return "@" in s and not s.startswith(("/", "EX:", "ex:"))
+
+
+def _recipient_label(r, resolve_smtp: bool = False) -> str:
+    """A readable attendee label.
+
+    Outlook returns the internal X500 directory path
+    (`/o=ExchangeLabs/ou=…/cn=…`) as `.Address` for Exchange
+    recipients, which is useless in the UI and poisons the AI brief +
+    domain-based client auto-tagging. Prefer a real SMTP address, then
+    the display name; never surface a raw X500 string.
+
+    `resolve_smtp=True` does the (COM-expensive) AddressEntry lookup —
+    only used on the lazy per-meeting detail path, never in the bulk
+    calendar scan.
+    """
+    try:
+        name = str(getattr(r, "Name", "") or "").strip()
+    except Exception:
+        name = ""
+    try:
+        addr = str(getattr(r, "Address", "") or "").strip()
+    except Exception:
+        addr = ""
+
+    email = addr if _looks_smtp(addr) else ""
+    if not email and resolve_smtp:
+        try:
+            ae = r.AddressEntry
+            try:
+                eu = ae.GetExchangeUser()
+                if eu is not None:
+                    smtp = str(getattr(eu, "PrimarySmtpAddress", "") or "")
+                    if _looks_smtp(smtp):
+                        email = smtp
+            except Exception:
+                pass
+            if not email:
+                # PR_SMTP_ADDRESS — works for contacts / non-EX entries.
+                try:
+                    pa = ae.PropertyAccessor
+                    smtp = str(pa.GetProperty(
+                        "http://schemas.microsoft.com/mapi/proptag/"
+                        "0x39FE001F") or "")
+                    if _looks_smtp(smtp):
+                        email = smtp
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    if name and email:
+        return f"{name} <{email}>"
+    if email:
+        return email
+    if name:
+        return name
+    return addr[:80] if addr else ""
+
+
 def _parse_appointment(item, today: datetime.date) -> Optional[dict]:
     """Extract meeting info from an Outlook AppointmentItem."""
     try:
@@ -148,12 +210,9 @@ def _parse_appointment(item, today: datetime.date) -> Optional[dict]:
         try:
             for r in item.Recipients:
                 try:
-                    addr = str(getattr(r, "Address", "") or "")
-                    name = str(getattr(r, "Name", "") or "")
-                    if addr:
-                        attendees.append(addr)
-                    elif name:
-                        attendees.append(name)
+                    label = _recipient_label(r)
+                    if label:
+                        attendees.append(label)
                 except Exception:
                     continue
         except Exception:
@@ -248,12 +307,9 @@ def _parse_appointment_any_date(item, start_date, end_date):
         try:
             for r in item.Recipients:
                 try:
-                    addr = str(getattr(r, "Address", "") or "")
-                    name = str(getattr(r, "Name", "") or "")
-                    if addr:
-                        attendees.append(addr)
-                    elif name:
-                        attendees.append(name)
+                    label = _recipient_label(r)
+                    if label:
+                        attendees.append(label)
                 except Exception:
                     continue
         except Exception:
@@ -303,7 +359,19 @@ def _scan_folder_recursively(folder, today: datetime.date,
 
 
 def get_meetings_for_date(target_date: datetime.date) -> List[dict]:
-    """Return all meetings on a specific date across every calendar."""
+    """Return all meetings on a specific date across every calendar.
+
+    Cached (short TTL): the auto-record loop calls this every 30s, and
+    an uncached COM scan that often saturates Outlook's single-threaded
+    lock and starves the UI's 7-day fetch (it then times out → blank
+    calendar). 2-minute freshness is plenty for an auto-start trigger
+    that only needs to notice a meeting within a poll or two."""
+    cache_key = ("date", target_date.isoformat())
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        logger.info(f"Calendar cache hit (date {target_date})")
+        return cached
+
     outlook = _get_outlook()
     if not outlook:
         return []
@@ -341,6 +409,7 @@ def get_meetings_for_date(target_date: datetime.date) -> List[dict]:
 
         all_meetings.sort(key=lambda m: m["start"])
         logger.info(f"Found {len(all_meetings)} meetings for {target_date}")
+        _cache_put(cache_key, all_meetings, ttl=120)
         return all_meetings
 
     except Exception as e:
@@ -350,6 +419,159 @@ def get_meetings_for_date(target_date: datetime.date) -> List[dict]:
         try:
             pythoncom.CoUninitialize()
         except Exception:
+            pass
+
+
+# Conference-link extraction for the lazy meeting-detail view. Unlike
+# auto_record_service._CONF_LINK_RE (which only needs to know a link
+# *exists*), here we return the full clickable URL so the UI can offer
+# a one-click Join button.
+_URL_RE = re.compile(r"""https?://[^\s<>"'\)\]]+""", re.IGNORECASE)
+_CONF_HOSTS = (
+    "teams.microsoft.com", "teams.live.com",
+    "zoom.us", "zoomgov.com",
+    "meet.google.com",
+    "webex.com",
+    "gotomeeting.com", "gotomeet.me",
+    "bluejeans.com", "whereby.com",
+    "chime.aws", "ringcentral.com",
+)
+# Invite bodies can be enormous (full reply chains). Cap so the API
+# payload and the LLM brief context stay sane.
+_BODY_CAP = 6000
+
+
+def _extract_join_url(*texts: str) -> Optional[str]:
+    for t in texts:
+        if not t:
+            continue
+        for u in _URL_RE.findall(t):
+            if any(h in u.lower() for h in _CONF_HOSTS):
+                return u.rstrip(".,);]>\"'")
+    return None
+
+
+def get_meeting_detail(subject: str, start_iso: str) -> dict:
+    """Lazy per-meeting detail: body/agenda + attendees + join link.
+
+    Deliberately scoped to the meeting's own day on the default
+    calendar so it stays fast — the bulk list omits bodies on purpose
+    (Outlook .Body access is slow and the text is large). Best-effort:
+    returns empty fields on any miss and never raises."""
+    empty = {"attendees": [], "body": "", "join_url": None}
+    try:
+        target = datetime.datetime.fromisoformat(start_iso)
+        if target.tzinfo is not None:
+            target = target.replace(tzinfo=None)
+    except ValueError:
+        return empty
+    want_subj = (subject or "").strip().lower()
+
+    # Cache so a meeting opened twice (or re-rendered) is instant and
+    # doesn't re-queue behind the periodic calendar scan for the single
+    # Outlook COM lock — that contention is what made first-vs-repeat
+    # opens feel ~30s slow.
+    cache_key = ("detail", want_subj, target.isoformat())
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    if not _OUTLOOK_LOCK.acquire(timeout=30):
+        logger.warning("meeting-detail: Outlook lock timeout")
+        return empty
+    outlook = _get_outlook()
+    if not outlook:
+        try:
+            _OUTLOOK_LOCK.release()
+        except RuntimeError:
+            pass
+        return empty
+    try:
+        ns = outlook.GetNamespace("MAPI")
+        cal = ns.GetDefaultFolder(OL_FOLDER_CALENDAR)
+        items = cal.Items
+        items.Sort("[Start]")
+        items.IncludeRecurrences = True
+        day = target.date()
+        lo = (day - datetime.timedelta(days=1)).strftime("%m/%d/%Y")
+        hi = (day + datetime.timedelta(days=1)).strftime("%m/%d/%Y")
+        try:
+            items = items.Restrict(
+                f"[Start] >= '{lo} 12:00 AM' AND [Start] <= '{hi} 11:59 PM'")
+            items.Sort("[Start]")
+            items.IncludeRecurrences = True
+        except Exception:
+            pass
+
+        count = 0
+        for item in items:
+            count += 1
+            if count > 1000:
+                break
+            try:
+                s = _to_local_naive(item.Start)
+            except Exception:
+                continue
+            # Recurring instances share a subject; match the occurrence
+            # by start time (90s slack absorbs tz/rounding).
+            if abs((s - target).total_seconds()) > 90:
+                continue
+            if str(getattr(item, "Subject", "") or "").strip().lower() != want_subj:
+                continue
+
+            attendees: List[str] = []
+            try:
+                # Resolve to real names/emails here (per-meeting, on
+                # demand) — worth the COM cost for a usable brief +
+                # attendee panel. Cap so a 200+ person invite can't make
+                # the detail call crawl through hundreds of AddressEntry
+                # lookups.
+                _ATT_CAP = 25
+                idx = 0
+                for r in item.Recipients:
+                    idx += 1
+                    if idx > _ATT_CAP:
+                        attendees.append(f"(+ more attendees not shown)")
+                        break
+                    try:
+                        label = _recipient_label(r, resolve_smtp=True)
+                        if label:
+                            attendees.append(label)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            try:
+                body = str(getattr(item, "Body", "") or "").strip()
+            except Exception:
+                body = ""
+            location = str(getattr(item, "Location", "") or "")
+            join_url = _extract_join_url(location, body)
+            if len(body) > _BODY_CAP:
+                body = body[:_BODY_CAP] + "\n…(truncated)"
+            result = {
+                "attendees": attendees,
+                "body": body,
+                "join_url": join_url,
+            }
+            _cache_put(cache_key, result)
+            return result
+        # No match — cache the miss briefly so repeated clicks during a
+        # slow Outlook window don't all pile onto the COM lock.
+        _cache_put(cache_key, empty, ttl=30)
+        return empty
+    except Exception as e:
+        logger.warning(f"meeting-detail failed: {e}")
+        return empty
+    finally:
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+        try:
+            _OUTLOOK_LOCK.release()
+        except RuntimeError:
             pass
 
 

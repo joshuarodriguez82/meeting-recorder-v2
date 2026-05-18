@@ -26,6 +26,21 @@ function getBaseUrl(): Promise<string> {
   return _baseUrlPromise;
 }
 
+/**
+ * Open an http(s) URL in the user's real browser. A plain
+ * <a target="_blank"> does nothing in the Tauri webview, so the
+ * "Join meeting" link (and any external link) needs this. Falls back
+ * to window.open outside Tauri (plain `npm run dev`).
+ */
+export async function openExternal(url: string): Promise<void> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("open_external", { url });
+  } catch {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
+
 export interface TemplateEntry {
   name: string;
   prompt: string;
@@ -224,6 +239,9 @@ export interface SessionFull {
   notes: string;
   segments: Array<{ speaker_id: string; start: number; end: number; text: string }>;
   speakers: Record<string, Speaker>;
+  // Absolute paths to screenshots captured during the meeting. Persisted
+  // with the session and fed to the summarizer as visual context.
+  screenshots?: string[];
 }
 
 export interface Speaker {
@@ -426,6 +444,33 @@ export const api = {
     }),
   loadModels: () =>
     request<{ loading: boolean }>("/models/load", { method: "POST" }),
+
+  // Screenshots — destination dir comes from the backend (it owns the
+  // per-session folder + bookkeeping); the actual capture happens in
+  // the Tauri/Rust shell, then we register the saved path here.
+  getScreenshotDir: () =>
+    request<{ dir: string; session_id: string | null }>(
+      "/recording/screenshot/dir"),
+  attachScreenshot: (path: string) =>
+    request<{ ok: boolean; count: number }>("/recording/screenshot", {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }),
+
+  // "Never auto-record this meeting" list. Keyed by subject so a
+  // recurring series stays blocked on every occurrence.
+  getAutoRecordBlocklist: () =>
+    request<{ subjects: string[] }>("/auto-record/blocklist"),
+  addAutoRecordBlocklist: (subject: string) =>
+    request<{ ok: boolean; subjects: string[] }>("/auto-record/blocklist", {
+      method: "POST",
+      body: JSON.stringify({ subject }),
+    }),
+  removeAutoRecordBlocklist: (subject: string) =>
+    request<{ ok: boolean; subjects: string[] }>("/auto-record/blocklist", {
+      method: "DELETE",
+      body: JSON.stringify({ subject }),
+    }),
 
   // AI extraction
   processSession: (id: string) =>
@@ -851,6 +896,7 @@ export const api = {
     scheduled_end_iso?: string;
     client: string;
     project: string;
+    body?: string;
   }) =>
     request<{
       markdown: string;
@@ -912,6 +958,14 @@ export const api = {
   getUpcomingMeetings: (hours: number = 168, refresh = false) =>
     request<Meeting[]>(
       `/calendar/upcoming?hours=${hours}${refresh ? "&refresh=true" : ""}`
+    ),
+  // Lazy per-meeting detail (agenda/body, attendees, parsed join link).
+  // Fetched only when the user opens a meeting so the bulk list stays
+  // fast — see the backend endpoint comment.
+  getMeetingDetail: (subject: string, start: string) =>
+    request<{ attendees: string[]; body: string; join_url: string | null }>(
+      `/calendar/meeting-detail?subject=${encodeURIComponent(subject)}`
+      + `&start=${encodeURIComponent(start)}`
     ),
   isCalendarAvailable: () =>
     request<{ available: boolean }>("/calendar/available"),
