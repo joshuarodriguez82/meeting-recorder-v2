@@ -13,7 +13,10 @@
 #   - rust:     `cargo check` on Linux, macOS, AND Windows. All three
 #                matter here because the screenshot capture command is
 #                heavily #[cfg]-gated per OS — a Linux-only check would
-#                miss a broken macOS/Windows branch.
+#                miss a broken macOS/Windows branch. Not `--locked`:
+#                the release pipeline doesn't pin the lockfile, so we
+#                don't want PR checks to be stricter than the build
+#                that actually ships.
 #
 # generate_context!() embeds the frontend dist at compile time, so the
 # rust job drops a tiny stub into ../out rather than building Next three
@@ -46,9 +49,7 @@ jobs:
         run: npm install
       - name: Lint
         run: npm run lint
-      - name: Typecheck
-        run: npx tsc -p tsconfig.json
-      - name: Build
+      - name: Build (also typechecks via strict tsconfig)
         run: npm run build
         env:
           NEXT_TELEMETRY_DISABLED: "1"
@@ -95,4 +96,4 @@ jobs:
           mkdir -p out
           echo '<!doctype html><title>stub</title>' > out/index.html
       - name: cargo check
-        run: cargo check --manifest-path src-tauri/Cargo.toml --locked
+        run: cargo check --manifest-path src-tauri/Cargo.toml
