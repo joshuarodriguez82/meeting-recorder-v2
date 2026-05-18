@@ -3,6 +3,7 @@ package com.joshuarodriguez.meetingrecorder
 import android.Manifest
 import android.content.Intent
 import android.net.Uri
+import android.provider.Settings
 import androidx.activity.result.ActivityResult
 import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
@@ -22,6 +23,7 @@ import java.io.FileInputStream
     permissions = [
         Permission(strings = [Manifest.permission.RECORD_AUDIO], alias = "microphone"),
         Permission(strings = [Manifest.permission.POST_NOTIFICATIONS], alias = "notifications"),
+        Permission(strings = [Manifest.permission.READ_PHONE_STATE], alias = "phone"),
     ],
 )
 class RecorderPlugin : Plugin() {
@@ -148,6 +150,74 @@ class RecorderPlugin : Plugin() {
                 .put("elapsedMs", RecordingState.elapsedMs()),
         )
     }
+
+    // --- accessibility (call capture) --------------------------------
+
+    @PluginMethod
+    fun accessibilityStatus(call: PluginCall) {
+        val enabled = try {
+            val flat = Settings.Secure.getString(
+                context.contentResolver,
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+            ) ?: ""
+            flat.split(':').any {
+                it.equals(CallAccessibilityService.ID, ignoreCase = true)
+            }
+        } catch (_: Exception) {
+            false
+        }
+        call.resolve(
+            JSObject()
+                .put("enabled", enabled)
+                .put("autoRecordCalls", RecordingPrefs.autoRecordCalls(context)),
+        )
+    }
+
+    @PluginMethod
+    fun openAccessibilitySettings(call: PluginCall) {
+        try {
+            val i = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(i)
+            call.resolve()
+        } catch (e: Exception) {
+            call.reject(e.message ?: "could not open Accessibility settings")
+        }
+    }
+
+    @PluginMethod
+    fun setAutoRecordCalls(call: PluginCall) {
+        RecordingPrefs.setAutoRecordCalls(
+            context, call.getBoolean("enabled", true) == true,
+        )
+        call.resolve()
+    }
+
+    /** Auto-recorded calls finish while the WebView may be dead, so
+     *  their .m4a sits in cache with no session JSON. The UI calls this
+     *  on resume to find them and run them through the normal sync
+     *  queue. */
+    @PluginMethod
+    fun pendingCaptures(call: PluginCall) {
+        val arr = JSArray()
+        try {
+            cacheDir().listFiles()?.forEach { f ->
+                val m = Regex("^rec_(.+)\\.m4a$").find(f.name)
+                if (f.isFile && m != null && RecordingState.filePath != f.absolutePath) {
+                    arr.put(
+                        JSObject()
+                            .put("sessionId", m.groupValues[1])
+                            .put("path", f.absolutePath)
+                            .put("sizeBytes", f.length()),
+                    )
+                }
+            }
+        } catch (_: Exception) {
+        }
+        call.resolve(JSObject().put("captures", arr))
+    }
+
+    private fun cacheDir(): File = context.cacheDir
 
     // --- SAF writes / reads ------------------------------------------
 

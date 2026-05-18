@@ -6,6 +6,21 @@ import { registerPlugin, Capacitor } from "@capacitor/core";
 export interface PermissionState {
   microphone: "granted" | "denied" | "prompt";
   notifications: "granted" | "denied" | "prompt";
+  // READ_PHONE_STATE — lets the accessibility service auto start/stop
+  // recording on a cellular call.
+  phone: "granted" | "denied" | "prompt";
+}
+
+export interface AccessibilityStatus {
+  // Our CallAccessibilityService is enabled in Settings → Accessibility.
+  enabled: boolean;
+  autoRecordCalls: boolean;
+}
+
+export interface PendingCapture {
+  sessionId: string;
+  path: string;
+  sizeBytes: number;
 }
 
 // Which AudioSource actually captured. "VOICE_CALL" = the device gave
@@ -77,6 +92,19 @@ export interface RecorderPlugin {
   listSyncedSessions(opts: { treeUri: string }): Promise<{ sessions: SyncedSession[] }>;
   // Read a single text file (used for client_configs.json) or null.
   readTextFile(opts: { treeUri: string; name: string }): Promise<{ content: string | null }>;
+
+  // --- accessibility / automatic call capture ---
+  // Whether our AccessibilityService is enabled (the non-root path to
+  // capturing the far side of a call on Android 10+) + the auto-record
+  // toggle state.
+  accessibilityStatus(): Promise<AccessibilityStatus>;
+  // Deep-link to Settings → Accessibility so the user can enable it
+  // (on Android 13+ they then tap "Allow restricted settings").
+  openAccessibilitySettings(): Promise<void>;
+  setAutoRecordCalls(opts: { enabled: boolean }): Promise<void>;
+  // Auto-recorded calls finish with no session JSON (the WebView may
+  // be dead). The UI calls this on resume to find + sync them.
+  pendingCaptures(): Promise<{ captures: PendingCapture[] }>;
 }
 
 export const isNative = Capacitor.isNativePlatform();
@@ -100,6 +128,7 @@ function createWebFallback(): RecorderPlugin {
   const perm: PermissionState = {
     microphone: "prompt",
     notifications: "granted",
+    phone: "granted",
   };
 
   return {
@@ -176,6 +205,18 @@ function createWebFallback(): RecorderPlugin {
     },
     async readTextFile() {
       return { content: null };
+    },
+    async accessibilityStatus() {
+      return { enabled: false, autoRecordCalls: true };
+    },
+    async openAccessibilitySettings() {
+      /* no-op in browser */
+    },
+    async setAutoRecordCalls() {
+      /* no-op in browser */
+    },
+    async pendingCaptures() {
+      return { captures: [] };
     },
   };
 }

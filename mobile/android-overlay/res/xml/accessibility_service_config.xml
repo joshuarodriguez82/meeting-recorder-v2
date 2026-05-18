@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Minimal accessibility-service config. We do not scrape screen content
+  (canRetrieveWindowContent=false, no useful event types) — the service
+  exists so the OS treats our in-call recording as a bound accessibility
+  service, which is the only non-root mechanism a sideloaded app has to
+  capture the far side of a call on Android 10+. Same approach the
+  working third-party recorders use.
+-->
+<accessibility-service
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/mr_accessibility_description"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault"
+    android:notificationTimeout="100"
+    android:canRetrieveWindowContent="false" />
