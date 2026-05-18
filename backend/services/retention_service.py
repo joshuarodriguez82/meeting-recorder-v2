@@ -95,6 +95,17 @@ def cleanup(
             logger.warning(f"Retention: could not read {json_path.name}: {e}")
             continue
 
+        # The glob `session_*.json` also matches sidecars written next
+        # to real sessions — session_<id>.commitments.json (a JSON
+        # array) and session_<id>.item_status.json. Only the session
+        # object itself (a dict with audio_path) is relevant here.
+        # Without this guard, hitting a commitments sidecar raised
+        # AttributeError: 'list' object has no attribute 'get', which
+        # 500'd the endpoint and surfaced in the UI as "failed to
+        # fetch" (and silently killed every auto-retention pass).
+        if not isinstance(data, dict):
+            continue
+
         audio_path_str = data.get("audio_path")
         if not audio_path_str:
             continue
