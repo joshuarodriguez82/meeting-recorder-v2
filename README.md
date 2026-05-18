@@ -15,77 +15,50 @@ After install you still need a one-time setup to drop in API keys and accept the
 
 ## Download (macOS)
 
-Starting with v2.1.0, prebuilt `.dmg` installers are published under
+Prebuilt builds are published under
 [**Releases**](https://github.com/joshuarodriguez82/meeting-recorder-v2/releases).
-Starting with the universal2 build, **one DMG runs on every Mac** — Apple
-Silicon (M1, M2, M3, M4) and Intel:
+macOS ships as a **ditto-zipped `.app`** (not a `.dmg` — Tauri's DMG
+packaging is unreliable on the CI runner). **One universal `.zip` runs
+on every Mac** — Apple Silicon (M1–M4) and Intel:
 
-- `Meeting.Recorder_X.Y.Z_universal.dmg`
-
-(Older v2.1.0 release ships separate `_aarch64.dmg` / `_x64.dmg` files;
-both work on the matching architecture. From v2.1.1 onward only the
-universal DMG is published.)
+- `Meeting.Recorder_X.Y.Z_universal.zip`
 
 (GitHub Actions writes spaces as dots in the artifact filename — the
 app's display name is still "Meeting Recorder".)
 
-### Bypassing Gatekeeper on first install
+### Bypassing Gatekeeper on first launch
 
-These DMGs are **not signed** (no Apple Developer cert yet), so macOS
-Sequoia / Sonoma flags them as *"damaged and can't be opened"* on
-first download. This isn't real damage — it's the quarantine attribute
-your browser added. Pick whichever path is easier; both work.
+The build is **not signed/notarized** (no Apple Developer cert yet),
+so macOS flags it as *"damaged and can't be opened"* on first launch.
+This isn't real damage — it's the quarantine attribute your browser
+added. Pick whichever path is easier; both work.
 
 #### Path A: System Settings (no Terminal)
 
-1. Double-click the DMG in Finder, drag the app to **Applications**.
-2. Double-click `Meeting Recorder` in Applications. macOS refuses with
-   the "damaged" warning. **Click Done / Cancel.**
-3. Open **System Settings → Privacy & Security**. Scroll to the
-   Security section. You'll see *"Meeting Recorder was blocked to
-   protect your Mac"* with an **Open Anyway** button. Click it.
-4. Re-double-click the app. macOS asks once more; click **Open**.
+1. Double-click the `.zip` in Finder — Archive Utility auto-extracts
+   it to `Meeting Recorder.app`.
+2. Drag `Meeting Recorder.app` to **/Applications**.
+3. Double-click it. macOS refuses with the "damaged" warning —
+   **dismiss it**.
+4. Open **System Settings → Privacy & Security**, scroll to Security,
+   and click **Open Anyway** next to "Meeting Recorder was blocked".
+5. Double-click the app again, then click **Open**.
 
-That's it — first launch starts. macOS now trusts the app forever.
+That's it — macOS trusts the app on every subsequent launch.
 
-#### Path B: Terminal (faster if you're comfortable with it)
-
-The older **right-click → Open** workaround stopped working on recent
-macOS. Use `xattr` to clear the quarantine attribute:
+#### Path B: Terminal
 
 ```sh
-# 1. Strip quarantine from whatever Meeting Recorder DMG is in Downloads.
-#    The Meeting* glob is robust to either dot or space in the filename.
-xattr -cr ~/Downloads/Meeting*.dmg
-
-# 2. Open the DMG. Finder mounts it; drag the app to Applications.
-open ~/Downloads/Meeting*.dmg
-
-# 3. Confirm the installed app's filename — could be "Meeting Recorder.app"
-#    (with a space) or "Meeting.Recorder.app" (with a dot) depending on
-#    the build pipeline. Whichever ls prints, use that exact name below.
-ls /Applications/ | grep -i meeting
-
-# 4. Strip quarantine from the installed app and launch. Quote the path
-#    if it contains a space.
+cd ~/Downloads
+unzip -o Meeting.Recorder_*_universal.zip
+mv "Meeting Recorder.app" /Applications/
 xattr -cr "/Applications/Meeting Recorder.app"
 open "/Applications/Meeting Recorder.app"
 ```
 
-**Heads-up on copy-paste from chat / Slack / etc.:** some clients
-auto-link `Recorder.app` (treats `.app` as a TLD) and `[Recorder.app]`
-syntax ends up in your pasted command. Either type the commands by
-hand or copy from the GitHub-rendered README directly. If you see
-`^[[200~` or `^[[201~` echoed back at you, that's stray bracketed-paste
-escape sequences — hit **Ctrl+C** to clear the prompt and try again.
-
-After either path, macOS treats the app as trusted and launches it
-normally on every subsequent open. The proper long-term fix is Apple
-Developer ID signing + notarization; until that's set up, the four
-clicks above are the install path.
-
-The proper fix is Apple Developer ID signing + notarization. Until
-that's set up, the four commands above are the install path.
+The proper long-term fix is Apple Developer ID signing + notarization;
+until that's set up, the steps above are the install path. **Windows
+users** can ignore all of this — just run the `.msi`/`.exe`.
 
 ### First-run setup (after install)
 
@@ -169,6 +142,7 @@ Mac feature parity vs. Windows:
 - **Auto device discovery** with host-API fallback — if WASAPI refuses the mic, the backend silently retries under MME → DirectSound → WDM-KS before giving up
 - **Persistent device selection** — mic and loopback choices saved by name, survive reboots and USB re-plugs
 - **Calendar-driven start** — click a meeting from Upcoming Meetings to pre-fill the name + attendees
+- **Screenshots** — capture any monitor mid-recording (multi-monitor picker); shots are saved with the meeting, fed to Claude as visual context for the summary, and browsable on the session's Screenshots tab
 - **Wallclock-anchored merge** — mic and loopback streams are time-stamped on first frame and aligned by absolute timing, not sample-count heuristics. Reduces speaker drift on long recordings.
 
 ### AI extraction
@@ -190,24 +164,29 @@ Mac feature parity vs. Windows:
 - **Clients + nested Projects** — Projects live inside Clients (one-to-many). Client dashboard shows a chip row of its projects; click a chip to drill into just that project's meetings. AI-assisted tagging suggests which meetings belong to a given client.
 
 ### Speakers
+- **Automatic naming** — speakers who introduce themselves ("Hi, I'm Sarah") or are addressed by name are auto-labeled and their voiceprint saved, with no manual tagging
 - **Cross-session fingerprinting** — rename a speaker once (e.g. SPEAKER_01 → "Maria Chen") and the embedding is saved. Future meetings auto-label her without re-tagging.
 - **Known Speakers UI** — manage the roster from Settings: rename, delete, or merge two profiles that ended up as separate entries. All local, stored as JSON.
 
 ### Workflow
-- **Auto-process after stop** — full transcribe + extract chain runs automatically
+- **Auto-process after stop (on by default)** — full transcribe → speakers → summary → action items → decisions → requirements → commitments chain runs automatically when you hit Stop
+- **Auto-refreshing views** — Follow-Ups / Commitments / Decisions update when you open the tab or return to the app, so freshly-processed calls show up without a reload
 - **Auto-draft follow-up email** — Outlook draft (Win) or Mail.app / Outlook for Mac draft (Mac) to attendees after processing
 - **Launch on startup** — optional. Windows: Startup folder shortcut. macOS: LaunchAgent plist.
-- **Retention policy** — automatic cleanup of old audio WAV files, separate thresholds for processed/unprocessed. Transcripts/summaries never deleted.
+- **Retention policy** — automatic + manual cleanup of old audio WAVs, separate thresholds for processed/unprocessed, across the main folder **and** every client Designated Folder (including orphaned copies whose session was deleted). Transcripts/summaries never deleted.
+- **In-app updates** — checks GitHub Releases and the Download button grabs the correct installer for your OS directly
 
 ### Security
 - **API keys → OS keychain** — Anthropic, HuggingFace, and OpenRouter tokens go into Windows Credential Manager (Win) or Keychain (Mac), never plaintext on disk. Existing `config.env` keys auto-migrate the first time the new build reads them.
 - **Local-only** — every model that can run locally does (Whisper, Pyannote, sentence-transformers, speaker fingerprints). Only the LLM extraction step calls out to a network service, and only the provider you picked.
 
 ### Calendar
-- **Upcoming Meetings** panel pulled from Outlook on launch (Classic Outlook only)
+- **Upcoming Meetings** panel pulled from Outlook (Win) / EventKit (Mac) on launch
+- **Click to expand any meeting** — attendees, the invite agenda/body, and a one-click **Join meeting** button (link auto-detected). The agenda also feeds the AI prep brief. Loaded lazily so the list stays fast.
+- **Auto-record** — starts recording at a meeting's scheduled time (skips all-day events; requires a Teams/Zoom/Meet/Webex/etc. link). Per-meeting **No auto** toggle permanently excludes a meeting/series. Auto-stop is silence + overrun aware and isn't fooled by you muting yourself.
 - **Popup notifications** 2 min before a scheduled meeting starts
-- **Attendee capture** from Outlook invites for follow-up emails
-- **Fast** — calendar is pre-warmed in a background thread at startup, cached 5 minutes, and Exchange resource / shared calendars are skipped automatically (they used to add 60+ seconds of COM latency)
+- **Real attendee names/emails** resolved from Exchange (no raw directory codes)
+- **Fast** — calendar is pre-warmed at startup, per-day + upcoming scans cached, and Exchange resource / shared calendars are skipped automatically
 
 ### Performance
 - Backend is responsive within ~500 ms of launch; AI models load lazily on first use
