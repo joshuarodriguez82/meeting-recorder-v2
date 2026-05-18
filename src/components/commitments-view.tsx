@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type Commitment, type SessionSummary } from "@/lib/api";
 import { toast } from "sonner";
 import { Card, CardContent } from "@/components/ui/card";
@@ -82,6 +82,32 @@ export function CommitmentsView({ onOpenSession }: Props) {
   };
 
   useEffect(() => { reload(); }, [statusFilter, client, side]);
+
+  // Commitments are mined in the background after a call auto-processes,
+  // so re-fetch when the app window regains focus — otherwise the list
+  // sits stale until a filter changes. Ref keeps the handler bound to
+  // the latest filters without re-registering the listener each render.
+  const reloadRef = useRef(reload);
+  reloadRef.current = reload;
+  useEffect(() => {
+    let last = 0;
+    const refresh = () => {
+      const now = Date.now();
+      if (now - last < 10_000) return;
+      last = now;
+      reloadRef.current();
+      api.listSessions().then(setSessions).catch(() => {});
+    };
+    const onVis = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []);
 
   // Free-text filter applied client-side over the already-fetched
   // list — cheap (max few hundred rows) and avoids backend round-trip

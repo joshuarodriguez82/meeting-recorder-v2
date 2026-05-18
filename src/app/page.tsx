@@ -210,7 +210,7 @@ export default function Home() {
     return () => { cancelled = true; };
   }, []);
 
-  const reloadSessions = async () => {
+  const reloadSessions = useCallback(async () => {
     try {
       const [s, stats, settings, cfgs] = await Promise.all([
         api.listSessions(),
@@ -225,7 +225,45 @@ export default function Home() {
     } catch (e) {
       console.error(e);
     }
-  };
+  }, []);
+
+  // Sessions carry the AI-extracted fields (summary / action_items /
+  // decisions) that the Follow-ups & Decisions tabs parse. Those tabs
+  // read the page-level `sessions`, so without a refresh they show
+  // whatever was loaded at startup — a call that auto-processed in the
+  // background wouldn't appear until a full reload. Re-pull sessions
+  // when the user opens one of those tabs, and when the app window
+  // regains focus (e.g. tabbing back after a call finished processing).
+  useEffect(() => {
+    if (!backendReady) return;
+    if (
+      nav === "sessions" || nav === "follow-ups"
+      || nav === "decisions" || nav === "clients"
+    ) {
+      reloadSessions();
+    }
+  }, [nav, backendReady, reloadSessions]);
+
+  useEffect(() => {
+    if (!backendReady) return;
+    let last = 0;
+    const refresh = () => {
+      // Debounce: focus + visibilitychange can both fire on one tab-back.
+      const now = Date.now();
+      if (now - last < 10_000) return;
+      last = now;
+      reloadSessions();
+    };
+    const onVis = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [backendReady, reloadSessions]);
 
   // Calendar loader. Kept here so the list survives nav switches. On
   // errors or empty responses from a transient COM hiccup, we preserve
