@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
-import { api, formatBytes, type Meeting, type SessionSummary } from "@/lib/api";
+import { api, formatBytes, openExternal, type Meeting, type SessionSummary } from "@/lib/api";
 import {
   Mic, History, CheckSquare, Target, Search,
   LayoutDashboard, Settings as SettingsIcon, HelpCircle, Loader2,
@@ -105,6 +105,26 @@ export default function Home() {
   const [pipelineStatus, setPipelineStatus] = useState<{
     loading: boolean; text: string;
   }>({ loading: false, text: "" });
+
+  // App-wide external-link handler. In a Tauri webview a plain
+  // <a target="_blank"> never reaches the system browser, so EVERY
+  // external link in the app (Join meeting, Settings/API console
+  // links, Usage Guide, etc.) silently did nothing in the packaged
+  // build. One delegated listener routes any http(s) anchor click
+  // through the real OS opener — no per-component changes needed.
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (e.defaultPrevented || e.button !== 0) return;
+      const a = (e.target as HTMLElement | null)?.closest?.("a");
+      const href = a?.getAttribute("href") || "";
+      if (/^https?:\/\//i.test(href)) {
+        e.preventDefault();
+        openExternal(href);
+      }
+    };
+    document.addEventListener("click", onClick);
+    return () => document.removeEventListener("click", onClick);
+  }, []);
 
   // Pull the installed Tauri app version so the sidebar shows the real
   // build number instead of a stale hardcoded string.
