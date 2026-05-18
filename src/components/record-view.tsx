@@ -1046,7 +1046,7 @@ export function RecordView({
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            {monitorPicker?.monitors.map((m, i) => {
+            {monitorPicker && monitorPicker.monitors.map((m, i) => {
               const primary = m.x === 0 && m.y === 0;
               const side =
                 m.x > 0 ? "right" : m.x < 0 ? "left"
