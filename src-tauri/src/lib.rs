@@ -739,7 +739,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             restart_backend,
             get_backend_port,
-            capture_screenshot
+            capture_screenshot,
+            open_external
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -1029,6 +1030,52 @@ fn capture_screenshot(
             status
         )),
         Err(e) => Err(format!("Could not run screenshot tool: {}", e)),
+    }
+}
+
+/// Tauri command: open an http(s) URL in the user's default browser.
+///
+/// In a Tauri webview a plain `<a target="_blank">` does NOT reach the
+/// system browser, so the "Join meeting" link (and every other external
+/// link in the app) silently did nothing in the packaged build. We
+/// shell out to the OS handler — same no-extra-crates approach as the
+/// screenshot command. The URL is passed as a single argument (no shell
+/// re-parsing) and scheme-validated so this can't be turned into an
+/// arbitrary-command/launch primitive from the web layer.
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    let u = url.trim();
+    let low = u.to_ascii_lowercase();
+    if !(low.starts_with("https://") || low.starts_with("http://")) {
+        return Err("Only http/https URLs can be opened.".to_string());
+    }
+    // Defense-in-depth: reject control chars / whitespace that could
+    // confuse a downstream handler.
+    if u.chars().any(|c| c.is_control() || c == '"') {
+        return Err("URL contains invalid characters.".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    // rundll32 FileProtocolHandler takes the URL as ONE opaque arg and
+    // launches the default browser — unlike `cmd /c start`, it doesn't
+    // re-parse `&` in the query string (Teams/Zoom links are full of
+    // them).
+    let res = Command::new("rundll32.exe")
+        .args(["url.dll,FileProtocolHandler", u])
+        .spawn();
+
+    #[cfg(target_os = "macos")]
+    let res = Command::new("open").arg(u).spawn();
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let res = Command::new("xdg-open").arg(u).spawn();
+
+    match res {
+        Ok(_) => {
+            rlog(&format!("Opened external URL: {}", u));
+            Ok(())
+        }
+        Err(e) => Err(format!("Could not open browser: {}", e)),
     }
 }
 
