@@ -133,6 +133,67 @@ def _get_outlook(retries: int = 3, delay: float = 1.0):
     return None
 
 
+def _looks_smtp(s: str) -> bool:
+    return "@" in s and not s.startswith(("/", "EX:", "ex:"))
+
+
+def _recipient_label(r, resolve_smtp: bool = False) -> str:
+    """A readable attendee label.
+
+    Outlook returns the internal X500 directory path
+    (`/o=ExchangeLabs/ou=…/cn=…`) as `.Address` for Exchange
+    recipients, which is useless in the UI and poisons the AI brief +
+    domain-based client auto-tagging. Prefer a real SMTP address, then
+    the display name; never surface a raw X500 string.
+
+    `resolve_smtp=True` does the (COM-expensive) AddressEntry lookup —
+    only used on the lazy per-meeting detail path, never in the bulk
+    calendar scan.
+    """
+    try:
+        name = str(getattr(r, "Name", "") or "").strip()
+    except Exception:
+        name = ""
+    try:
+        addr = str(getattr(r, "Address", "") or "").strip()
+    except Exception:
+        addr = ""
+
+    email = addr if _looks_smtp(addr) else ""
+    if not email and resolve_smtp:
+        try:
+            ae = r.AddressEntry
+            try:
+                eu = ae.GetExchangeUser()
+                if eu is not None:
+                    smtp = str(getattr(eu, "PrimarySmtpAddress", "") or "")
+                    if _looks_smtp(smtp):
+                        email = smtp
+            except Exception:
+                pass
+            if not email:
+                # PR_SMTP_ADDRESS — works for contacts / non-EX entries.
+                try:
+                    pa = ae.PropertyAccessor
+                    smtp = str(pa.GetProperty(
+                        "http://schemas.microsoft.com/mapi/proptag/"
+                        "0x39FE001F") or "")
+                    if _looks_smtp(smtp):
+                        email = smtp
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    if name and email:
+        return f"{name} <{email}>"
+    if email:
+        return email
+    if name:
+        return name
+    return addr[:80] if addr else ""
+
+
 def _parse_appointment(item, today: datetime.date) -> Optional[dict]:
     """Extract meeting info from an Outlook AppointmentItem."""
     try:
@@ -149,12 +210,9 @@ def _parse_appointment(item, today: datetime.date) -> Optional[dict]:
         try:
             for r in item.Recipients:
                 try:
-                    addr = str(getattr(r, "Address", "") or "")
-                    name = str(getattr(r, "Name", "") or "")
-                    if addr:
-                        attendees.append(addr)
-                    elif name:
-                        attendees.append(name)
+                    label = _recipient_label(r)
+                    if label:
+                        attendees.append(label)
                 except Exception:
                     continue
         except Exception:
@@ -249,12 +307,9 @@ def _parse_appointment_any_date(item, start_date, end_date):
         try:
             for r in item.Recipients:
                 try:
-                    addr = str(getattr(r, "Address", "") or "")
-                    name = str(getattr(r, "Name", "") or "")
-                    if addr:
-                        attendees.append(addr)
-                    elif name:
-                        attendees.append(name)
+                    label = _recipient_label(r)
+                    if label:
+                        attendees.append(label)
                 except Exception:
                     continue
         except Exception:
@@ -444,14 +499,22 @@ def get_meeting_detail(subject: str, start_iso: str) -> dict:
 
             attendees: List[str] = []
             try:
+                # Resolve to real names/emails here (per-meeting, on
+                # demand) — worth the COM cost for a usable brief +
+                # attendee panel. Cap so a 200+ person invite can't make
+                # the detail call crawl through hundreds of AddressEntry
+                # lookups.
+                _ATT_CAP = 80
+                idx = 0
                 for r in item.Recipients:
+                    idx += 1
+                    if idx > _ATT_CAP:
+                        attendees.append(f"(+ more attendees not shown)")
+                        break
                     try:
-                        addr = str(getattr(r, "Address", "") or "")
-                        name = str(getattr(r, "Name", "") or "")
-                        if addr:
-                            attendees.append(addr)
-                        elif name:
-                            attendees.append(name)
+                        label = _recipient_label(r, resolve_smtp=True)
+                        if label:
+                            attendees.append(label)
                     except Exception:
                         continue
             except Exception:

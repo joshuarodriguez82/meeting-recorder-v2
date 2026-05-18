@@ -1069,12 +1069,16 @@ export function RecordView({
                                   <ExternalLink className="h-3.5 w-3.5" />
                                   Join meeting
                                 </button>
-                                {/* Always show the raw link too — selectable
-                                    so it can be copied even if launching the
-                                    browser is blocked by the environment. */}
-                                <div className="text-[11px] text-muted-foreground break-all select-all">
+                                {/* The raw URL as an actual clickable
+                                    link (the app-wide handler opens it
+                                    in the real browser) and still
+                                    selectable to copy as a fallback. */}
+                                <a
+                                  href={det.data.join_url}
+                                  className="block text-[11px] text-primary underline break-all select-all hover:opacity-80"
+                                >
                                   {det.data.join_url}
-                                </div>
+                                </a>
                               </div>
                             )}
                             <div>
