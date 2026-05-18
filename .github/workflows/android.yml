@@ -1,0 +1,114 @@
+# Builds the sideloadable Android companion APK.
+#
+# Triggered alongside the desktop release pipeline (same v*.*.* tag) and
+# manually for dry-runs. The native android/ project is NOT committed —
+# it's regenerated here from mobile/android-overlay/ via
+# apply-android-overlay.mjs so there's exactly one source of truth.
+#
+# We ship `assembleDebug` output: it's signed with the standard Android
+# debug keystore, which is installable by sideload. A release-signed APK
+# would need a keystore secret and buys nothing for un-Play-Store
+# distribution. Recipients enable "Install unknown apps" for their
+# browser/file manager and tap the APK — same trust model as the
+# unsigned desktop builds.
+
+name: Android APK
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build from (e.g. v3.0.0)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build web bundle
+        run: npm run build
+
+      - name: Add Android platform
+        run: npx cap add android
+
+      - name: Capacitor sync
+        run: npx cap sync android
+
+      # Overlay LAST: cap sync re-copies assets and updates plugin
+      # wiring; running the native patch afterwards guarantees nothing
+      # sync does can revert the manifest / gradle / MainActivity.
+      - name: Apply native overlay
+        run: node scripts/apply-android-overlay.mjs
+
+      - name: Gradle assembleDebug
+        working-directory: mobile/android
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon assembleDebug
+
+      - name: Stage APK
+        working-directory: mobile
+        run: |
+          set -e
+          SRC=android/app/build/outputs/apk/debug/app-debug.apk
+          if [ ! -f "$SRC" ]; then
+            echo "::error::APK not found at $SRC"
+            find android -name "*.apk" -print || true
+            exit 1
+          fi
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p artifacts
+          cp "$SRC" "artifacts/Meeting.Recorder_${VERSION}_android.apk"
+          ls -la artifacts/
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          # No body_path here: release.yml owns the release notes body.
+          # action-gh-release appends our APK as an extra asset to the
+          # same tag-named release without clobbering the description.
+          fail_on_unmatched_files: false
+          files: mobile/artifacts/*
+          draft: false
+          prerelease: false
+
+      - name: Upload workflow artifact (dispatch dry-runs)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: meeting-recorder-android-apk
+          path: mobile/artifacts/*.apk
+          if-no-files-found: error
