@@ -736,7 +736,11 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(backend)
-        .invoke_handler(tauri::generate_handler![restart_backend, get_backend_port])
+        .invoke_handler(tauri::generate_handler![
+            restart_backend,
+            get_backend_port,
+            capture_screenshot
+        ])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -867,6 +871,105 @@ fn restart_backend(
     }
     spawn_python_backend(&app).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Tauri command: capture a screenshot of the user's screen into `dir`
+/// and return the saved file's absolute path.
+///
+/// Capture lives in the Rust shell on purpose. On macOS, Screen
+/// Recording permission (TCC) is attributed to the signed app bundle —
+/// the same reason the calendar bridge moved here. The Python sidecar
+/// runs from a venv outside the bundle and its capture would be denied.
+/// We shell out to the OS screenshot tool rather than pull in a heavy
+/// capture crate: keeps the CI bundle small and avoids the macos-14
+/// runner brittleness called out in AGENTS.md.
+#[tauri::command]
+fn capture_screenshot(dir: String) -> Result<String, String> {
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let target_dir = PathBuf::from(&dir);
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("Could not create screenshot dir: {}", e))?;
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let out_path = target_dir.join(format!("screenshot_{}.png", millis));
+    let out = out_path.to_string_lossy().to_string();
+
+    #[cfg(target_os = "macos")]
+    let result = Command::new("screencapture")
+        .args(["-x", "-t", "png", &out])
+        .status();
+
+    #[cfg(target_os = "windows")]
+    let result = {
+        // Primary-screen grab via .NET, no extra deps. -STA so the
+        // drawing APIs behave; bounds come from the primary screen so
+        // a multi-monitor setup doesn't produce a giant blank canvas.
+        let ps = format!(
+            "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
+             $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; \
+             $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height; \
+             $g = [System.Drawing.Graphics]::FromImage($bmp); \
+             $g.CopyFromScreen($b.X, $b.Y, 0, 0, $bmp.Size); \
+             $bmp.Save('{}', [System.Drawing.Imaging.ImageFormat]::Png); \
+             $g.Dispose(); $bmp.Dispose()",
+            out.replace('\'', "''")
+        );
+        Command::new("powershell")
+            .args(["-NoProfile", "-STA", "-Command", &ps])
+            .status()
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = {
+        // Try the common Wayland/X11 tools in turn; first one that's
+        // installed and succeeds wins.
+        let mut last: std::io::Result<std::process::ExitStatus> =
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no screenshot tool",
+            ));
+        let attempts: [(&str, Vec<&str>); 4] = [
+            ("grim", vec![out.as_str()]),
+            ("gnome-screenshot", vec!["-f", out.as_str()]),
+            ("scrot", vec![out.as_str()]),
+            ("import", vec!["-window", "root", out.as_str()]),
+        ];
+        for (bin, args) in attempts.iter() {
+            match Command::new(bin).args(args).status() {
+                Ok(s) if s.success() => {
+                    last = Ok(s);
+                    break;
+                }
+                other => last = other,
+            }
+        }
+        last
+    };
+
+    match result {
+        Ok(status) if status.success() => {
+            if std::path::Path::new(&out).exists() {
+                rlog(&format!("Screenshot captured: {}", out));
+                Ok(out)
+            } else {
+                Err("Screenshot tool reported success but no file was \
+                     written. On macOS, grant Screen Recording permission \
+                     in System Settings → Privacy & Security."
+                    .to_string())
+            }
+        }
+        Ok(status) => Err(format!(
+            "Screenshot tool exited with status {}. On macOS, grant \
+             Screen Recording permission in System Settings → Privacy \
+             & Security, then try again.",
+            status
+        )),
+        Err(e) => Err(format!("Could not run screenshot tool: {}", e)),
+    }
 }
 
 fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
