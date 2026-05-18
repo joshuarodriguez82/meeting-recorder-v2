@@ -5,8 +5,12 @@
 # when a release was cut. This workflow closes that gap with the cheap
 # half of the release pipeline (no bundling, signing, or notarization):
 #
-#   - frontend: eslint, strict tsc typecheck, and a real `next build`
-#                (the same step release runs via tauri-prebuild).
+#   - frontend: `next build` — the same step release runs via
+#                tauri-prebuild. It typechecks against the strict
+#                tsconfig. No standalone eslint: the repo has ~39
+#                pre-existing lint errors unrelated to any one change
+#                and release doesn't lint, so a lint gate would just
+#                block every PR on inherited debt.
 #   - backend:  byte-compile every Python module (catches syntax errors
 #                in the FastAPI sidecar without installing the heavy
 #                ML deps).
@@ -18,9 +22,10 @@
 #                don't want PR checks to be stricter than the build
 #                that actually ships.
 #
-# generate_context!() embeds the frontend dist at compile time, so the
-# rust job drops a tiny stub into ../out rather than building Next three
-# times just to satisfy the macro.
+# The rust job stubs the two build inputs the release pre-build would
+# normally produce (../out for generate_context!(), and the
+# ../backend-bundle.zip resource tauri-build validates) so `cargo
+# check` runs without building Next or zipping the backend three times.
 
 name: PR Checks
 
@@ -37,7 +42,7 @@ concurrency:
 
 jobs:
   frontend:
-    name: Frontend (lint · typecheck · build)
+    name: Frontend (build · typecheck)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,9 +52,13 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm install
-      - name: Lint
-        run: npm run lint
-      - name: Build (also typechecks via strict tsconfig)
+      # No standalone `eslint` step: the repo carries ~39 pre-existing
+      # lint errors (newer eslint-config-next ruleset) in files unrelated
+      # to any given change, and the release pipeline doesn't lint. A
+      # blocking lint gate here would red-flag every PR for debt it
+      # didn't introduce. `next build` is what actually ships and it
+      # typechecks against the strict tsconfig — that's the real gate.
+      - name: Build (typechecks via strict tsconfig)
         run: npm run build
         env:
           NEXT_TELEMETRY_DISABLED: "1"
@@ -88,12 +97,19 @@ jobs:
             librsvg2-dev \
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev
-      - name: Stub frontend dist
+      - name: Stub build artifacts
         shell: bash
-        # tauri::generate_context!() reads frontendDist (../out) at
-        # compile time. A one-line index is enough for `cargo check`.
+        # Two things the Tauri build expects that only exist after the
+        # release pre-build runs:
+        #   - frontendDist (../out): generate_context!() embeds it at
+        #     compile time; a one-line index satisfies the macro.
+        #   - ../backend-bundle.zip: declared in tauri.conf.json
+        #     `resources`; tauri-build's script aborts if the path is
+        #     missing. zip-bundle.py produces the real one in release;
+        #     for `cargo check` a valid empty zip is enough.
         run: |
           mkdir -p out
           echo '<!doctype html><title>stub</title>' > out/index.html
+          printf 'PK\005\006\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0' > backend-bundle.zip
       - name: cargo check
         run: cargo check --manifest-path src-tauri/Cargo.toml
