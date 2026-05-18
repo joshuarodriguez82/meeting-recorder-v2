@@ -74,6 +74,10 @@ class _StubBackend:
         return []
 
     @staticmethod
+    def get_meeting_detail(subject: str, start_iso: str) -> dict:
+        return {"attendees": [], "body": "", "join_url": None}
+
+    @staticmethod
     def is_outlook_available() -> bool:
         return False
 
@@ -98,6 +102,7 @@ _BACKEND = _load_backend()
 get_todays_meetings = _BACKEND.get_todays_meetings
 get_meetings_for_date = _BACKEND.get_meetings_for_date
 get_upcoming_meetings = _BACKEND.get_upcoming_meetings
+get_meeting_detail = _BACKEND.get_meeting_detail
 is_outlook_available = _BACKEND.is_outlook_available
 invalidate_calendar_cache = _BACKEND.invalidate_calendar_cache
 make_session_name = _BACKEND.make_session_name
