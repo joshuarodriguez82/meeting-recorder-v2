@@ -911,13 +911,15 @@ fn capture_screenshot(
     let out = out_path.to_string_lossy().to_string();
 
     let region = width > 0 && height > 0;
-    let sc = if scale > 0.0 { scale } else { 1.0 };
 
     #[cfg(target_os = "macos")]
     let result = {
+        // screencapture -R takes points; Tauri bounds are physical
+        // pixels, so divide by the monitor's scale factor. Only the
+        // macOS path needs this, so it's scoped here to avoid an
+        // unused-variable warning on Windows/Linux builds.
+        let sc = if scale > 0.0 { scale } else { 1.0 };
         if region {
-            // screencapture -R takes points; Tauri bounds are physical
-            // pixels, so divide by the monitor's scale factor.
             let rx = (x as f64 / sc).round() as i64;
             let ry = (y as f64 / sc).round() as i64;
             let rw = (width as f64 / sc).round() as i64;
