@@ -224,6 +224,9 @@ export interface SessionFull {
   notes: string;
   segments: Array<{ speaker_id: string; start: number; end: number; text: string }>;
   speakers: Record<string, Speaker>;
+  // Absolute paths to screenshots captured during the meeting. Persisted
+  // with the session and fed to the summarizer as visual context.
+  screenshots?: string[];
 }
 
 export interface Speaker {
@@ -426,6 +429,33 @@ export const api = {
     }),
   loadModels: () =>
     request<{ loading: boolean }>("/models/load", { method: "POST" }),
+
+  // Screenshots — destination dir comes from the backend (it owns the
+  // per-session folder + bookkeeping); the actual capture happens in
+  // the Tauri/Rust shell, then we register the saved path here.
+  getScreenshotDir: () =>
+    request<{ dir: string; session_id: string | null }>(
+      "/recording/screenshot/dir"),
+  attachScreenshot: (path: string) =>
+    request<{ ok: boolean; count: number }>("/recording/screenshot", {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }),
+
+  // "Never auto-record this meeting" list. Keyed by subject so a
+  // recurring series stays blocked on every occurrence.
+  getAutoRecordBlocklist: () =>
+    request<{ subjects: string[] }>("/auto-record/blocklist"),
+  addAutoRecordBlocklist: (subject: string) =>
+    request<{ ok: boolean; subjects: string[] }>("/auto-record/blocklist", {
+      method: "POST",
+      body: JSON.stringify({ subject }),
+    }),
+  removeAutoRecordBlocklist: (subject: string) =>
+    request<{ ok: boolean; subjects: string[] }>("/auto-record/blocklist", {
+      method: "DELETE",
+      body: JSON.stringify({ subject }),
+    }),
 
   // AI extraction
   processSession: (id: string) =>

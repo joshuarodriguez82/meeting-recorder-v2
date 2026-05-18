@@ -51,6 +51,13 @@ DUCK_LEVEL_THRESHOLD = 0.02   # ~ -34 dBFS RMS — quiet speech band
 DUCK_ATTENUATION = 0.15
 DUCK_SMOOTHING = 0.4          # EMA blend of new-chunk RMS into running
 
+# Dead-air watchdog silence floor. A chunk whose RMS clears this counts
+# as "someone is talking" and resets the silence timer. ~ -50 dBFS in
+# float space. Both the mic AND the loopback (far-end participants)
+# feed this — if the user mutes their own mic but the other side keeps
+# talking, the room is NOT dead and the watchdog must not auto-stop.
+SILENCE_RMS_FLOOR = 0.003
+
 
 def _resample_for_live(audio: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
     """Resample a mono float32 chunk for the live transcriber.
@@ -146,6 +153,30 @@ class RecordingService:
         """Exposed so the SSE endpoint in server.py can subscribe to
         the active recording's segment stream."""
         return self._live_transcriber
+
+    def screenshot_dir(self) -> Optional[Path]:
+        """Per-session screenshot folder, created on demand. None when
+        no session is active. Lives under recordings_dir so screenshots
+        are retained/cleaned up alongside the rest of the meeting's
+        artifacts and can be reused later like any other file."""
+        if self._session is None:
+            return None
+        d = (Path(self._settings.recordings_dir) / "screenshots"
+             / f"session_{self._session.session_id}")
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def add_screenshot(self, path: str) -> bool:
+        """Attach a captured screenshot to the active session. The path
+        is persisted with the session JSON on stop/process. Returns
+        False if there's no session or the file doesn't exist."""
+        if self._session is None:
+            return False
+        if not path or not Path(path).is_file():
+            return False
+        if path not in self._session.screenshots:
+            self._session.screenshots.append(path)
+        return True
 
     def set_session(self, session: Session) -> None:
         """Allow an externally created session (e.g. loaded file) to be processed."""
@@ -637,17 +668,17 @@ class RecordingService:
                 self._wav_writer.write(mono)
                 self._chunk_count += 1
         # Auto-stop watchdog input: track the most recent moment we heard
-        # speech-level audio. Mic and loopback both contribute — if
-        # EITHER is hot, the room isn't dead. RMS in float space; -50 dB
-        # roughly maps to 0.003 amplitude. Calibrated for the typical
-        # mic noise floor — too aggressive a threshold treats
-        # background-fan noise as speech and the watchdog never fires;
-        # too loose treats whispered speech as silence and the watchdog
-        # fires while the user is still talking. 0.003 is the right
-        # order of magnitude empirically.
+        # speech-level audio on the MIC. The loopback path
+        # (_on_loopback_chunk) feeds the same _last_speech_at so the
+        # far-end participants keep the room "alive" even when the user
+        # mutes their own mic. Calibrated for the typical mic noise
+        # floor — too aggressive a threshold treats background-fan noise
+        # as speech and the watchdog never fires; too loose treats
+        # whispered speech as silence and the watchdog fires while the
+        # user is still talking.
         try:
             rms = float(np.sqrt(np.mean(mono * mono))) if len(mono) else 0.0
-            if rms > 0.003:
+            if rms > SILENCE_RMS_FLOOR:
                 self._last_speech_at = datetime.now()
         except Exception:
             # Don't let RMS math kill the audio path
@@ -684,13 +715,6 @@ class RecordingService:
         capture hasn't opened the loopback stream yet."""
         if not self._recording:
             return
-        live = self._live_transcriber
-        if live is None or not live.is_running:
-            return
-        capture = self._capture
-        if capture is None:
-            return
-        loopback_sr = capture.loopback_sr or LIVE_SR
         try:
             mono = chunk.mean(axis=1) if chunk.ndim > 1 else chunk
             # Update the rolling level estimate that the mic-duck gate
@@ -702,6 +726,29 @@ class RecordingService:
                 DUCK_SMOOTHING * chunk_rms
                 + (1.0 - DUCK_SMOOTHING) * self._loopback_level_ema
             )
+            # Dead-air watchdog: far-end audio counts as "the room is
+            # alive". Without this, muting your own mic during a meeting
+            # makes the silence timer run even though the other people
+            # are still talking — the recorder would auto-stop mid-call.
+            # This runs whether or not live transcription is enabled.
+            if chunk_rms > SILENCE_RMS_FLOOR:
+                self._last_speech_at = datetime.now()
+        except Exception:
+            # Never let RMS math kill the audio path.
+            pass
+
+        # Live-transcription tee. Independent of the watchdog update
+        # above so disabling the live preview doesn't re-introduce the
+        # mute-triggers-auto-stop bug.
+        live = self._live_transcriber
+        if live is None or not live.is_running:
+            return
+        capture = self._capture
+        if capture is None:
+            return
+        loopback_sr = capture.loopback_sr or LIVE_SR
+        try:
+            mono = chunk.mean(axis=1) if chunk.ndim > 1 else chunk
             live.push_loopback(_resample_for_live(mono, loopback_sr, LIVE_SR))
         except Exception as e:
             logger.debug(f"Live push_loopback failed: {e}")

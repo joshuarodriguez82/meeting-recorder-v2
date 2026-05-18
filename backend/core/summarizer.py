@@ -19,13 +19,52 @@ string — "ollama" by convention).
 """
 
 import asyncio
+import base64
 import json
 import re
-from typing import Dict, Optional
+from pathlib import Path
+from typing import Dict, List, Optional
 from anthropic import AsyncAnthropic
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Screenshots the user grabs mid-meeting are PNG (macOS screencapture /
+# Windows GDI / Linux grim all default to PNG). Cap how many we attach
+# so a screenshot-happy meeting doesn't blow the request size / cost.
+_MAX_SCREENSHOTS = 8
+_IMG_MEDIA_TYPES = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp",
+}
+
+
+def _image_blocks(image_paths: List[str]) -> list:
+    """Read screenshot files into Anthropic image content blocks.
+    Skips anything missing/oversized/unknown rather than failing the
+    whole summary — a broken screenshot shouldn't cost the user their
+    meeting notes."""
+    blocks: list = []
+    for p in (image_paths or [])[:_MAX_SCREENSHOTS]:
+        try:
+            fp = Path(p)
+            media = _IMG_MEDIA_TYPES.get(fp.suffix.lower())
+            if not media or not fp.is_file():
+                continue
+            raw = fp.read_bytes()
+            if not raw or len(raw) > 5 * 1024 * 1024:  # Anthropic per-image cap
+                continue
+            blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media,
+                    "data": base64.standard_b64encode(raw).decode("ascii"),
+                },
+            })
+        except Exception as e:
+            logger.warning(f"Skipping screenshot {p}: {e}")
+    return blocks
 
 
 def _markdown_to_html(text: str) -> str:
@@ -197,25 +236,38 @@ class Summarizer:
             )
 
     async def _chat(self, prompt: str, max_tokens: int = 1024,
-                    timeout: float = 60.0) -> str:
+                    timeout: float = 60.0,
+                    image_paths: Optional[List[str]] = None) -> str:
         """
         Provider-agnostic "one-shot user prompt → assistant text" helper.
 
         Both Anthropic and OpenAI-compat providers get the same user
         content string; the SDK differences are isolated to this method
         so the extractors above stay identical.
+
+        `image_paths` (optional) attaches meeting screenshots as visual
+        context. Only honoured on the Anthropic provider — Claude is
+        vision-capable; the OpenAI-compat path covers local/text-only
+        models (Ollama etc.) where blindly sending images would error,
+        so there we silently fall back to text-only.
         """
         if self._provider == "anthropic":
+            imgs = _image_blocks(image_paths) if image_paths else []
+            if imgs:
+                content: object = [*imgs, {"type": "text", "text": prompt}]
+            else:
+                content = prompt
             msg = await asyncio.wait_for(
                 self._anthropic_client.messages.create(
                     model=self._model,
                     max_tokens=max_tokens,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[{"role": "user", "content": content}],
                 ),
                 timeout=timeout,
             )
             return msg.content[0].text
-        # OpenAI-compatible (OpenRouter / Ollama / LM Studio / ...)
+        # OpenAI-compatible (OpenRouter / Ollama / LM Studio / ...).
+        # Text-only — see docstring.
         resp = await asyncio.wait_for(
             self._openai_client.chat.completions.create(
                 model=self._model,
@@ -269,19 +321,35 @@ class Summarizer:
                 yield delta
 
     async def summarize(self, transcript: str, prompt: str,
-                         notes: str = "", template_name: str = "") -> str:
+                         notes: str = "", template_name: str = "",
+                         image_paths: Optional[List[str]] = None) -> str:
         """
         Summarize a transcript against a caller-supplied prompt. The
         server-side templates service resolves the template name into
         a prompt so this class stays free of template storage concerns.
         `template_name` is accepted only for logging clarity.
+
+        `image_paths` are screenshots the user captured during the
+        meeting — passed to Claude as visual context so the summary can
+        reference what was on screen (diagrams, dashboards, slides).
         """
         label = template_name or "custom"
-        logger.info(f"Requesting meeting summary (template={label}) via {self._provider}/{self._model}")
+        n_imgs = len(image_paths or [])
+        logger.info(
+            f"Requesting meeting summary (template={label}, "
+            f"screenshots={n_imgs}) via {self._provider}/{self._model}")
+        instruction = prompt
+        if n_imgs:
+            instruction = (
+                f"{prompt}\n\nThe user also attached {n_imgs} screenshot"
+                f"{'s' if n_imgs != 1 else ''} captured during the meeting "
+                f"(shown above). Use them as additional context — refer to "
+                f"what they show where it sharpens the summary.")
         try:
             summary = await self._chat(
-                _with_user_notes(prompt, transcript, notes),
-                max_tokens=1024, timeout=60.0,
+                _with_user_notes(instruction, transcript, notes),
+                max_tokens=1024, timeout=90.0,
+                image_paths=image_paths,
             )
             logger.info("Summary received.")
             return summary
@@ -487,13 +555,25 @@ class Summarizer:
         try:
             raw = (await self._chat(
                 (
-                    "Analyze this meeting transcript and identify any speakers "
-                    "who introduced themselves by name. Return ONLY a JSON object "
-                    "mapping speaker IDs to their real names. "
-                    "Only include speakers where you are confident of their name "
-                    "from an explicit introduction like 'Hi I'm X', 'My name is X', "
-                    "'This is X speaking', etc. "
-                    "If no introductions are found, return an empty JSON object {}.\n\n"
+                    "Analyze this meeting transcript and identify the real "
+                    "name of each speaker. Return ONLY a JSON object mapping "
+                    "speaker IDs to their real names.\n\n"
+                    "Use these two high-confidence signals:\n"
+                    "1. SELF-INTRODUCTION — a speaker states their own name: "
+                    "'Hi, I'm X', 'My name is X', 'This is X', 'X here', or "
+                    "in a round of intros 'I'm X from <company>'.\n"
+                    "2. DIRECT ADDRESS — someone calls a person by name and "
+                    "that person then immediately speaks or responds. e.g. "
+                    "SPEAKER_00: 'Sarah, what do you think?' followed by "
+                    "SPEAKER_02: 'I think…' → SPEAKER_02 is Sarah. Also "
+                    "'Thanks, Mike.', 'Over to you, Priya.', 'Go ahead "
+                    "Dave.' — attribute the name to the speaker who takes "
+                    "the turn that was handed to them.\n\n"
+                    "Only include a speaker when one of these signals makes "
+                    "you confident. Use the most complete form of the name "
+                    "stated (prefer 'Sarah Jones' over 'Sarah' if both "
+                    "appear for the same speaker). Do NOT guess from topic "
+                    "or role. If nothing qualifies, return {}.\n\n"
                     "Example response: "
                     "{\"SPEAKER_00\": \"John Smith\", \"SPEAKER_02\": \"Sarah Jones\"}\n\n"
                     f"Transcript:\n{transcript}"

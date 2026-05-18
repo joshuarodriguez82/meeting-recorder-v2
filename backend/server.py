@@ -315,6 +315,7 @@ from services.item_status_service import (
     ItemStatusService, VALID_DECISION_STATUSES,
 )
 from services.qa_service import QAService
+from services.auto_record_blocklist_service import AutoRecordBlocklistService
 from services.search_service import SearchService
 from services.session_service import SessionService
 from services.speaker_profile_service import (
@@ -466,6 +467,7 @@ class Services:
         self.template_svc: Optional[TemplateService] = None
         self.recording_svc: Optional[RecordingService] = None
         self.speaker_profile_svc: Optional[SpeakerProfileService] = None
+        self.auto_record_blocklist_svc: Optional[AutoRecordBlocklistService] = None
         self.search_svc: Optional[SearchService] = None
         self.qa_svc: Optional[QAService] = None
         self.commitments_svc: Optional[CommitmentsService] = None
@@ -545,6 +547,11 @@ class Services:
             # mic-hardware-dependent, syncing them across devices with
             # different mics risks false positives.
             self.speaker_profile_svc = SpeakerProfileService(USER_DATA_DIR)
+            # "Never auto-record this meeting" list. Per-machine like
+            # speaker profiles — it's tied to how this user works, not
+            # account data worth syncing.
+            self.auto_record_blocklist_svc = AutoRecordBlocklistService(
+                USER_DATA_DIR)
             # SearchService stays a thin wrapper around session_service —
             # session embeddings live next to session JSONs, so it just
             # needs that handle. Lazy index load happens on first search.
@@ -1371,11 +1378,15 @@ def _ensure_auto_record_service() -> None:
     if svc.auto_record_svc is None:
         svc.auto_record_svc = AutoRecordService(
             get_upcoming_meetings=calendar_service.get_upcoming_meetings,
+            get_todays_meetings=calendar_service.get_todays_meetings,
             is_recording=lambda: bool(
                 svc.recording_svc and svc.recording_svc.is_recording),
             start_recording=_auto_record_start,
             is_enabled=lambda: bool(
                 svc.settings and svc.settings.auto_record_enabled),
+            is_blocked=lambda m: bool(
+                svc.auto_record_blocklist_svc
+                and svc.auto_record_blocklist_svc.is_blocked(m)),
         )
     want_on = bool(svc.settings and svc.settings.auto_record_enabled)
     if want_on and not svc.auto_record_svc.running:
@@ -1425,6 +1436,83 @@ async def recording_auto_status():
         "running": running,
         "next_event": next_event,
     }
+
+
+class BlocklistRequest(BaseModel):
+    subject: str
+
+
+@app.get("/auto-record/blocklist")
+async def get_auto_record_blocklist():
+    """Subjects the user flagged 'never auto-record'. Matched
+    case/whitespace-insensitively by subject so a recurring series stays
+    blocked every occurrence."""
+    if not svc.auto_record_blocklist_svc:
+        return {"subjects": []}
+    subjects = await asyncio.to_thread(svc.auto_record_blocklist_svc.list_all)
+    return {"subjects": subjects}
+
+
+@app.post("/auto-record/blocklist")
+async def add_auto_record_blocklist(req: BlocklistRequest):
+    if not svc.auto_record_blocklist_svc:
+        raise HTTPException(status_code=503,
+                            detail="Blocklist service not initialized")
+    subject = (req.subject or "").strip()
+    if not subject:
+        raise HTTPException(status_code=400, detail="subject is required")
+    await asyncio.to_thread(svc.auto_record_blocklist_svc.add, subject)
+    subjects = await asyncio.to_thread(svc.auto_record_blocklist_svc.list_all)
+    return {"ok": True, "subjects": subjects}
+
+
+@app.delete("/auto-record/blocklist")
+async def remove_auto_record_blocklist(req: BlocklistRequest):
+    if not svc.auto_record_blocklist_svc:
+        raise HTTPException(status_code=503,
+                            detail="Blocklist service not initialized")
+    await asyncio.to_thread(
+        svc.auto_record_blocklist_svc.remove, (req.subject or "").strip())
+    subjects = await asyncio.to_thread(svc.auto_record_blocklist_svc.list_all)
+    return {"ok": True, "subjects": subjects}
+
+
+@app.get("/recording/screenshot/dir")
+async def get_screenshot_dir():
+    """Where the Tauri shell should write a screenshot for the active
+    recording. The actual screen capture happens in the Rust layer
+    (macOS attributes Screen Recording permission to the signed app
+    bundle, not the Python child), so Python only owns the destination
+    path + session bookkeeping."""
+    if not svc.recording_svc or not svc.recording_svc.is_recording:
+        raise HTTPException(status_code=409, detail="Not recording")
+    d = await asyncio.to_thread(svc.recording_svc.screenshot_dir)
+    if d is None:
+        raise HTTPException(status_code=409, detail="No active session")
+    sess = svc.recording_svc.current_session
+    return {"dir": str(d), "session_id": sess.session_id if sess else None}
+
+
+class ScreenshotRequest(BaseModel):
+    path: str
+
+
+@app.post("/recording/screenshot")
+async def attach_screenshot(req: ScreenshotRequest):
+    """Register a screenshot the shell just captured against the active
+    session. It's persisted with the session JSON on stop, then fed to
+    the summarizer as visual context."""
+    if not svc.recording_svc or not svc.recording_svc.is_recording:
+        raise HTTPException(status_code=409, detail="Not recording")
+    ok = await asyncio.to_thread(
+        svc.recording_svc.add_screenshot, (req.path or "").strip())
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail="Screenshot file not found or no active session")
+    sess = svc.recording_svc.current_session
+    count = len(sess.screenshots) if sess else 0
+    return {"ok": True, "count": count}
 
 
 @app.get("/recording/transcript/stream")
@@ -1634,6 +1722,85 @@ async def _auto_extract_commitments(session) -> None:
                 session.session_id, commits)
     except Exception as e:
         logger.exception(f"Commitment auto-extract failed: {e}")
+
+
+async def _auto_identify_and_save_speakers(session) -> int:
+    """Ask the LLM who each diarized speaker is — from an explicit
+    self-introduction ("Hi, I'm Sarah") or a direct-address hand-off
+    ("Sarah, your thoughts?" → the next speaker is Sarah) — then label
+    the speaker AND persist their voice fingerprint to the known-speaker
+    store so future meetings auto-match without the user typing anything.
+
+    Mirrors the create/link/refine logic of the manual rename endpoint.
+    Best-effort: returns the number of speakers named; logs and continues
+    on any failure."""
+    if not svc.summarizer or not svc.speaker_profile_svc:
+        return 0
+    if not session.segments or not session.speakers:
+        return 0
+    try:
+        mapping = await svc.summarizer.identify_speakers(
+            session.full_transcript())
+    except Exception as e:
+        logger.warning(f"auto speaker-id call failed: {e}")
+        return 0
+    if not mapping:
+        return 0
+
+    import numpy as np
+    named = 0
+    for speaker_id, raw_name in mapping.items():
+        speaker = session.speakers.get(speaker_id)
+        if speaker is None:
+            continue
+        new_name = (raw_name or "").strip()
+        if not new_name:
+            continue
+        # Never override a name the user already confirmed by hand.
+        if speaker.match_confirmed and speaker.profile_id:
+            continue
+
+        speaker.display_name = new_name
+        speaker.match_confirmed = True
+        speaker.match_confidence = None
+
+        if not speaker.embedding:
+            # Spoke too briefly to fingerprint (<1.5s). Keep the label;
+            # we just can't save a reusable voiceprint this time.
+            named += 1
+            continue
+        try:
+            emb = np.asarray(speaker.embedding, dtype=np.float32)
+            existing = (svc.speaker_profile_svc.get(speaker.profile_id)
+                        if speaker.profile_id else None)
+            if existing is not None:
+                # Already linked (e.g. an auto-match) — trust the
+                # explicit name and refine the centroid.
+                svc.speaker_profile_svc.rename(existing.profile_id, new_name)
+                svc.speaker_profile_svc.confirm_match(
+                    existing.profile_id, emb, session.session_id)
+            else:
+                wanted = new_name.lower()
+                same_name = next(
+                    (p for p in svc.speaker_profile_svc.list_all()
+                     if p.display_name.lower() == wanted), None)
+                if same_name is not None:
+                    speaker.profile_id = same_name.profile_id
+                    svc.speaker_profile_svc.confirm_match(
+                        same_name.profile_id, emb, session.session_id)
+                else:
+                    profile = svc.speaker_profile_svc.create(
+                        new_name, emb, session.session_id)
+                    speaker.profile_id = profile.profile_id
+            named += 1
+        except Exception as e:
+            logger.warning(
+                f"auto-save profile for {speaker_id} ({new_name}) failed: {e}")
+
+    if named:
+        logger.info(f"Auto-identified + saved {named} speaker(s) for "
+                    f"session {session.session_id}")
+    return named
 
 
 def _serialize_speaker(sp) -> dict:
@@ -2344,6 +2511,14 @@ async def process_session(session_id: str):
     svc.current_session = session
     try:
         result = await svc.recording_svc.process_session()
+        # Auto-name speakers from explicit introductions / direct-address
+        # hand-offs and persist their voiceprints to the known-speakers
+        # store so the next meeting auto-matches them. Best-effort — a
+        # failure here must not block saving the processed session.
+        try:
+            await _auto_identify_and_save_speakers(result)
+        except Exception as e:
+            logger.warning(f"auto speaker identification skipped: {e}")
         await asyncio.to_thread(svc.session_svc.save, result)
         _auto_export_to_client(result, copy_audio=False)
         # Build the semantic-search index entry for this session in the
@@ -2423,6 +2598,7 @@ async def summarize_session(session_id: str, req: TemplateRequest):
             prompt=prompt_text,
             notes=session.notes or "",
             template_name=req.template,
+            image_paths=list(session.screenshots or []),
         )
         session.summary = result
         session.template = req.template
@@ -2495,6 +2671,10 @@ async def process_full(session_id: str, req: ProcessFullRequest):
         svc.current_session = session
         try:
             session = await svc.recording_svc.process_session()
+            try:
+                await _auto_identify_and_save_speakers(session)
+            except Exception as e:
+                logger.warning(f"auto speaker identification skipped: {e}")
             await asyncio.to_thread(svc.session_svc.save, session)
             stages["transcribe_diarize"] = "ok"
         except Exception as e:
@@ -2580,7 +2760,8 @@ async def _extract_and_save(
             svc.template_svc.get_prompt, template)
         result = await method(
             transcript, prompt=prompt_text,
-            notes=notes, template_name=template)
+            notes=notes, template_name=template,
+            image_paths=list(session.screenshots or []))
         session.template = template
     else:
         result = await method(transcript, notes=notes)
