@@ -10,6 +10,7 @@ Works with Classic Outlook. Gracefully fails with New Outlook.
 """
 
 import datetime
+import re
 import time
 import threading
 import pythoncom            # noqa: F401  Windows-only
@@ -350,6 +351,137 @@ def get_meetings_for_date(target_date: datetime.date) -> List[dict]:
         try:
             pythoncom.CoUninitialize()
         except Exception:
+            pass
+
+
+# Conference-link extraction for the lazy meeting-detail view. Unlike
+# auto_record_service._CONF_LINK_RE (which only needs to know a link
+# *exists*), here we return the full clickable URL so the UI can offer
+# a one-click Join button.
+_URL_RE = re.compile(r"""https?://[^\s<>"'\)\]]+""", re.IGNORECASE)
+_CONF_HOSTS = (
+    "teams.microsoft.com", "teams.live.com",
+    "zoom.us", "zoomgov.com",
+    "meet.google.com",
+    "webex.com",
+    "gotomeeting.com", "gotomeet.me",
+    "bluejeans.com", "whereby.com",
+    "chime.aws", "ringcentral.com",
+)
+# Invite bodies can be enormous (full reply chains). Cap so the API
+# payload and the LLM brief context stay sane.
+_BODY_CAP = 6000
+
+
+def _extract_join_url(*texts: str) -> Optional[str]:
+    for t in texts:
+        if not t:
+            continue
+        for u in _URL_RE.findall(t):
+            if any(h in u.lower() for h in _CONF_HOSTS):
+                return u.rstrip(".,);]>\"'")
+    return None
+
+
+def get_meeting_detail(subject: str, start_iso: str) -> dict:
+    """Lazy per-meeting detail: body/agenda + attendees + join link.
+
+    Deliberately scoped to the meeting's own day on the default
+    calendar so it stays fast — the bulk list omits bodies on purpose
+    (Outlook .Body access is slow and the text is large). Best-effort:
+    returns empty fields on any miss and never raises."""
+    empty = {"attendees": [], "body": "", "join_url": None}
+    try:
+        target = datetime.datetime.fromisoformat(start_iso)
+        if target.tzinfo is not None:
+            target = target.replace(tzinfo=None)
+    except ValueError:
+        return empty
+    want_subj = (subject or "").strip().lower()
+
+    if not _OUTLOOK_LOCK.acquire(timeout=30):
+        logger.warning("meeting-detail: Outlook lock timeout")
+        return empty
+    outlook = _get_outlook()
+    if not outlook:
+        try:
+            _OUTLOOK_LOCK.release()
+        except RuntimeError:
+            pass
+        return empty
+    try:
+        ns = outlook.GetNamespace("MAPI")
+        cal = ns.GetDefaultFolder(OL_FOLDER_CALENDAR)
+        items = cal.Items
+        items.Sort("[Start]")
+        items.IncludeRecurrences = True
+        day = target.date()
+        lo = (day - datetime.timedelta(days=1)).strftime("%m/%d/%Y")
+        hi = (day + datetime.timedelta(days=1)).strftime("%m/%d/%Y")
+        try:
+            items = items.Restrict(
+                f"[Start] >= '{lo} 12:00 AM' AND [Start] <= '{hi} 11:59 PM'")
+            items.Sort("[Start]")
+            items.IncludeRecurrences = True
+        except Exception:
+            pass
+
+        count = 0
+        for item in items:
+            count += 1
+            if count > 1000:
+                break
+            try:
+                s = _to_local_naive(item.Start)
+            except Exception:
+                continue
+            # Recurring instances share a subject; match the occurrence
+            # by start time (90s slack absorbs tz/rounding).
+            if abs((s - target).total_seconds()) > 90:
+                continue
+            if str(getattr(item, "Subject", "") or "").strip().lower() != want_subj:
+                continue
+
+            attendees: List[str] = []
+            try:
+                for r in item.Recipients:
+                    try:
+                        addr = str(getattr(r, "Address", "") or "")
+                        name = str(getattr(r, "Name", "") or "")
+                        if addr:
+                            attendees.append(addr)
+                        elif name:
+                            attendees.append(name)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            try:
+                body = str(getattr(item, "Body", "") or "").strip()
+            except Exception:
+                body = ""
+            location = str(getattr(item, "Location", "") or "")
+            join_url = _extract_join_url(location, body)
+            if len(body) > _BODY_CAP:
+                body = body[:_BODY_CAP] + "\n…(truncated)"
+            return {
+                "attendees": attendees,
+                "body": body,
+                "join_url": join_url,
+            }
+        return empty
+    except Exception as e:
+        logger.warning(f"meeting-detail failed: {e}")
+        return empty
+    finally:
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+        try:
+            _OUTLOOK_LOCK.release()
+        except RuntimeError:
             pass
 
 

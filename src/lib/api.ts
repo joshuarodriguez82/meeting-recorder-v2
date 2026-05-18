@@ -881,6 +881,7 @@ export const api = {
     scheduled_end_iso?: string;
     client: string;
     project: string;
+    body?: string;
   }) =>
     request<{
       markdown: string;
@@ -942,6 +943,14 @@ export const api = {
   getUpcomingMeetings: (hours: number = 168, refresh = false) =>
     request<Meeting[]>(
       `/calendar/upcoming?hours=${hours}${refresh ? "&refresh=true" : ""}`
+    ),
+  // Lazy per-meeting detail (agenda/body, attendees, parsed join link).
+  // Fetched only when the user opens a meeting so the bulk list stays
+  // fast — see the backend endpoint comment.
+  getMeetingDetail: (subject: string, start: string) =>
+    request<{ attendees: string[]; body: string; join_url: string | null }>(
+      `/calendar/meeting-detail?subject=${encodeURIComponent(subject)}`
+      + `&start=${encodeURIComponent(start)}`
     ),
   isCalendarAvailable: () =>
     request<{ available: boolean }>("/calendar/available"),

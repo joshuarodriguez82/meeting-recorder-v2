@@ -22,6 +22,7 @@ the user to toggle Meeting Recorder back on in System Settings → Privacy
 """
 
 import datetime
+import re
 import threading
 import time
 from typing import List, Optional
@@ -483,6 +484,106 @@ def get_upcoming_meetings(hours_ahead: int = 168) -> List[dict]:
         with _CACHE_LOCK:
             _inflight.pop(cache_key, None)
         wait_event.set()
+
+
+_URL_RE = re.compile(r"""https?://[^\s<>"'\)\]]+""", re.IGNORECASE)
+_CONF_HOSTS = (
+    "teams.microsoft.com", "teams.live.com",
+    "zoom.us", "zoomgov.com",
+    "meet.google.com",
+    "webex.com",
+    "gotomeeting.com", "gotomeet.me",
+    "bluejeans.com", "whereby.com",
+    "chime.aws", "ringcentral.com",
+)
+_BODY_CAP = 6000
+
+
+def _extract_join_url(*texts: str) -> Optional[str]:
+    for t in texts:
+        if not t:
+            continue
+        for u in _URL_RE.findall(t):
+            if any(h in u.lower() for h in _CONF_HOSTS):
+                return u.rstrip(".,);]>\"'")
+    return None
+
+
+def get_meeting_detail(subject: str, start_iso: str) -> dict:
+    """Lazy per-meeting detail (body/agenda + attendees + join link),
+    scoped to the meeting's own day. Best-effort: empty fields on any
+    miss, never raises. Mirrors the Outlook backend's contract."""
+    empty = {"attendees": [], "body": "", "join_url": None}
+    try:
+        target = datetime.datetime.fromisoformat(start_iso)
+        if target.tzinfo is not None:
+            target = target.replace(tzinfo=None)
+    except ValueError:
+        return empty
+    want_subj = (subject or "").strip().lower()
+
+    if not _ensure_permission():
+        return empty
+    try:
+        _import_eventkit()
+    except ImportError:
+        return empty
+
+    day = target.date()
+    lo = datetime.datetime.combine(day, datetime.time.min)
+    hi = datetime.datetime.combine(day, datetime.time.max)
+    try:
+        with _EK_LOCK:
+            store = _get_event_store()
+            predicate = store.predicateForEventsWithStartDate_endDate_calendars_(
+                _ns_date_from_datetime(lo),
+                _ns_date_from_datetime(hi),
+                None,
+            )
+            ek_events = store.eventsMatchingPredicate_(predicate)
+            for ev in (ek_events or []):
+                try:
+                    s = _datetime_from_nsdate(ev.startDate())
+                except Exception:
+                    continue
+                if abs((s - target).total_seconds()) > 90:
+                    continue
+                title = str(ev.title()) if ev.title() else ""
+                if title.strip().lower() != want_subj:
+                    continue
+                body = ""
+                try:
+                    n = ev.notes()
+                    if n:
+                        body = str(n).strip()
+                except Exception:
+                    body = ""
+                location = ""
+                try:
+                    loc = ev.location()
+                    if loc:
+                        location = str(loc)
+                except Exception:
+                    pass
+                url_str = ""
+                try:
+                    u = ev.URL()
+                    if u is not None:
+                        url_str = str(u.absoluteString())
+                except Exception:
+                    pass
+                join_url = _extract_join_url(url_str, location, body)
+                if len(body) > _BODY_CAP:
+                    body = body[:_BODY_CAP] + "\n…(truncated)"
+                return {
+                    "attendees": _attendees_from_event(ev),
+                    "body": body,
+                    "join_url": join_url,
+                }
+        return empty
+    except Exception as e:
+        logger.warning(f"meeting-detail failed: {e}")
+        return empty
 
 
 def is_outlook_available() -> bool:
