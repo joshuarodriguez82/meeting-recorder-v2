@@ -304,7 +304,7 @@ export default function Home() {
                 <br />
                 • Another instance is running (check Task Manager for meeting-recorder.exe / pythonw.exe)
                 <br />
-                • Port 17645 held by a zombie process
+                • A stale backend process is holding the app&apos;s port (it&apos;s chosen automatically at startup)
               </div>
             </div>
             <div className="flex gap-2">

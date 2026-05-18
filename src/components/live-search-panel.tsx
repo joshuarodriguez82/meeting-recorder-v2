@@ -29,8 +29,6 @@ import { Input } from "@/components/ui/input";
 // subscriber, so two consumers cost almost nothing, and the components
 // stay decoupled — neither has to know about the other's lifecycle.
 
-const BACKEND = "http://127.0.0.1:17645";
-
 type Segment = {
   start: number;
   end: number;
@@ -56,16 +54,31 @@ export function LiveSearchPanel({ recording }: { recording: boolean }) {
       setSegments([]);
       return;
     }
-    const es = new EventSource(`${BACKEND}/recording/transcript/stream`);
-    es.onmessage = (e) => {
-      try {
-        const seg: Segment = JSON.parse(e.data);
-        setSegments((prev) => [...prev, seg]);
-      } catch { /* ignore malformed */ }
+    let es: EventSource | null = null;
+    let cancelled = false;
+    (async () => {
+      // The backend port is OS-picked at app startup and exposed via
+      // the get_backend_port Tauri command — it must be resolved
+      // dynamically. The old hardcoded 127.0.0.1:17645 only worked in
+      // dev; in the packaged app it pointed at a dead port, so this
+      // panel received zero live segments and "This call" search
+      // always came back empty even though the transcript was visible.
+      const baseUrl = await api.getBaseUrl();
+      if (cancelled) return;
+      es = new EventSource(`${baseUrl}/recording/transcript/stream`);
+      es.onmessage = (e) => {
+        try {
+          const seg: Segment = JSON.parse(e.data);
+          setSegments((prev) => [...prev, seg]);
+        } catch { /* ignore malformed */ }
+      };
+      es.addEventListener("done", () => es?.close());
+      es.onerror = () => es?.close();
+    })();
+    return () => {
+      cancelled = true;
+      es?.close();
     };
-    es.addEventListener("done", () => es.close());
-    es.onerror = () => es.close();
-    return () => es.close();
   }, [recording]);
 
   // ── Past-meetings remote search ────────────────────────────────────
