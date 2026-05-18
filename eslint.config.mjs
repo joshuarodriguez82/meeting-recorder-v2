@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Self-contained Capacitor sub-project with its own tsconfig +
+    // node_modules; the desktop lint/typecheck must not pull it in.
+    "mobile/**",
   ]),
 ]);
 
