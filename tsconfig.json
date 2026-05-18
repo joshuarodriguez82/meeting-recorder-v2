@@ -34,6 +34,7 @@
     "node_modules",
     "backend",
     "src-tauri",
+    "mobile",
     "backend-bundle.zip"
   ]
 }
