@@ -359,7 +359,19 @@ def _scan_folder_recursively(folder, today: datetime.date,
 
 
 def get_meetings_for_date(target_date: datetime.date) -> List[dict]:
-    """Return all meetings on a specific date across every calendar."""
+    """Return all meetings on a specific date across every calendar.
+
+    Cached (short TTL): the auto-record loop calls this every 30s, and
+    an uncached COM scan that often saturates Outlook's single-threaded
+    lock and starves the UI's 7-day fetch (it then times out → blank
+    calendar). 2-minute freshness is plenty for an auto-start trigger
+    that only needs to notice a meeting within a poll or two."""
+    cache_key = ("date", target_date.isoformat())
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        logger.info(f"Calendar cache hit (date {target_date})")
+        return cached
+
     outlook = _get_outlook()
     if not outlook:
         return []
@@ -397,6 +409,7 @@ def get_meetings_for_date(target_date: datetime.date) -> List[dict]:
 
         all_meetings.sort(key=lambda m: m["start"])
         logger.info(f"Found {len(all_meetings)} meetings for {target_date}")
+        _cache_put(cache_key, all_meetings, ttl=120)
         return all_meetings
 
     except Exception as e:
