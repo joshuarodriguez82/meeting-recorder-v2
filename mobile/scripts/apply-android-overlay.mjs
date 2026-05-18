@@ -54,9 +54,30 @@ for (const root of srcRoots) {
     }
   }
 }
-for (const f of ["MainActivity.kt", "RecorderPlugin.kt", "RecordingService.kt"]) {
+for (const f of [
+  "MainActivity.kt",
+  "RecorderPlugin.kt",
+  "RecordingService.kt",
+  "CallAccessibilityService.kt",
+  "RecordingPrefs.kt",
+]) {
   copyFileSync(join(overlayJava, PKG_PATH, f), join(pkgDir, f));
   log(`installed ${f}`);
+}
+
+// 1b. Resources the AccessibilityService needs (its config + the
+//     description string). Capacitor merges multiple values-*.xml, so
+//     dropping a separate mr_strings.xml in doesn't clash with the
+//     template's strings.xml.
+const overlayRes = join(mobile, "android-overlay", "res");
+for (const [sub, file] of [
+  ["xml", "accessibility_service_config.xml"],
+  ["values", "mr_strings.xml"],
+]) {
+  const destDir = join(appMain, "res", sub);
+  mkdirSync(destDir, { recursive: true });
+  copyFileSync(join(overlayRes, sub, file), join(destDir, file));
+  log(`installed res/${sub}/${file}`);
 }
 
 // 2. AndroidManifest: permissions + the foreground service.
@@ -68,6 +89,9 @@ const PERMS = [
   "android.permission.FOREGROUND_SERVICE",
   "android.permission.FOREGROUND_SERVICE_MICROPHONE",
   "android.permission.POST_NOTIFICATIONS",
+  // Lets the AccessibilityService observe call state to auto start/stop
+  // recording on a regular cellular call.
+  "android.permission.READ_PHONE_STATE",
 ];
 const permLines = PERMS.filter((p) => !manifest.includes(`"${p}"`))
   .map((p) => `    <uses-permission android:name="${p}" />`)
@@ -88,6 +112,29 @@ if (!manifest.includes("RecordingService")) {
     `            android:foregroundServiceType="microphone" />\n`;
   manifest = manifest.replace(/(\n\s*<\/application>)/, `\n${service}$1`);
   log("registered RecordingService");
+}
+
+if (!manifest.includes("CallAccessibilityService")) {
+  // Bound accessibility service: this is the non-root mechanism for
+  // capturing the far side of a call on Android 10+ (same as Talker /
+  // Cube ACR). exported=true + BIND_ACCESSIBILITY_SERVICE + the
+  // accessibility intent-filter is mandatory for the OS to list it
+  // under Settings → Accessibility.
+  const accSvc =
+    `        <service\n` +
+    `            android:name="${PKG}.CallAccessibilityService"\n` +
+    `            android:exported="true"\n` +
+    `            android:label="Meeting Recorder call capture"\n` +
+    `            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">\n` +
+    `            <intent-filter>\n` +
+    `                <action android:name="android.accessibilityservice.AccessibilityService" />\n` +
+    `            </intent-filter>\n` +
+    `            <meta-data\n` +
+    `                android:name="android.accessibilityservice"\n` +
+    `                android:resource="@xml/accessibility_service_config" />\n` +
+    `        </service>\n`;
+  manifest = manifest.replace(/(\n\s*<\/application>)/, `\n${accSvc}$1`);
+  log("registered CallAccessibilityService");
 }
 writeFileSync(manifestPath, manifest);
 
