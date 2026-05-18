@@ -63,6 +63,14 @@ export function SessionDetailDialog({
   const [processing, setProcessing] = useState<string | null>(null);
   const [processingStatus, setProcessingStatus] = useState("");
   const [tab, setTab] = useState(initialTab);
+  // Resolved backend origin for direct media URLs (audio player,
+  // screenshots). MUST come from getBaseUrl() — the backend port is
+  // OS-picked at app startup, so any hardcoded 127.0.0.1:17645 points
+  // at a dead port in the packaged app.
+  const [baseUrl, setBaseUrl] = useState("");
+  useEffect(() => {
+    api.getBaseUrl().then(setBaseUrl).catch(() => {});
+  }, []);
 
   // While an async backend job is running (process / summarize / extract),
   // poll /recording/status so we can surface `current_status` strings like
@@ -325,14 +333,14 @@ export function SessionDetailDialog({
             <ScrollArea className="flex-1 min-h-0">
               <div className="p-6 min-w-0 max-w-full break-words">
                 <TabsContent value="overview" className="mt-0 space-y-6">
-                  {session.audio_path && (
+                  {session.audio_path && baseUrl && (
                     <div className="space-y-2">
                       <Label className="text-xs uppercase tracking-wider text-muted-foreground">Recording</Label>
                       <audio
                         controls
                         preload="metadata"
                         className="w-full"
-                        src={`http://127.0.0.1:17645/sessions/${sessionId}/audio`}
+                        src={`${baseUrl}/sessions/${sessionId}/audio`}
                       >
                         Your browser doesn&apos;t support audio playback.
                       </audio>
