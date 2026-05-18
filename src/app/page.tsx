@@ -150,16 +150,16 @@ export default function Home() {
     let cancelled = false;
     (async () => {
       try {
-        const { checkForUpdate, openReleaseInBrowser } = await import("@/lib/updater");
+        const { checkForUpdate, downloadUpdate } = await import("@/lib/updater");
         const result = await checkForUpdate();
         if (cancelled) return;
         if (result.kind === "available") {
           toast.message(`Update available: v${result.release.version}`, {
-            description: "Click Download to grab the new installer.",
+            description: "Click Download to grab the installer for your OS.",
             duration: 12000,
             action: {
               label: "Download",
-              onClick: () => openReleaseInBrowser(result.release.url),
+              onClick: () => { downloadUpdate(result.release); },
             },
           });
         }
