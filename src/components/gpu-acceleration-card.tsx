@@ -18,6 +18,11 @@ type BackendCard = {
   when: string;
   disabled?: boolean;
   disabledReason?: string;
+  // macOS MPS: on by default, nothing to install or switch. Distinct
+  // from `disabled` (coming-soon/unavailable) so the UI shows it as the
+  // active accelerator instead of greying it out as "Not available".
+  automatic?: boolean;
+  note?: string;
 };
 
 // Windows / Linux: NVIDIA CUDA is the upgrade path, AMD DirectML is shown
@@ -62,11 +67,12 @@ const BACKENDS_MACOS: BackendCard[] = [
     title: "Apple Silicon (Metal / MPS)",
     subtitle: "Hardware-accelerated transcription on M1, M2, M3, M4 Macs via Apple's Metal Performance Shaders.",
     bytes: "0 MB — bundled with torch",
-    when: "Active automatically on Apple Silicon Macs. Nothing to install.",
-    disabled: true,
-    disabledReason:
-      "MPS is enabled out of the box whenever the running torch was built with MPS support — "
-      + "every torch 2.x universal2 wheel is. There's nothing to switch to or install.",
+    when: "On automatically on Apple Silicon. Nothing to install or switch.",
+    automatic: true,
+    note:
+      "Enabled out of the box — every torch 2.x universal2 wheel ships "
+      + "with MPS. This is the active transcription accelerator on your "
+      + "Mac; there's nothing to install or switch.",
   },
   {
     id: "cpu",
@@ -284,12 +290,17 @@ export function GpuAccelerationCard() {
                           Not available yet
                         </Badge>
                       )}
+                      {b.automatic && !active && (
+                        <Badge variant="outline" className="text-[10px] border-primary text-primary">
+                          On (automatic)
+                        </Badge>
+                      )}
                       {isPendingTarget && (
                         <Badge variant="outline" className="text-[10px] border-primary text-primary">
                           Installed — restart pending
                         </Badge>
                       )}
-                      {recommended && !active && !isPendingTarget && !b.disabled && (
+                      {recommended && !active && !isPendingTarget && !b.disabled && !b.automatic && (
                         <Badge variant="outline" className="text-[10px] border-primary text-primary">
                           Recommended for you
                         </Badge>
@@ -299,26 +310,37 @@ export function GpuAccelerationCard() {
                     <p className="text-xs text-muted-foreground mt-0.5">
                       {b.bytes} · {b.when}
                     </p>
-                    {b.disabled && b.disabledReason && (
+                    {((b.disabled && b.disabledReason) || b.note) && (
                       <p className="text-[11px] text-muted-foreground mt-2 italic">
-                        {b.disabledReason}
+                        {b.note || b.disabledReason}
                       </p>
                     )}
                   </div>
-                  <Button
-                    size="sm"
-                    variant={active ? "outline" : "default"}
-                    disabled={anyInstallBlocked}
-                    onClick={() => install(b.id)}
-                    title={b.disabled ? b.disabledReason : undefined}
-                  >
-                    {thisInstalling ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : null}
-                    {b.disabled ? "Unavailable"
-                      : active ? "Active"
-                      : isPendingTarget ? "Pending restart"
-                      : thisInstalling ? "Installing…"
-                      : "Use This"}
-                  </Button>
+                  {b.automatic ? (
+                    // No install/switch for MPS — it's the active
+                    // accelerator by default. Show status, not a button.
+                    <Badge
+                      variant={active ? "default" : "outline"}
+                      className="text-[10px] whitespace-nowrap"
+                    >
+                      {active ? "Active" : "On"}
+                    </Badge>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant={active ? "outline" : "default"}
+                      disabled={anyInstallBlocked}
+                      onClick={() => install(b.id)}
+                      title={b.disabled ? b.disabledReason : undefined}
+                    >
+                      {thisInstalling ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : null}
+                      {b.disabled ? "Unavailable"
+                        : active ? "Active"
+                        : isPendingTarget ? "Pending restart"
+                        : thisInstalling ? "Installing…"
+                        : "Use This"}
+                    </Button>
+                  )}
                 </div>
               </div>
             );
