@@ -883,8 +883,20 @@ fn restart_backend(
 /// We shell out to the OS screenshot tool rather than pull in a heavy
 /// capture crate: keeps the CI bundle small and avoids the macos-14
 /// runner brittleness called out in AGENTS.md.
+/// `x`/`y`/`width`/`height` are the chosen monitor's bounds in PHYSICAL
+/// pixels (from the frontend's Tauri monitor list); `scale` is that
+/// monitor's scale factor. When `width`/`height` are 0 we fall back to
+/// a full primary-screen grab — covers the single-monitor / no-info
+/// path so the button never silently no-ops.
 #[tauri::command]
-fn capture_screenshot(dir: String) -> Result<String, String> {
+fn capture_screenshot(
+    dir: String,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    scale: f64,
+) -> Result<String, String> {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -898,46 +910,92 @@ fn capture_screenshot(dir: String) -> Result<String, String> {
     let out_path = target_dir.join(format!("screenshot_{}.png", millis));
     let out = out_path.to_string_lossy().to_string();
 
+    let region = width > 0 && height > 0;
+    let sc = if scale > 0.0 { scale } else { 1.0 };
+
     #[cfg(target_os = "macos")]
-    let result = Command::new("screencapture")
-        .args(["-x", "-t", "png", &out])
-        .status();
+    let result = {
+        if region {
+            // screencapture -R takes points; Tauri bounds are physical
+            // pixels, so divide by the monitor's scale factor.
+            let rx = (x as f64 / sc).round() as i64;
+            let ry = (y as f64 / sc).round() as i64;
+            let rw = (width as f64 / sc).round() as i64;
+            let rh = (height as f64 / sc).round() as i64;
+            let r = format!("-R{},{},{},{}", rx, ry, rw, rh);
+            Command::new("screencapture")
+                .args(["-x", "-t", "png", r.as_str(), out.as_str()])
+                .status()
+        } else {
+            Command::new("screencapture")
+                .args(["-x", "-t", "png", out.as_str()])
+                .status()
+        }
+    };
 
     #[cfg(target_os = "windows")]
     let result = {
-        // Primary-screen grab via .NET, no extra deps. -STA so the
-        // drawing APIs behave; bounds come from the primary screen so
-        // a multi-monitor setup doesn't produce a giant blank canvas.
-        let ps = format!(
-            "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
-             $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; \
+        // SetProcessDPIAware so CopyFromScreen coordinates are physical
+        // pixels and line up with the Tauri monitor bounds. Falls back
+        // to the primary screen when no region was supplied.
+        let grab = if region {
+            format!(
+                "$bmp = New-Object System.Drawing.Bitmap {w}, {h}; \
+                 $g = [System.Drawing.Graphics]::FromImage($bmp); \
+                 $g.CopyFromScreen({x}, {y}, 0, 0, $bmp.Size);",
+                w = width, h = height, x = x, y = y
+            )
+        } else {
+            "$b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; \
              $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height; \
              $g = [System.Drawing.Graphics]::FromImage($bmp); \
-             $g.CopyFromScreen($b.X, $b.Y, 0, 0, $bmp.Size); \
-             $bmp.Save('{}', [System.Drawing.Imaging.ImageFormat]::Png); \
+             $g.CopyFromScreen($b.X, $b.Y, 0, 0, $bmp.Size);"
+                .to_string()
+        };
+        let ps = format!(
+            "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
+             Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] \
+             public static extern bool SetProcessDPIAware();' \
+             -Name U -Namespace W; [W.U]::SetProcessDPIAware() | Out-Null; \
+             {grab} \
+             $bmp.Save('{out}', [System.Drawing.Imaging.ImageFormat]::Png); \
              $g.Dispose(); $bmp.Dispose()",
-            out.replace('\'', "''")
+            grab = grab,
+            out = out.replace('\'', "''")
         );
         Command::new("powershell")
-            .args(["-NoProfile", "-STA", "-Command", &ps])
+            .args(["-NoProfile", "-STA", "-Command", ps.as_str()])
             .status()
     };
 
     #[cfg(all(unix, not(target_os = "macos")))]
     let result = {
         // Try the common Wayland/X11 tools in turn; first one that's
-        // installed and succeeds wins.
+        // installed and succeeds wins. With a region we pass the
+        // geometry; without one we grab everything.
         let mut last: std::io::Result<std::process::ExitStatus> =
             Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "no screenshot tool",
             ));
-        let attempts: [(&str, Vec<&str>); 4] = [
-            ("grim", vec![out.as_str()]),
-            ("gnome-screenshot", vec!["-f", out.as_str()]),
-            ("scrot", vec![out.as_str()]),
-            ("import", vec!["-window", "root", out.as_str()]),
-        ];
+        let geom_grim = format!("{},{} {}x{}", x, y, width, height);
+        let geom_im = format!("{}x{}+{}+{}", width, height, x, y);
+        let geom_scrot = format!("{},{},{},{}", x, y, width, height);
+        let attempts: Vec<(&str, Vec<&str>)> = if region {
+            vec![
+                ("grim", vec!["-g", geom_grim.as_str(), out.as_str()]),
+                ("import", vec!["-window", "root", "-crop",
+                                geom_im.as_str(), out.as_str()]),
+                ("scrot", vec!["-a", geom_scrot.as_str(), out.as_str()]),
+            ]
+        } else {
+            vec![
+                ("grim", vec![out.as_str()]),
+                ("gnome-screenshot", vec!["-f", out.as_str()]),
+                ("scrot", vec![out.as_str()]),
+                ("import", vec!["-window", "root", out.as_str()]),
+            ]
+        };
         for (bin, args) in attempts.iter() {
             match Command::new(bin).args(args).status() {
                 Ok(s) if s.success() => {

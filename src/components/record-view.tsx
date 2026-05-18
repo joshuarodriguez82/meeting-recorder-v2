@@ -27,6 +27,9 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
+} from "@/components/ui/dialog";
 import { LiveTranscriptPanel } from "./live-transcript-panel";
 import { MeetingBriefModal } from "./meeting-brief-modal";
 import { LiveSearchPanel } from "./live-search-panel";
@@ -40,6 +43,17 @@ interface Props {
   // where an Outlook hiccup should keep the current list instead of
   // flashing to empty. Silent mode also suppresses toast feedback.
   onRefreshCalendar: (silent?: boolean) => void;
+}
+
+// One physical display, as reported by Tauri's monitor list. Bounds are
+// in physical pixels; the Rust capture command converts as needed.
+interface ScreenMonitor {
+  name: string | null;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  scale: number;
 }
 
 export function RecordView({
@@ -91,6 +105,12 @@ export function RecordView({
   // fed to the summarizer as visual context.
   const [screenshotBusy, setScreenshotBusy] = useState(false);
   const [screenshotCount, setScreenshotCount] = useState(0);
+  // When the user has >1 monitor, clicking Screenshot opens this picker
+  // so they choose which display to capture (rather than us guessing).
+  const [monitorPicker, setMonitorPicker] = useState<{
+    dir: string;
+    monitors: ScreenMonitor[];
+  } | null>(null);
   // Subjects flagged "never auto-record" (permanent, server-persisted,
   // matched by subject so a recurring series stays blocked).
   const [blockedSubjects, setBlockedSubjects] = useState<string[]>([]);
@@ -475,12 +495,20 @@ export function RecordView({
   // attributes Screen Recording permission to the signed bundle, not
   // the Python sidecar); the backend owns the destination folder and
   // session bookkeeping.
-  const takeScreenshot = async () => {
+  // Capture `m` (or the whole primary screen when m is null) and attach
+  // it to the active recording.
+  const captureMonitor = async (dir: string, m: ScreenMonitor | null) => {
     setScreenshotBusy(true);
     try {
-      const { dir } = await api.getScreenshotDir();
       const { invoke } = await import("@tauri-apps/api/core");
-      const path = await invoke<string>("capture_screenshot", { dir });
+      const path = await invoke<string>("capture_screenshot", {
+        dir,
+        x: m ? Math.round(m.x) : 0,
+        y: m ? Math.round(m.y) : 0,
+        width: m ? Math.round(m.width) : 0,
+        height: m ? Math.round(m.height) : 0,
+        scale: m ? m.scale : 1,
+      });
       const res = await api.attachScreenshot(path);
       setScreenshotCount(res.count);
       toast.success("Screenshot captured", {
@@ -490,6 +518,44 @@ export function RecordView({
       toast.error(
         `Screenshot failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
+      setScreenshotBusy(false);
+    }
+  };
+
+  const takeScreenshot = async () => {
+    setScreenshotBusy(true);
+    try {
+      const { dir } = await api.getScreenshotDir();
+      // Enumerate displays so the user can pick. availableMonitors is
+      // Tauri-only; outside Tauri (plain web dev) we just grab primary.
+      let monitors: ScreenMonitor[] = [];
+      try {
+        const win = await import("@tauri-apps/api/window");
+        const list = await win.availableMonitors();
+        monitors = list.map((mon) => ({
+          name: mon.name ?? null,
+          x: mon.position.x,
+          y: mon.position.y,
+          width: mon.size.width,
+          height: mon.size.height,
+          scale: mon.scaleFactor,
+        }));
+      } catch {
+        monitors = [];
+      }
+
+      if (monitors.length <= 1) {
+        // Nothing to choose — capture the one (or primary fallback).
+        await captureMonitor(dir, monitors[0] ?? null);
+        return;
+      }
+      // Multiple displays: let the user pick. The dialog drives the
+      // actual capture; release the busy state until they choose.
+      setScreenshotBusy(false);
+      setMonitorPicker({ dir, monitors });
+    } catch (e) {
+      toast.error(
+        `Screenshot failed: ${e instanceof Error ? e.message : String(e)}`);
       setScreenshotBusy(false);
     }
   };
@@ -965,6 +1031,60 @@ export function RecordView({
           if (p) setProject(p);
         }}
       />
+
+      <Dialog
+        open={monitorPicker !== null}
+        onOpenChange={(open) => { if (!open) setMonitorPicker(null); }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Which screen?</DialogTitle>
+            <DialogDescription>
+              You have {monitorPicker?.monitors.length ?? 0} displays. Pick the
+              one to capture — it&apos;s attached to this meeting and sent to
+              Claude as visual context.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            {monitorPicker?.monitors.map((m, i) => {
+              const primary = m.x === 0 && m.y === 0;
+              const side =
+                m.x > 0 ? "right" : m.x < 0 ? "left"
+                  : m.y > 0 ? "below" : m.y < 0 ? "above" : "primary";
+              return (
+                <button
+                  key={i}
+                  type="button"
+                  disabled={screenshotBusy}
+                  onClick={async () => {
+                    const dir = monitorPicker.dir;
+                    setMonitorPicker(null);
+                    await captureMonitor(dir, m);
+                  }}
+                  className="flex w-full items-center justify-between rounded-lg border p-3 text-left transition hover:bg-muted/50 disabled:opacity-60"
+                >
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium truncate">
+                      Display {i + 1}
+                      {m.name ? ` — ${m.name}` : ""}
+                      {primary && (
+                        <span className="ml-2 text-[10px] uppercase tracking-wide text-muted-foreground">
+                          primary
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {Math.round(m.width)}×{Math.round(m.height)}
+                      {!primary && ` · ${side} of main`}
+                    </div>
+                  </div>
+                  <Camera className="h-4 w-4 shrink-0 text-muted-foreground" />
+                </button>
+              );
+            })}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
