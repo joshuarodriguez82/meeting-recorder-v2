@@ -13,12 +13,26 @@ and remain searchable forever.
 
 import datetime
 import json
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Audio extensions the recorder ever writes as a client-folder copy.
+_AUDIO_EXTS = (".wav", ".mp3", ".m4a", ".flac")
+
+# Recognises a recorder-created audio file by name when its session is
+# gone (orphan). Two strong signals, both low false-positive:
+#   - "session_<hex>"           → ExportService._base_name with no
+#                                  display name
+#   - "… - YYYY-MM-DD"          → the app's session-naming convention;
+#                                  the trailing date also gives us the
+#                                  file's age without a session record
+_ORPHAN_NAME_RE = re.compile(
+    r"(?:^session_[0-9a-fA-F]{4,}$)|(?:.+ - (\d{4}-\d{2}-\d{2})$)")
 
 
 def folder_stats(recordings_dir: str) -> Dict[str, int]:
@@ -290,13 +304,37 @@ def cleanup(
                     if not fpath.is_file():
                         continue
                     meta = expected.get(fpath.name)
-                    if meta is None:
-                        continue  # not a recorder-created file — leave it
-                    processed, age_days = meta
-                    if age_days is None:
-                        age_days = (now - datetime.datetime.fromtimestamp(
-                            fpath.stat().st_mtime)).total_seconds() / 86400
-                    threshold = processed_days if processed else unprocessed_days
+                    is_orphan = False
+                    if meta is not None:
+                        processed, age_days = meta
+                        if age_days is None:
+                            age_days = (now - datetime.datetime.fromtimestamp(
+                                fpath.stat().st_mtime)).total_seconds() / 86400
+                        threshold = (processed_days if processed
+                                     else unprocessed_days)
+                    else:
+                        # No matching session. Only touch files that look
+                        # like the recorder's own output — never the
+                        # user's other files in the customer folder.
+                        if fpath.suffix.lower() not in _AUDIO_EXTS:
+                            continue
+                        m = _ORPHAN_NAME_RE.match(fpath.stem)
+                        if not m:
+                            continue
+                        is_orphan = True
+                        processed = True  # a finished export → processed
+                        age_days = None
+                        date_str = m.group(1)
+                        if date_str:
+                            try:
+                                d = datetime.datetime.fromisoformat(date_str)
+                                age_days = (now - d).total_seconds() / 86400
+                            except ValueError:
+                                age_days = None
+                        if age_days is None:
+                            age_days = (now - datetime.datetime.fromtimestamp(
+                                fpath.stat().st_mtime)).total_seconds() / 86400
+                        threshold = processed_days
                     if threshold <= 0 or age_days < threshold:
                         continue
                     size = fpath.stat().st_size
@@ -310,7 +348,8 @@ def cleanup(
                         unprocessed_deleted += 1
                     logger.info(
                         f"Retention: {'(dry run) ' if dry_run else ''}deleted "
-                        f"untracked client-folder copy {fpath} "
+                        f"{'orphaned (no session) ' if is_orphan else 'untracked '}"
+                        f"client-folder copy {fpath} "
                         f"({age_days:.1f} days old, {format_bytes(size)})"
                     )
                 except OSError as e:
