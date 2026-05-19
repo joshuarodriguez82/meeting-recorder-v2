@@ -2797,6 +2797,41 @@ async def engagement_register(client: str, project: str = ""):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/engagements/{client}/export")
+async def engagement_export(client: str, project: str = ""):
+    """Render the engagement register to a stable .xlsx in the client's
+    export folder (falls back to the recordings dir). Overwrites in
+    place; human-entered Status/Notes carry forward across runs."""
+    svc.load_settings()
+    if not svc.engagement_svc:
+        raise HTTPException(status_code=400, detail="Service not ready")
+    try:
+        from services.engagement_export_service import (
+            export_register_workbook,
+        )
+
+        register = await asyncio.to_thread(
+            svc.engagement_svc.build_register, client, project)
+
+        cfg = svc.client_cfg_svc.get(client) if svc.client_cfg_svc else None
+        dest_dir = (
+            cfg.export_folder if cfg and cfg.export_folder
+            else str(svc.session_svc.recordings_dir)
+        )
+        label = register.get("client") or client
+        suffix = f" - {project}" if project else ""
+        filename = f"{label} - Engagement Register{suffix}.xlsx"
+
+        result = await asyncio.to_thread(
+            export_register_workbook, register, dest_dir, filename)
+        return {"ok": True, **result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("Engagement export failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class ProcessFullRequest(BaseModel):
     template: str = "General"
     follow_up_drafts: bool = False

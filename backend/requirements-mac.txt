@@ -17,6 +17,8 @@ uvicorn[standard]>=0.30.0
 pydantic>=2.0
 anthropic
 openai
+# Engagement-register Excel export (Phase 3); imported lazily.
+openpyxl>=3.1
 python-dotenv
 # OS keychain for API keys. macOS Keychain on Mac, Secret Service on
 # Linux. See backend/config/secrets.py.
