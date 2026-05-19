@@ -3,6 +3,10 @@ uvicorn[standard]>=0.30.0
 pydantic>=2.0
 anthropic
 openai
+# Engagement-register Excel workbook export (Phase 3). Imported lazily
+# so a missing wheel degrades to a clear API error, never an import
+# crash of the whole backend.
+openpyxl>=3.1
 python-dotenv
 # OS keychain for secrets (Anthropic/HF/OpenAI keys). Picks the right
 # backend automatically: Windows Credential Manager, macOS Keychain,
