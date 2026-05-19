@@ -3,6 +3,12 @@ import datetime
 from typing import Dict, List, Optional
 from models.speaker import Speaker
 from models.segment import Segment
+from models.extraction import (
+    Requirement,
+    Decision,
+    ActionItem,
+    OpenQuestion,
+)
 
 
 class Session:
@@ -23,6 +29,16 @@ class Session:
         self.project: str = ""
         self.attendees: List[str] = []
         self.decisions: Optional[str] = None
+        # Structured counterparts to the markdown fields above. The
+        # markdown stays the source of truth for the current per-session
+        # UI; these typed records exist so an engagement (many sessions
+        # for one client/project) can roll up, dedupe, and status-track.
+        # Empty on legacy sessions until they're reprocessed — nothing
+        # reads these as required, so old JSON loads unchanged.
+        self.requirements_struct: List[Requirement] = []
+        self.decisions_struct: List[Decision] = []
+        self.action_items_struct: List[ActionItem] = []
+        self.open_questions: List[OpenQuestion] = []
         # Free-form notes the user adds to the session — personal reminders,
         # off-audio context, follow-ups they want to remember. Fed into the
         # summarizer prompt so AI extractions reflect the user's own
@@ -77,6 +93,10 @@ class Session:
             "project": self.project,
             "attendees": self.attendees,
             "decisions": self.decisions,
+            "requirements_struct": [r.to_dict() for r in self.requirements_struct],
+            "decisions_struct": [d.to_dict() for d in self.decisions_struct],
+            "action_items_struct": [a.to_dict() for a in self.action_items_struct],
+            "open_questions": [q.to_dict() for q in self.open_questions],
             "notes": self.notes,
             "exported_audio_paths": list(self.exported_audio_paths),
             "screenshots": list(self.screenshots),
@@ -108,6 +128,18 @@ class Session:
         session.project = data.get("project", "") or ""
         session.attendees = list(data.get("attendees") or [])
         session.decisions = data.get("decisions")
+        session.requirements_struct = [
+            Requirement.from_dict(x) for x in (data.get("requirements_struct") or [])
+        ]
+        session.decisions_struct = [
+            Decision.from_dict(x) for x in (data.get("decisions_struct") or [])
+        ]
+        session.action_items_struct = [
+            ActionItem.from_dict(x) for x in (data.get("action_items_struct") or [])
+        ]
+        session.open_questions = [
+            OpenQuestion.from_dict(x) for x in (data.get("open_questions") or [])
+        ]
         session.notes = data.get("notes") or ""
         session.exported_audio_paths = list(data.get("exported_audio_paths") or [])
         session.screenshots = list(data.get("screenshots") or [])

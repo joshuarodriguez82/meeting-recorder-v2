@@ -190,6 +190,32 @@ def _with_user_notes(instruction: str, transcript: str, notes: str = "") -> str:
     )
 
 
+def _coerce_json(text: str) -> Optional[dict]:
+    """Best-effort 'model text → dict'. Tolerates code fences and a
+    little surrounding prose by falling back to the outermost {...}
+    slice. Returns None when nothing parseable is found so the caller
+    can trigger a repair retry."""
+    if not text:
+        return None
+    s = text.strip()
+    # Strip a leading ```json / ``` fence and its closer if present.
+    s = re.sub(r"^```(?:json)?\s*", "", s)
+    s = re.sub(r"\s*```$", "", s).strip()
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else None
+    except (ValueError, TypeError):
+        pass
+    start, end = s.find("{"), s.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            obj = json.loads(s[start:end + 1])
+            return obj if isinstance(obj, dict) else None
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
 class Summarizer:
 
     def __init__(
@@ -435,6 +461,72 @@ class Summarizer:
             return result
         except Exception as e:
             raise RuntimeError(f"Decisions extraction failed: {e}") from e
+
+    async def extract_structured(self, transcript: str,
+                                 notes: str = "") -> dict:
+        """One call → typed records for the engagement layer.
+
+        Returns {"requirements": [...], "decisions": [...],
+        "action_items": [...], "open_questions": [...]} where each item
+        is a plain dict of content fields (the server stamps id /
+        session_id / status / created_at — the model never owns those).
+
+        Deliberately NOT Anthropic tool-use: `_chat` also serves
+        OpenRouter / Ollama where tool-calling isn't guaranteed. A
+        JSON-only instruction plus a tolerant parser and one repair
+        retry keeps a single code path across every provider. On hard
+        failure this raises — callers run it best-effort so the markdown
+        extractors still populate the per-session UI.
+        """
+        logger.info(
+            f"Extracting structured records via {self._provider}/{self._model}")
+        instruction = (
+            "Extract the meeting's content as STRICT JSON. Output ONLY a "
+            "single JSON object, no prose, no markdown fences. Schema:\n"
+            "{\n"
+            '  "requirements": [{"text": str, "kind": '
+            '"functional|nonfunctional|constraint|assumption", '
+            '"source": "transcript|notes"}],\n'
+            '  "decisions": [{"title": str, "decided": str, '
+            '"rationale": str, "alternatives": str, "owner": str, '
+            '"impact": str, "source": "transcript|notes"}],\n'
+            '  "action_items": [{"text": str, "owner": str, '
+            '"due": str, "source": "transcript|notes"}],\n'
+            '  "open_questions": [{"text": str, '
+            '"source": "transcript|notes"}]\n'
+            "}\n"
+            "Rules: include only items that genuinely occurred — empty "
+            "arrays are correct when nothing applies, never invent. "
+            "Decisions = actually agreed, not merely discussed. If the "
+            "USER NOTES record items decided/committed off-audio, include "
+            'them with "source":"notes". Use "" for unknown string '
+            'fields, [] for empty arrays. Output nothing but the JSON.'
+        )
+        prompt = _with_user_notes(instruction, transcript, notes)
+        try:
+            raw = await self._chat(prompt, max_tokens=2048, timeout=90.0)
+            parsed = _coerce_json(raw)
+            if parsed is None:
+                # One repair pass — weak models often wrap JSON in prose
+                # or fences despite instructions.
+                repair = (
+                    "Return ONLY the JSON object from your previous answer, "
+                    "valid and parseable, with no surrounding text or "
+                    "code fences:\n\n" + raw
+                )
+                raw = await self._chat(repair, max_tokens=2048, timeout=90.0)
+                parsed = _coerce_json(raw)
+            if parsed is None:
+                raise RuntimeError("model did not return parseable JSON")
+            logger.info("Structured records extracted.")
+            return {
+                "requirements": parsed.get("requirements") or [],
+                "decisions": parsed.get("decisions") or [],
+                "action_items": parsed.get("action_items") or [],
+                "open_questions": parsed.get("open_questions") or [],
+            }
+        except Exception as e:
+            raise RuntimeError(f"Structured extraction failed: {e}") from e
 
     async def meeting_prep_brief_from_calendar(
         self,
