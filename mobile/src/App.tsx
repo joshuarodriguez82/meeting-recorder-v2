@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Recorder, isNative, type PermissionState } from "./native/recorder";
-import { store, type Defaults, type FolderGrant } from "./lib/store";
+import {
+  store,
+  type Defaults,
+  type FolderGrant,
+  type PendingItem,
+} from "./lib/store";
 import { buildSessionJson, newSessionId } from "./lib/session";
 import {
   describePending,
@@ -295,6 +300,29 @@ export function App() {
     }
   }
 
+  // Hand a queued recording to the OneDrive app via the OS share sheet.
+  // The .m4a stays in cache (shareSession doesn't delete it) so a
+  // cancelled share can be retried; the user clears the item with
+  // "Sent — remove" once OneDrive confirms the upload.
+  async function sendToOneDrive(q: PendingItem) {
+    try {
+      await Recorder.shareSession({
+        audioPath: q.audioPath,
+        json: q.json,
+        baseName: q.baseName,
+      });
+      flash("In OneDrive, pick the MeetingRecorder folder the desktop watches.");
+    } catch (e) {
+      flash(`Send failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  function removeFromQueue(sessionId: string) {
+    store.dequeue(sessionId);
+    setPendingDesc(describePending(store.getQueue()));
+    void refreshSynced();
+  }
+
   function saveDefaults(patch: Partial<Defaults>) {
     const d = { ...defaults, ...patch };
     setDefaults(d);
@@ -409,9 +437,23 @@ export function App() {
                         retrying — {q.lastError}
                       </span>
                     ) : (
-                      <span className="pill warn">pending sync</span>
+                      <span className="pill warn">not on PC yet</span>
                     )}
                   </div>
+                </div>
+                <div className="row" style={{ marginTop: 10, gap: 8 }}>
+                  <button
+                    className="ghost"
+                    onClick={() => void sendToOneDrive(q)}
+                  >
+                    Send to OneDrive
+                  </button>
+                  <button
+                    className="ghost"
+                    onClick={() => removeFromQueue(q.sessionId)}
+                  >
+                    Sent — remove
+                  </button>
                 </div>
               </div>
             ))}
@@ -447,12 +489,15 @@ export function App() {
             <h2>Sync folder</h2>
             <div className="card">
               <p className="hint">
-                Pick the <strong>same</strong> folder OneDrive syncs that the
-                desktop app reads — e.g. <code>OneDrive/MeetingRecorder</code>.
-                In the picker, browse into your OneDrive provider and select
-                that folder. Recordings drop in as
-                <code> session_&lt;id&gt;.m4a</code> + a tiny JSON; the PC
-                picks them up and you run Process there.
+                Android's OneDrive app exposes no folder this picker can
+                write into, so the reliable path is the{" "}
+                <strong>Send to OneDrive</strong> button on each recording
+                in the Recordings tab — it hands the
+                <code> session_&lt;id&gt;.m4a</code> + JSON to your OneDrive
+                app, which uploads them to the same folder the desktop
+                watches. Picking a folder here is optional: it only auto-
+                writes if you select a folder a sync app actually mirrors
+                to OneDrive (e.g. an Autosync target).
               </p>
               <p className="hint" style={{ marginTop: 8 }}>
                 Status:{" "}

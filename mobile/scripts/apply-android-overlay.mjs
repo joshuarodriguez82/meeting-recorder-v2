@@ -72,6 +72,7 @@ for (const f of [
 const overlayRes = join(mobile, "android-overlay", "res");
 for (const [sub, file] of [
   ["xml", "accessibility_service_config.xml"],
+  ["xml", "mr_file_paths.xml"],
   ["values", "mr_strings.xml"],
 ]) {
   const destDir = join(appMain, "res", sub);
@@ -135,6 +136,25 @@ if (!manifest.includes("CallAccessibilityService")) {
     `        </service>\n`;
   manifest = manifest.replace(/(\n\s*<\/application>)/, `\n${accSvc}$1`);
   log("registered CallAccessibilityService");
+}
+
+// FileProvider for shareSession() — exposes the cache-dir .m4a + JSON
+// as content:// URIs so the OS share sheet (→ OneDrive) can read them.
+// Distinct authority (".share") so it can't collide with a Capacitor
+// plugin's own ".fileprovider" if one is ever added.
+if (!manifest.includes(`${PKG}.share`)) {
+  const provider =
+    `        <provider\n` +
+    `            android:name="androidx.core.content.FileProvider"\n` +
+    `            android:authorities="${PKG}.share"\n` +
+    `            android:exported="false"\n` +
+    `            android:grantUriPermissions="true">\n` +
+    `            <meta-data\n` +
+    `                android:name="android.support.FILE_PROVIDER_PATHS"\n` +
+    `                android:resource="@xml/mr_file_paths" />\n` +
+    `        </provider>\n`;
+  manifest = manifest.replace(/(\n\s*<\/application>)/, `\n${provider}$1`);
+  log("registered share FileProvider");
 }
 writeFileSync(manifestPath, manifest);
 

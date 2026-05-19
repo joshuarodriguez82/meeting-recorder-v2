@@ -278,6 +278,57 @@ class RecorderPlugin : Plugin() {
         return doc.uri.toString()
     }
 
+    /** Hand the recording's .m4a + session JSON to whatever app the
+     *  user picks (OneDrive). Android's OneDrive app has no writable
+     *  folder a SAF picker can target, so this share-intent path is the
+     *  supported way to land a phone recording in the same OneDrive
+     *  folder the desktop watches. The .m4a is left in cache (NOT
+     *  deleted like writeSession does) so a cancelled/retried share
+     *  still has the audio. */
+    @PluginMethod
+    fun shareSession(call: PluginCall) {
+        val audioPath = call.getString("audioPath")
+        val json = call.getString("json")
+        val baseName = call.getString("baseName")
+        if (audioPath == null || json == null || baseName == null) {
+            call.reject("audioPath, json, baseName required")
+            return
+        }
+        try {
+            val audioFile = File(audioPath)
+            if (!audioFile.exists()) {
+                call.reject("audio file missing — it may already be synced")
+                return
+            }
+            val jsonFile = File(cacheDir(), "$baseName.json")
+            jsonFile.writeText(json, Charsets.UTF_8)
+
+            val authority = "${context.packageName}.share"
+            val uris = arrayListOf(
+                androidx.core.content.FileProvider.getUriForFile(
+                    context, authority, audioFile, "$baseName.m4a",
+                ),
+                androidx.core.content.FileProvider.getUriForFile(
+                    context, authority, jsonFile, "$baseName.json",
+                ),
+            )
+            val send = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                type = "*/*"
+                putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val chooser = Intent.createChooser(send, "Send recording to OneDrive")
+                .addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            context.startActivity(chooser)
+            call.resolve()
+        } catch (e: Exception) {
+            call.reject(e.message ?: "share failed")
+        }
+    }
+
     @PluginMethod
     fun listSyncedSessions(call: PluginCall) {
         val treeUri = call.getString("treeUri")

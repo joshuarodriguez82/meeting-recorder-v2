@@ -87,6 +87,10 @@ export interface RecorderPlugin {
   getStatus(): Promise<RecordingStatus>;
 
   writeSession(opts: WriteSessionOptions): Promise<{ audioUri: string; jsonUri: string }>;
+  // Hand the .m4a + session JSON to the OS share sheet (→ OneDrive).
+  // Used on Android, where OneDrive exposes no folder a SAF picker can
+  // write into, so writeSession() can't target it directly.
+  shareSession(opts: { audioPath: string; json: string; baseName: string }): Promise<void>;
   // Enumerate session_*.json already in the synced folder so the
   // Recordings tab can show what the desktop has and hasn't processed.
   listSyncedSessions(opts: { treeUri: string }): Promise<{ sessions: SyncedSession[] }>;
@@ -199,6 +203,17 @@ function createWebFallback(): RecorderPlugin {
       a2.click();
       setTimeout(() => URL.revokeObjectURL(ju), 5000);
       return { audioUri: opts.audioPath, jsonUri: ju };
+    },
+    async shareSession(opts) {
+      // Browser dev: no share sheet — fall back to downloading the JSON
+      // so the flow is still exercisable without a device.
+      const jb = new Blob([opts.json], { type: "application/json" });
+      const ju = URL.createObjectURL(jb);
+      const a = document.createElement("a");
+      a.href = ju;
+      a.download = `${opts.baseName}.json`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(ju), 5000);
     },
     async listSyncedSessions() {
       return { sessions: memSessions };

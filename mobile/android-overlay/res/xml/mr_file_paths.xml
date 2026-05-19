@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider roots for shareSession(): the recording .m4a and the
+     temp session JSON both live in the app cache dir. -->
+<paths>
+    <cache-path name="shared" path="." />
+</paths>
