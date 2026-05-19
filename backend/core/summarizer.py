@@ -214,7 +214,13 @@ class Summarizer:
                 For Ollama any non-empty string works.
         """
         self._provider = (provider or "anthropic").strip().lower()
-        self._model = model or DEFAULT_MODEL
+        from config.settings import _normalize_model
+        requested = model or DEFAULT_MODEL
+        self._model = _normalize_model(requested)
+        if self._model != requested:
+            logger.warning(
+                "Model id %r is not resolvable (Anthropic 404s it); "
+                "using %r instead", requested, self._model)
         self._anthropic_client: Optional[AsyncAnthropic] = None
         self._openai_client = None  # lazily imported so the openai SDK
         # isn't a hard dep when the user stays on Anthropic
