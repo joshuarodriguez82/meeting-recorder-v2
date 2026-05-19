@@ -122,6 +122,21 @@ if not ENV_PATH.exists() and _LEGACY_ENV.exists():
 load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 
+# Model ids the Anthropic API rejects with 404 not_found, mapped to the
+# canonical id that resolves. claude-3-5-haiku-latest shipped in the
+# settings dropdown and got persisted into users' config.env; the
+# "-latest" alias is not resolvable for 3.5 Haiku. Heal it on read so
+# every consumer (summarizer + the direct client-suggestion call) uses
+# the working id without each user having to re-pick the model.
+_DEAD_MODEL_ALIASES = {
+    "claude-3-5-haiku-latest": "claude-3-5-haiku-20241022",
+}
+
+
+def _normalize_model(model: str) -> str:
+    return _DEAD_MODEL_ALIASES.get((model or "").strip(), model)
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable application settings resolved at startup."""
@@ -209,15 +224,18 @@ class Settings:
         _secrets.migrate_from_env(file_values)
 
         def _get(key: str, default: str = "") -> str:
-            # Sensitive keys come from the OS keychain when available,
-            # falling back to file/env for migration and degraded modes.
+            # config.env is authoritative (save_to_env always writes it).
+            # A non-empty file value wins so a stale/unreadable keychain
+            # entry can never shadow the real key — that shadowing is the
+            # "401 invalid x-api-key" bug. Keychain is only consulted when
+            # the file has nothing (pre-migration / externally cleared).
+            v = file_values.get(key)
+            if v is not None and v != "":
+                return v
             if key in _secrets.SECRET_KEYS:
                 kc = _secrets.get_secret(key)
                 if kc:
                     return kc
-            v = file_values.get(key)
-            if v is not None and v != "":
-                return v
             return os.getenv(key, default)
 
         def _get_int(key: str, default: int) -> int:
@@ -245,7 +263,8 @@ class Settings:
             recordings_dir=_get(
                 "RECORDINGS_DIR", str(USER_DATA_DIR / "recordings")),
             email_to=_get("EMAIL_TO", ""),
-            claude_model=_get("CLAUDE_MODEL", "claude-haiku-4-5"),
+            claude_model=_normalize_model(
+                _get("CLAUDE_MODEL", "claude-haiku-4-5")),
             notify_minutes_before=_get_int("NOTIFY_MINUTES_BEFORE", 2),
             auto_process_after_stop=_get_bool("AUTO_PROCESS_AFTER_STOP", True),
             launch_on_startup=_get_bool("LAUNCH_ON_STARTUP", False),
@@ -336,22 +355,27 @@ class Settings:
     ) -> None:
         """Write settings back to the .env file.
 
-        Secrets (Anthropic / HF / OpenAI keys) are routed to the OS keychain
-        when available; the corresponding config.env lines are written empty
-        so the file no longer holds plaintext credentials. If the keychain
-        write fails (no backend, locked, etc.) the secret falls back to
-        config.env so the app still works — degraded security, not broken.
+        Secrets (Anthropic / HF / OpenAI keys) are mirrored into the OS
+        keychain when available, but ALSO always kept in config.env as
+        the durable source of truth. Earlier builds blanked the env line
+        on a successful keychain write; that lost the key whenever the
+        keychain entry later became unreadable — e.g. an unsigned macOS
+        app rebuilt with a new ad-hoc signature, or a Windows Credential
+        Manager entry written under a different context — producing a
+        hard "401 invalid x-api-key" with no fallback. The plaintext
+        fallback is the lesser evil versus silently losing the key on
+        every upgrade.
         """
-        # Try keychain first for each secret. kc_ok[name] == True means
-        # we successfully stored it; the file gets a blank for that name.
-        kc_ok = {
-            "ANTHROPIC_API_KEY": _secrets.set_secret("ANTHROPIC_API_KEY", anthropic_api_key),
-            "HF_TOKEN":          _secrets.set_secret("HF_TOKEN", hf_token),
-            "OPENAI_API_KEY":    _secrets.set_secret("OPENAI_API_KEY", openai_api_key),
-        }
-        env_anthropic = "" if kc_ok["ANTHROPIC_API_KEY"] else anthropic_api_key
-        env_hf        = "" if kc_ok["HF_TOKEN"]          else hf_token
-        env_openai    = "" if kc_ok["OPENAI_API_KEY"]    else openai_api_key
+        # Mirror secrets into the keychain best-effort. We no longer
+        # blank the file on success — config.env stays authoritative so
+        # the key survives the keychain entry becoming unreadable across
+        # an upgrade / re-sign / different-user context.
+        _secrets.set_secret("ANTHROPIC_API_KEY", anthropic_api_key)
+        _secrets.set_secret("HF_TOKEN", hf_token)
+        _secrets.set_secret("OPENAI_API_KEY", openai_api_key)
+        env_anthropic = anthropic_api_key
+        env_hf        = hf_token
+        env_openai    = openai_api_key
 
         content = (
             f"ANTHROPIC_API_KEY={env_anthropic}\n"
