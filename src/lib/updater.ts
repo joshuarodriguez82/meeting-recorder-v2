@@ -189,6 +189,19 @@ export async function downloadUpdate(
   release: Pick<LatestRelease, "url" | "assets">,
 ): Promise<string | null> {
   const asset = pickInstallerAsset(release.assets || []);
+  // Windows .exe: hand it to the Rust shell, which downloads it to temp
+  // and launches the installer directly — no browser tab, no dead-end
+  // page. Any failure (not Tauri, non-Windows, network) falls through
+  // to the browser path below, so this can't regress updating.
+  if (asset && /\.exe$/i.test(asset.name)) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("download_and_run_update", { url: asset.url });
+      return asset.name;
+    } catch {
+      // fall through to the browser download
+    }
+  }
   await openExternal(asset?.url || release.url || RELEASE_PAGE_URL);
   return asset?.name ?? null;
 }
