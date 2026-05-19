@@ -400,6 +400,60 @@ const SECTIONS: Section[] = [
     ),
   },
   {
+    id: "engagements",
+    title: "Engagements (per-client register + Excel export)",
+    content: (
+      <>
+        <p>
+          The <strong>Engagements</strong> tab rolls every meeting for one client up
+          into a single living register, and exports it to a hand-editable Excel
+          workbook. Where Follow-Ups / Decisions are per-item cross-meeting views,
+          this is the <em>engagement-level</em> picture: &quot;across every ACME
+          call, what are all the requirements, decisions, action items, and open
+          questions — deduped, with which meeting each came from?&quot;
+        </p>
+        <p className="font-medium mt-3">Using it:</p>
+        <ol className="list-decimal pl-5 space-y-1">
+          <li>Pick a <strong>client</strong> (and optionally a <strong>project</strong>) from the dropdowns.</li>
+          <li>
+            The register renders: Requirements / Decisions / Action Items / Open
+            Questions, each item showing status, a &quot;from notes&quot; marker when it
+            came from your session notes rather than the transcript, and provenance
+            (how many meetings, last seen, which sessions).
+          </li>
+          <li>
+            Click <strong>Export to Excel</strong> — a workbook is written to the
+            client&apos;s export folder (or the recordings folder if none is set)
+            and the path is shown in a toast.
+          </li>
+        </ol>
+        <p className="text-sm text-muted-foreground mt-3">
+          The workbook has an Overview sheet, one sheet per record type, and a
+          <strong> Changes since last export</strong> sheet. It&apos;s designed to be
+          hand-edited: every record sheet has two human-owned columns —
+          <strong> Status</strong> and <strong>Notes</strong> — that are <em>never</em>
+          overwritten. Re-export after the next meeting and it regenerates the same
+          file in place, carrying your Status/Notes forward (matched by a durable
+          record id, with a text fallback so a re-extraction can&apos;t orphan them).
+          An item that&apos;s no longer detected isn&apos;t deleted — it stays, flagged
+          &quot;carried over (last seen …)&quot;, with your edits intact.
+        </p>
+        <Tip>
+          <strong>Structured records are created automatically</strong> when a session
+          is processed (the same auto-process that produces the summary). The
+          register reads those. Sessions recorded by an older build won&apos;t have
+          them until reprocessed.
+        </Tip>
+        <Warn>
+          If the workbook is open in Excel (or mid-OneDrive-sync) when you re-export,
+          it will <strong>not</strong> overwrite it — it writes a dated
+          &quot;(conflicted …)&quot; copy and warns you in the toast, so hand-entered
+          Status/Notes are never destroyed. Close the file and re-export to merge.
+        </Warn>
+      </>
+    ),
+  },
+  {
     id: "insights",
     title: "Insights",
     content: (
