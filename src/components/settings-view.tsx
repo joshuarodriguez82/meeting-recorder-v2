@@ -694,6 +694,38 @@ function AIProviderSection({
 }) {
   const preset = presetFromSettings(settings);
 
+  // OpenRouter's free roster rotates constantly — fetch it live so the
+  // dropdown never goes stale (the bundled OPENROUTER_MODELS is only a
+  // no-network fallback). Stable non-":free" entries (paid pass-through)
+  // are kept appended since those ids don't rotate.
+  const [liveOpenrouter, setLiveOpenrouter] = useState<
+    { value: string; label: string }[] | null
+  >(null);
+  useEffect(() => {
+    if (preset !== "openrouter") return;
+    let cancelled = false;
+    api
+      .getFreeModels("openrouter")
+      .then((r) => {
+        if (!cancelled && r.models && r.models.length) {
+          const passThrough = OPENROUTER_MODELS.filter(
+            (m) => !m.value.endsWith(":free"),
+          );
+          setLiveOpenrouter([...r.models, ...passThrough]);
+        }
+      })
+      .catch(() => {
+        /* keep bundled fallback */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [preset]);
+  const openrouterModels =
+    liveOpenrouter && liveOpenrouter.length
+      ? liveOpenrouter
+      : OPENROUTER_MODELS;
+
   // Apply a preset: sets ai_provider, openai_base_url, and (when a
   // sensible default exists) claude_model. Touching the API-key field
   // is avoided — users may already have one pasted for a different
@@ -710,8 +742,8 @@ function AIProviderSection({
     update("ai_provider", "openai");
     if (next === "openrouter") {
       update("openai_base_url", OPENROUTER_BASE);
-      if (!OPENROUTER_MODELS.find((m) => m.value === settings.claude_model)) {
-        update("claude_model", OPENROUTER_MODELS[0].value);
+      if (!openrouterModels.find((m) => m.value === settings.claude_model)) {
+        update("claude_model", openrouterModels[0].value);
       }
     } else if (next === "ollama") {
       update("openai_base_url", OLLAMA_BASE);
@@ -737,7 +769,7 @@ function AIProviderSection({
   // Which preset list (if any) this provider uses. Custom gets no list —
   // the user types a model id directly.
   const presetModels = preset === "anthropic" ? ANTHROPIC_MODELS
-    : preset === "openrouter" ? OPENROUTER_MODELS
+    : preset === "openrouter" ? openrouterModels
     : preset === "ollama" ? OLLAMA_MODELS
     : preset === "groq" ? GROQ_MODELS
     : preset === "gemini" ? GEMINI_MODELS
