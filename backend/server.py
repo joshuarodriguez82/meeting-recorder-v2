@@ -305,6 +305,7 @@ from services.calendar_service import (
 )
 from services._cloud_sync import CloudFileNotReadyError
 from services.client_config_service import ClientConfig, ClientConfigService
+from services.engagement_service import EngagementService
 from services.export_service import ExportService
 from services.recording_service import RecordingService
 from services.retention_service import cleanup as run_retention_cleanup, folder_stats
@@ -465,6 +466,7 @@ class Services:
         self.session_svc: Optional[SessionService] = None
         self.export_svc: Optional[ExportService] = None
         self.client_cfg_svc: Optional[ClientConfigService] = None
+        self.engagement_svc: Optional[EngagementService] = None
         self.template_svc: Optional[TemplateService] = None
         self.recording_svc: Optional[RecordingService] = None
         self.speaker_profile_svc: Optional[SpeakerProfileService] = None
@@ -543,6 +545,10 @@ class Services:
                             f"Migration of {_filename} failed ({_e}); "
                             f"reading from legacy USER_DATA_DIR location.")
             self.client_cfg_svc = ClientConfigService(_recordings_dir)
+            # Pure aggregator over session JSONs + client configs — no
+            # state of its own, so it's safe to build eagerly here.
+            self.engagement_svc = EngagementService(
+                self.session_svc, self.client_cfg_svc)
             self.template_svc = TemplateService(_recordings_dir)
             # Speaker profiles stay per-machine: voice fingerprints are
             # mic-hardware-dependent, syncing them across devices with
@@ -2772,6 +2778,25 @@ async def structured(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/engagements/{client}/register")
+async def engagement_register(client: str, project: str = ""):
+    """The engagement-level roll-up: structured records from every
+    session for this client (optionally scoped to a project), deduped
+    with provenance. Computed on demand from session JSONs."""
+    svc.load_settings()
+    if not svc.engagement_svc:
+        raise HTTPException(status_code=400, detail="Service not ready")
+    try:
+        register = await asyncio.to_thread(
+            svc.engagement_svc.build_register, client, project)
+        return {"ok": True, "register": register}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("Engagement register build failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class ProcessFullRequest(BaseModel):
     template: str = "General"
     follow_up_drafts: bool = False
@@ -2875,6 +2900,22 @@ async def process_full(session_id: str, req: ProcessFullRequest):
             except Exception as e:
                 logger.exception(f"process_full commitments failed: {e}")
         asyncio.create_task(_do_commitments())
+
+    # Keep the engagement register warm: a freshly processed session
+    # has new structured records, so recompute its client's roll-up.
+    # Fire-and-forget — a stale register never blocks processing.
+    if svc.engagement_svc:
+        async def _do_register():
+            try:
+                fresh = await asyncio.to_thread(
+                    svc.session_svc.load_full, session_id)
+                if fresh and (fresh.client or "").strip():
+                    await asyncio.to_thread(
+                        svc.engagement_svc.build_register,
+                        fresh.client, fresh.project or "")
+            except Exception as e:
+                logger.exception(f"process_full register refresh failed: {e}")
+        asyncio.create_task(_do_register())
 
     return {"ok": True, "stages": stages}
 
