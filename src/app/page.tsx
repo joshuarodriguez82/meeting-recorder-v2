@@ -6,7 +6,7 @@ import { api, formatBytes, openExternal, type Meeting, type SessionSummary } fro
 import {
   Mic, History, CheckSquare, Target, Search,
   LayoutDashboard, Settings as SettingsIcon, HelpCircle, Loader2,
-  Sparkles, MessageCircle, Handshake, BarChart3,
+  Sparkles, MessageCircle, Handshake, BarChart3, FileSpreadsheet,
 } from "lucide-react";
 import { InsightsView } from "@/components/insights-view";
 import { RecordView } from "@/components/record-view";
@@ -16,6 +16,7 @@ import { FollowUpsView } from "@/components/follow-ups-view";
 import { DecisionsView } from "@/components/decisions-view";
 import { SearchView } from "@/components/search-view";
 import { ClientsView } from "@/components/clients-view";
+import { EngagementView } from "@/components/engagement-view";
 import { PrepBriefView } from "@/components/prep-brief-view";
 import { QAView } from "@/components/qa-view";
 import { CommitmentsView } from "@/components/commitments-view";
@@ -33,6 +34,7 @@ const NAV_ITEMS = [
   { id: "search", label: "Search", icon: Search },
   { id: "qa", label: "Ask", icon: MessageCircle },
   { id: "clients", label: "Clients", icon: LayoutDashboard },
+  { id: "engagements", label: "Engagements", icon: FileSpreadsheet },
   { id: "insights", label: "Insights", icon: BarChart3 },
   { id: "prep-brief", label: "Prep Brief", icon: Sparkles },
 ];
@@ -259,6 +261,7 @@ export default function Home() {
     if (
       nav === "sessions" || nav === "follow-ups"
       || nav === "decisions" || nav === "clients"
+      || nav === "engagements"
     ) {
       reloadSessions();
     }
@@ -515,6 +518,7 @@ export default function Home() {
               {nav === "search" && "Search across all transcripts"}
               {nav === "qa" && "Ask Claude questions about your meetings — answers come with citations"}
               {nav === "clients" && "Clients and their projects — drill in to see meetings"}
+              {nav === "engagements" && "Per-client engagement register — requirements, decisions, actions & open questions rolled up across every meeting, exportable to Excel"}
               {nav === "insights" && "Cross-meeting analytics — time allocation, recurring topics, open loops"}
               {nav === "prep-brief" && "Generate a pre-meeting brief from past sessions"}
               {nav === "settings" && "Configure API keys, devices, and workflow"}
@@ -552,6 +556,7 @@ export default function Home() {
           {nav === "clients" && (
             <ClientsView sessions={sessions} onReload={reloadSessions} onOpenSession={openSession} />
           )}
+          {nav === "engagements" && <EngagementView sessions={sessions} />}
           {nav === "insights" && (
             <InsightsView
               onOpenSession={openSession}
