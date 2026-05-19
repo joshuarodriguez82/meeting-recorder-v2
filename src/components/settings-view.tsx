@@ -36,7 +36,9 @@ const ANTHROPIC_MODELS = [
   { value: "claude-haiku-4-5", label: "Claude Haiku 4.5 — cheap, great for summaries" },
   { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 — premium (~4× cost)" },
   { value: "claude-opus-4-7", label: "Claude Opus 4.7 — max quality, ~15× cost" },
-  { value: "claude-3-5-haiku-latest", label: "Claude Haiku 3.5 — legacy" },
+  // Pinned dated id, NOT the "-latest" alias: the API returns 404
+  // not_found for claude-3-5-haiku-latest, so the alias is unusable here.
+  { value: "claude-3-5-haiku-20241022", label: "Claude Haiku 3.5 — legacy" },
 ];
 
 // Free-tier selections from OpenRouter as of early 2026. The ":free"
