@@ -302,31 +302,69 @@ class RecorderPlugin : Plugin() {
             }
             val jsonFile = File(cacheDir(), "$baseName.json")
             jsonFile.writeText(json, Charsets.UTF_8)
-
-            val authority = "${context.packageName}.share"
-            val uris = arrayListOf(
-                androidx.core.content.FileProvider.getUriForFile(
-                    context, authority, audioFile, "$baseName.m4a",
-                ),
-                androidx.core.content.FileProvider.getUriForFile(
-                    context, authority, jsonFile, "$baseName.json",
-                ),
-            )
-            val send = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-                type = "*/*"
-                putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            val chooser = Intent.createChooser(send, "Send recording to OneDrive")
-                .addFlags(
-                    Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
-                )
-            context.startActivity(chooser)
+            launchShare(listOf(audioFile, jsonFile))
             call.resolve()
         } catch (e: Exception) {
             call.reject(e.message ?: "share failed")
         }
+    }
+
+    /** Share a recording that's already been written to the synced
+     *  folder (its cache .m4a was deleted by writeSession). Reads the
+     *  folder's <baseName>.m4a + .json back into cache, then hands them
+     *  to the share sheet — so "Send to OneDrive" works on every
+     *  recording row, not only ones still queued. */
+    @PluginMethod
+    fun shareSyncedSession(call: PluginCall) {
+        val treeUri = call.getString("treeUri")
+        val baseName = call.getString("baseName")
+        if (treeUri == null || baseName == null) {
+            call.reject("treeUri, baseName required")
+            return
+        }
+        Thread {
+            try {
+                val dir = DocumentFile.fromTreeUri(context, Uri.parse(treeUri))
+                    ?: throw IllegalStateException("folder not accessible")
+                val staged = ArrayList<File>(2)
+                for (name in listOf("$baseName.m4a", "$baseName.json")) {
+                    val doc = dir.findFile(name)
+                        ?: throw IllegalStateException("$name not in synced folder")
+                    val dest = File(cacheDir(), name)
+                    context.contentResolver.openInputStream(doc.uri)?.use { ins ->
+                        dest.outputStream().use { ins.copyTo(it) }
+                    } ?: throw IllegalStateException("could not read $name")
+                    staged.add(dest)
+                }
+                launchShare(staged)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "share failed")
+            }
+        }.start()
+    }
+
+    private fun launchShare(files: List<File>) {
+        val authority = "${context.packageName}.share"
+        val uris = ArrayList<Uri>(files.size)
+        for (f in files) {
+            uris.add(
+                androidx.core.content.FileProvider.getUriForFile(
+                    context, authority, f, f.name,
+                ),
+            )
+        }
+        val send = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+            type = "*/*"
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        val chooser = Intent.createChooser(send, "Send recording to OneDrive")
+            .addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
+        context.startActivity(chooser)
     }
 
     @PluginMethod

@@ -91,6 +91,10 @@ export interface RecorderPlugin {
   // Used on Android, where OneDrive exposes no folder a SAF picker can
   // write into, so writeSession() can't target it directly.
   shareSession(opts: { audioPath: string; json: string; baseName: string }): Promise<void>;
+  // Same, but for a recording already written to the synced folder
+  // (its cache .m4a is gone) — the native side reads it back from the
+  // folder. So "Send to OneDrive" works on every recording row.
+  shareSyncedSession(opts: { treeUri: string; baseName: string }): Promise<void>;
   // Enumerate session_*.json already in the synced folder so the
   // Recordings tab can show what the desktop has and hasn't processed.
   listSyncedSessions(opts: { treeUri: string }): Promise<{ sessions: SyncedSession[] }>;
@@ -208,6 +212,17 @@ function createWebFallback(): RecorderPlugin {
       // Browser dev: no share sheet — fall back to downloading the JSON
       // so the flow is still exercisable without a device.
       const jb = new Blob([opts.json], { type: "application/json" });
+      const ju = URL.createObjectURL(jb);
+      const a = document.createElement("a");
+      a.href = ju;
+      a.download = `${opts.baseName}.json`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(ju), 5000);
+    },
+    async shareSyncedSession(opts) {
+      const s = memSessions.find((m) => m.name === `${opts.baseName}.json`);
+      if (!s) return;
+      const jb = new Blob([s.json], { type: "application/json" });
       const ju = URL.createObjectURL(jb);
       const a = document.createElement("a");
       a.href = ju;

@@ -181,6 +181,29 @@ if (!g.includes("OVERLAY_DEPS")) {
   g = g.replace(/dependencies\s*\{/, (m) => `${m}\n${deps}`);
   log("added documentfile/core-ktx/kotlin deps");
 }
+if (!g.includes("OVERLAY_SIGNING")) {
+  // Pin a stable, committed debug keystore. Without this AGP generates
+  // a fresh random debug key per CI runner, so each build is signed
+  // differently and Android refuses to install one over another
+  // ("App not installed"). AGP auto-applies the signingConfig named
+  // "debug" to the debug build type, so no buildTypes edit is needed.
+  copyFileSync(
+    join(mobile, "android-overlay", "debug.keystore"),
+    join(android, "app", "debug.keystore"),
+  );
+  const signing =
+    `\n    // OVERLAY_SIGNING\n` +
+    `    signingConfigs {\n` +
+    `        debug {\n` +
+    `            storeFile file('debug.keystore')\n` +
+    `            storePassword 'android'\n` +
+    `            keyAlias 'androiddebugkey'\n` +
+    `            keyPassword 'android'\n` +
+    `        }\n` +
+    `    }\n`;
+  g = g.replace(/^android\s*\{/m, (m) => `${m}${signing}`);
+  log("pinned stable debug signing key");
+}
 writeFileSync(appGradle, g);
 
 // 4. Project build.gradle: Kotlin Gradle plugin on the buildscript

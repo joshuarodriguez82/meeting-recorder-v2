@@ -323,6 +323,23 @@ export function App() {
     void refreshSynced();
   }
 
+  // Share a recording that's already in the synced folder. The cache
+  // copy is gone (writeSession deleted it), so the native side reads
+  // it back from the folder — this is what makes "Send to OneDrive"
+  // reachable when a (non-OneDrive) sync folder is set.
+  async function sendSyncedToOneDrive(s: SyncedRow) {
+    if (!folder) return;
+    try {
+      await Recorder.shareSyncedSession({
+        treeUri: folder.treeUri,
+        baseName: `session_${s.sessionId}`,
+      });
+      flash("In OneDrive, pick the MeetingRecorder folder the desktop watches.");
+    } catch (e) {
+      flash(`Send failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
   function saveDefaults(patch: Partial<Defaults>) {
     const d = { ...defaults, ...patch };
     setDefaults(d);
@@ -475,6 +492,14 @@ export function App() {
                     ) : (
                       <span className="pill">awaiting PC</span>
                     )}
+                  </div>
+                  <div className="row" style={{ marginTop: 8 }}>
+                    <button
+                      className="ghost"
+                      onClick={() => void sendSyncedToOneDrive(s)}
+                    >
+                      Send to OneDrive
+                    </button>
                   </div>
                 </div>
               ))}
