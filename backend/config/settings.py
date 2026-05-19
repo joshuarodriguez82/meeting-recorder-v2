@@ -122,6 +122,21 @@ if not ENV_PATH.exists() and _LEGACY_ENV.exists():
 load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 
+# Model ids the Anthropic API rejects with 404 not_found, mapped to the
+# canonical id that resolves. claude-3-5-haiku-latest shipped in the
+# settings dropdown and got persisted into users' config.env; the
+# "-latest" alias is not resolvable for 3.5 Haiku. Heal it on read so
+# every consumer (summarizer + the direct client-suggestion call) uses
+# the working id without each user having to re-pick the model.
+_DEAD_MODEL_ALIASES = {
+    "claude-3-5-haiku-latest": "claude-3-5-haiku-20241022",
+}
+
+
+def _normalize_model(model: str) -> str:
+    return _DEAD_MODEL_ALIASES.get((model or "").strip(), model)
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable application settings resolved at startup."""
@@ -248,7 +263,8 @@ class Settings:
             recordings_dir=_get(
                 "RECORDINGS_DIR", str(USER_DATA_DIR / "recordings")),
             email_to=_get("EMAIL_TO", ""),
-            claude_model=_get("CLAUDE_MODEL", "claude-haiku-4-5"),
+            claude_model=_normalize_model(
+                _get("CLAUDE_MODEL", "claude-haiku-4-5")),
             notify_minutes_before=_get_int("NOTIFY_MINUTES_BEFORE", 2),
             auto_process_after_stop=_get_bool("AUTO_PROCESS_AFTER_STOP", True),
             launch_on_startup=_get_bool("LAUNCH_ON_STARTUP", False),
