@@ -3,6 +3,7 @@ package com.joshuarodriguez.meetingrecorder
 import android.Manifest
 import android.content.ClipData
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.Settings
 import androidx.activity.result.ActivityResult
@@ -369,6 +370,21 @@ class RecorderPlugin : Plugin() {
                 for (i in 1 until uris.size) c.addItem(ClipData.Item(uris[i]))
             }
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        // Belt-and-suspenders: the chooser doesn't reliably propagate
+        // the URI grant to the picked app (OneDrive kept rejecting with
+        // "couldn't be uploaded"). Explicitly grant read to every app
+        // that can handle the share so it works regardless of which the
+        // user taps. Grants are dropped when the cache files go away.
+        val targets = context.packageManager
+            .queryIntentActivities(send, PackageManager.MATCH_DEFAULT_ONLY)
+        for (ri in targets) {
+            val pkg = ri.activityInfo.packageName
+            for (u in uris) {
+                context.grantUriPermission(
+                    pkg, u, Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
         }
         val chooser = Intent.createChooser(send, "Send recording to OneDrive")
             .addFlags(
