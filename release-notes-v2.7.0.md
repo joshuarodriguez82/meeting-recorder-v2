@@ -67,6 +67,14 @@ v2.6.2 fixes are included.
   failed) to compile `tokenizers` from source. The bootstrap now uses
   **Python 3.12** (3.13 still works as a fallback), so a fresh install
   on a normal machine just works.
+- **Calendar auto-record never fired for normal meetings.** It only
+  auto-started meetings whose join URL appeared in the calendar
+  Location/Subject, but Outlook puts the Teams/Zoom link in the
+  meeting *body* (omitted from the fast calendar scan), so standard
+  invites were silently skipped. Auto-record now starts **every timed
+  meeting** at its start time (all-day events and blocklisted meetings
+  excluded); the auto-stop watchdog ends it per your Settings. Requires
+  the auto-record toggle on (opt-in, unchanged).
 
 ## Everything from v2.6.2
 
