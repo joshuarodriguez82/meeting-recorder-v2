@@ -303,6 +303,7 @@ from models.session import Session
 from services.calendar_service import (
     get_todays_meetings, get_upcoming_meetings, is_outlook_available,
 )
+from services._cloud_sync import CloudFileNotReadyError
 from services.client_config_service import ClientConfig, ClientConfigService
 from services.export_service import ExportService
 from services.recording_service import RecordingService
@@ -2360,7 +2361,13 @@ async def get_client_configs():
             }
             for name, cfg in svc.client_cfg_svc.get_all().items()
         }
-    return await asyncio.to_thread(_do)
+    try:
+        return await asyncio.to_thread(_do)
+    except CloudFileNotReadyError as e:
+        # The synced client_configs.json hasn't downloaded to this
+        # device yet. 503 + the actionable message beats silently
+        # returning {} (which read as "you have no clients").
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 class ClientConfigDTO(BaseModel):

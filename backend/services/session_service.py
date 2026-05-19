@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from models.session import Session
+from services._cloud_sync import CloudFileNotReadyError, read_text_hydrated
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -110,8 +111,17 @@ class SessionService:
             if "." in path.stem:
                 continue
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                data = json.loads(read_text_hydrated(path))
+            except CloudFileNotReadyError as e:
+                # Synced from another device but not downloaded to this
+                # disk yet — the "new session created today doesn't show
+                # up on the Mac" bug. Log loud + actionable instead of a
+                # quiet skip so the cause is obvious.
+                logger.error(
+                    f"Session {path.name} is an un-downloaded cloud "
+                    f"placeholder; it will appear once the sync client "
+                    f"finishes downloading it. {e}")
+                continue
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning(f"Skipping unreadable session {path.name}: {e}")
                 continue
