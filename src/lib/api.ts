@@ -1060,7 +1060,60 @@ export const api = {
     return request<InsightsSummary>(
       `/insights/summary${qs ? `?${qs}` : ""}`);
   },
+
+  // Engagement register: structured records rolled up across every
+  // session for a client (optionally one project), deduped.
+  engagementRegister: (client: string, project = "") => {
+    const q = new URLSearchParams();
+    if (project) q.set("project", project);
+    const qs = q.toString();
+    return request<{ ok: boolean; register: EngagementRegister }>(
+      `/engagements/${encodeURIComponent(client)}/register${qs ? `?${qs}` : ""}`,
+    );
+  },
+  // Render the register to a stable, hand-editable .xlsx in the
+  // client's export folder. Returns the path (or a dated conflict
+  // copy + warning if the workbook was open/locked).
+  engagementExport: (client: string, project = "") => {
+    const q = new URLSearchParams();
+    if (project) q.set("project", project);
+    const qs = q.toString();
+    return request<{ ok: boolean; path: string; warning: string | null }>(
+      `/engagements/${encodeURIComponent(client)}/export${qs ? `?${qs}` : ""}`,
+      { method: "POST" },
+    );
+  },
 };
+
+export interface EngagementOccurrence {
+  session_id: string;
+  display_name: string;
+  at: string;
+}
+export interface EngagementRecord {
+  id: string;
+  status: string;
+  source: string;
+  occurrences: EngagementOccurrence[];
+  // record-type-specific fields (text/title/decided/owner/…)
+  [k: string]: unknown;
+}
+export interface EngagementRegister {
+  client: string;
+  project: string;
+  generated_at: string;
+  session_count: number;
+  counts: {
+    open_requirements: number;
+    decisions: number;
+    open_action_items: number;
+    open_questions: number;
+  };
+  requirements: EngagementRecord[];
+  decisions: EngagementRecord[];
+  action_items: EngagementRecord[];
+  open_questions: EngagementRecord[];
+}
 
 export interface InsightsRow {
   label: string;
