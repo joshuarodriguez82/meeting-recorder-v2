@@ -2773,6 +2773,8 @@ async def structured(session_id: str):
     try:
         counts = await _extract_structured_and_save(session_id)
         return {"ok": True, "counts": counts}
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.exception("Structured extraction failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2992,8 +2994,14 @@ async def _extract_structured_and_save(session_id: str) -> dict:
     from models.extraction import STRUCTURED_FIELDS, stamp_records
 
     session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
-    if not session or not session.segments:
-        raise RuntimeError("no transcript")
+    if session is None:
+        raise FileNotFoundError("session not found")
+    if not session.segments:
+        # Audio exists but was never transcribed. The bulk backfill walks
+        # every session, so this is expected, not an error — skip with
+        # zero counts instead of failing the whole sweep.
+        logger.info("structured: %s has no transcript — skipped", session_id)
+        return {k: 0 for k in STRUCTURED_FIELDS}
     parsed = await svc.summarizer.extract_structured(
         session.full_transcript(), notes=session.notes or "")
     created_at = session.started_at.isoformat() if session.started_at else ""
