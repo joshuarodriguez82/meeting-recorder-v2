@@ -2,11 +2,13 @@
 AutoRecordService — calendar-driven auto-start of recordings.
 
 When enabled in Settings, a single asyncio task wakes every 30 seconds,
-pulls today's meetings from `calendar_service`, filters out events the
-user said they don't want, and when an event's window is currently open
-(`start <= now < end`) it starts a recording via the same code path as
-the manual Start button. The auto-stop watchdog (silence + overrun)
-handles the stop side, so this service is intentionally start-only.
+pulls today's meetings from `calendar_service`, and when an event's
+window is currently open (`start <= now < end`) it starts a recording
+via the same code path as the manual Start button. Every timed meeting
+is recorded — the only exclusions are all-day events and meetings the
+user blocklisted; there is intentionally NO conference-link
+requirement. The auto-stop watchdog (silence + overrun) handles the
+stop side, so this service is intentionally start-only.
 
 Design notes:
   - The loop is event-driven by wall-clock, not by calendar webhooks.
@@ -28,35 +30,11 @@ from __future__ import annotations
 
 import asyncio
 import datetime as _dt
-import re
 from typing import Any, Callable, Optional, Tuple
 
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-
-# Conference-link detection. Outlook stuffs join URLs into Location,
-# Subject, or the meeting body; we only see Location reliably from the
-# Outlook COM backend, so we match the common providers there. The
-# regex is intentionally forgiving — anything with these hosts counts.
-_CONF_LINK_RE = re.compile(
-    r"https?://[^\s]*?("
-    r"teams\.microsoft\.com|teams\.live\.com|"
-    r"zoom\.us|zoomgov\.com|"
-    r"meet\.google\.com|"
-    r"webex\.com|"
-    r"gotomeeting\.com|gotomeet\.me|"
-    r"bluejeans\.com|"
-    r"whereby\.com"
-    r")", re.IGNORECASE)
-
-
-def _has_conference_link(meeting: dict) -> bool:
-    blob = " ".join(
-        str(meeting.get(k, "") or "")
-        for k in ("location", "subject", "body", "organizer"))
-    return bool(_CONF_LINK_RE.search(blob))
 
 
 def _is_all_day(meeting: dict) -> bool:
@@ -218,9 +196,14 @@ class AutoRecordService:
             break
 
     def _qualifies(self, m: dict) -> bool:
+        # Deliberately NOT gated on a conference link. Outlook only puts
+        # the join URL in the meeting *body*, which the bulk calendar
+        # parse omits for speed — so link-gating silently skipped every
+        # normal Teams invite. Per product decision, auto-record fires
+        # for every timed meeting; the auto-stop watchdog (silence /
+        # overrun) ends it, and the all-day filter + blocklist below are
+        # the only exclusions.
         if _is_all_day(m):
-            return False
-        if not _has_conference_link(m):
             return False
         try:
             if self._is_blocked(m):
