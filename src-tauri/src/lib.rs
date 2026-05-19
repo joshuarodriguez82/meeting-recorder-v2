@@ -67,7 +67,7 @@ static BOOTSTRAPPING: AtomicBool = AtomicBool::new(false);
 //                        Support on Mac, $XDG_DATA_HOME on Linux)
 //   - venv_python():    where Python lands inside a venv
 //                        (Scripts\python.exe vs bin/python)
-//   - find_system_python_313(): how we locate a system Python to bootstrap
+//   - find_system_python(): how we locate a system Python to bootstrap
 //                        the venv from
 // Everything else is shared.
 
@@ -382,26 +382,49 @@ fn resolve_python(backend_dir: &std::path::Path) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Try to find a system-installed Python 3.13 that we can use to create
-/// an app venv from. Checks multiple discovery paths per platform.
+/// Locate a system Python to build the app venv from. Prefers 3.12,
+/// falls back to 3.13. Why prefer the older one: the deliberate
+/// `huggingface_hub==0.23` pin (kept until pyannote fixes its newer-hub
+/// breakage) drags in tokenizers 0.19, which ships NO cp313 wheels —
+/// on 3.13 pip silently switches to compiling it from Rust source and
+/// fails on any machine without a toolchain (the sales-laptop case).
+/// On 3.12 every pinned wheel is prebuilt, so the install just works.
 #[cfg(windows)]
-fn find_system_python_313() -> Option<std::path::PathBuf> {
-    // 1. `py -3.13 -c "print(sys.executable)"`
-    let mut cmd = Command::new("py");
-    cmd.args(["-3.13", "-c", "import sys; print(sys.executable)"])
-        .stdout(Stdio::piped()).stderr(Stdio::null());
-    no_window(&mut cmd);
-    if let Ok(out) = cmd.output() {
-        if out.status.success() {
-            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !path.is_empty() {
-                let p = std::path::PathBuf::from(&path);
-                if p.exists() { return Some(p); }
+fn find_system_python() -> Option<std::path::PathBuf> {
+    for ver in ["3.12", "3.13"] {
+        // 1. `py -<ver> -c "print(sys.executable)"`
+        let mut cmd = Command::new("py");
+        cmd.arg(format!("-{ver}"))
+            .args(["-c", "import sys; print(sys.executable)"])
+            .stdout(Stdio::piped()).stderr(Stdio::null());
+        no_window(&mut cmd);
+        if let Ok(out) = cmd.output() {
+            if out.status.success() {
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !path.is_empty() {
+                    let p = std::path::PathBuf::from(&path);
+                    if p.exists() { return Some(p); }
+                }
             }
+        }
+
+        // 2. Common per-user / machine install paths.
+        let dir = format!("Python{}", ver.replace('.', ""));
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
+            candidates.push(std::path::PathBuf::from(&localappdata)
+                .join("Programs").join("Python").join(&dir).join("python.exe"));
+        }
+        candidates.push(std::path::PathBuf::from(
+            format!(r"C:\Program Files\{dir}\python.exe")));
+        candidates.push(std::path::PathBuf::from(
+            format!(r"C:\Program Files (x86)\{dir}\python.exe")));
+        for c in candidates {
+            if c.exists() { return Some(c); }
         }
     }
 
-    // 2. `python` on PATH — verify it's 3.13
+    // 3. Last resort: `python` on PATH, accepted only if 3.12 / 3.13.
     let mut cmd = Command::new("python");
     cmd.args(["-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}'); print(sys.executable)"])
         .stdout(Stdio::piped()).stderr(Stdio::null());
@@ -411,45 +434,49 @@ fn find_system_python_313() -> Option<std::path::PathBuf> {
             let text = String::from_utf8_lossy(&out.stdout).to_string();
             let mut lines = text.lines();
             if let (Some(ver), Some(exe)) = (lines.next(), lines.next()) {
-                if ver.trim() == "3.13" {
+                if matches!(ver.trim(), "3.12" | "3.13") {
                     let p = std::path::PathBuf::from(exe.trim());
                     if p.exists() { return Some(p); }
                 }
             }
         }
     }
-
-    // 3. Common install paths.
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
-        candidates.push(std::path::PathBuf::from(&localappdata)
-            .join("Programs").join("Python").join("Python313").join("python.exe"));
-    }
-    candidates.push(std::path::PathBuf::from(r"C:\Program Files\Python313\python.exe"));
-    candidates.push(std::path::PathBuf::from(r"C:\Program Files (x86)\Python313\python.exe"));
-    for c in candidates {
-        if c.exists() { return Some(c); }
-    }
     None
 }
 
 #[cfg(target_os = "macos")]
-fn find_system_python_313() -> Option<std::path::PathBuf> {
-    // 1. `python3.13` on PATH (Homebrew exposes this — `brew install python@3.13`).
-    let mut cmd = Command::new("python3.13");
-    cmd.args(["-c", "import sys; print(sys.executable)"])
-        .stdout(Stdio::piped()).stderr(Stdio::null());
-    if let Ok(out) = cmd.output() {
-        if out.status.success() {
-            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !path.is_empty() {
-                let p = std::path::PathBuf::from(&path);
-                if p.exists() { return Some(p); }
+fn find_system_python() -> Option<std::path::PathBuf> {
+    for ver in ["3.12", "3.13"] {
+        // 1. pythonX.YY on PATH (Homebrew: `brew install python@3.12`).
+        let mut cmd = Command::new(format!("python{ver}"));
+        cmd.args(["-c", "import sys; print(sys.executable)"])
+            .stdout(Stdio::piped()).stderr(Stdio::null());
+        if let Ok(out) = cmd.output() {
+            if out.status.success() {
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !path.is_empty() {
+                    let p = std::path::PathBuf::from(&path);
+                    if p.exists() { return Some(p); }
+                }
             }
+        }
+
+        // 2. Standard install locations: Homebrew (ARM/Intel),
+        //    python.org installer, pyenv shim.
+        let candidates: Vec<std::path::PathBuf> = vec![
+            std::path::PathBuf::from(format!("/opt/homebrew/bin/python{ver}")),
+            std::path::PathBuf::from(format!("/usr/local/bin/python{ver}")),
+            std::path::PathBuf::from(format!(
+                "/Library/Frameworks/Python.framework/Versions/{ver}/bin/python{ver}")),
+            std::path::PathBuf::from(format!("{}/.pyenv/versions/{ver}.0/bin/python{ver}",
+                std::env::var("HOME").unwrap_or_default())),
+        ];
+        for c in candidates {
+            if c.exists() { return Some(c); }
         }
     }
 
-    // 2. `python3` on PATH if it is exactly 3.13.
+    // 3. Last resort: `python3` on PATH, accepted only if 3.12 / 3.13.
     let mut cmd = Command::new("python3");
     cmd.args(["-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}'); print(sys.executable)"])
         .stdout(Stdio::piped()).stderr(Stdio::null());
@@ -458,69 +485,72 @@ fn find_system_python_313() -> Option<std::path::PathBuf> {
             let text = String::from_utf8_lossy(&out.stdout).to_string();
             let mut lines = text.lines();
             if let (Some(ver), Some(exe)) = (lines.next(), lines.next()) {
-                if ver.trim() == "3.13" {
+                if matches!(ver.trim(), "3.12" | "3.13") {
                     let p = std::path::PathBuf::from(exe.trim());
                     if p.exists() { return Some(p); }
                 }
             }
         }
     }
-
-    // 3. Standard install locations: Homebrew on Apple Silicon, Homebrew on
-    //    Intel, python.org installer, pyenv shim.
-    let candidates: Vec<std::path::PathBuf> = vec![
-        std::path::PathBuf::from("/opt/homebrew/bin/python3.13"),         // brew, Apple Silicon
-        std::path::PathBuf::from("/usr/local/bin/python3.13"),             // brew, Intel
-        std::path::PathBuf::from("/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13"),  // python.org
-        std::path::PathBuf::from(format!("{}/.pyenv/versions/3.13.0/bin/python3.13",
-            std::env::var("HOME").unwrap_or_default())),
-    ];
-    for c in candidates {
-        if c.exists() { return Some(c); }
-    }
     None
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn find_system_python_313() -> Option<std::path::PathBuf> {
-    for name in ["python3.13", "python3"] {
-        let mut cmd = Command::new(name);
-        cmd.args(["-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}'); print(sys.executable)"])
+fn find_system_python() -> Option<std::path::PathBuf> {
+    for ver in ["3.12", "3.13"] {
+        let mut cmd = Command::new(format!("python{ver}"));
+        cmd.args(["-c", "import sys; print(sys.executable)"])
             .stdout(Stdio::piped()).stderr(Stdio::null());
         if let Ok(out) = cmd.output() {
             if out.status.success() {
-                let text = String::from_utf8_lossy(&out.stdout).to_string();
-                let mut lines = text.lines();
-                if let (Some(ver), Some(exe)) = (lines.next(), lines.next()) {
-                    if ver.trim() == "3.13" {
-                        let p = std::path::PathBuf::from(exe.trim());
-                        if p.exists() { return Some(p); }
-                    }
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !path.is_empty() {
+                    let p = std::path::PathBuf::from(&path);
+                    if p.exists() { return Some(p); }
+                }
+            }
+        }
+        for c in [format!("/usr/bin/python{ver}"),
+                  format!("/usr/local/bin/python{ver}")] {
+            let p = std::path::PathBuf::from(&c);
+            if p.exists() { return Some(p); }
+        }
+    }
+
+    // Last resort: `python3` on PATH, accepted only if 3.12 / 3.13.
+    let mut cmd = Command::new("python3");
+    cmd.args(["-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}'); print(sys.executable)"])
+        .stdout(Stdio::piped()).stderr(Stdio::null());
+    if let Ok(out) = cmd.output() {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout).to_string();
+            let mut lines = text.lines();
+            if let (Some(ver), Some(exe)) = (lines.next(), lines.next()) {
+                if matches!(ver.trim(), "3.12" | "3.13") {
+                    let p = std::path::PathBuf::from(exe.trim());
+                    if p.exists() { return Some(p); }
                 }
             }
         }
     }
-    for c in ["/usr/bin/python3.13", "/usr/local/bin/python3.13"] {
-        let p = std::path::PathBuf::from(c);
-        if p.exists() { return Some(p); }
-    }
     None
 }
 
-/// Human-readable instruction for installing Python 3.13. Surfaced in the
+/// Human-readable instruction for installing Python 3.12. Surfaced in the
 /// error message when we can't find one — different per platform because
 /// the install method differs (py.org installer vs Homebrew vs apt).
+/// 3.12 (not 3.13) on purpose: see find_system_python().
 fn python_install_instructions() -> &'static str {
     #[cfg(windows)]
-    { "Install Python 3.13 from https://www.python.org/downloads/ \
+    { "Install Python 3.12 from https://www.python.org/downloads/ \
        (per-user install, no admin needed; check 'Add python.exe to PATH'), \
        then restart Meeting Recorder." }
     #[cfg(target_os = "macos")]
-    { "Install Python 3.13 with Homebrew: `brew install python@3.13`. \
+    { "Install Python 3.12 with Homebrew: `brew install python@3.12`. \
        (If you don't have Homebrew, install it from https://brew.sh first.) \
        Then restart Meeting Recorder." }
     #[cfg(all(unix, not(target_os = "macos")))]
-    { "Install Python 3.13 from your distro's package manager (e.g. `apt install python3.13`) \
+    { "Install Python 3.12 from your distro's package manager (e.g. `apt install python3.12`) \
        and restart Meeting Recorder." }
 }
 
@@ -586,8 +616,8 @@ fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBu
         Some(p) => p,
         None => {
             // First-time install: create the venv from scratch with system Python.
-            let system_py = find_system_python_313().ok_or_else(|| {
-                format!("Python 3.13 not found on this machine. {}",
+            let system_py = find_system_python().ok_or_else(|| {
+                format!("Python 3.12 not found on this machine. {}",
                         python_install_instructions())
             })?;
             rlog(&format!("Bootstrap: system Python at {}", system_py.display()));
@@ -631,6 +661,11 @@ fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBu
     let t0 = std::time::Instant::now();
     let mut c = Command::new(&venv_py);
     c.args(["-m", "pip", "install", "-r"]).arg(&reqs)
+        // Belt-and-suspenders for the 3.13 fallback: if we did land on
+        // 3.13 and pip has to compile a pyo3 extension (tokenizers),
+        // let it build against 3.13's stable ABI instead of hard-erroring.
+        // No effect on 3.12 (every wheel is prebuilt — nothing compiles).
+        .env("PYO3_USE_ABI3_FORWARD_COMPATIBILITY", "1")
         .stdout(Stdio::from(out)).stderr(Stdio::from(err));
     no_window(&mut c);
     let status = c.status().map_err(|e| format!("pip install cmd failed: {}", e))?;
