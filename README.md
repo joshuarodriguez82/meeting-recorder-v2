@@ -162,6 +162,7 @@ Mac feature parity vs. Windows:
 - **Semantic search** — type a phrase and get hits where the wording differs but the meaning matches. Powered by a local 22 MB sentence-transformer (MiniLM-L6); embeddings never leave the machine.
 - **Cross-meeting Q&A** — ask natural-language questions across every transcript, get streamed answers with inline citations like `[ABC123 @ 12:34]` that jump to the source session. Scope by client or project.
 - **Clients + nested Projects** — Projects live inside Clients (one-to-many). Client dashboard shows a chip row of its projects; click a chip to drill into just that project's meetings. AI-assisted tagging suggests which meetings belong to a given client.
+- **Engagements** — per-client (optionally per-project) register that rolls every meeting's requirements, decisions, action items, and open questions into one deduped, provenance-tagged view, and exports it to a hand-editable Excel workbook. Re-export after each meeting regenerates the same file in place, carrying your Status/Notes columns forward and adding a "Changes since last export" sheet.
 
 ### Speakers
 - **Automatic naming** — speakers who introduce themselves ("Hi, I'm Sarah") or are addressed by name are auto-labeled and their voiceprint saved, with no manual tagging
