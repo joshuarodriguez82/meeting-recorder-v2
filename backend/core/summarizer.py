@@ -39,6 +39,16 @@ _IMG_MEDIA_TYPES = {
 }
 
 
+def _model_supports_vision(model: str) -> bool:
+    """Claude 3.5 Haiku and the original Claude 3 Haiku are text-only —
+    sending image blocks to them is a hard 400 from the Anthropic API.
+    Every Claude 4.x model (and Sonnet/Opus 3.x) is vision-capable, so
+    default to True and only deny the known text-only Haiku ids."""
+    m = (model or "").lower()
+    return not ("haiku-3" in m or "3-5-haiku" in m or "3.5-haiku" in m
+                or "3-haiku" in m)
+
+
 def _image_blocks(image_paths: List[str]) -> list:
     """Read screenshot files into Anthropic image content blocks.
     Skips anything missing/oversized/unknown rather than failing the
@@ -252,7 +262,11 @@ class Summarizer:
         so there we silently fall back to text-only.
         """
         if self._provider == "anthropic":
-            imgs = _image_blocks(image_paths) if image_paths else []
+            imgs = (
+                _image_blocks(image_paths)
+                if image_paths and _model_supports_vision(self._model)
+                else []
+            )
             if imgs:
                 content: object = [*imgs, {"type": "text", "text": prompt}]
             else:
