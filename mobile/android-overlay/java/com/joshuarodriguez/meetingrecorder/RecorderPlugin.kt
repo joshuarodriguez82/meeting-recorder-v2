@@ -1,6 +1,7 @@
 package com.joshuarodriguez.meetingrecorder
 
 import android.Manifest
+import android.content.ClipData
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
@@ -357,6 +358,16 @@ class RecorderPlugin : Plugin() {
         val send = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
             type = "*/*"
             putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            // FLAG_GRANT_READ_URI_PERMISSION does NOT cover EXTRA_STREAM
+            // URIs — only getData()/ClipData. Without ClipData the
+            // target app (OneDrive) gets the URIs but can't read them
+            // ("couldn't be uploaded"). Attaching them as ClipData makes
+            // the OS grant read to whichever app the user picks.
+            clipData = ClipData(
+                "recording", arrayOf("*/*"), ClipData.Item(uris[0]),
+            ).also { c ->
+                for (i in 1 until uris.size) c.addItem(ClipData.Item(uris[i]))
+            }
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         val chooser = Intent.createChooser(send, "Send recording to OneDrive")
