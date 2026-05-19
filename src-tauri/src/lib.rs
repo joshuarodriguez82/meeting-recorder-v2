@@ -775,6 +775,7 @@ pub fn run() {
             restart_backend,
             get_backend_port,
             capture_screenshot,
+            download_and_run_update,
             open_external
         ])
         .setup(|app| {
@@ -909,6 +910,46 @@ fn restart_backend(
     Ok(())
 }
 
+/// Tauri command: download a release installer to the temp dir and
+/// launch it, so an in-app update doesn't dump the user in a browser.
+/// Windows only — the NSIS `.exe` runs itself (UAC prompts as usual);
+/// on macOS the unsigned `.zip` can't auto-install (Gatekeeper), so the
+/// frontend keeps the browser path there. We shell out via PowerShell
+/// (already the pattern in this file) to avoid pulling an HTTP crate.
+/// Best-effort: any failure returns Err and the caller falls back to
+/// opening the asset URL in the browser, so this can't make updating
+/// worse than before.
+#[tauri::command]
+fn download_and_run_update(url: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let dest = std::env::temp_dir().join("MeetingRecorder-Update-Setup.exe");
+        let dest_s = dest.to_string_lossy().replace('\'', "''");
+        let url_s = url.replace('\'', "''");
+        let ps = format!(
+            "$ErrorActionPreference='Stop'; \
+             $ProgressPreference='SilentlyContinue'; \
+             Invoke-WebRequest -Uri '{url}' -OutFile '{dest}'; \
+             Start-Process -FilePath '{dest}'",
+            url = url_s,
+            dest = dest_s,
+        );
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-Command", ps.as_str()]);
+        no_window(&mut cmd);
+        let status = cmd.status().map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err(format!("update download/launch failed ({status})"));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = url;
+        Err("auto-run installer is only supported on Windows".into())
+    }
+}
+
 /// Tauri command: capture a screenshot of the user's screen into `dir`
 /// and return the saved file's absolute path.
 ///
@@ -1001,9 +1042,14 @@ fn capture_screenshot(
             grab = grab,
             out = out.replace('\'', "''")
         );
-        Command::new("powershell")
-            .args(["-NoProfile", "-STA", "-Command", ps.as_str()])
-            .status()
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-STA", "-Command", ps.as_str()]);
+        // Without CREATE_NO_WINDOW the powershell console flashes up and
+        // gets captured INTO the screenshot (and pops over a live
+        // meeting). Every other Command in this file already hides it;
+        // this one was missed.
+        no_window(&mut cmd);
+        cmd.status()
     };
 
     #[cfg(all(unix, not(target_os = "macos")))]
