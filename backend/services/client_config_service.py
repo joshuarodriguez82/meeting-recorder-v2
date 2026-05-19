@@ -21,6 +21,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, Optional
 
+from services._cloud_sync import CloudFileNotReadyError, read_text_hydrated
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -52,7 +53,17 @@ class ClientConfigService:
         if not self._path.exists():
             return {}
         try:
-            return json.loads(self._path.read_text(encoding="utf-8")) or {}
+            return json.loads(read_text_hydrated(self._path)) or {}
+        except CloudFileNotReadyError:
+            # The file synced from another device but its bytes aren't on
+            # this disk yet. Do NOT swallow this as "no clients" — that's
+            # exactly the "client is in the file but the app won't show
+            # it" bug. Surface it so the endpoint can tell the user to
+            # let OneDrive/iCloud finish downloading.
+            logger.error(
+                "client_configs.json is an un-downloaded cloud placeholder "
+                "— surfacing instead of dropping every client")
+            raise
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(f"client_configs.json unreadable ({e}); starting fresh")
             return {}
