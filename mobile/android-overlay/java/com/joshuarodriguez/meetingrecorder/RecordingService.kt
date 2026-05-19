@@ -83,7 +83,7 @@ class RecordingService : Service() {
     private fun start(sessionId: String, captureMode: String) {
         if (running.get()) return
         val outFile = File(cacheDir, "rec_$sessionId.m4a")
-        startForeground(NOTIF_ID, buildNotification())
+        beginForeground(NOTIF_ID, buildNotification())
 
         var lastErr: String? = null
         for ((source, label) in candidates(captureMode)) {
@@ -158,7 +158,12 @@ class RecordingService : Service() {
         }
     }
 
-    private fun startForeground(id: Int, n: Notification) {
+    // Renamed off "startForeground": a private method with that exact
+    // name illegally hides Service.startForeground (public) — Kotlin
+    // rejects it ("cannot weaken access privilege" / needs override),
+    // and it would recurse into itself. This wrapper just picks the
+    // right Service.startForeground overload per API level.
+    private fun beginForeground(id: Int, n: Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(id, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {
