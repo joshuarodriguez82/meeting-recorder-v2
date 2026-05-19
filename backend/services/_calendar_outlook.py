@@ -422,10 +422,8 @@ def get_meetings_for_date(target_date: datetime.date) -> List[dict]:
             pass
 
 
-# Conference-link extraction for the lazy meeting-detail view. Unlike
-# auto_record_service._CONF_LINK_RE (which only needs to know a link
-# *exists*), here we return the full clickable URL so the UI can offer
-# a one-click Join button.
+# Conference-link extraction for the lazy meeting-detail view: return
+# the full clickable URL so the UI can offer a one-click Join button.
 _URL_RE = re.compile(r"""https?://[^\s<>"'\)\]]+""", re.IGNORECASE)
 _CONF_HOSTS = (
     "teams.microsoft.com", "teams.live.com",
