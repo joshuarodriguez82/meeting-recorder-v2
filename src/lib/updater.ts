@@ -115,6 +115,20 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
     };
   }
   if (compareVersions(tag, currentVersion) > 0) {
+    const assets: ReleaseAsset[] = (data.assets || [])
+      .filter((a) => a.name && a.browser_download_url)
+      .map((a) => ({
+        name: a.name as string,
+        url: a.browser_download_url as string,
+      }));
+    // The release object exists the instant the tag is pushed, but the
+    // Tauri build uploads the .exe/.msi/.zip ~10-20 min later. Don't
+    // prompt while there's no installer for this OS yet — otherwise
+    // "Download" dead-ends on a page with no files. A later launch
+    // (once assets are attached) will surface it normally.
+    if (!pickInstallerAsset(assets)) {
+      return { kind: "up-to-date", currentVersion };
+    }
     return {
       kind: "available",
       currentVersion,
@@ -124,12 +138,7 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
         url: data.html_url || RELEASE_PAGE_URL,
         body: data.body || "",
         publishedAt: data.published_at || "",
-        assets: (data.assets || [])
-          .filter((a) => a.name && a.browser_download_url)
-          .map((a) => ({
-            name: a.name as string,
-            url: a.browser_download_url as string,
-          })),
+        assets,
       },
     };
   }
