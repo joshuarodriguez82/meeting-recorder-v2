@@ -89,6 +89,9 @@ jobs:
             exit 1
           fi
           VERSION="${GITHUB_REF_NAME#v}"
+          # Branch dispatches (e.g. claude/fix-x) have a "/" in the ref,
+          # which would make cp target a nonexistent subdir — flatten it.
+          VERSION="${VERSION//\//-}"
           mkdir -p artifacts
           cp "$SRC" "artifacts/Meeting.Recorder_${VERSION}_android.apk"
           ls -la artifacts/
