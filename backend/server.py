@@ -2756,6 +2756,22 @@ async def decisions(session_id: str):
         session_id, "extract_decisions", "decisions", "export_decisions")
 
 
+@app.post("/sessions/{session_id}/structured")
+async def structured(session_id: str):
+    """Opt-in structured (re)extraction. The auto pipeline already does
+    this for new sessions; this endpoint lets the UI backfill a legacy
+    session on demand without a bulk, token-burning migration."""
+    svc.load_settings()
+    if not svc.summarizer:
+        raise HTTPException(status_code=400, detail="AI provider not configured")
+    try:
+        counts = await _extract_structured_and_save(session_id)
+        return {"ok": True, "counts": counts}
+    except Exception as e:
+        logger.exception("Structured extraction failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class ProcessFullRequest(BaseModel):
     template: str = "General"
     follow_up_drafts: bool = False
@@ -2825,6 +2841,7 @@ async def process_full(session_id: str, req: ProcessFullRequest):
             session_id, "extract_decisions", "decisions"), "decisions"),
         _safe(_extract_and_save(
             session_id, "extract_requirements", "requirements"), "requirements"),
+        _safe(_extract_structured_and_save(session_id), "structured"),
     )
 
     # 6. Optional follow-up email drafts — only when requested explicitly.
@@ -2889,6 +2906,29 @@ async def _extract_and_save(
         result = await method(transcript, notes=notes)
     setattr(session, field_name, result)
     await asyncio.to_thread(svc.session_svc.save, session)
+
+
+async def _extract_structured_and_save(session_id: str) -> dict:
+    """Run the single structured extraction and persist the typed
+    records onto the session. Returns per-type counts for the response
+    / stage log. Independent of the markdown extractors — those still
+    populate the per-session UI; this feeds the engagement layer."""
+    from models.extraction import STRUCTURED_FIELDS, stamp_records
+
+    session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+    if not session or not session.segments:
+        raise RuntimeError("no transcript")
+    parsed = await svc.summarizer.extract_structured(
+        session.full_transcript(), notes=session.notes or "")
+    created_at = session.started_at.isoformat() if session.started_at else ""
+    stamped = stamp_records(parsed, session.session_id, created_at)
+    counts: dict = {}
+    for key, (_cls, attr) in STRUCTURED_FIELDS.items():
+        recs = stamped.get(key, [])
+        setattr(session, attr, recs)
+        counts[key] = len(recs)
+    await asyncio.to_thread(svc.session_svc.save, session)
+    return counts
 
 
 @app.get("/sessions/unprocessed")
