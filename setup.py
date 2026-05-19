@@ -5,11 +5,15 @@ Creates a Python venv inside backend/, installs all dependencies,
 and writes a fresh .env if none exists. Run once after cloning.
 
     cd meeting-recorder-v2
-    python setup.py        # Windows
-    python3.13 setup.py    # macOS / Linux
+    py -3.12 setup.py       # Windows
+    python3.12 setup.py     # macOS / Linux
 
-IMPORTANT: invoke this with Python 3.13 specifically (`python3.13`, not
-`python3`). The default `python3` on macOS is Apple's stock 3.9, which
+IMPORTANT: invoke this with Python 3.12 specifically (`python3.12` /
+`py -3.12`, not `python3`). 3.12 — not 3.13 — because the pinned ML
+stack (tokenizers 0.19, dragged in by the deliberate huggingface_hub
+pin) has no cp313 wheels, so on 3.13 pip tries to compile it from Rust
+source and fails on machines without a toolchain. On 3.12 every wheel
+is prebuilt. The default `python3` on macOS is Apple's stock 3.9, which
 can't install numpy 2.x or torch 2.6. We bail with an explanatory error
 if the running interpreter is older than 3.10.
 
@@ -36,10 +40,10 @@ if sys.version_info < (3, 10):
     if sys.platform == "darwin":
         sys.stderr.write(
             "On macOS, the default `python3` is Apple's stock 3.9. Install\n"
-            "Python 3.13 via Homebrew and rerun explicitly:\n\n"
-            "    brew install python@3.13\n"
+            "Python 3.12 via Homebrew and rerun explicitly:\n\n"
+            "    brew install python@3.12\n"
             "    rm -rf backend/.venv\n"
-            "    python3.13 setup.py\n\n"
+            "    python3.12 setup.py\n\n"
         )
     else:
         sys.stderr.write(
@@ -151,6 +155,7 @@ def main():
         "anthropic",
         "openai",
         "python-dotenv",
+        "openpyxl>=3.1",  # engagement-register .xlsx export
         "sounddevice",
         "soundfile",
         "scipy",
