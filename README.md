@@ -80,12 +80,12 @@ Short version:
 
 ```sh
 xcode-select --install                    # C compiler
-brew install python@3.13 node blackhole-2ch
+brew install python@3.12 node blackhole-2ch
 brew install rustup-init && rustup-init -y
 
 git clone https://github.com/joshuarodriguez82/meeting-recorder-v2.git
 cd meeting-recorder-v2
-python3.13 setup.py                       # backend venv (5–10 min). Use python3.13, NOT python3.
+python3.12 setup.py                       # backend venv (5–10 min). Use python3.12, NOT python3 or 3.13.
 npm install
 npx tauri build
 ./scripts/macos-postbuild.sh              # patches Info.plist privacy keys
@@ -212,7 +212,7 @@ Mac feature parity vs. Windows:
   Exchange / Outlook for Mac, Google) — Meeting Recorder reads through
   Calendar.app, not directly from the providers
 - Xcode Command Line Tools (`xcode-select --install`)
-- Homebrew, Python 3.13, Node 20+, Rust, BlackHole 2ch — see
+- Homebrew, Python 3.12, Node 20+, Rust, BlackHole 2ch — see
   [MAC_SETUP.md](./MAC_SETUP.md) for the exact commands
 - Apple Silicon GPU acceleration is automatic (PyTorch 2.6 MPS backend)
 
