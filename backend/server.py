@@ -743,6 +743,81 @@ async def health():
     return {"status": "ok", "version": "2.0.0"}
 
 
+# Free-model roster is fetched live from OpenRouter's public catalog so
+# it never goes stale. Hardcoded lists rotate out and start 404ing
+# within weeks (this is the class of bug that broke claude-3-5-haiku-
+# latest and the old :free ids). Cached in-process so opening Settings
+# doesn't hammer the upstream.
+_FREE_MODELS_CACHE: dict = {"at": 0.0, "models": []}
+_FREE_MODELS_TTL = 6 * 3600  # 6h — free roster changes on the order of days
+
+
+def _fetch_openrouter_free() -> list:
+    """Return [{value,label}] of free, text-capable OpenRouter models.
+    stdlib-only (no httpx dependency assumption); any failure returns []
+    so the frontend falls back to its bundled list."""
+    import json as _json
+    import urllib.request as _urlreq
+
+    req = _urlreq.Request(
+        "https://openrouter.ai/api/v1/models",
+        headers={"User-Agent": "MeetingRecorder/2"},
+    )
+    with _urlreq.urlopen(req, timeout=10) as resp:
+        data = _json.loads(resp.read().decode("utf-8"))
+
+    out: list = []
+    for m in data.get("data", []):
+        mid = m.get("id") or ""
+        pricing = m.get("pricing") or {}
+        # Free = both prompt and completion priced at 0. The ":free"
+        # suffix is the canonical free variant; require it so we don't
+        # surface a paid model the user gets billed for.
+        if not mid.endswith(":free"):
+            continue
+        try:
+            if float(pricing.get("prompt", "1")) != 0.0:
+                continue
+            if float(pricing.get("completion", "1")) != 0.0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        # Text in/out only — skip image/audio-only endpoints.
+        arch = m.get("architecture") or {}
+        in_mods = arch.get("input_modalities") or []
+        if in_mods and "text" not in in_mods:
+            continue
+        ctx = m.get("context_length") or 0
+        name = m.get("name") or mid
+        ctx_k = f" · {round(ctx / 1000)}k ctx" if ctx else ""
+        out.append({"value": mid, "label": f"{name}{ctx_k}"})
+
+    # Longest context first (best for long meeting transcripts), then name.
+    out.sort(key=lambda x: x["label"])
+    return out
+
+
+@app.get("/models/free")
+async def get_free_models(provider: str = "openrouter"):
+    """Live free-model roster for the OpenRouter provider preset.
+    Returns {models:[{value,label}]}; empty list on any failure (the UI
+    keeps its bundled fallback list)."""
+    if provider != "openrouter":
+        return {"models": []}
+    now = time.time()
+    if (now - _FREE_MODELS_CACHE["at"]) < _FREE_MODELS_TTL and _FREE_MODELS_CACHE["models"]:
+        return {"models": _FREE_MODELS_CACHE["models"]}
+    try:
+        models = await asyncio.to_thread(_fetch_openrouter_free)
+    except Exception as e:
+        logger.warning(f"OpenRouter free-model fetch failed ({e}); UI uses fallback")
+        return {"models": _FREE_MODELS_CACHE["models"]}
+    if models:
+        _FREE_MODELS_CACHE["at"] = now
+        _FREE_MODELS_CACHE["models"] = models
+    return {"models": models}
+
+
 # ── Settings ─────────────────────────────────────────────────────────
 @app.get("/settings", response_model=SettingsDTO)
 async def get_settings():

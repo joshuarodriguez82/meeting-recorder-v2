@@ -1026,6 +1026,12 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  // Live free-model roster (OpenRouter). Empty list => UI keeps its
+  // bundled fallback. Never throws into the caller's happy path.
+  getFreeModels: (provider: string) =>
+    request<{ models: { value: string; label: string }[] }>(
+      `/models/free?provider=${encodeURIComponent(provider)}`),
+
   // Per-client configs (designated export folders, etc.)
   getClientConfigs: () =>
     request<Record<string, { export_folder: string; display_name?: string }>>(
