@@ -101,6 +101,16 @@ export interface Settings {
   // lists alongside the live transcript. Defaults false — costs LLM
   // calls during every recording, so users opt in.
   live_copilot_enabled: boolean;
+  // Optional separate LLM for the live co-pilot. Empty strings (the
+  // default) mean "reuse the main provider/model/key". Set
+  // live_ai_provider="openai" + base_url to point ticks at local
+  // Ollama or a free OpenRouter model while the post-meeting summary
+  // keeps running on the main (paid) provider.
+  live_ai_provider: string;
+  live_claude_model: string;
+  live_openai_api_key: string;
+  live_openai_base_url: string;
+  live_anthropic_api_key: string;
 }
 
 export interface CoPilotTickResponse {
@@ -265,6 +275,10 @@ export interface SessionFull {
   // Absolute paths to screenshots captured during the meeting. Persisted
   // with the session and fed to the summarizer as visual context.
   screenshots?: string[];
+  // Saved Live Co-Pilot ticks — one entry per coaching pass the panel
+  // made during the recording. Persisted with the session so the
+  // bullets the model produced mid-call survive past the meeting.
+  copilot_ticks?: CoPilotTickResponse[];
 }
 
 export interface Speaker {
@@ -471,6 +485,19 @@ export const api = {
   copilotTick: () =>
     request<CoPilotTickResponse>("/recording/copilot/tick", {
       method: "POST",
+    }),
+  // Pulls every persisted tick on the active session so the panel can
+  // rehydrate after a reload — otherwise the bullets vanish until the
+  // next 45s tick fires.
+  copilotHistory: () =>
+    request<{ ticks: CoPilotTickResponse[] }>("/recording/copilot/history"),
+  // Lightweight setter for live_copilot_enabled only. Unlike the full
+  // POST /settings, this endpoint works while a recording is in
+  // progress so the user can flip the panel on/off from the Record bar.
+  setLiveCopilotEnabled: (enabled: boolean) =>
+    request<{ live_copilot_enabled: boolean }>("/settings/live-copilot", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
     }),
   loadModels: () =>
     request<{ loading: boolean }>("/models/load", { method: "POST" }),

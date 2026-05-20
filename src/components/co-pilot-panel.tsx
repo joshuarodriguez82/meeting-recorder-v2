@@ -8,17 +8,24 @@ import { Button } from "@/components/ui/button";
 // Live Co-Pilot panel.
 //
 // While a recording is in progress AND the user has opted into
-// "Live Co-Pilot" in Settings, this panel polls
-// POST /recording/copilot/tick every ~45 s. The backend reads the last
-// ~10 min of live-transcript segments and asks the configured LLM
-// (default Anthropic Haiku) for three short bullet lists:
+// "Live Co-Pilot" in Settings (or via the in-bar toggle on the Record
+// view), this panel polls POST /recording/copilot/tick every ~45 s.
+// The backend reads the last ~10 min of live-transcript segments and
+// asks the configured LLM (default Anthropic Haiku) for three short
+// bullet lists:
 //
 //   * clarifying_questions — what to ask now to fill gaps
 //   * risks                — unspoken assumptions / flags
 //   * follow_ups           — concrete next-step suggestions
 //
-// Each list is capped at three short bullets. The panel only mounts
-// when `recording && enabled`, so the polling lifecycle is automatic.
+// Each tick's bullets are also appended to the active session on the
+// backend so the coaching record survives past the recording — every
+// tick is rendered here in a scrolling history (newest at the top)
+// instead of replacing the previous one, matching how the live
+// transcript accumulates segments rather than overwriting.
+//
+// On mount we fetch GET /recording/copilot/history so a mid-recording
+// page reload doesn't blank the panel.
 //
 // Errors are silenced on the screen: a 403 means the user toggled the
 // feature off while recording (we just stop polling), a 409 means the
@@ -33,7 +40,11 @@ interface Props {
 }
 
 export function CoPilotPanel({ recording, enabled }: Props) {
-  const [result, setResult] = useState<CoPilotTickResponse | null>(null);
+  // Newest-first list of every tick we've shown. The backend also
+  // persists each one onto the active session, so this list is purely
+  // a render cache; the canonical history lives in session.copilot_ticks
+  // once the recording stops.
+  const [ticks, setTicks] = useState<CoPilotTickResponse[]>([]);
   const [loading, setLoading] = useState(false);
   const [paused, setPaused] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
@@ -41,6 +52,29 @@ export function CoPilotPanel({ recording, enabled }: Props) {
   // with the timer-driven one. Ref (not state) so the latest value is
   // visible inside the timer callback without re-creating the interval.
   const inFlight = useRef(false);
+  // Track whether we've already hydrated history on mount so a fast
+  // re-render (e.g. parent state churn) doesn't refetch.
+  const hydrated = useRef(false);
+
+  // On mount (and any time the recording toggles back on), pull the
+  // persisted tick history so a page reload mid-call rehydrates the
+  // panel instead of starting from scratch. Best-effort; failures just
+  // mean the user waits ~45 s for the first live tick.
+  useEffect(() => {
+    if (!recording || !enabled || hydrated.current) return;
+    hydrated.current = true;
+    (async () => {
+      try {
+        const r = await api.copilotHistory();
+        if (r.ticks && r.ticks.length) {
+          // Newest first matches the live render order.
+          setTicks([...r.ticks].reverse());
+        }
+      } catch {
+        // No persisted history (no recording yet, fresh session) — fine.
+      }
+    })();
+  }, [recording, enabled]);
 
   const tick = useCallback(async () => {
     if (inFlight.current) return;
@@ -48,7 +82,17 @@ export function CoPilotPanel({ recording, enabled }: Props) {
     setLoading(true);
     try {
       const r = await api.copilotTick();
-      setResult(r);
+      // Drop empty ticks so the history doesn't fill up with no-ops
+      // before anyone has spoken. The backend already filters these
+      // before persisting, but the panel polls faster than meaningful
+      // speech sometimes happens, so this is a second guard.
+      const isEmpty =
+        r.clarifying_questions.length === 0 &&
+        r.risks.length === 0 &&
+        r.follow_ups.length === 0;
+      if (!isEmpty) {
+        setTicks((prev) => [r, ...prev]);
+      }
       setLastError(null);
     } catch (e) {
       if (e instanceof ApiError && (e.status === 403 || e.status === 409)) {
@@ -82,12 +126,6 @@ export function CoPilotPanel({ recording, enabled }: Props) {
 
   if (!recording || !enabled) return null;
 
-  const sections: Array<{ title: string; key: keyof CoPilotTickResponse }> = [
-    { title: "Clarifying questions", key: "clarifying_questions" },
-    { title: "Risks & assumptions", key: "risks" },
-    { title: "Suggested follow-ups", key: "follow_ups" },
-  ];
-
   return (
     <div className="rounded-lg border bg-card p-4 space-y-3">
       <div className="flex items-center gap-2 text-sm font-medium">
@@ -99,6 +137,11 @@ export function CoPilotPanel({ recording, enabled }: Props) {
         {loading && (
           <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
         )}
+        <span className="ml-2 text-[10px] text-muted-foreground">
+          {ticks.length > 0
+            ? `${ticks.length} update${ticks.length === 1 ? "" : "s"}`
+            : ""}
+        </span>
         <div className="ml-auto flex items-center gap-1">
           <Button
             variant="ghost"
@@ -124,35 +167,17 @@ export function CoPilotPanel({ recording, enabled }: Props) {
         </div>
       </div>
 
-      <div className="space-y-3">
-        {sections.map(({ title, key }) => {
-          const items = (result?.[key] as string[] | undefined) ?? [];
-          return (
-            <div key={key} className="space-y-1.5">
-              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                {title}
-              </p>
-              {items.length === 0 ? (
-                <p className="text-xs italic text-muted-foreground">
-                  {result === null
-                    ? "Waiting for the first tick…"
-                    : "Nothing here right now."}
-                </p>
-              ) : (
-                <ul className="space-y-1">
-                  {items.map((s, i) => (
-                    <li key={i} className="text-sm leading-snug flex gap-2">
-                      <span className="text-muted-foreground select-none">
-                        •
-                      </span>
-                      <span>{s}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          );
-        })}
+      {/* Scrollable history. Capped at a comfortable single-screen
+          height so the panel doesn't push the live transcript or other
+          recording-page sections off the page on long calls. */}
+      <div className="max-h-[28rem] overflow-y-auto pr-1 space-y-3">
+        {ticks.length === 0 ? (
+          <p className="text-xs italic text-muted-foreground py-2">
+            Waiting for the first tick…
+          </p>
+        ) : (
+          ticks.map((t, i) => <TickCard key={t.generated_at + i} tick={t} />)
+        )}
       </div>
 
       <div className="flex items-center justify-between text-[10px] text-muted-foreground">
@@ -160,8 +185,8 @@ export function CoPilotPanel({ recording, enabled }: Props) {
           {paused
             ? "Paused"
             : `Refreshing every ${Math.round(POLL_INTERVAL_MS / 1000)}s`}
-          {result?.segment_count
-            ? ` · ${result.segment_count} recent segments`
+          {ticks[0]?.segment_count
+            ? ` · ${ticks[0].segment_count} recent segments`
             : ""}
         </span>
         {lastError && (
@@ -170,6 +195,52 @@ export function CoPilotPanel({ recording, enabled }: Props) {
           </span>
         )}
       </div>
+    </div>
+  );
+}
+
+// A single tick rendered as three labeled bullet lists with the
+// timestamp it was generated. Empty categories are hidden (rather than
+// showing "Nothing here right now") to keep the history dense.
+function TickCard({ tick }: { tick: CoPilotTickResponse }) {
+  const sections: Array<{ title: string; key: keyof CoPilotTickResponse }> = [
+    { title: "Clarifying questions", key: "clarifying_questions" },
+    { title: "Risks & assumptions", key: "risks" },
+    { title: "Suggested follow-ups", key: "follow_ups" },
+  ];
+  const generated = tick.generated_at
+    ? new Date(tick.generated_at).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      })
+    : "";
+
+  return (
+    <div className="rounded-md border bg-muted/30 p-3 space-y-2">
+      <div className="flex items-center justify-between text-[10px] uppercase tracking-wide text-muted-foreground">
+        <span>{generated}</span>
+        {tick.segment_count > 0 && <span>{tick.segment_count} segments</span>}
+      </div>
+      {sections.map(({ title, key }) => {
+        const items = (tick[key] as string[] | undefined) ?? [];
+        if (items.length === 0) return null;
+        return (
+          <div key={key} className="space-y-1">
+            <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+              {title}
+            </p>
+            <ul className="space-y-1">
+              {items.map((s, i) => (
+                <li key={i} className="text-sm leading-snug flex gap-2">
+                  <span className="text-muted-foreground select-none">•</span>
+                  <span>{s}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        );
+      })}
     </div>
   );
 }
