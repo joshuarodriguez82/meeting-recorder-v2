@@ -184,8 +184,11 @@ export function RecordView({
   const [autoRecord, setAutoRecord] = useState<boolean>(false);
   // Live Co-Pilot opt-in. Hydrated from Settings alongside autoRecord —
   // see the effect below. When true and a recording is in progress, the
-  // CoPilotPanel renders beside the live transcript.
+  // CoPilotPanel renders beside the live transcript. The recording-bar
+  // Switch flips this via api.setLiveCopilotEnabled, which is safe to
+  // call mid-recording (unlike the full POST /settings).
   const [liveCopilotEnabled, setLiveCopilotEnabled] = useState<boolean>(false);
+  const [liveCopilotSaving, setLiveCopilotSaving] = useState<boolean>(false);
   const [autoRecordNext, setAutoRecordNext] = useState<{
     subject: string;
     start: string;
@@ -377,6 +380,26 @@ export function RecordView({
       toast.error(`Couldn't save auto-record setting: ${msg}`);
     } finally {
       setAutoRecordSaving(false);
+    }
+  };
+
+  // Live Co-Pilot in-bar toggle. Uses the lightweight endpoint that
+  // accepts flips mid-recording — the full POST /settings refuses while
+  // recording (rebuilding RecordingService would orphan capture
+  // threads), but this one just rewrites the env line and updates the
+  // cached Settings in place.
+  const toggleLiveCopilot = async (next: boolean) => {
+    setLiveCopilotEnabled(next); // optimistic
+    setLiveCopilotSaving(true);
+    try {
+      await api.setLiveCopilotEnabled(next);
+      toast.success(next ? "Co-Pilot on" : "Co-Pilot off");
+    } catch (e: unknown) {
+      setLiveCopilotEnabled(!next); // rollback
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`Couldn't toggle Co-Pilot: ${msg}`);
+    } finally {
+      setLiveCopilotSaving(false);
     }
   };
 
@@ -698,6 +721,28 @@ export function RecordView({
             <div className="text-xs text-red-700/80 dark:text-red-300/80">
               {formatDur(duration)} · {meetingName || "Untitled"}
             </div>
+          </div>
+          {/* In-bar Co-Pilot toggle. Uses the lightweight
+              POST /settings/live-copilot endpoint which (unlike the full
+              POST /settings) doesn't refuse during a recording, so the
+              user can flip the panel on mid-call. */}
+          <div
+            className="flex items-center gap-2"
+            title="Live Co-Pilot — surfaces clarifying questions / risks / follow-ups every ~45s. Costs an LLM call per tick (~$0.10–$0.20 per hour on Haiku, or $0 with the override set to Ollama)."
+          >
+            <Sparkles className="h-3.5 w-3.5 text-red-700/80 dark:text-red-300/80" />
+            <Label
+              htmlFor="copilot-toggle"
+              className="text-xs font-medium text-red-900 dark:text-red-200 select-none"
+            >
+              Co-Pilot
+            </Label>
+            <Switch
+              id="copilot-toggle"
+              checked={liveCopilotEnabled}
+              onCheckedChange={toggleLiveCopilot}
+              disabled={liveCopilotSaving}
+            />
           </div>
           <Button
             variant="outline"
