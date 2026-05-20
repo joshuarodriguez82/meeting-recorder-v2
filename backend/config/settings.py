@@ -188,6 +188,11 @@ class Settings:
     # Manual recordings always win — auto-start is a no-op while
     # `recording_svc.is_recording` is True.
     auto_record_enabled: bool
+    # When True, the Record view shows a "Live Co-Pilot" panel that calls
+    # the LLM every ~45s with the recent transcript and surfaces three
+    # short lists (clarifying questions / risks / suggested follow-ups).
+    # Opt-in by default — it costs LLM calls during every recording.
+    live_copilot_enabled: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -290,6 +295,7 @@ class Settings:
             overrun_stop_min=_get_int("OVERRUN_STOP_MIN", 0),
             hard_cap_hours=_get_int("HARD_CAP_HOURS", 4),
             auto_record_enabled=_get_bool("AUTO_RECORD_ENABLED", False),
+            live_copilot_enabled=_get_bool("LIVE_COPILOT_ENABLED", False),
         )
 
     @property
@@ -352,6 +358,7 @@ class Settings:
         overrun_stop_min: int = 0,
         hard_cap_hours: int = 4,
         auto_record_enabled: bool = False,
+        live_copilot_enabled: bool = False,
     ) -> None:
         """Write settings back to the .env file.
 
@@ -402,6 +409,7 @@ class Settings:
             f"OVERRUN_STOP_MIN={overrun_stop_min}\n"
             f"HARD_CAP_HOURS={hard_cap_hours}\n"
             f"AUTO_RECORD_ENABLED={'true' if auto_record_enabled else 'false'}\n"
+            f"LIVE_COPILOT_ENABLED={'true' if live_copilot_enabled else 'false'}\n"
         )
         # Write to the canonical LOCALAPPDATA location first. In rare cases
         # a Tauri-spawned Python child cannot open files under LOCALAPPDATA

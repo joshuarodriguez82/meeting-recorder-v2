@@ -36,6 +36,7 @@ import {
 import { LiveTranscriptPanel } from "./live-transcript-panel";
 import { MeetingBriefModal } from "./meeting-brief-modal";
 import { LiveSearchPanel } from "./live-search-panel";
+import { CoPilotPanel } from "./co-pilot-panel";
 
 interface Props {
   onSessionsChanged: () => void;
@@ -181,6 +182,10 @@ export function RecordView({
   // optimistically. `autoRecordNext` is the next qualifying event, shown
   // as a small hint under the toggle.
   const [autoRecord, setAutoRecord] = useState<boolean>(false);
+  // Live Co-Pilot opt-in. Hydrated from Settings alongside autoRecord —
+  // see the effect below. When true and a recording is in progress, the
+  // CoPilotPanel renders beside the live transcript.
+  const [liveCopilotEnabled, setLiveCopilotEnabled] = useState<boolean>(false);
   const [autoRecordNext, setAutoRecordNext] = useState<{
     subject: string;
     start: string;
@@ -325,6 +330,7 @@ export function RecordView({
         const s = await api.getSettings();
         if (cancelled) return;
         setAutoRecord(Boolean(s.auto_record_enabled));
+        setLiveCopilotEnabled(Boolean(s.live_copilot_enabled));
       } catch {
         // Settings unreachable — leave toggle off. The /settings
         // failure path already surfaces elsewhere.
@@ -738,6 +744,11 @@ export function RecordView({
       {/* Live transcript stream — only mounts during an active recording.
           Subscribes to SSE itself; we just give it the recording flag. */}
       <LiveTranscriptPanel recording={recording} />
+
+      {/* Live Co-Pilot — polls /recording/copilot/tick every ~45s while
+          recording (opt-in via Settings.live_copilot_enabled). Renders
+          three short bullet lists alongside the transcript. */}
+      <CoPilotPanel recording={recording} enabled={liveCopilotEnabled} />
 
       {/* In-call semantic search — query past meetings without leaving
           the recording view. Reuses the cross-meeting Q&A pipeline; it
