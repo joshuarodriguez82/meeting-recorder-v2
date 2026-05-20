@@ -1933,13 +1933,92 @@ async def copilot_tick():
     result = await coach.coach_tick(
         segments=segments, meeting_name=meeting_name,
     )
-    return {
+    payload = {
         "clarifying_questions": result.get("clarifying_questions", []),
         "risks": result.get("risks", []),
         "follow_ups": result.get("follow_ups", []),
         "segment_count": len(segments),
         "generated_at": datetime.now().isoformat(),
     }
+    # Persist every tick into the active session so the bullets the
+    # model produced mid-call survive past the recording. The session
+    # JSON is written on stop_recording / process_session — appending
+    # in-memory here is enough; we don't write the file every 45s.
+    # Skip empty payloads (no segments yet, no bullets either) so the
+    # saved list isn't padded with no-ops from the first ticks before
+    # anyone has spoken.
+    if sess is not None and (
+        payload["clarifying_questions"]
+        or payload["risks"]
+        or payload["follow_ups"]
+    ):
+        sess.copilot_ticks.append(payload)
+    return payload
+
+
+@app.post("/settings/live-copilot")
+async def set_live_copilot_enabled(payload: dict):
+    """Lightweight setter for `live_copilot_enabled` only.
+
+    The full POST /settings refuses while a recording is in progress
+    because it rebuilds RecordingService — orphaning the active capture
+    threads. This endpoint flips just the co-pilot flag, so the user can
+    toggle the panel mid-call from the recording bar without stopping.
+    Persists to config.env so the choice survives a restart.
+    """
+    import dataclasses
+    enabled = bool(payload.get("enabled", False))
+    s = svc.load_settings()
+    Settings.save_to_env(
+        anthropic_api_key=s.anthropic_api_key,
+        hf_token=s.hf_token,
+        whisper_model=s.whisper_model,
+        max_speakers=s.max_speakers,
+        recordings_dir=s.recordings_dir,
+        email_to=s.email_to,
+        claude_model=s.claude_model,
+        notify_minutes_before=s.notify_minutes_before,
+        auto_process_after_stop=s.auto_process_after_stop,
+        launch_on_startup=s.launch_on_startup,
+        auto_follow_up_email=s.auto_follow_up_email,
+        retention_enabled=s.retention_enabled,
+        retention_processed_days=s.retention_processed_days,
+        retention_unprocessed_days=s.retention_unprocessed_days,
+        ai_provider=s.ai_provider,
+        openai_api_key=s.openai_api_key,
+        openai_base_url=s.openai_base_url,
+        live_transcription_enabled=s.live_transcription_enabled,
+        silence_warn_min=s.silence_warn_min,
+        silence_stop_min=s.silence_stop_min,
+        overrun_warn_min=s.overrun_warn_min,
+        overrun_stop_min=s.overrun_stop_min,
+        hard_cap_hours=s.hard_cap_hours,
+        auto_record_enabled=s.auto_record_enabled,
+        live_copilot_enabled=enabled,
+        live_ai_provider=s.live_ai_provider,
+        live_claude_model=s.live_claude_model,
+        live_openai_api_key=s.live_openai_api_key,
+        live_openai_base_url=s.live_openai_base_url,
+        live_anthropic_api_key=s.live_anthropic_api_key,
+    )
+    # Update the cached Settings in-place so the change is visible
+    # immediately, without going through load_settings() which would
+    # rebuild RecordingService and orphan the active capture.
+    svc.settings = dataclasses.replace(s, live_copilot_enabled=enabled)
+    return {"live_copilot_enabled": enabled}
+
+
+@app.get("/recording/copilot/history")
+async def get_copilot_history():
+    """Return all Co-Pilot ticks persisted on the active session so the
+    panel can rehydrate after a page reload mid-recording (otherwise the
+    bullets vanish until the next 45s tick fires)."""
+    if not svc.recording_svc or not svc.recording_svc.is_recording:
+        return {"ticks": []}
+    sess = svc.recording_svc.current_session
+    if sess is None:
+        return {"ticks": []}
+    return {"ticks": list(sess.copilot_ticks)}
 
 
 def _stop_recording_sync():
