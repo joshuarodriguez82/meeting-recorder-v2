@@ -494,6 +494,11 @@ class Services:
         self.transcription: Optional[TranscriptionEngine] = None
         self.diarization: Optional[DiarizationEngine] = None
         self.summarizer: Optional[Summarizer] = None
+        # Optional override summarizer used by the live co-pilot tick
+        # endpoint only. Constructed in load_settings() when
+        # `live_ai_provider` is set; otherwise we point this at the same
+        # instance as `summarizer` so the tick code can stay branch-free.
+        self.live_summarizer: Optional[Summarizer] = None
         self.current_session: Optional[Session] = None
         self.models_ready = False
         self.models_loading = False
@@ -620,6 +625,42 @@ class Services:
                     # surface the error at first use.
                     logger.warning(f"Summarizer init failed: {e}")
                     self.summarizer = None
+            # Live Co-Pilot override summarizer. When `live_ai_provider`
+            # is set we build a second Summarizer pointing at whatever
+            # cheap/free model the user picked for live ticks (local
+            # Ollama, a free OpenRouter model, a smaller Anthropic
+            # model). Unset → reuse the main summarizer so the tick
+            # endpoint doesn't have to branch.
+            live_provider = (s.live_ai_provider or "").strip().lower()
+            if live_provider and self.summarizer is not None:
+                try:
+                    if live_provider == "anthropic":
+                        # Fall back to the main Anthropic key when the
+                        # override-specific one is blank — users on
+                        # Anthropic-everywhere shouldn't have to paste
+                        # the same key twice.
+                        live_key = (
+                            s.live_anthropic_api_key or s.anthropic_api_key)
+                        self.live_summarizer = Summarizer(
+                            api_key=live_key,
+                            model=s.live_claude_model or s.claude_model,
+                            provider="anthropic",
+                        )
+                    else:
+                        self.live_summarizer = Summarizer(
+                            api_key="",  # ignored for the openai path
+                            model=s.live_claude_model or s.claude_model,
+                            provider="openai",
+                            base_url=s.live_openai_base_url,
+                            openai_api_key=s.live_openai_api_key,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"Live Co-Pilot summarizer init failed "
+                        f"(falling back to main summarizer): {e}")
+                    self.live_summarizer = self.summarizer
+            else:
+                self.live_summarizer = self.summarizer
             # QAService threads search_svc + summarizer together. Either
             # being None at this moment is fine — QAService.is_ready
             # reports False and the endpoint emits a clear "not configured"
@@ -707,6 +748,15 @@ class SettingsDTO(BaseModel):
     # Live in-call co-pilot panel. Defaults off — it makes one LLM call
     # every ~45s of recording, so users opt in.
     live_copilot_enabled: bool = False
+    # Optional separate LLM for the live co-pilot. Empty strings (the
+    # default) mean "reuse the main provider config". Set
+    # live_ai_provider to "openai" + a base_url to point ticks at a
+    # local Ollama / a free OpenRouter model.
+    live_ai_provider: str = ""
+    live_claude_model: str = ""
+    live_openai_api_key: str = ""
+    live_openai_base_url: str = ""
+    live_anthropic_api_key: str = ""
 
 
 class StartRecordingRequest(BaseModel):
@@ -878,6 +928,11 @@ async def get_settings():
         hard_cap_hours=s.hard_cap_hours,
         auto_record_enabled=s.auto_record_enabled,
         live_copilot_enabled=s.live_copilot_enabled,
+        live_ai_provider=s.live_ai_provider,
+        live_claude_model=s.live_claude_model,
+        live_openai_api_key=s.live_openai_api_key,
+        live_openai_base_url=s.live_openai_base_url,
+        live_anthropic_api_key=s.live_anthropic_api_key,
     )
 
 
@@ -942,6 +997,11 @@ async def save_settings(payload: SettingsDTO):
         hard_cap_hours=max(0, payload.hard_cap_hours),
         auto_record_enabled=bool(payload.auto_record_enabled),
         live_copilot_enabled=bool(payload.live_copilot_enabled),
+        live_ai_provider=(payload.live_ai_provider or "").strip(),
+        live_claude_model=(payload.live_claude_model or "").strip(),
+        live_openai_api_key=payload.live_openai_api_key or "",
+        live_openai_base_url=(payload.live_openai_base_url or "").strip(),
+        live_anthropic_api_key=payload.live_anthropic_api_key or "",
     )
     # If the recordings folder changed, migrate client + template state
     # from the previous folder to the new one. Copy, not move, so the
@@ -1852,7 +1912,13 @@ async def copilot_tick():
             status_code=409,
             detail="Live transcription isn't running for this recording.",
         )
-    if svc.summarizer is None:
+    # The live co-pilot reads from `live_summarizer` so users can route
+    # ticks to a cheaper or local model (Ollama, free OpenRouter) while
+    # post-meeting summaries stay on the main provider. When no live
+    # override is configured this points at the same instance as
+    # `summarizer`, so the fallback is automatic.
+    coach = svc.live_summarizer or svc.summarizer
+    if coach is None:
         raise HTTPException(
             status_code=503,
             detail="Summarizer not ready — check provider/API key in Settings.",
@@ -1864,16 +1930,95 @@ async def copilot_tick():
     if sess is not None:
         meeting_name = getattr(sess, "meeting_name", "") or ""
 
-    result = await svc.summarizer.coach_tick(
+    result = await coach.coach_tick(
         segments=segments, meeting_name=meeting_name,
     )
-    return {
+    payload = {
         "clarifying_questions": result.get("clarifying_questions", []),
         "risks": result.get("risks", []),
         "follow_ups": result.get("follow_ups", []),
         "segment_count": len(segments),
         "generated_at": datetime.now().isoformat(),
     }
+    # Persist every tick into the active session so the bullets the
+    # model produced mid-call survive past the recording. The session
+    # JSON is written on stop_recording / process_session — appending
+    # in-memory here is enough; we don't write the file every 45s.
+    # Skip empty payloads (no segments yet, no bullets either) so the
+    # saved list isn't padded with no-ops from the first ticks before
+    # anyone has spoken.
+    if sess is not None and (
+        payload["clarifying_questions"]
+        or payload["risks"]
+        or payload["follow_ups"]
+    ):
+        sess.copilot_ticks.append(payload)
+    return payload
+
+
+@app.post("/settings/live-copilot")
+async def set_live_copilot_enabled(payload: dict):
+    """Lightweight setter for `live_copilot_enabled` only.
+
+    The full POST /settings refuses while a recording is in progress
+    because it rebuilds RecordingService — orphaning the active capture
+    threads. This endpoint flips just the co-pilot flag, so the user can
+    toggle the panel mid-call from the recording bar without stopping.
+    Persists to config.env so the choice survives a restart.
+    """
+    import dataclasses
+    enabled = bool(payload.get("enabled", False))
+    s = svc.load_settings()
+    Settings.save_to_env(
+        anthropic_api_key=s.anthropic_api_key,
+        hf_token=s.hf_token,
+        whisper_model=s.whisper_model,
+        max_speakers=s.max_speakers,
+        recordings_dir=s.recordings_dir,
+        email_to=s.email_to,
+        claude_model=s.claude_model,
+        notify_minutes_before=s.notify_minutes_before,
+        auto_process_after_stop=s.auto_process_after_stop,
+        launch_on_startup=s.launch_on_startup,
+        auto_follow_up_email=s.auto_follow_up_email,
+        retention_enabled=s.retention_enabled,
+        retention_processed_days=s.retention_processed_days,
+        retention_unprocessed_days=s.retention_unprocessed_days,
+        ai_provider=s.ai_provider,
+        openai_api_key=s.openai_api_key,
+        openai_base_url=s.openai_base_url,
+        live_transcription_enabled=s.live_transcription_enabled,
+        silence_warn_min=s.silence_warn_min,
+        silence_stop_min=s.silence_stop_min,
+        overrun_warn_min=s.overrun_warn_min,
+        overrun_stop_min=s.overrun_stop_min,
+        hard_cap_hours=s.hard_cap_hours,
+        auto_record_enabled=s.auto_record_enabled,
+        live_copilot_enabled=enabled,
+        live_ai_provider=s.live_ai_provider,
+        live_claude_model=s.live_claude_model,
+        live_openai_api_key=s.live_openai_api_key,
+        live_openai_base_url=s.live_openai_base_url,
+        live_anthropic_api_key=s.live_anthropic_api_key,
+    )
+    # Update the cached Settings in-place so the change is visible
+    # immediately, without going through load_settings() which would
+    # rebuild RecordingService and orphan the active capture.
+    svc.settings = dataclasses.replace(s, live_copilot_enabled=enabled)
+    return {"live_copilot_enabled": enabled}
+
+
+@app.get("/recording/copilot/history")
+async def get_copilot_history():
+    """Return all Co-Pilot ticks persisted on the active session so the
+    panel can rehydrate after a page reload mid-recording (otherwise the
+    bullets vanish until the next 45s tick fires)."""
+    if not svc.recording_svc or not svc.recording_svc.is_recording:
+        return {"ticks": []}
+    sess = svc.recording_svc.current_session
+    if sess is None:
+        return {"ticks": []}
+    return {"ticks": list(sess.copilot_ticks)}
 
 
 def _stop_recording_sync():
