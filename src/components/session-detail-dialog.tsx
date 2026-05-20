@@ -323,6 +323,17 @@ export function SessionDetailDialog({
                     </span>
                   )}
                 </TabsTrigger>
+                <TabsTrigger
+                  value="copilot"
+                  disabled={(session.copilot_ticks?.length ?? 0) === 0}
+                >
+                  <Sparkles className="h-3.5 w-3.5 mr-1" />
+                  Co-Pilot {(session.copilot_ticks?.length ?? 0) > 0 && (
+                    <span className="ml-1 text-muted-foreground">
+                      ({session.copilot_ticks?.length})
+                    </span>
+                  )}
+                </TabsTrigger>
                 <TabsTrigger value="summary" disabled={!session.summary}>Summary</TabsTrigger>
                 <TabsTrigger value="actions" disabled={!session.action_items}>Actions</TabsTrigger>
                 <TabsTrigger value="decisions" disabled={!session.decisions}>Decisions</TabsTrigger>
@@ -502,6 +513,10 @@ export function SessionDetailDialog({
                   <ScreenshotsView session={session} />
                 </TabsContent>
 
+                <TabsContent value="copilot" className="mt-0">
+                  <CoPilotTicksView session={session} />
+                </TabsContent>
+
                 <TabsContent value="summary" className="mt-0">
                   <MarkdownBlock content={session.summary || ""} />
                 </TabsContent>
@@ -605,6 +620,82 @@ function ScreenshotsView({ session }: { session: SessionFull }) {
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+// Saved Live Co-Pilot ticks for a finished session. Mirrors the live
+// panel's layout but reads from `session.copilot_ticks` (persisted on
+// every tick during recording) instead of polling. Newest first so the
+// last coaching pass is what the user sees on open — matches the in-
+// call presentation.
+function CoPilotTicksView({ session }: { session: SessionFull }) {
+  const ticks = session.copilot_ticks ?? [];
+  if (ticks.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground text-center py-8">
+        No Co-Pilot ticks were recorded during this meeting.
+      </p>
+    );
+  }
+  const newestFirst = [...ticks].reverse();
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        {ticks.length} coaching update{ticks.length === 1 ? "" : "s"} the
+        Live Co-Pilot produced during this meeting, newest first. Each
+        update reflected what had been said in the previous ~10 minutes
+        at the time the tick fired.
+      </p>
+      {newestFirst.map((t, i) => {
+        const sections: Array<{
+          title: string;
+          items: string[] | undefined;
+        }> = [
+          { title: "Clarifying questions", items: t.clarifying_questions },
+          { title: "Risks & assumptions", items: t.risks },
+          { title: "Suggested follow-ups", items: t.follow_ups },
+        ];
+        const generated = t.generated_at
+          ? new Date(t.generated_at).toLocaleString()
+          : "";
+        return (
+          <div
+            key={(t.generated_at || "") + i}
+            className="rounded-md border bg-muted/30 p-3 space-y-2"
+          >
+            <div className="flex items-center justify-between text-[10px] uppercase tracking-wide text-muted-foreground">
+              <span>{generated}</span>
+              {t.segment_count > 0 && (
+                <span>{t.segment_count} segments</span>
+              )}
+            </div>
+            {sections.map(({ title, items }) => {
+              if (!items || items.length === 0) return null;
+              return (
+                <div key={title} className="space-y-1">
+                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                    {title}
+                  </p>
+                  <ul className="space-y-1">
+                    {items.map((s, j) => (
+                      <li
+                        key={j}
+                        className="text-sm leading-snug flex gap-2"
+                      >
+                        <span className="text-muted-foreground select-none">
+                          •
+                        </span>
+                        <span>{s}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
     </div>
   );
 }

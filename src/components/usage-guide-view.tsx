@@ -597,6 +597,104 @@ const SECTIONS: Section[] = [
     ),
   },
   {
+    id: "live-copilot",
+    title: "Live Co-Pilot (beta)",
+    content: (
+      <>
+        <p>
+          A panel that watches the live transcript while you&apos;re recording
+          and, every ~45 seconds, asks the configured LLM for three short
+          bullet lists based on the last ~10 minutes of conversation:
+        </p>
+        <ul className="list-disc pl-5 space-y-1">
+          <li>
+            <strong>Clarifying questions</strong> — what to ask now to fill
+            gaps the room hasn&apos;t addressed.
+          </li>
+          <li>
+            <strong>Risks &amp; assumptions</strong> — unspoken assumptions
+            or flags worth surfacing.
+          </li>
+          <li>
+            <strong>Suggested follow-ups</strong> — concrete next steps.
+          </li>
+        </ul>
+        <p>
+          Each list is capped at three bullets per tick. The panel keeps a
+          scrolling history of every tick during the call so you can scroll
+          back to earlier suggestions; nothing is overwritten. <strong>Every
+          tick is also saved with the session</strong>, so after the meeting
+          ends you can open the saved session and find the full coaching
+          record in the <strong>Co-Pilot</strong> tab — alongside the
+          transcript, summary, and screenshots.
+        </p>
+
+        <p className="font-medium pt-2">Turning it on</p>
+        <p>The co-pilot is opt-in — there are two ways to enable it:</p>
+        <ul className="list-disc pl-5 space-y-1">
+          <li>
+            <strong>Settings → Workflow → Live Co-Pilot (beta)</strong>.
+            Persists across restarts.
+          </li>
+          <li>
+            <strong>The Co-Pilot switch in the recording bar</strong> (next
+            to Screenshot / Stop). Flip on or off mid-call without leaving
+            the page; safe to toggle while recording.
+          </li>
+        </ul>
+        <p>
+          Requires <strong>Live transcription</strong> to also be on — the
+          co-pilot reads from the same segment stream.
+        </p>
+
+        <p className="font-medium pt-2">Cost &amp; the optional cheap model</p>
+        <p>
+          By default each tick costs an LLM call on your main provider —
+          about <strong>$0.10–$0.20 per hour</strong> of meeting on Anthropic
+          Haiku. To drop the live side to $0 you can override just the
+          co-pilot&apos;s model in{" "}
+          <strong>Settings → Live Co-Pilot model</strong> (the card appears
+          when the feature is on):
+        </p>
+        <ul className="list-disc pl-5 space-y-1">
+          <li>
+            <strong>Ollama</strong> (local, free): install from{" "}
+            <a
+              href="https://ollama.com/download"
+              className="underline"
+              target="_blank"
+              rel="noreferrer"
+            >
+              ollama.com
+            </a>
+            , run <code>ollama pull llama3.1</code>, set base URL to{" "}
+            <code>http://localhost:11434/v1</code>.
+          </li>
+          <li>
+            <strong>OpenRouter free tier</strong>: free models with ~50
+            requests/day cap (one long meeting can hit it).
+          </li>
+        </ul>
+        <p>
+          Post-meeting summaries stay on whatever your main AI Provider is —
+          the override only affects the 45-second tick calls.
+        </p>
+
+        <p className="font-medium pt-2">Controls inside the panel</p>
+        <ul className="list-disc pl-5 space-y-1">
+          <li>
+            <strong>Refresh now</strong> — force an immediate tick (e.g.
+            after a key moment in the meeting).
+          </li>
+          <li>
+            <strong>Pause</strong> — stop the 45-second timer (the panel
+            stays visible; toggle back on to resume).
+          </li>
+        </ul>
+      </>
+    ),
+  },
+  {
     id: "clients",
     title: "Clients & Projects",
     content: (

@@ -129,7 +129,11 @@ export function KnownSpeakersSection() {
             session and they&apos;ll appear here.
           </p>
         ) : (
-          <div className="space-y-2">
+          /* Scroll cap so the speaker list doesn't keep growing the
+             Settings page as the user accumulates known speakers across
+             meetings — the rest of the cards beneath would otherwise
+             get pushed further and further off-screen. */
+          <div className="max-h-[24rem] overflow-y-auto pr-1 space-y-2">
             {profiles.map((p) => (
               <ProfileRow
                 key={p.profile_id}

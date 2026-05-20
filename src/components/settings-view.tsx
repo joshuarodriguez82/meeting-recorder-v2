@@ -489,6 +489,15 @@ export function SettingsView() {
         </CardContent>
       </Card>
 
+      {/* Live Co-Pilot model — only rendered when the toggle above is
+          on. Optional override so users can route the 45s tick calls
+          to a free / local model (Ollama, OpenRouter free tier) while
+          post-meeting summaries stay on the main provider. Empty
+          override → reuses the main provider, same as Phase A. */}
+      {settings.live_copilot_enabled && (
+        <LiveCoPilotModelCard settings={settings} update={update} />
+      )}
+
       {/* Auto-stop watchdog — protects against forgotten recordings
           running for hours. All trigger settings live together so
           users see the full safety net at a glance, with the
@@ -946,6 +955,174 @@ function AIProviderSection({
  * Failures (no network, GitHub rate limit, deleted repo) collapse to
  * an "Update check unavailable" line rather than an error toast.
  */
+// Compact override panel for the Live Co-Pilot's tick model. The main
+// AIProviderSection already does a lot — full preset list, model-id
+// dropdowns, key-acquisition instructions — so we don't try to repeat
+// it here. Power users opting in to a different live model can paste
+// a base URL + key + model id directly.
+//
+// Empty `live_ai_provider` = "use the main provider" (Phase A behavior).
+// "anthropic" + blank live_anthropic_api_key reuses the main key.
+// "openai" + base URL = OpenRouter / Ollama / Groq / Gemini / custom.
+function LiveCoPilotModelCard({
+  settings, update,
+}: {
+  settings: Settings;
+  update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
+}) {
+  const useOverride = (settings.live_ai_provider || "").trim() !== "";
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">
+          Live Co-Pilot model{" "}
+          <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            optional
+          </span>
+        </CardTitle>
+        <p className="text-xs text-muted-foreground mt-1">
+          By default the co-pilot tick uses your main AI Provider above.
+          Override here to route the 45-second tick calls to something
+          cheaper or local — e.g. <strong>Ollama</strong> (free, runs on
+          your machine) or a free <strong>OpenRouter</strong> model —
+          while post-meeting summaries stay on your main provider.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <Toggle
+          label="Use a different model for live ticks"
+          description="When off, the co-pilot reuses the main AI Provider configured above."
+          checked={useOverride}
+          onChange={(on) => {
+            if (on) {
+              // Default to an OpenAI-compatible target with empty
+              // fields — the user fills in base URL + key + model.
+              update("live_ai_provider", "openai");
+            } else {
+              // Clear everything so the backend falls back cleanly.
+              update("live_ai_provider", "");
+              update("live_claude_model", "");
+              update("live_openai_api_key", "");
+              update("live_openai_base_url", "");
+              update("live_anthropic_api_key", "");
+            }
+          }}
+        />
+
+        {useOverride && (
+          <>
+            <div className="space-y-2">
+              <Label>Provider family</Label>
+              <Select
+                value={settings.live_ai_provider}
+                onValueChange={(v) => v && update("live_ai_provider", v)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="anthropic">
+                    Anthropic (e.g. claude-haiku-4-5)
+                  </SelectItem>
+                  <SelectItem value="openai">
+                    OpenAI-compatible (Ollama, OpenRouter, Groq, Gemini,
+                    custom)
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Model id</Label>
+              <Input
+                value={settings.live_claude_model}
+                onChange={(e) =>
+                  update("live_claude_model", e.target.value)
+                }
+                placeholder={
+                  settings.live_ai_provider === "anthropic"
+                    ? "claude-haiku-4-5"
+                    : "llama3.1, gpt-oss:20b, meta-llama/llama-3.3-70b-instruct:free, …"
+                }
+                className="font-mono text-sm"
+              />
+              <p className="text-[11px] text-muted-foreground">
+                Leave blank to reuse the main provider&apos;s model id.
+              </p>
+            </div>
+
+            {settings.live_ai_provider === "openai" && (
+              <>
+                <div className="space-y-2">
+                  <Label>Base URL</Label>
+                  <Input
+                    value={settings.live_openai_base_url}
+                    onChange={(e) =>
+                      update("live_openai_base_url", e.target.value)
+                    }
+                    placeholder="http://localhost:11434/v1   or   https://openrouter.ai/api/v1"
+                    className="font-mono text-sm"
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    Ollama: <code>http://localhost:11434/v1</code>{" "}
+                    (install from{" "}
+                    <a
+                      href="https://ollama.com/download"
+                      className="underline"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      ollama.com
+                    </a>
+                    , then <code>ollama pull llama3.1</code>).
+                    OpenRouter: <code>https://openrouter.ai/api/v1</code>.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>API key</Label>
+                  <Input
+                    type="password"
+                    value={settings.live_openai_api_key}
+                    onChange={(e) =>
+                      update("live_openai_api_key", e.target.value)
+                    }
+                    placeholder="sk-or-... (any non-empty string for Ollama)"
+                    autoComplete="off"
+                  />
+                </div>
+              </>
+            )}
+
+            {settings.live_ai_provider === "anthropic" && (
+              <div className="space-y-2">
+                <Label>Anthropic API key (optional)</Label>
+                <Input
+                  type="password"
+                  value={settings.live_anthropic_api_key}
+                  onChange={(e) =>
+                    update("live_anthropic_api_key", e.target.value)
+                  }
+                  placeholder="Leave blank to reuse the main Anthropic key"
+                  autoComplete="off"
+                />
+              </div>
+            )}
+
+            <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+              Tip: cost guidance. Anthropic Haiku ≈ $0.10–$0.20 per hour
+              of meeting. Ollama (local) = $0. OpenRouter&apos;s free
+              tier = $0 with a ~50 req/day cap (one meeting ≈ 80 ticks,
+              so the cap kicks in after one long meeting).
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function AppUpdatesCard() {
   type LatestRelease = {
     tag: string;

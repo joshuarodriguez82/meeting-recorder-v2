@@ -54,6 +54,14 @@ class Session:
         # the summarizer as visual context and reused later like any
         # other artifact.
         self.screenshots: List[str] = []
+        # Saved Live Co-Pilot ticks. Each entry is the dict the tick
+        # endpoint returned — `generated_at`, `segment_count`,
+        # `clarifying_questions`, `risks`, `follow_ups`. Kept with the
+        # session so the bullets the model produced mid-call survive
+        # past the recording. Treated as opaque dicts (rather than a
+        # typed model) because the prompt schema may evolve before the
+        # feature leaves beta.
+        self.copilot_ticks: List[Dict] = []
 
     def get_or_create_speaker(self, speaker_id: str) -> Speaker:
         if speaker_id not in self.speakers:
@@ -100,6 +108,7 @@ class Session:
             "notes": self.notes,
             "exported_audio_paths": list(self.exported_audio_paths),
             "screenshots": list(self.screenshots),
+            "copilot_ticks": list(self.copilot_ticks),
         }
 
     @classmethod
@@ -143,6 +152,7 @@ class Session:
         session.notes = data.get("notes") or ""
         session.exported_audio_paths = list(data.get("exported_audio_paths") or [])
         session.screenshots = list(data.get("screenshots") or [])
+        session.copilot_ticks = list(data.get("copilot_ticks") or [])
 
         # Rebuild speakers
         speakers_data = data.get("speakers") or {}
