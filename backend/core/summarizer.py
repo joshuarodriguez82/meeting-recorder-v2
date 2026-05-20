@@ -402,6 +402,89 @@ class Summarizer:
         except Exception as e:
             raise RuntimeError(f"Summarization API call failed: {e}") from e
 
+    async def coach_tick(
+        self, segments: List[dict], meeting_name: str = "",
+    ) -> dict:
+        """In-call coaching tick. Given the last few minutes of live
+        transcript segments, produce three short bullet lists:
+
+          * clarifying_questions — what the user should ask to fill gaps
+          * risks                — flags / assumptions the room hasn't
+                                   acknowledged
+          * follow_ups           — concrete next-step suggestions
+
+        Each list is capped at three short bullets. Returns a dict with
+        those three string-array keys. Tolerates a malformed model
+        response by returning empty lists rather than raising — a coach
+        tick is best-effort UX polish, not a critical-path call.
+
+        Tight max_tokens (512) and a 20s timeout because this is called
+        from a 45s frontend poll loop; a slow response would queue up.
+        """
+        if not segments:
+            return {"clarifying_questions": [], "risks": [], "follow_ups": []}
+
+        lines = []
+        for s in segments[-200:]:
+            speaker = (s.get("speaker") or "?").strip()
+            text = (s.get("text") or "").strip()
+            if not text:
+                continue
+            lines.append(f"[{speaker}] {text}")
+        transcript = "\n".join(lines)
+        if not transcript:
+            return {"clarifying_questions": [], "risks": [], "follow_ups": []}
+
+        header = (
+            f"Meeting: {meeting_name}\n\n"
+            if meeting_name else ""
+        )
+        prompt = (
+            "You are a live meeting co-pilot. Read the recent transcript "
+            "below (last few minutes of a meeting in progress) and reply "
+            "with a JSON object — and nothing else — using exactly these "
+            "keys:\n"
+            '  "clarifying_questions": up to 3 short questions the user '
+            "should ask now to clarify ambiguity or missing detail.\n"
+            '  "risks": up to 3 short flags or unspoken assumptions worth '
+            "surfacing.\n"
+            '  "follow_ups": up to 3 short concrete next-step suggestions.\n\n'
+            "Rules: each bullet must be one sentence, ≤120 characters. "
+            "If a category genuinely has nothing useful to add, return an "
+            "empty array for it — do not fabricate. Do not include "
+            "markdown, prose, or code fences around the JSON.\n\n"
+            f"{header}Recent transcript:\n{transcript}"
+        )
+
+        try:
+            raw = await self._chat(prompt, max_tokens=512, timeout=20.0)
+        except Exception as e:
+            logger.warning(f"coach_tick chat call failed: {e}")
+            return {"clarifying_questions": [], "risks": [], "follow_ups": []}
+
+        parsed = _coerce_json(raw) or {}
+
+        def _clean(key: str) -> List[str]:
+            items = parsed.get(key)
+            if not isinstance(items, list):
+                return []
+            out: List[str] = []
+            for item in items:
+                if not isinstance(item, str):
+                    continue
+                t = item.strip()
+                if t:
+                    out.append(t[:200])
+                if len(out) == 3:
+                    break
+            return out
+
+        return {
+            "clarifying_questions": _clean("clarifying_questions"),
+            "risks": _clean("risks"),
+            "follow_ups": _clean("follow_ups"),
+        }
+
     async def extract_action_items(self, transcript: str, notes: str = "") -> str:
         logger.info(f"Extracting action items via {self._provider}/{self._model}")
         instruction = (
