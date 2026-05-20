@@ -494,6 +494,11 @@ class Services:
         self.transcription: Optional[TranscriptionEngine] = None
         self.diarization: Optional[DiarizationEngine] = None
         self.summarizer: Optional[Summarizer] = None
+        # Optional override summarizer used by the live co-pilot tick
+        # endpoint only. Constructed in load_settings() when
+        # `live_ai_provider` is set; otherwise we point this at the same
+        # instance as `summarizer` so the tick code can stay branch-free.
+        self.live_summarizer: Optional[Summarizer] = None
         self.current_session: Optional[Session] = None
         self.models_ready = False
         self.models_loading = False
@@ -620,6 +625,42 @@ class Services:
                     # surface the error at first use.
                     logger.warning(f"Summarizer init failed: {e}")
                     self.summarizer = None
+            # Live Co-Pilot override summarizer. When `live_ai_provider`
+            # is set we build a second Summarizer pointing at whatever
+            # cheap/free model the user picked for live ticks (local
+            # Ollama, a free OpenRouter model, a smaller Anthropic
+            # model). Unset → reuse the main summarizer so the tick
+            # endpoint doesn't have to branch.
+            live_provider = (s.live_ai_provider or "").strip().lower()
+            if live_provider and self.summarizer is not None:
+                try:
+                    if live_provider == "anthropic":
+                        # Fall back to the main Anthropic key when the
+                        # override-specific one is blank — users on
+                        # Anthropic-everywhere shouldn't have to paste
+                        # the same key twice.
+                        live_key = (
+                            s.live_anthropic_api_key or s.anthropic_api_key)
+                        self.live_summarizer = Summarizer(
+                            api_key=live_key,
+                            model=s.live_claude_model or s.claude_model,
+                            provider="anthropic",
+                        )
+                    else:
+                        self.live_summarizer = Summarizer(
+                            api_key="",  # ignored for the openai path
+                            model=s.live_claude_model or s.claude_model,
+                            provider="openai",
+                            base_url=s.live_openai_base_url,
+                            openai_api_key=s.live_openai_api_key,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"Live Co-Pilot summarizer init failed "
+                        f"(falling back to main summarizer): {e}")
+                    self.live_summarizer = self.summarizer
+            else:
+                self.live_summarizer = self.summarizer
             # QAService threads search_svc + summarizer together. Either
             # being None at this moment is fine — QAService.is_ready
             # reports False and the endpoint emits a clear "not configured"
@@ -707,6 +748,15 @@ class SettingsDTO(BaseModel):
     # Live in-call co-pilot panel. Defaults off — it makes one LLM call
     # every ~45s of recording, so users opt in.
     live_copilot_enabled: bool = False
+    # Optional separate LLM for the live co-pilot. Empty strings (the
+    # default) mean "reuse the main provider config". Set
+    # live_ai_provider to "openai" + a base_url to point ticks at a
+    # local Ollama / a free OpenRouter model.
+    live_ai_provider: str = ""
+    live_claude_model: str = ""
+    live_openai_api_key: str = ""
+    live_openai_base_url: str = ""
+    live_anthropic_api_key: str = ""
 
 
 class StartRecordingRequest(BaseModel):
@@ -878,6 +928,11 @@ async def get_settings():
         hard_cap_hours=s.hard_cap_hours,
         auto_record_enabled=s.auto_record_enabled,
         live_copilot_enabled=s.live_copilot_enabled,
+        live_ai_provider=s.live_ai_provider,
+        live_claude_model=s.live_claude_model,
+        live_openai_api_key=s.live_openai_api_key,
+        live_openai_base_url=s.live_openai_base_url,
+        live_anthropic_api_key=s.live_anthropic_api_key,
     )
 
 
@@ -942,6 +997,11 @@ async def save_settings(payload: SettingsDTO):
         hard_cap_hours=max(0, payload.hard_cap_hours),
         auto_record_enabled=bool(payload.auto_record_enabled),
         live_copilot_enabled=bool(payload.live_copilot_enabled),
+        live_ai_provider=(payload.live_ai_provider or "").strip(),
+        live_claude_model=(payload.live_claude_model or "").strip(),
+        live_openai_api_key=payload.live_openai_api_key or "",
+        live_openai_base_url=(payload.live_openai_base_url or "").strip(),
+        live_anthropic_api_key=payload.live_anthropic_api_key or "",
     )
     # If the recordings folder changed, migrate client + template state
     # from the previous folder to the new one. Copy, not move, so the
@@ -1852,7 +1912,13 @@ async def copilot_tick():
             status_code=409,
             detail="Live transcription isn't running for this recording.",
         )
-    if svc.summarizer is None:
+    # The live co-pilot reads from `live_summarizer` so users can route
+    # ticks to a cheaper or local model (Ollama, free OpenRouter) while
+    # post-meeting summaries stay on the main provider. When no live
+    # override is configured this points at the same instance as
+    # `summarizer`, so the fallback is automatic.
+    coach = svc.live_summarizer or svc.summarizer
+    if coach is None:
         raise HTTPException(
             status_code=503,
             detail="Summarizer not ready — check provider/API key in Settings.",
@@ -1864,7 +1930,7 @@ async def copilot_tick():
     if sess is not None:
         meeting_name = getattr(sess, "meeting_name", "") or ""
 
-    result = await svc.summarizer.coach_tick(
+    result = await coach.coach_tick(
         segments=segments, meeting_name=meeting_name,
     )
     return {

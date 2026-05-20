@@ -193,6 +193,20 @@ class Settings:
     # short lists (clarifying questions / risks / suggested follow-ups).
     # Opt-in by default — it costs LLM calls during every recording.
     live_copilot_enabled: bool
+    # Optional separate LLM for the live co-pilot ticks. When
+    # `live_ai_provider` is empty (default) the co-pilot reuses the main
+    # provider — same client, same key, same model as post-meeting
+    # summaries. When it's set, we build a second Summarizer with these
+    # fields so the live side can run on something cheap or free (local
+    # Ollama, a free OpenRouter model) while the post-meeting summary
+    # stays on the main provider. `live_anthropic_api_key` is only used
+    # when the override provider is "anthropic"; otherwise the main
+    # `anthropic_api_key` is reused.
+    live_ai_provider: str
+    live_claude_model: str
+    live_openai_api_key: str
+    live_openai_base_url: str
+    live_anthropic_api_key: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -296,6 +310,11 @@ class Settings:
             hard_cap_hours=_get_int("HARD_CAP_HOURS", 4),
             auto_record_enabled=_get_bool("AUTO_RECORD_ENABLED", False),
             live_copilot_enabled=_get_bool("LIVE_COPILOT_ENABLED", False),
+            live_ai_provider=_get("LIVE_AI_PROVIDER", ""),
+            live_claude_model=_get("LIVE_CLAUDE_MODEL", ""),
+            live_openai_api_key=_get("LIVE_OPENAI_API_KEY", ""),
+            live_openai_base_url=_get("LIVE_OPENAI_BASE_URL", ""),
+            live_anthropic_api_key=_get("LIVE_ANTHROPIC_API_KEY", ""),
         )
 
     @property
@@ -359,6 +378,11 @@ class Settings:
         hard_cap_hours: int = 4,
         auto_record_enabled: bool = False,
         live_copilot_enabled: bool = False,
+        live_ai_provider: str = "",
+        live_claude_model: str = "",
+        live_openai_api_key: str = "",
+        live_openai_base_url: str = "",
+        live_anthropic_api_key: str = "",
     ) -> None:
         """Write settings back to the .env file.
 
@@ -410,6 +434,11 @@ class Settings:
             f"HARD_CAP_HOURS={hard_cap_hours}\n"
             f"AUTO_RECORD_ENABLED={'true' if auto_record_enabled else 'false'}\n"
             f"LIVE_COPILOT_ENABLED={'true' if live_copilot_enabled else 'false'}\n"
+            f"LIVE_AI_PROVIDER={live_ai_provider}\n"
+            f"LIVE_CLAUDE_MODEL={live_claude_model}\n"
+            f"LIVE_OPENAI_API_KEY={live_openai_api_key}\n"
+            f"LIVE_OPENAI_BASE_URL={live_openai_base_url}\n"
+            f"LIVE_ANTHROPIC_API_KEY={live_anthropic_api_key}\n"
         )
         # Write to the canonical LOCALAPPDATA location first. In rare cases
         # a Tauri-spawned Python child cannot open files under LOCALAPPDATA

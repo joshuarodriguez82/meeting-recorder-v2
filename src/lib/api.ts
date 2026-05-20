@@ -101,6 +101,16 @@ export interface Settings {
   // lists alongside the live transcript. Defaults false — costs LLM
   // calls during every recording, so users opt in.
   live_copilot_enabled: boolean;
+  // Optional separate LLM for the live co-pilot. Empty strings (the
+  // default) mean "reuse the main provider/model/key". Set
+  // live_ai_provider="openai" + base_url to point ticks at local
+  // Ollama or a free OpenRouter model while the post-meeting summary
+  // keeps running on the main (paid) provider.
+  live_ai_provider: string;
+  live_claude_model: string;
+  live_openai_api_key: string;
+  live_openai_base_url: string;
+  live_anthropic_api_key: string;
 }
 
 export interface CoPilotTickResponse {
