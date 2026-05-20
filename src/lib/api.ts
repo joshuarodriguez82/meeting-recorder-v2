@@ -96,6 +96,19 @@ export interface Settings {
   // Manual recordings always win — auto-start is suppressed while a
   // recording is already in progress.
   auto_record_enabled: boolean;
+  // Live in-call co-pilot panel. When true, the Record view polls
+  // /recording/copilot/tick every ~45s and renders three short bullet
+  // lists alongside the live transcript. Defaults false — costs LLM
+  // calls during every recording, so users opt in.
+  live_copilot_enabled: boolean;
+}
+
+export interface CoPilotTickResponse {
+  clarifying_questions: string[];
+  risks: string[];
+  follow_ups: string[];
+  segment_count: number;
+  generated_at: string;
 }
 
 export interface AudioDevice {
@@ -450,6 +463,13 @@ export const api = {
     }),
   stopRecording: () =>
     request<{ session_id: string; audio_path: string }>("/recording/stop", {
+      method: "POST",
+    }),
+  // Live Co-Pilot tick. Backend reads the last ~10 min of live transcript
+  // segments and asks the LLM for three short bullet lists. 403 means
+  // the user hasn't turned the feature on; 409 means no active recording.
+  copilotTick: () =>
+    request<CoPilotTickResponse>("/recording/copilot/tick", {
       method: "POST",
     }),
   loadModels: () =>

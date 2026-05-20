@@ -59,7 +59,8 @@ import json
 import queue
 import threading
 import time
-from typing import Callable, List, Optional
+from collections import deque
+from typing import Callable, Deque, List, Optional
 
 import numpy as np
 
@@ -184,6 +185,13 @@ class LiveTranscriber:
         self._consumers_lock = threading.Lock()
         self._running = False
         self._worker: Optional[threading.Thread] = None
+        # Rolling history of every published segment, kept so the live
+        # co-pilot tick endpoint can read the last N minutes of transcript
+        # without subscribing its own SSE queue. Bounded so a marathon
+        # meeting can't grow this unboundedly — a typical 15s window
+        # produces 1-4 segments, so 2000 holds ~2-3h of dense talking.
+        self._history: Deque[dict] = deque(maxlen=2000)
+        self._history_lock = threading.Lock()
 
     @property
     def is_running(self) -> bool:
@@ -212,6 +220,8 @@ class LiveTranscriber:
         mic_label = SPEAKER_ROOM if conference_room_mode else SPEAKER_YOU
         self._mic = _SourceBuffer(mic_label, samplerate)
         self._loopback = _SourceBuffer(SPEAKER_THEM, samplerate)
+        with self._history_lock:
+            self._history.clear()
         self._running = True
         self._worker = threading.Thread(
             target=self._run, daemon=True, name="live-transcriber",
@@ -292,12 +302,28 @@ class LiveTranscriber:
             except ValueError:
                 pass
 
+    def recent_segments(self, last_seconds: float = 600.0) -> List[dict]:
+        """Snapshot of published segments whose `end` falls within the
+        last `last_seconds` of the recording's timeline. The co-pilot
+        tick endpoint calls this every ~45s to feed the LLM a rolling
+        window — independent of the SSE fan-out (which is fire-and-forget
+        and may have dropped chunks on slow consumers)."""
+        with self._history_lock:
+            snapshot = list(self._history)
+        if not snapshot:
+            return []
+        cutoff = snapshot[-1].get("end", 0.0) - last_seconds
+        return [s for s in snapshot if s.get("end", 0.0) >= cutoff]
+
     # ── Worker internals ─────────────────────────────────────────────
 
     def _publish(self, segment: dict) -> None:
-        """Best-effort fan-out to every consumer. A slow client gets its
-        new segments dropped (queue.Full) rather than backpressuring
-        the worker — the canonical transcript at /process catches them."""
+        """Record into the rolling history, then fan out to every
+        consumer. History is the source of truth for the co-pilot tick;
+        fan-out is best-effort — a slow SSE client gets its new segments
+        dropped (queue.Full) rather than backpressuring the worker."""
+        with self._history_lock:
+            self._history.append(segment)
         with self._consumers_lock:
             consumers = list(self._consumers)
         for q in consumers:
