@@ -704,6 +704,9 @@ class SettingsDTO(BaseModel):
     # Calendar-driven auto-start. Defaults off — user opts in via the
     # toggle on the Record view. Persisted across restarts.
     auto_record_enabled: bool = False
+    # Live in-call co-pilot panel. Defaults off — it makes one LLM call
+    # every ~45s of recording, so users opt in.
+    live_copilot_enabled: bool = False
 
 
 class StartRecordingRequest(BaseModel):
@@ -874,6 +877,7 @@ async def get_settings():
         overrun_stop_min=s.overrun_stop_min,
         hard_cap_hours=s.hard_cap_hours,
         auto_record_enabled=s.auto_record_enabled,
+        live_copilot_enabled=s.live_copilot_enabled,
     )
 
 
@@ -937,6 +941,7 @@ async def save_settings(payload: SettingsDTO):
         overrun_stop_min=max(0, payload.overrun_stop_min),
         hard_cap_hours=max(0, payload.hard_cap_hours),
         auto_record_enabled=bool(payload.auto_record_enabled),
+        live_copilot_enabled=bool(payload.live_copilot_enabled),
     )
     # If the recordings folder changed, migrate client + template state
     # from the previous folder to the new one. Copy, not move, so the
@@ -1813,6 +1818,62 @@ async def stream_live_transcript():
             transcriber.unsubscribe(q)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/recording/copilot/tick")
+async def copilot_tick():
+    """Live Co-Pilot tick.
+
+    Reads the last ~10 minutes of live-transcript segments from the
+    active recording and asks the configured LLM for three short bullet
+    lists (clarifying questions / risks / suggested follow-ups). The
+    frontend polls this every ~45s while a recording is in progress.
+
+    Returns 409 when no recording is active or live transcription is
+    disabled — the panel only makes sense alongside live segments. The
+    feature itself is gated by the `live_copilot_enabled` setting so
+    users have to opt in; we return 403 when it's off so the frontend
+    can quietly hide the panel without retrying.
+    """
+    s = svc.load_settings()
+    if not s.live_copilot_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="Live Co-Pilot is disabled in Settings.",
+        )
+    if not svc.recording_svc or not svc.recording_svc.is_recording:
+        raise HTTPException(
+            status_code=409,
+            detail="No recording is active.",
+        )
+    transcriber = svc.recording_svc.live_transcriber
+    if transcriber is None or not transcriber.is_running:
+        raise HTTPException(
+            status_code=409,
+            detail="Live transcription isn't running for this recording.",
+        )
+    if svc.summarizer is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Summarizer not ready — check provider/API key in Settings.",
+        )
+
+    segments = transcriber.recent_segments(last_seconds=600.0)
+    meeting_name = ""
+    sess = svc.recording_svc.current_session
+    if sess is not None:
+        meeting_name = getattr(sess, "meeting_name", "") or ""
+
+    result = await svc.summarizer.coach_tick(
+        segments=segments, meeting_name=meeting_name,
+    )
+    return {
+        "clarifying_questions": result.get("clarifying_questions", []),
+        "risks": result.get("risks", []),
+        "follow_ups": result.get("follow_ups", []),
+        "segment_count": len(segments),
+        "generated_at": datetime.now().isoformat(),
+    }
 
 
 def _stop_recording_sync():
