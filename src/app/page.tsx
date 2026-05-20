@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { toast } from "sonner";
 import { api, formatBytes, openExternal, type Meeting, type SessionSummary } from "@/lib/api";
 import {
@@ -107,6 +107,24 @@ export default function Home() {
   const [pipelineStatus, setPipelineStatus] = useState<{
     loading: boolean; text: string;
   }>({ loading: false, text: "" });
+  // Mirrored from /recording/status so the sidebar can show a
+  // persistent "Recording…" badge on every tab — the previous design
+  // only surfaced recording state inside the Record view, so when
+  // auto-record fired silently the user had no visible cue and ended
+  // up colliding with their own manual Start.
+  const [recordingNow, setRecordingNow] = useState<{
+    isRecording: boolean;
+    sessionId: string | null;
+    startedAt: string | null;
+    autoSubject: string | null;
+  }>({ isRecording: false, sessionId: null, startedAt: null, autoSubject: null });
+  // Dedup keys: only fire the auto-record toast/notification ONCE per
+  // session, and only show each unique skip-reason once.
+  const lastAutoSessionRef = useRef<string | null>(null);
+  const lastSkipReasonRef = useRef<string | null>(null);
+  // Live timer for the recording badge. Ticks every second while a
+  // recording is active so the badge label shows real elapsed time.
+  const [recordingElapsedS, setRecordingElapsedS] = useState(0);
 
   // App-wide external-link handler. In a Tauri webview a plain
   // <a target="_blank"> never reaches the system browser, so EVERY
@@ -190,6 +208,67 @@ export default function Home() {
         } else {
           setPipelineStatus({ loading: false, text: "" });
         }
+
+        // Mirror the recording state so the persistent badge can
+        // render on every tab — not just inside the Record view.
+        setRecordingNow({
+          isRecording: !!s.is_recording,
+          sessionId: s.session_id ?? null,
+          startedAt: s.started_at ?? null,
+          autoSubject: s.auto_record_subject ?? null,
+        });
+
+        // Auto-record start — fire native + in-app notification ONCE
+        // per session_id so the user can't miss that auto-record fired
+        // (the original complaint: it started, no visual cue at all).
+        if (
+          s.is_recording &&
+          s.auto_record_subject &&
+          s.session_id &&
+          lastAutoSessionRef.current !== s.session_id
+        ) {
+          lastAutoSessionRef.current = s.session_id;
+          const subject = s.auto_record_subject;
+          toast.message("Auto-recording started", { description: subject });
+          void (async () => {
+            try {
+              const { sendNotification, isPermissionGranted, requestPermission } =
+                await import("@tauri-apps/plugin-notification");
+              let granted = await isPermissionGranted();
+              if (!granted) granted = (await requestPermission()) === "granted";
+              if (granted) {
+                await sendNotification({
+                  title: "Auto-recording started", body: subject,
+                });
+              }
+            } catch { /* not Tauri */ }
+          })();
+        }
+
+        // One-shot skip reason (backend clears after one read).
+        // Surfaces "no mic configured" etc. so silent failure can't
+        // happen the way it did before.
+        if (
+          s.auto_record_skip_reason &&
+          s.auto_record_skip_reason !== lastSkipReasonRef.current
+        ) {
+          const reason = s.auto_record_skip_reason;
+          lastSkipReasonRef.current = reason;
+          toast.warning(reason, { duration: 10000 });
+          void (async () => {
+            try {
+              const { sendNotification, isPermissionGranted, requestPermission } =
+                await import("@tauri-apps/plugin-notification");
+              let granted = await isPermissionGranted();
+              if (!granted) granted = (await requestPermission()) === "granted";
+              if (granted) {
+                await sendNotification({
+                  title: "Auto-record skipped", body: reason,
+                });
+              }
+            } catch { /* not Tauri */ }
+          })();
+        }
       } catch {
         // Backend unreachable — don't overwrite any message in flight.
       }
@@ -198,6 +277,24 @@ export default function Home() {
     const id = setInterval(tick, 2000);
     return () => { cancelled = true; clearInterval(id); };
   }, [backendReady]);
+
+  // Drives the elapsed timer next to the persistent "● Recording"
+  // badge. 1s tick is plenty for a wall-clock label; the heavy poll
+  // above stays on its 2s cadence.
+  useEffect(() => {
+    if (!recordingNow.isRecording || !recordingNow.startedAt) {
+      setRecordingElapsedS(0);
+      return;
+    }
+    const startMs = Date.parse(recordingNow.startedAt);
+    if (Number.isNaN(startMs)) return;
+    const update = () => setRecordingElapsedS(
+      Math.max(0, Math.floor((Date.now() - startMs) / 1000)),
+    );
+    update();
+    const id = setInterval(update, 1000);
+    return () => clearInterval(id);
+  }, [recordingNow.isRecording, recordingNow.startedAt]);
 
   useEffect(() => {
     let cancelled = false;
@@ -429,6 +526,37 @@ export default function Home() {
             <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0 text-primary" />
             <span className="truncate">{pipelineStatus.text}</span>
           </div>
+        )}
+
+        {recordingNow.isRecording && (
+          <button
+            type="button"
+            onClick={() => setNav("record")}
+            className="flex items-center gap-2 border-b border-border bg-red-500/10 px-4 py-2 text-xs text-foreground hover:bg-red-500/15 transition-colors w-full text-left"
+            title={recordingNow.autoSubject
+              ? `Auto-recording: ${recordingNow.autoSubject}`
+              : "Recording in progress — click to open the Record view"}
+          >
+            <span className="relative inline-flex h-2.5 w-2.5 shrink-0">
+              <span className="absolute inset-0 inline-flex h-full w-full animate-ping rounded-full bg-red-500 opacity-75" />
+              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
+            </span>
+            <span className="truncate flex-1">
+              {recordingNow.autoSubject
+                ? `Auto-recording: ${recordingNow.autoSubject}`
+                : "Recording…"}
+            </span>
+            <span className="font-mono text-[11px] text-muted-foreground shrink-0">
+              {(() => {
+                const s = recordingElapsedS;
+                const h = Math.floor(s / 3600);
+                const m = Math.floor((s % 3600) / 60);
+                const ss = s % 60;
+                const pad = (n: number) => String(n).padStart(2, "0");
+                return h ? `${h}:${pad(m)}:${pad(ss)}` : `${m}:${pad(ss)}`;
+              })()}
+            </span>
+          </button>
         )}
 
         <nav className="flex-1 overflow-y-auto p-3">
