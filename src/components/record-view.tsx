@@ -899,7 +899,7 @@ export function RecordView({
             </div>
           </div>
         </CardContent>
-        {!recording && !session && (
+        {!recording && (
           <div className="px-6 pb-5 pt-1 flex justify-end border-t border-border/50 pt-4 mt-2">
             <Button size="lg" onClick={start} className="bg-red-600 hover:bg-red-700 text-white px-8 h-11">
               <Play className="h-4 w-4 mr-2 fill-current" />
