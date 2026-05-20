@@ -481,6 +481,16 @@ class Services:
         # Calendar-driven auto-recorder. Started/stopped from the
         # /settings handler whenever auto_record_enabled flips.
         self.auto_record_svc = None
+        # Set when AutoRecordService fires a new recording so the
+        # frontend can show "Auto-recording: <subject>" notification +
+        # the persistent recording badge with a meaningful label.
+        # Cleared on stop and on manual /recording/start.
+        self.auto_record_subject: Optional[str] = None
+        # Set when AutoRecordService had to skip a meeting because the
+        # user has never run a manual recording (so we have no saved
+        # mic/loopback device to use). Frontend polls + surfaces it.
+        # Cleared the moment the user starts a recording manually.
+        self.auto_record_skip_reason: Optional[str] = None
         self.transcription: Optional[TranscriptionEngine] = None
         self.diarization: Optional[DiarizationEngine] = None
         self.summarizer: Optional[Summarizer] = None
@@ -741,6 +751,16 @@ class RecordingStatus(BaseModel):
     #    "message": "...",
     #    "since_seconds": int}
     warnings: list[dict] = []
+    # When the running recording was kicked off by AutoRecordService
+    # (and not the user clicking Start), this is the meeting subject;
+    # the frontend uses it for the "Auto-recording: <subject>" toast +
+    # native notification + the persistent recording-badge label.
+    auto_record_subject: Optional[str] = None
+    # Set on a tick where AutoRecordService had to skip a meeting it
+    # would have recorded (e.g. no saved mic device). One-shot cue for
+    # the frontend to surface so the user isn't left wondering why
+    # nothing recorded. Backend clears it after one read.
+    auto_record_skip_reason: Optional[str] = None
 
 
 # ── Health ───────────────────────────────────────────────────────────
@@ -1394,6 +1414,10 @@ async def recording_status():
         except Exception as e:
             logger.exception(f"Watchdog tick failed: {e}")
 
+    # One-shot skip-reason: read + clear so the frontend only sees it
+    # once and we never spam-notify on every status poll.
+    skip_reason = svc.auto_record_skip_reason
+    svc.auto_record_skip_reason = None
     return RecordingStatus(
         is_recording=is_rec,
         session_id=session_id,
@@ -1404,6 +1428,8 @@ async def recording_status():
         models_error=svc.models_error,
         current_status=svc.current_status,
         warnings=warnings,
+        auto_record_subject=(svc.auto_record_subject if is_rec else None),
+        auto_record_skip_reason=skip_reason,
     )
 
 
@@ -1442,6 +1468,91 @@ def _start_recording_sync(req: StartRecordingRequest):
     return session
 
 
+# Last-used recording devices. Persisted by name (indices shift across
+# reboots / USB re-plugs) in a small sidecar JSON, written by the
+# manual /recording/start route on every successful start and read by
+# _auto_record_start so the calendar auto-recorder uses the same mic /
+# loopback the user picked manually. The old auto-record path passed
+# `None` indices, which made the capture silent and produced empty
+# recordings — surfacing that to the user is the auto_record_skip_reason
+# path below.
+def _last_devices_path():
+    from config.settings import USER_DATA_DIR
+    from pathlib import Path as _Path
+    return _Path(USER_DATA_DIR) / "last_devices.json"
+
+
+def _read_last_devices() -> dict:
+    p = _last_devices_path()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"last_devices.json unreadable ({e}); ignoring.")
+        return {}
+
+
+def _write_last_devices(mic_name: str, output_name: str) -> None:
+    p = _last_devices_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            json.dumps({"mic_name": mic_name, "output_name": output_name}),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning(f"could not persist last devices: {e}")
+
+
+def _name_for_input_index(idx: Optional[int]) -> str:
+    if idx is None:
+        return ""
+    try:
+        for d in list_input_devices():
+            if int(d.get("index", -1)) == idx:
+                return str(d.get("name") or "")
+    except Exception as e:
+        logger.warning(f"input device lookup failed: {e}")
+    return ""
+
+
+def _name_for_output_index(idx: Optional[int]) -> str:
+    if idx is None:
+        return ""
+    try:
+        for d in list_output_devices():
+            if int(d.get("index", -1)) == idx:
+                return str(d.get("name") or "")
+    except Exception as e:
+        logger.warning(f"output device lookup failed: {e}")
+    return ""
+
+
+def _input_index_for_name(name: str) -> Optional[int]:
+    if not name:
+        return None
+    try:
+        for d in list_input_devices():
+            if str(d.get("name") or "") == name:
+                return int(d.get("index"))
+    except Exception as e:
+        logger.warning(f"input device lookup failed: {e}")
+    return None
+
+
+def _output_index_for_name(name: str) -> Optional[int]:
+    if not name:
+        return None
+    try:
+        for d in list_output_devices():
+            if str(d.get("name") or "") == name:
+                return int(d.get("index"))
+    except Exception as e:
+        logger.warning(f"output device lookup failed: {e}")
+    return None
+
+
 def _auto_record_start(meeting: dict) -> None:
     """Adapter the AutoRecordService calls when a meeting window opens.
     Synthesizes a StartRecordingRequest from the calendar event and hands
@@ -1452,11 +1563,38 @@ def _auto_record_start(meeting: dict) -> None:
     end = meeting.get("end")
     end_iso = end.isoformat() if hasattr(end, "isoformat") else None
     name = make_session_name(meeting) if meeting.get("start") else (meeting.get("subject") or "")
+
+    # Resolve the user's last-used mic/loopback by NAME. Without this we
+    # used to pass None and capture silence. If we have no saved mic,
+    # skip the meeting and surface a clear reason — silently recording
+    # nothing is the worst possible failure mode.
+    saved = _read_last_devices()
+    mic_idx = _input_index_for_name(saved.get("mic_name", ""))
+    out_idx = _output_index_for_name(saved.get("output_name", ""))
+    if mic_idx is None:
+        reason = (
+            "Auto-record skipped — no microphone configured. Start a "
+            "manual recording once to register your devices."
+        )
+        logger.warning(f"auto-record skipped for '{name}': {reason}")
+        svc.auto_record_skip_reason = reason
+        return
+
     req = StartRecordingRequest(
         meeting_name=name,
         attendees=list(meeting.get("attendees") or []),
         scheduled_end_iso=end_iso,
+        mic_device_index=mic_idx,
+        output_device_index=out_idx,
+        # Empty saved output name → conference-room mode (no loopback).
+        conference_room_mode=(out_idx is None),
     )
+
+    # Stamp the meeting subject so the frontend can show
+    # "Auto-recording: <subject>" + the persistent badge label.
+    subject = str(meeting.get("subject") or "").strip()
+    svc.auto_record_subject = (subject[:120] if subject else name) or "Untitled meeting"
+
     # Mirror the HTTP route's pre-warm step so live transcription has
     # Whisper ready when the first window completes.
     if (svc.settings and svc.settings.is_configured
@@ -1512,6 +1650,18 @@ async def start_recording(req: StartRecordingRequest):
         # start_recording can take a couple seconds opening audio streams —
         # run off the event loop so /recording/status stays responsive
         session = await asyncio.to_thread(_start_recording_sync, req)
+        # Manual start — wipe any leftover auto-record state and
+        # persist the chosen devices BY NAME so calendar auto-record
+        # uses the same ones (indices shift across reboots / re-plugs).
+        svc.auto_record_subject = None
+        svc.auto_record_skip_reason = None
+        try:
+            mic_name = _name_for_input_index(req.mic_device_index)
+            out_name = ("" if req.conference_room_mode
+                        else _name_for_output_index(req.output_device_index))
+            _write_last_devices(mic_name, out_name)
+        except Exception as e:
+            logger.warning(f"could not persist last devices: {e}")
         return {"session_id": session.session_id}
     except Exception as e:
         logger.exception("Start recording failed")
@@ -1688,6 +1838,7 @@ async def stop_recording():
         # long meetings. Must run off the event loop or polling from the
         # frontend gets blocked and fetch() eventually gives up.
         svc.record_started_at = None  # set immediately so status reflects stopped
+        svc.auto_record_subject = None  # recording is ending; clear the auto label
         session = await asyncio.to_thread(_stop_recording_sync)
         if session:
             return {"session_id": session.session_id, "audio_path": session.audio_path}
