@@ -220,6 +220,16 @@ export interface RecordingStatus {
     message: string;
     since_seconds: number;
   }>;
+  // Set by AutoRecordService when it (rather than the user) started the
+  // current recording — the frontend uses it for the "Auto-recording:
+  // <subject>" toast/native notification and the persistent
+  // recording-badge label. Null on manual recordings.
+  auto_record_subject?: string | null;
+  // One-shot reason emitted when AutoRecordService had to skip a
+  // meeting (e.g. no saved mic device). Backend clears it after one
+  // read, so observing a non-null value means "show this to the user
+  // once and move on."
+  auto_record_skip_reason?: string | null;
 }
 
 export interface SessionFull {
