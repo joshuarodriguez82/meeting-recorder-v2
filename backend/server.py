@@ -3338,7 +3338,15 @@ async def _extract_and_save(
             image_paths=list(session.screenshots or []))
         session.template = template
     else:
-        result = await method(transcript, notes=notes)
+        # All four markdown extractors now accept image_paths so
+        # screenshots inform action items / decisions / requirements
+        # the same way they inform the summary. Older builds passed
+        # only the transcript; this widening is backwards-compatible
+        # with the Summarizer signatures (image_paths default = None).
+        result = await method(
+            transcript, notes=notes,
+            image_paths=list(session.screenshots or []),
+        )
     setattr(session, field_name, result)
     await asyncio.to_thread(svc.session_svc.save, session)
 
@@ -3360,7 +3368,9 @@ async def _extract_structured_and_save(session_id: str) -> dict:
         logger.info("structured: %s has no transcript — skipped", session_id)
         return {k: 0 for k in STRUCTURED_FIELDS}
     parsed = await svc.summarizer.extract_structured(
-        session.full_transcript(), notes=session.notes or "")
+        session.full_transcript(),
+        notes=session.notes or "",
+        image_paths=list(session.screenshots or []))
     created_at = session.started_at.isoformat() if session.started_at else ""
     stamped = stamp_records(parsed, session.session_id, created_at)
     counts: dict = {}
