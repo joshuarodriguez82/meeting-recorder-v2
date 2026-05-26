@@ -2009,6 +2009,25 @@ async def set_live_copilot_enabled(payload: dict):
     return {"live_copilot_enabled": enabled}
 
 
+@app.get("/recording/transcript/history")
+async def get_transcript_history():
+    """Return every live-transcript segment captured during the current
+    recording so the UI's transcript panel can rehydrate after a tab
+    switch / page reload. Without this, the panel resets to empty and
+    only catches segments published from that moment forward, even
+    though the backend still has the full history in memory.
+
+    Returns 409 when no recording is active — same shape as the SSE
+    stream endpoint so the client can distinguish "no recording" from
+    "empty history."""
+    if not svc.recording_svc or not svc.recording_svc.is_recording:
+        raise HTTPException(status_code=409, detail="No recording active.")
+    transcriber = svc.recording_svc.live_transcriber
+    if transcriber is None or not transcriber.is_running:
+        return {"segments": []}
+    return {"segments": transcriber.all_segments()}
+
+
 @app.get("/recording/copilot/history")
 async def get_copilot_history():
     """Return all Co-Pilot ticks persisted on the active session so the

@@ -28,6 +28,33 @@ interface ActionItem {
 const LINE_RE = /^\s*-\s*\[(?<status>[ xX])\]\s*(?<rest>.+)$/gm;
 const OWNER_RE = /\*\*(?<owner>[^*]+)\*\*\s*:\s*(?<desc>.+)/;
 const DUE_RE = /\(Due:\s*(?<due>[^)]+)\)/i;
+// LLM extractions often label owners with the diarization-internal
+// "SPEAKER_03" tag rather than the renamed display_name, even when the
+// session has known speakers. We resolve those back to the real name
+// at render time using the speakers map shipped on SessionSummary.
+// Matches "SPEAKER_03", "Speaker 03", "speaker_03", etc.
+const SPEAKER_TAG_RE = /^\s*SPEAKER[_\s]*0*(\d+)\s*$/i;
+
+function resolveOwner(
+  owner: string, speakers: Record<string, string> | undefined,
+): string {
+  if (!owner || !speakers) return owner;
+  // Fast path: exact match against any speaker_id we know.
+  if (speakers[owner]) return speakers[owner];
+  const m = owner.match(SPEAKER_TAG_RE);
+  if (!m) return owner;
+  // Try every padding the diarization output uses: SPEAKER_00, SPEAKER_3, etc.
+  const num = m[1];
+  const candidates = [
+    `SPEAKER_${num.padStart(2, "0")}`,
+    `SPEAKER_${num}`,
+    `SPEAKER_${num.padStart(3, "0")}`,
+  ];
+  for (const c of candidates) {
+    if (speakers[c]) return speakers[c];
+  }
+  return owner;
+}
 
 interface ParsedRaw {
   doneFromMarkdown: boolean;
@@ -119,7 +146,11 @@ export function FollowUpsView({ sessions, onOpenSession }: Props) {
             done: r.doneFromMarkdown,
             doneFromMarkdown: r.doneFromMarkdown,
             itemHash: h,
-            owner: r.owner,
+            // Resolve "SPEAKER_03" back to the real name when the
+            // session has renamed speakers. Falls through unchanged
+            // when the owner is already a real name, or when the
+            // session has no speaker renames recorded.
+            owner: resolveOwner(r.owner, s.speakers),
             description: r.description,
             due: r.due,
             ...meta,
@@ -205,8 +236,16 @@ export function FollowUpsView({ sessions, onOpenSession }: Props) {
     }
   };
 
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  // Compose a unique key — itemHash can collide across sessions if two
+  // meetings happen to have identical owner+description follow-ups.
+  const keyFor = (i: ActionItem) => `${i.session_id}|${i.itemHash}`;
+  const selected = filtered.find((i) => keyFor(i) === selectedKey)
+    || itemsWithOverrides.find((i) => keyFor(i) === selectedKey)
+    || null;
+
   return (
-    <div className="mx-auto max-w-6xl space-y-4">
+    <div className="mx-auto max-w-7xl space-y-4">
       <div className="flex flex-wrap gap-3">
         <Select value={statusFilter} onValueChange={(v) => v && setStatusFilter(v)}>
           <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
@@ -229,7 +268,7 @@ export function FollowUpsView({ sessions, onOpenSession }: Props) {
           </SelectContent>
         </Select>
         <Input
-          placeholder="Search..."
+          placeholder="Search follow-ups..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="flex-1 max-w-md"
@@ -240,21 +279,131 @@ export function FollowUpsView({ sessions, onOpenSession }: Props) {
         {filtered.length} shown · {openCount} open of {itemsWithOverrides.length} total
       </p>
 
-      <Card>
-        <CardContent className="p-0">
-          {filtered.length === 0 ? (
-            <p className="text-sm text-muted-foreground py-8 text-center">
-              No action items yet. Extract them from a processed session.
-            </p>
-          ) : (
-            <FollowUpGroups
-              items={filtered}
-              onOpenSession={onOpenSession}
-              onToggle={toggleDone}
-            />
-          )}
-        </CardContent>
-      </Card>
+      {/* Split-pane layout matches Decisions and Commitments: list of
+          rows on the left, detail panel + status dropdown on the right.
+          Click a row to populate the detail. Status changes apply
+          straight from the detail panel so the user never has to hunt
+          for a checkbox buried in a collapsed group. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Card>
+          <CardContent className="p-0">
+            {filtered.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-8 text-center">
+                No follow-ups match. Try a different filter.
+              </p>
+            ) : (
+              filtered.map((i) => {
+                const k = keyFor(i);
+                return (
+                  <button
+                    key={k}
+                    onClick={() => setSelectedKey(k)}
+                    className={`w-full text-left flex items-start gap-3 border-b last:border-b-0 p-3 hover:bg-muted/40 transition-colors ${
+                      selectedKey === k ? "bg-accent" : ""
+                    }`}
+                  >
+                    <span className="text-primary mt-0.5">{i.done ? "✓" : "○"}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className={`text-sm font-medium truncate ${i.done ? "line-through text-muted-foreground" : ""}`}>
+                        {i.description || "(no description)"}
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-2 flex-wrap">
+                        <Badge
+                          variant={i.done ? "secondary" : "default"}
+                          className="text-[10px]"
+                        >
+                          {i.done ? "Done" : "Open"}
+                        </Badge>
+                        {i.owner && (
+                          <Badge variant="outline" className="text-[10px]">
+                            {i.owner}
+                          </Badge>
+                        )}
+                        {i.client && (
+                          <Badge variant="outline" className="text-[10px]">
+                            {i.client}
+                          </Badge>
+                        )}
+                        <span className="truncate">{i.meeting}</span>
+                      </div>
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent className="p-6">
+            {selected ? (
+              <div className="space-y-4">
+                <div className="flex items-start justify-between gap-3">
+                  <h2 className="text-base font-semibold flex-1 min-w-0">
+                    {selected.description || "(no description)"}
+                  </h2>
+                  <Badge variant={selected.done ? "secondary" : "default"}>
+                    {selected.done ? "Done" : "Open"}
+                  </Badge>
+                </div>
+                <div>
+                  <div className="text-[10px] font-medium uppercase tracking-wider text-primary mb-1">
+                    Status
+                  </div>
+                  <Select
+                    value={selected.done ? "done" : "open"}
+                    onValueChange={(v) => {
+                      if (!v) return;
+                      const wantDone = v === "done";
+                      if (wantDone !== selected.done) toggleDone(selected);
+                    }}
+                  >
+                    <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="open">Open</SelectItem>
+                      <SelectItem value="done">Done</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {selected.owner && (
+                  <FollowUpField label="Owner">{selected.owner}</FollowUpField>
+                )}
+                {selected.due && (
+                  <FollowUpField label="Due">{selected.due}</FollowUpField>
+                )}
+                <div className="pt-3 border-t flex items-center justify-between">
+                  <div className="text-xs text-muted-foreground">
+                    From <span className="font-medium text-foreground">{selected.meeting}</span>
+                    {selected.session_date ? ` (${selected.session_date})` : ""}
+                    {selected.client ? ` · ${selected.client}` : ""}
+                  </div>
+                  <button
+                    onClick={() => onOpenSession(selected.session_id, "actions")}
+                    className="text-xs text-primary hover:underline font-medium inline-flex items-center gap-1"
+                  >
+                    Open meeting <ExternalLink className="h-3 w-3" />
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground text-center py-12">
+                Select a follow-up to see details and change its status.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function FollowUpField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-[10px] font-medium uppercase tracking-wider text-primary mb-1">
+        {label}
+      </div>
+      <div className="text-sm whitespace-pre-wrap break-words">{children}</div>
     </div>
   );
 }
