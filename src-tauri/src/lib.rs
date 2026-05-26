@@ -1180,16 +1180,40 @@ fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
         "Could not find bundled backend/ directory. The installer may be \
          corrupted; reinstall from Releases.")?;
     let server_py = backend_dir.join("server.py");
-    let python_exe = match resolve_python(&backend_dir) {
-        Some(p) => p,
-        None => {
-            rlog("No Python found — starting venv bootstrap");
-            bootstrap_app_venv(&backend_dir).map_err(|e| {
-                rlog(&format!("ERROR: bootstrap failed: {}", e));
-                e
-            })?;
-            resolve_python(&backend_dir).ok_or(
-                "Bootstrap reported success but Python still not found")?
+    // Run the venv bootstrap on every launch when an app-managed venv
+    // already exists — the function is idempotent (skips pip install
+    // when `requirements.installed.txt` matches the bundled
+    // requirements file) but DOES re-install when requirements have
+    // changed between releases. Previously this was gated behind
+    // `resolve_python() == None`, which meant bootstrap only ran on
+    // machines with NO Python at all — every user with a venv from a
+    // prior install was frozen at that install's package set forever
+    // (openpyxl added in v2.7.0 never landed for anyone who installed
+    // v2.6.x or earlier; the "marker missing → re-install" code path
+    // inside bootstrap_app_venv was effectively dead). For dev-mode
+    // (dev checkout venv) and the legacy-v1 venv path we skip the app
+    // bootstrap so we don't create an unwanted second venv.
+    let app_venv_exists = venv_python_candidates(&app_venv_dir())
+        .into_iter().any(|p| p.exists());
+    let python_exe = if app_venv_exists {
+        if let Err(e) = bootstrap_app_venv(&backend_dir) {
+            rlog(&format!("ERROR: bootstrap (upgrade-check) failed: {}", e));
+            return Err(e.into());
+        }
+        resolve_python(&backend_dir).ok_or(
+            "Bootstrap reported success but Python still not found")?
+    } else {
+        match resolve_python(&backend_dir) {
+            Some(p) => p,
+            None => {
+                rlog("No Python found — starting venv bootstrap");
+                bootstrap_app_venv(&backend_dir).map_err(|e| {
+                    rlog(&format!("ERROR: bootstrap failed: {}", e));
+                    e
+                })?;
+                resolve_python(&backend_dir).ok_or(
+                    "Bootstrap reported success but Python still not found")?
+            }
         }
     };
 
