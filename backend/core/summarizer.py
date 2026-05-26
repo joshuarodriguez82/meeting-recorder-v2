@@ -190,6 +190,32 @@ def _with_user_notes(instruction: str, transcript: str, notes: str = "") -> str:
     )
 
 
+def _visual_instruction(n_imgs: int) -> str:
+    """Standard appendix telling the model to use any attached screenshots.
+
+    Used by every extraction prompt so screenshot context is leveraged
+    consistently — without this, Anthropic Haiku has the images in the
+    request but doesn't always reference them in output, especially for
+    dense technical meetings where the transcript text is rich enough
+    on its own. Empty string when there are no images so the prompt
+    isn't padded for nothing on a screenshot-less meeting.
+    """
+    if n_imgs <= 0:
+        return ""
+    return (
+        f"\n\nThe user attached {n_imgs} screenshot"
+        f"{'s' if n_imgs != 1 else ''} captured during the meeting. "
+        f"Treat them as primary evidence alongside the transcript: "
+        f"diagrams, slides, error screens, and shared whiteboards "
+        f"frequently contain information that wasn't spoken aloud. "
+        f"Reference specific screenshots inline when you draw on them "
+        f"(e.g. \"as shown in screenshot 1\"). If a screenshot adds "
+        f"context that doesn't fit the main sections, surface it under "
+        f"a final \"## Visuals\" section that names each one in order "
+        f"and describes what it shows."
+    )
+
+
 def _coerce_json(text: str) -> Optional[dict]:
     """Best-effort 'model text → dict'. Tolerates code fences and a
     little surrounding prose by falling back to the outermost {...}
@@ -459,7 +485,12 @@ class Summarizer:
         try:
             raw = await self._chat(prompt, max_tokens=512, timeout=20.0)
         except Exception as e:
-            logger.warning(f"coach_tick chat call failed: {e}")
+            # Include the exception type because some exceptions
+            # (asyncio.TimeoutError in particular) have an empty __str__,
+            # which made earlier logs look like "coach_tick chat call
+            # failed:" with nothing after the colon. Useless for support.
+            logger.warning(
+                f"coach_tick chat call failed: {type(e).__name__}: {e}")
             return {"clarifying_questions": [], "risks": [], "follow_ups": []}
 
         parsed = _coerce_json(raw) or {}
@@ -485,8 +516,14 @@ class Summarizer:
             "follow_ups": _clean("follow_ups"),
         }
 
-    async def extract_action_items(self, transcript: str, notes: str = "") -> str:
-        logger.info(f"Extracting action items via {self._provider}/{self._model}")
+    async def extract_action_items(
+        self, transcript: str, notes: str = "",
+        image_paths: Optional[List[str]] = None,
+    ) -> str:
+        n_imgs = len(image_paths or [])
+        logger.info(
+            f"Extracting action items (screenshots={n_imgs}) "
+            f"via {self._provider}/{self._model}")
         instruction = (
             "Analyze this meeting transcript and extract the following "
             "in clearly structured markdown:\n\n"
@@ -502,20 +539,28 @@ class Summarizer:
             "If the USER NOTES mention action items the user has committed "
             "to (things like 'need to follow up on X', 'reminder to send Y'), "
             "include those as action items owned by the user."
+            + _visual_instruction(n_imgs)
         )
         try:
             result = await self._chat(
                 _with_user_notes(instruction, transcript, notes),
                 max_tokens=1024, timeout=60.0,
+                image_paths=image_paths,
             )
             logger.info("Action items extracted.")
             return result
         except Exception as e:
             raise RuntimeError(f"Action items extraction failed: {e}") from e
 
-    async def extract_decisions(self, transcript: str, notes: str = "") -> str:
+    async def extract_decisions(
+        self, transcript: str, notes: str = "",
+        image_paths: Optional[List[str]] = None,
+    ) -> str:
         """Extract decisions made with rationale — an auto-generated ADR log."""
-        logger.info(f"Extracting decisions via {self._provider}/{self._model}")
+        n_imgs = len(image_paths or [])
+        logger.info(
+            f"Extracting decisions (screenshots={n_imgs}) "
+            f"via {self._provider}/{self._model}")
         instruction = (
             "Analyze this meeting transcript and extract every DECISION "
             "made. Return structured markdown with one entry per decision "
@@ -534,19 +579,23 @@ class Summarizer:
             "annotate with **Source:** user notes.\n\n"
             "If no decisions were made, write: 'No decisions made in this "
             "meeting.'"
+            + _visual_instruction(n_imgs)
         )
         try:
             result = await self._chat(
                 _with_user_notes(instruction, transcript, notes),
                 max_tokens=1024, timeout=60.0,
+                image_paths=image_paths,
             )
             logger.info("Decisions extracted.")
             return result
         except Exception as e:
             raise RuntimeError(f"Decisions extraction failed: {e}") from e
 
-    async def extract_structured(self, transcript: str,
-                                 notes: str = "") -> dict:
+    async def extract_structured(
+        self, transcript: str, notes: str = "",
+        image_paths: Optional[List[str]] = None,
+    ) -> dict:
         """One call → typed records for the engagement layer.
 
         Returns {"requirements": [...], "decisions": [...],
@@ -561,8 +610,11 @@ class Summarizer:
         failure this raises — callers run it best-effort so the markdown
         extractors still populate the per-session UI.
         """
+        n_imgs = len(image_paths or [])
         logger.info(
-            f"Extracting structured records via {self._provider}/{self._model}")
+            f"Extracting structured records (screenshots={n_imgs}) "
+            f"via {self._provider}/{self._model}")
+        visuals_hint = _visual_instruction(n_imgs)
         instruction = (
             "Extract the meeting's content as STRICT JSON. Output ONLY a "
             "single JSON object, no prose, no markdown fences. Schema:\n"
@@ -584,14 +636,19 @@ class Summarizer:
             "USER NOTES record items decided/committed off-audio, include "
             'them with "source":"notes". Use "" for unknown string '
             'fields, [] for empty arrays. Output nothing but the JSON.'
+            + visuals_hint
         )
         prompt = _with_user_notes(instruction, transcript, notes)
         try:
-            raw = await self._chat(prompt, max_tokens=2048, timeout=90.0)
+            raw = await self._chat(
+                prompt, max_tokens=2048, timeout=90.0,
+                image_paths=image_paths,
+            )
             parsed = _coerce_json(raw)
             if parsed is None:
                 # One repair pass — weak models often wrap JSON in prose
-                # or fences despite instructions.
+                # or fences despite instructions. Repair pass doesn't need
+                # the image context — we're cleaning up text output.
                 repair = (
                     "Return ONLY the JSON object from your previous answer, "
                     "valid and parseable, with no surrounding text or "
@@ -600,6 +657,15 @@ class Summarizer:
                 raw = await self._chat(repair, max_tokens=2048, timeout=90.0)
                 parsed = _coerce_json(raw)
             if parsed is None:
+                # Log a truncated preview of what the model actually
+                # produced so future debugging doesn't require reproducing
+                # the failure to see what went wrong. Earlier this raised
+                # without surfacing the raw output, making the partial
+                # tracebacks in backend.log uninformative.
+                preview = (raw or "").strip().replace("\n", " ")[:300]
+                logger.warning(
+                    f"extract_structured: model returned unparseable "
+                    f"output (preview: {preview!r})")
                 raise RuntimeError("model did not return parseable JSON")
             logger.info("Structured records extracted.")
             return {
@@ -728,8 +794,14 @@ class Summarizer:
         except Exception as e:
             raise RuntimeError(f"Prep brief generation failed: {e}") from e
 
-    async def extract_requirements(self, transcript: str, notes: str = "") -> str:
-        logger.info(f"Extracting requirements via {self._provider}/{self._model}")
+    async def extract_requirements(
+        self, transcript: str, notes: str = "",
+        image_paths: Optional[List[str]] = None,
+    ) -> str:
+        n_imgs = len(image_paths or [])
+        logger.info(
+            f"Extracting requirements (screenshots={n_imgs}) "
+            f"via {self._provider}/{self._model}")
         instruction = (
             "Analyze this meeting transcript and extract all requirements "
             "discussed. Return structured markdown with:\n\n"
@@ -748,11 +820,13 @@ class Summarizer:
             "or constraints the transcript doesn't capture, include those — "
             "annotate their source in the Owner column as 'user notes'.\n"
             "If a section has no items, write 'None identified.'"
+            + _visual_instruction(n_imgs)
         )
         try:
             result = await self._chat(
                 _with_user_notes(instruction, transcript, notes),
                 max_tokens=2048, timeout=90.0,
+                image_paths=image_paths,
             )
             logger.info("Requirements extracted.")
             return result
