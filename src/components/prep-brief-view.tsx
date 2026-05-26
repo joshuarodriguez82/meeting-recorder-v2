@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { api, type SessionSummary } from "@/lib/api";
+import { api, type Meeting, type SessionSummary } from "@/lib/api";
 import { toast } from "sonner";
-import { Loader2, Sparkles, Copy, Info } from "lucide-react";
+import { Loader2, Sparkles, Copy, Info, Calendar as CalendarIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -13,13 +13,83 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 
-export function PrepBriefView({ sessions }: { sessions: SessionSummary[] }) {
+interface Props {
+  sessions: SessionSummary[];
+  // Upcoming calendar meetings — optional so the view degrades to its
+  // pre-meeting-picker behavior on callers that haven't been updated.
+  meetings?: Meeting[];
+}
+
+// Look back through past sessions for one whose display_name matches the
+// upcoming meeting's subject. When we find a match, prefer its client +
+// project as the defaults so the user doesn't re-tag the same calendar
+// event every time. Exact-match first (handles recurring series cleanly),
+// fallback to substring containment for slightly-renamed events.
+function inferTagsFromHistory(
+  subject: string, sessions: SessionSummary[],
+): { client: string; project: string } | null {
+  if (!subject.trim()) return null;
+  const norm = (s: string) => s.toLowerCase().trim();
+  const exact = sessions.find(
+    (s) => norm(s.display_name) === norm(subject) && (s.client || s.project),
+  );
+  if (exact) return { client: exact.client, project: exact.project };
+  const fuzzy = sessions.find(
+    (s) =>
+      s.display_name &&
+      (norm(s.display_name).includes(norm(subject)) ||
+        norm(subject).includes(norm(s.display_name))) &&
+      (s.client || s.project),
+  );
+  if (fuzzy) return { client: fuzzy.client, project: fuzzy.project };
+  return null;
+}
+
+export function PrepBriefView({ sessions, meetings = [] }: Props) {
   const [subject, setSubject] = useState("");
   const [client, setClient] = useState("");
   const [project, setProject] = useState("");
   const [brief, setBrief] = useState("");
   const [relatedCount, setRelatedCount] = useState(0);
   const [generating, setGenerating] = useState(false);
+  // Sentinel value for the meeting picker so the SelectItem doesn't
+  // collide with a real meeting whose subject is the empty string.
+  const [pickedMeetingKey, setPickedMeetingKey] = useState<string>("");
+
+  // Only show upcoming meetings (not all-day, in the future or
+  // currently happening). Match the same qualifying logic the Record
+  // view uses for the calendar tiles.
+  const upcomingMeetings = useMemo(() => {
+    const now = Date.now();
+    return meetings.filter((m) => {
+      try {
+        const end = new Date(m.end).getTime();
+        return end > now - 5 * 60 * 1000; // include meetings that just ended ≤5 min ago
+      } catch {
+        return false;
+      }
+    });
+  }, [meetings]);
+
+  const handlePickMeeting = (raw: string | null) => {
+    const key = raw ?? "";
+    setPickedMeetingKey(key);
+    if (!key || key === "none") return;
+    // key is the start ISO + "|" + subject, unique enough for the dropdown
+    const sep = key.indexOf("|");
+    if (sep < 0) return;
+    const meetingSubject = key.slice(sep + 1);
+    setSubject(meetingSubject);
+    const inferred = inferTagsFromHistory(meetingSubject, sessions);
+    if (inferred) {
+      if (inferred.client) setClient(inferred.client);
+      if (inferred.project) setProject(inferred.project);
+      toast.success(
+        `Auto-tagged from previous "${meetingSubject}" meeting: ` +
+        [inferred.client, inferred.project].filter(Boolean).join(" / "),
+      );
+    }
+  };
 
   const clients = useMemo(
     () => Array.from(new Set(sessions.map((s) => s.client).filter(Boolean))).sort(),
@@ -102,6 +172,43 @@ export function PrepBriefView({ sessions }: { sessions: SessionSummary[] }) {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-5">
+          {upcomingMeetings.length > 0 && (
+            <div className="space-y-2">
+              <Label className="flex items-center gap-2">
+                <CalendarIcon className="h-3.5 w-3.5 text-primary" />
+                Pick from your calendar
+              </Label>
+              <Select value={pickedMeetingKey || "none"} onValueChange={handlePickMeeting}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="Type a subject below, or pick an upcoming meeting…" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">— Type a subject manually instead —</SelectItem>
+                  {upcomingMeetings.map((m) => {
+                    const when = (() => {
+                      try {
+                        return new Date(m.start).toLocaleString([], {
+                          weekday: "short", month: "short", day: "numeric",
+                          hour: "numeric", minute: "2-digit",
+                        });
+                      } catch { return m.start; }
+                    })();
+                    const key = `${m.start}|${m.subject}`;
+                    return (
+                      <SelectItem key={key} value={key}>
+                        {m.subject || "(no subject)"} · {when}
+                      </SelectItem>
+                    );
+                  })}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Picking a meeting fills in the subject below. If a prior
+                meeting with the same name was tagged with a client and
+                project, those get carried over automatically.
+              </p>
+            </div>
+          )}
           <div className="space-y-2">
             <Label>Upcoming Meeting Subject <span className="text-destructive">*</span></Label>
             <Input
