@@ -163,6 +163,11 @@ export interface SessionSummary {
   // against (if any). Used for the auto-tag-client-from-attendees
   // heuristic in the Record view.
   attendees: string[];
+  // Compact speaker_id -> display_name map for sessions where the user
+  // has renamed speakers. Used by Follow-ups (and other list views) to
+  // resolve owner labels like "SPEAKER_03" back to the real person.
+  // Empty / missing when no speakers have been renamed.
+  speakers?: Record<string, string>;
 }
 
 /**
@@ -491,6 +496,14 @@ export const api = {
   // next 45s tick fires.
   copilotHistory: () =>
     request<{ ticks: CoPilotTickResponse[] }>("/recording/copilot/history"),
+  // Full live-transcript segment history for the active recording.
+  // Lets the LiveTranscriptPanel rehydrate after a tab switch instead
+  // of starting empty and only catching segments published from that
+  // moment forward. Returns 409 when no recording is active.
+  transcriptHistory: () =>
+    request<{ segments: Array<{ start: number; end: number; text: string; speaker?: string }> }>(
+      "/recording/transcript/history",
+    ),
   // Lightweight setter for live_copilot_enabled only. Unlike the full
   // POST /settings, this endpoint works while a recording is in
   // progress so the user can flip the panel on/off from the Record bar.
