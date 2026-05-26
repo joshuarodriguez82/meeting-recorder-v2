@@ -31,11 +31,27 @@ logger = get_logger(__name__)
 # Seeded on first launch. Kept here (not in summarizer.py) so the
 # summarizer has no compile-time coupling to the template set — anything
 # beyond these five is purely user data.
+# Shared appendix every default template ends with. Adding it once at
+# the top means a single edit keeps the visuals-handling policy in sync
+# across every built-in template. User-created templates inherit it
+# only if the user types it themselves — by design, since custom
+# templates may want different rules.
+_VISUALS_DIRECTIVE = (
+    " If screenshots are attached to this meeting, treat them as "
+    "primary evidence alongside the transcript and reference specific "
+    "ones inline when relevant (e.g. \"as shown in screenshot 1\"). "
+    "End the summary with a `## Visuals` section that names each "
+    "screenshot in order and briefly describes what it shows; skip "
+    "this section entirely when no screenshots are attached."
+)
+
+
 DEFAULT_TEMPLATES: Dict[str, str] = {
     "General": (
         "Please summarize this meeting transcript. "
         "Include: key topics discussed, decisions made, "
         "action items, and any follow-ups needed."
+        + _VISUALS_DIRECTIVE
     ),
     "Requirements Gathering": (
         "This is a requirements gathering meeting. Summarize with focus on: "
@@ -45,6 +61,7 @@ DEFAULT_TEMPLATES: Dict[str, str] = {
         "4) Constraints and assumptions mentioned, "
         "5) Open questions that need follow-up, "
         "6) Stakeholder priorities and any conflicts between requirements."
+        + _VISUALS_DIRECTIVE
     ),
     "Design Review": (
         "This is a design/architecture review meeting. Summarize with focus on: "
@@ -54,6 +71,7 @@ DEFAULT_TEMPLATES: Dict[str, str] = {
         "4) Risks and concerns raised, "
         "5) Feedback and requested changes, "
         "6) Next steps and action items."
+        + _VISUALS_DIRECTIVE
     ),
     "Sprint Planning": (
         "This is a sprint planning meeting. Summarize with focus on: "
@@ -63,6 +81,7 @@ DEFAULT_TEMPLATES: Dict[str, str] = {
         "4) Dependencies identified, "
         "5) Carry-over items from previous sprint, "
         "6) Key risks to sprint delivery."
+        + _VISUALS_DIRECTIVE
     ),
     "Stakeholder Update": (
         "This is a stakeholder update meeting. Summarize with focus on: "
@@ -72,6 +91,7 @@ DEFAULT_TEMPLATES: Dict[str, str] = {
         "4) Decisions requested from stakeholders, "
         "5) Decisions made by stakeholders, "
         "6) Next steps and timeline updates."
+        + _VISUALS_DIRECTIVE
     ),
 }
 
@@ -102,20 +122,55 @@ class TemplateService:
     # ── disk I/O ────────────────────────────────────────────────────
     def _ensure_seeded(self) -> None:
         with self._lock:
-            if self._path.exists():
-                return
-            data = {
-                name: {
-                    "prompt": prompt,
-                    "is_default": True,
-                    "default_prompt": prompt,
-                    # Hidden templates (deleted defaults) stay in the file so
-                    # we can still restore them. The UI filters on this flag.
-                    "hidden": False,
+            if not self._path.exists():
+                data = {
+                    name: {
+                        "prompt": prompt,
+                        "is_default": True,
+                        "default_prompt": prompt,
+                        # Hidden templates (deleted defaults) stay in the
+                        # file so we can still restore them. The UI
+                        # filters on this flag.
+                        "hidden": False,
+                    }
+                    for name, prompt in DEFAULT_TEMPLATES.items()
                 }
-                for name, prompt in DEFAULT_TEMPLATES.items()
-            }
-            self._write_all_locked(data)
+                self._write_all_locked(data)
+                return
+            # File exists — migrate stored built-ins to the current
+            # DEFAULT_TEMPLATES revision so improvements to the canonical
+            # prompts (e.g. the visuals directive added in v2.7.9) reach
+            # existing users instead of being a fresh-install-only change.
+            #
+            # Rules:
+            #   - default_prompt is always refreshed so "Reset to default"
+            #     reflects the latest canonical text.
+            #   - prompt is refreshed only when the user hasn't customized
+            #     it (i.e. prompt currently equals the OLD default_prompt).
+            #     If the user edited it, we leave their version alone.
+            try:
+                data = self._read_all_locked()
+            except Exception:
+                data = {}
+            dirty = False
+            for name, latest in DEFAULT_TEMPLATES.items():
+                entry = data.get(name)
+                if not isinstance(entry, dict):
+                    data[name] = {
+                        "prompt": latest, "is_default": True,
+                        "default_prompt": latest, "hidden": False,
+                    }
+                    dirty = True
+                    continue
+                old_default = entry.get("default_prompt")
+                if old_default != latest:
+                    if entry.get("prompt") == old_default:
+                        entry["prompt"] = latest
+                    entry["default_prompt"] = latest
+                    entry["is_default"] = True
+                    dirty = True
+            if dirty:
+                self._write_all_locked(data)
 
     def _read_all_locked(self) -> Dict[str, dict]:
         if not self._path.exists():
