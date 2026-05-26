@@ -1,11 +1,10 @@
-# v2.7.9 — Smarter summaries: screenshots reach every extraction
+# v2.7.9 — Auto-record actually persists devices; smarter summaries
 
-Patch release. Closes the gap surfaced by a real meeting in v2.7.8
-where two screenshots were attached to the session but never showed up
-in the summary, the action items, or any of the extractions. The
-screenshots were sent to Claude — Haiku just chose not to reference
-them in dense technical output. v2.7.9 makes the screenshot-handling
-behavior explicit and reliable across every baked-in prompt.
+Patch release. Fixes a silent bug that has been quietly breaking
+calendar auto-record for every user since v2.7.4 — and closes the gap
+surfaced by a real meeting in v2.7.8 where two screenshots were
+attached to the session but didn't show up in the summary, the action
+items, or any of the AI extractions.
 
 ## Install (macOS)
 
@@ -37,6 +36,17 @@ behavior explicit and reliable across every baked-in prompt.
 
 ## Fixed since v2.7.8
 
+- **Auto-record can finally remember your microphone.** Since v2.7.4,
+  manual recordings have been *silently failing* to persist your
+  selected mic + loopback to disk because of a missing `import json`
+  in the backend. The exception was caught and logged as a warning, so
+  the user-facing behavior was just "auto-record never fires, says
+  no microphone configured." Net effect for the calendar auto-record
+  feature shipped in 2.7.4: it has never worked for anyone who upgraded
+  from a pre-2.7.4 build (fresh installs were unaffected only by
+  coincidence). v2.7.9 imports `json` properly. Existing users get
+  their `last_devices.json` written on the next manual recording, and
+  auto-record fires reliably from that point on.
 - **Screenshots now influence every AI output, not just the summary.**
   Action items, decisions, requirements, and the structured engagement
   records all receive your meeting screenshots as visual context now —
