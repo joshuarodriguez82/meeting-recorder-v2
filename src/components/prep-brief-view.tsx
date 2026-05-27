@@ -7,6 +7,7 @@ import { Loader2, Sparkles, Copy, Info, Calendar as CalendarIcon } from "lucide-
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -52,6 +53,10 @@ export function PrepBriefView({ sessions, meetings = [] }: Props) {
   const [brief, setBrief] = useState("");
   const [relatedCount, setRelatedCount] = useState(0);
   const [generating, setGenerating] = useState(false);
+  // Free-text the user types in to feed the LLM extra situational
+  // context the meeting history doesn't capture — exec asks, recent
+  // emails, customer mood, agenda items not in the invite. Optional.
+  const [userContext, setUserContext] = useState("");
   // Sentinel value for the meeting picker so the SelectItem doesn't
   // collide with a real meeting whose subject is the empty string.
   const [pickedMeetingKey, setPickedMeetingKey] = useState<string>("");
@@ -131,7 +136,7 @@ export function PrepBriefView({ sessions, meetings = [] }: Props) {
     setGenerating(true);
     setBrief("");
     try {
-      const res = await api.prepBrief(subject, client, project);
+      const res = await api.prepBrief(subject, client, project, userContext);
       setBrief(res.brief);
       setRelatedCount(res.related_count);
       toast.success(`Brief ready from ${res.related_count} prior meetings`);
@@ -246,6 +251,23 @@ export function PrepBriefView({ sessions, meetings = [] }: Props) {
                 </SelectContent>
               </Select>
             </div>
+          </div>
+
+          {/* Free-text user context — paste exec asks, agenda items,
+              redlines, anything the meeting history can't see. Optional. */}
+          <div className="space-y-2">
+            <Label>Additional context for the AI <span className="text-muted-foreground text-xs font-normal">(optional)</span></Label>
+            <Textarea
+              value={userContext}
+              onChange={(e) => setUserContext(e.target.value)}
+              placeholder="e.g. The customer's CFO just joined this engagement and wants a 60-day plan. Procurement flagged the SLA section in our SOW yesterday. Focus on the API integration timeline."
+              rows={4}
+              className="resize-y"
+            />
+            <p className="text-xs text-muted-foreground">
+              Treated as authoritative — Claude will weave this into the brief
+              alongside the meeting history.
+            </p>
           </div>
 
           {/* Preview of meetings that'll be used */}

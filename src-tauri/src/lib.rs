@@ -660,11 +660,17 @@ fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBu
     let (out, err) = open_log()?;
     let t0 = std::time::Instant::now();
     let mut c = Command::new(&venv_py);
-    c.args(["-m", "pip", "install", "-r"]).arg(&reqs)
+    // --only-binary=:all: forbids pip from source-building any package.
+    // Without it, a missing wheel silently triggers maturin / a C compiler
+    // inside pip's isolated build env, which (a) takes 5-30 min and (b)
+    // pops up its own console windows that no_window() can't suppress on
+    // grandchildren. With the flag, pip fails fast with a readable
+    // "no matching distribution found" message that we can act on.
+    c.args(["-m", "pip", "install", "--only-binary=:all:", "-r"]).arg(&reqs)
         // Belt-and-suspenders for the 3.13 fallback: if we did land on
         // 3.13 and pip has to compile a pyo3 extension (tokenizers),
         // let it build against 3.13's stable ABI instead of hard-erroring.
-        // No effect on 3.12 (every wheel is prebuilt — nothing compiles).
+        // Now a no-op with --only-binary, kept for defense in depth.
         .env("PYO3_USE_ABI3_FORWARD_COMPATIBILITY", "1")
         .stdout(Stdio::from(out)).stderr(Stdio::from(err));
     no_window(&mut c);
