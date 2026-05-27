@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, Pause, Play, RefreshCw, Sparkles } from "lucide-react";
+import { Loader2, Pause, Play, RefreshCw, Sparkles, Copy, Check } from "lucide-react";
+import { toast } from "sonner";
 import { api, ApiError, type CoPilotTickResponse } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 
@@ -229,25 +230,51 @@ function TickCard({ tick }: { tick: CoPilotTickResponse }) {
       })
     : "";
 
+  // Build a plain-text copy of the whole tick formatted for paste-into-
+  // notes use. Empty sections are skipped so the clipboard isn't padded
+  // with blank headers.
+  const copyText = sections
+    .map(({ title, key }) => {
+      const items = (tick[key] as string[] | undefined) ?? [];
+      if (items.length === 0) return "";
+      return `${title}:\n${items.map((s) => `  • ${s}`).join("\n")}`;
+    })
+    .filter(Boolean)
+    .join("\n\n");
+
   return (
     <div className="rounded-md border bg-muted/30 p-3 space-y-2">
       <div className="flex items-center justify-between text-[10px] uppercase tracking-wide text-muted-foreground">
         <span>{generated}</span>
-        {tick.segment_count > 0 && <span>{tick.segment_count} segments</span>}
+        <div className="flex items-center gap-2">
+          {tick.segment_count > 0 && <span>{tick.segment_count} segments</span>}
+          <TickCopyButton text={copyText} />
+        </div>
       </div>
       {sections.map(({ title, key }) => {
         const items = (tick[key] as string[] | undefined) ?? [];
         if (items.length === 0) return null;
         return (
           <div key={key} className="space-y-1">
-            <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
-              {title}
-            </p>
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                {title}
+              </p>
+              <TickCopyButton
+                text={`${title}:\n${items.map((s) => `  • ${s}`).join("\n")}`}
+                ariaLabel={`Copy ${title}`}
+              />
+            </div>
             <ul className="space-y-1">
               {items.map((s, i) => (
-                <li key={i} className="text-sm leading-snug flex gap-2">
+                <li key={i} className="text-sm leading-snug flex gap-2 group">
                   <span className="text-muted-foreground select-none">•</span>
-                  <span>{s}</span>
+                  <span className="flex-1">{s}</span>
+                  <TickCopyButton
+                    text={s}
+                    ariaLabel="Copy bullet"
+                    subtle
+                  />
                 </li>
               ))}
             </ul>
@@ -255,5 +282,55 @@ function TickCard({ tick }: { tick: CoPilotTickResponse }) {
         );
       })}
     </div>
+  );
+}
+
+// Tiny inline Copy button used at three levels inside TickCard: whole
+// tick (header), one section, one bullet. `subtle` hides until row hover
+// so bullet-level buttons don't clutter the panel until the user goes
+// looking for one.
+function TickCopyButton({
+  text, ariaLabel = "Copy", subtle = false,
+}: { text: string; ariaLabel?: string; subtle?: boolean }) {
+  const [copied, setCopied] = useState(false);
+  const onClick = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!text) return;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setCopied(true);
+      toast.success("Copied");
+      setTimeout(() => setCopied(false), 1200);
+    } catch (err) {
+      toast.error(`Copy failed: ${err instanceof Error ? err.message : err}`);
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={ariaLabel}
+      title={ariaLabel}
+      className={
+        "inline-flex items-center justify-center h-5 w-5 rounded text-muted-foreground "
+        + "hover:bg-muted hover:text-foreground transition-opacity "
+        + (subtle ? "opacity-0 group-hover:opacity-100" : "opacity-70 hover:opacity-100")
+      }
+    >
+      {copied
+        ? <Check className="h-3 w-3" />
+        : <Copy className="h-3 w-3" />}
+    </button>
   );
 }
