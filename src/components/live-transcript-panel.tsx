@@ -79,13 +79,48 @@ export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
     return () => { cancelled = true; };
   }, [recording]);
 
-  // Reset when a new recording starts so the previous session's text
-  // isn't mixed in.
+  // Hydrate the panel from the backend's segment history whenever this
+  // component (re-)mounts while a recording is active. This is what
+  // makes the live transcript "persistent" across tab switches —
+  // RecordView unmounts when the user navigates away, and on the way
+  // back in we fast-rebuild the segment list from /recording/
+  // transcript/history instead of starting from a blank slate and
+  // catching only segments produced after the SSE re-subscribe.
+  //
+  // The endpoint 409s when nothing's recording, which is fine — we just
+  // start empty and the SSE block below does nothing until a recording
+  // starts. When a recording is in progress, the history is whatever
+  // segments the LiveTranscriber's bounded deque (2000 entries) has at
+  // request time — enough for an entire ~2-3h dense meeting.
+  //
+  // Why this isn't `if (recording)` only: the SSE could fire its first
+  // segment before our history fetch resolves, leaving a brief window
+  // where we'd duplicate. The append-with-dedupe in the SSE handler
+  // below handles that.
   useEffect(() => {
-    if (recording) {
+    if (!recording) {
+      // Fresh recording about to start (or just stopped) — drop the
+      // previous session's segments so they don't bleed into the next.
       setSegments([]);
       setAutoStick(true);
+      return;
     }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.transcriptHistory();
+        if (cancelled) return;
+        if (r.segments && r.segments.length) {
+          setSegments(r.segments as Segment[]);
+          setAutoStick(true);
+        }
+      } catch {
+        // 409 = no active recording on the backend (race with stop).
+        // Anything else (network, parse) — leave segments empty, the
+        // SSE catch-up will fill in from now forward.
+      }
+    })();
+    return () => { cancelled = true; };
   }, [recording]);
 
   // Open / close the EventSource based on `recording` AND `liveEnabled`.
@@ -115,7 +150,22 @@ export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
       es.onmessage = (e) => {
         try {
           const seg: Segment = JSON.parse(e.data);
-          setSegments((prev) => [...prev, seg]);
+          setSegments((prev) => {
+            // Dedupe against the most recent ~50 entries. The history
+            // hydrate that runs on mount may overlap with the first
+            // few SSE events in flight at subscribe time; matching on
+            // (start, end, text) is a tight enough key that a real
+            // distinct segment with the same shape essentially can't
+            // happen, and bounding the lookup keeps appends O(1).
+            const tail = prev.slice(-50);
+            const dup = tail.some(
+              (s) =>
+                s.start === seg.start &&
+                s.end === seg.end &&
+                s.text === seg.text,
+            );
+            return dup ? prev : [...prev, seg];
+          });
         } catch {
           // ignore malformed event
         }

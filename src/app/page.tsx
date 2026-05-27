@@ -691,7 +691,7 @@ export default function Home() {
               existingClients={existingClients}
             />
           )}
-          {nav === "prep-brief" && <PrepBriefView sessions={sessions} />}
+          {nav === "prep-brief" && <PrepBriefView sessions={sessions} meetings={meetings} />}
           {nav === "settings" && <SettingsView />}
           {nav === "help" && <UsageGuideView />}
         </div>

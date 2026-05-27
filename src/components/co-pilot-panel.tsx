@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, Pause, Play, RefreshCw, Sparkles } from "lucide-react";
+import { Loader2, Pause, Play, RefreshCw, Sparkles, Copy, Check } from "lucide-react";
+import { toast } from "sonner";
 import { api, ApiError, type CoPilotTickResponse } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 
@@ -48,6 +49,9 @@ export function CoPilotPanel({ recording, enabled }: Props) {
   const [loading, setLoading] = useState(false);
   const [paused, setPaused] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
+  // Surfaced when a manual Refresh-now click returns an empty tick.
+  // Cleared on the next non-empty tick or the next manual click.
+  const [refreshNote, setRefreshNote] = useState<string | null>(null);
   // Track in-flight ticks so a manual "Refresh now" doesn't overlap
   // with the timer-driven one. Ref (not state) so the latest value is
   // visible inside the timer callback without re-creating the interval.
@@ -76,10 +80,11 @@ export function CoPilotPanel({ recording, enabled }: Props) {
     })();
   }, [recording, enabled]);
 
-  const tick = useCallback(async () => {
+  const tick = useCallback(async (manual = false) => {
     if (inFlight.current) return;
     inFlight.current = true;
     setLoading(true);
+    if (manual) setRefreshNote(null);
     try {
       const r = await api.copilotTick();
       // Drop empty ticks so the history doesn't fill up with no-ops
@@ -92,6 +97,11 @@ export function CoPilotPanel({ recording, enabled }: Props) {
         r.follow_ups.length === 0;
       if (!isEmpty) {
         setTicks((prev) => [r, ...prev]);
+        setRefreshNote(null);
+      } else if (manual) {
+        // User clicked Refresh and got nothing — say so, otherwise it
+        // looks like the button is broken.
+        setRefreshNote("No new coaching content since the last tick.");
       }
       setLastError(null);
     } catch (e) {
@@ -99,6 +109,8 @@ export function CoPilotPanel({ recording, enabled }: Props) {
         // Feature disabled or no active recording — stop trying, the
         // parent will unmount us shortly anyway.
         setLastError(null);
+      } else if (e instanceof ApiError && e.status === 429) {
+        setLastError("Rate-limited by the LLM — retrying on the next tick.");
       } else {
         setLastError(e instanceof Error ? e.message : "Tick failed");
       }
@@ -146,7 +158,7 @@ export function CoPilotPanel({ recording, enabled }: Props) {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => void tick()}
+            onClick={() => void tick(true)}
             disabled={loading || paused}
             title="Refresh now"
           >
@@ -189,11 +201,13 @@ export function CoPilotPanel({ recording, enabled }: Props) {
             ? ` · ${ticks[0].segment_count} recent segments`
             : ""}
         </span>
-        {lastError && (
+        {lastError ? (
           <span className="text-amber-600 dark:text-amber-400">
             {lastError}
           </span>
-        )}
+        ) : refreshNote ? (
+          <span className="text-muted-foreground italic">{refreshNote}</span>
+        ) : null}
       </div>
     </div>
   );
@@ -216,25 +230,51 @@ function TickCard({ tick }: { tick: CoPilotTickResponse }) {
       })
     : "";
 
+  // Build a plain-text copy of the whole tick formatted for paste-into-
+  // notes use. Empty sections are skipped so the clipboard isn't padded
+  // with blank headers.
+  const copyText = sections
+    .map(({ title, key }) => {
+      const items = (tick[key] as string[] | undefined) ?? [];
+      if (items.length === 0) return "";
+      return `${title}:\n${items.map((s) => `  • ${s}`).join("\n")}`;
+    })
+    .filter(Boolean)
+    .join("\n\n");
+
   return (
     <div className="rounded-md border bg-muted/30 p-3 space-y-2">
       <div className="flex items-center justify-between text-[10px] uppercase tracking-wide text-muted-foreground">
         <span>{generated}</span>
-        {tick.segment_count > 0 && <span>{tick.segment_count} segments</span>}
+        <div className="flex items-center gap-2">
+          {tick.segment_count > 0 && <span>{tick.segment_count} segments</span>}
+          <TickCopyButton text={copyText} />
+        </div>
       </div>
       {sections.map(({ title, key }) => {
         const items = (tick[key] as string[] | undefined) ?? [];
         if (items.length === 0) return null;
         return (
           <div key={key} className="space-y-1">
-            <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
-              {title}
-            </p>
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                {title}
+              </p>
+              <TickCopyButton
+                text={`${title}:\n${items.map((s) => `  • ${s}`).join("\n")}`}
+                ariaLabel={`Copy ${title}`}
+              />
+            </div>
             <ul className="space-y-1">
               {items.map((s, i) => (
-                <li key={i} className="text-sm leading-snug flex gap-2">
+                <li key={i} className="text-sm leading-snug flex gap-2 group">
                   <span className="text-muted-foreground select-none">•</span>
-                  <span>{s}</span>
+                  <span className="flex-1">{s}</span>
+                  <TickCopyButton
+                    text={s}
+                    ariaLabel="Copy bullet"
+                    subtle
+                  />
                 </li>
               ))}
             </ul>
@@ -242,5 +282,55 @@ function TickCard({ tick }: { tick: CoPilotTickResponse }) {
         );
       })}
     </div>
+  );
+}
+
+// Tiny inline Copy button used at three levels inside TickCard: whole
+// tick (header), one section, one bullet. `subtle` hides until row hover
+// so bullet-level buttons don't clutter the panel until the user goes
+// looking for one.
+function TickCopyButton({
+  text, ariaLabel = "Copy", subtle = false,
+}: { text: string; ariaLabel?: string; subtle?: boolean }) {
+  const [copied, setCopied] = useState(false);
+  const onClick = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!text) return;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setCopied(true);
+      toast.success("Copied");
+      setTimeout(() => setCopied(false), 1200);
+    } catch (err) {
+      toast.error(`Copy failed: ${err instanceof Error ? err.message : err}`);
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={ariaLabel}
+      title={ariaLabel}
+      className={
+        "inline-flex items-center justify-center h-5 w-5 rounded text-muted-foreground "
+        + "hover:bg-muted hover:text-foreground transition-opacity "
+        + (subtle ? "opacity-0 group-hover:opacity-100" : "opacity-70 hover:opacity-100")
+      }
+    >
+      {copied
+        ? <Check className="h-3 w-3" />
+        : <Copy className="h-3 w-3" />}
+    </button>
   );
 }
