@@ -695,6 +695,161 @@ const SECTIONS: Section[] = [
     ),
   },
   {
+    id: "ollama-setup",
+    title: "Running Ollama locally (for $0 Live Co-Pilot ticks)",
+    content: (
+      <>
+        <p>
+          Ollama runs an LLM on your own machine, so the Live Co-Pilot&apos;s
+          45-second tick calls cost <strong>nothing</strong>. The
+          post-meeting summary stays on your main provider (Anthropic
+          Haiku, recommended for vision + quality), only the live side
+          moves to local inference.
+        </p>
+
+        <p className="font-medium pt-2">Install Ollama</p>
+        <ul className="list-disc pl-5 space-y-1">
+          <li>
+            <strong>Windows / macOS:</strong> download the installer
+            from{" "}
+            <a
+              href="https://ollama.com/download"
+              target="_blank"
+              rel="noreferrer"
+              className="text-primary hover:underline"
+            >
+              ollama.com/download
+            </a>{" "}
+            and run it. Ollama installs as a background service and
+            auto-starts at login — you should see a llama icon in the
+            system tray (Windows) or menu bar (macOS).
+          </li>
+          <li>
+            <strong>Verify it&apos;s running</strong> by visiting{" "}
+            <code className="text-[11px]">http://localhost:11434</code>{" "}
+            in your browser. You should see
+            &ldquo;Ollama is running&rdquo;.
+          </li>
+        </ul>
+
+        <p className="font-medium pt-2">Pull a model</p>
+        <p>
+          Open a terminal (PowerShell on Windows, Terminal on macOS) and
+          run one of:
+        </p>
+        <ul className="list-disc pl-5 space-y-1">
+          <li>
+            <code className="text-[11px]">ollama pull llama3.1</code> —
+            ~5 GB, our default recommendation. Good JSON compliance,
+            3–8&nbsp;s per tick on modern hardware.
+          </li>
+          <li>
+            <code className="text-[11px]">ollama pull qwen2.5:7b</code>{" "}
+            — slightly better at &ldquo;what&apos;s the unspoken
+            assumption&rdquo; style prompts; similar size and speed.
+          </li>
+          <li>
+            <code className="text-[11px]">ollama pull llama3.2:3b</code>{" "}
+            — fallback for older machines. ~2 GB, 1–3&nbsp;s per tick,
+            noticeably weaker quality.
+          </li>
+        </ul>
+        <p>
+          Once the pull finishes you can sanity-check with{" "}
+          <code className="text-[11px]">
+            ollama run llama3.1 &quot;Return JSON: {"{ok:true}"}&quot;
+          </code>
+          .
+        </p>
+
+        <p className="font-medium pt-2">Point Meeting Recorder at Ollama</p>
+        <ol className="list-decimal pl-5 space-y-1">
+          <li>
+            <strong>Settings → Workflow → Live Co-Pilot (beta)</strong>{" "}
+            → flip on.
+          </li>
+          <li>
+            A new <strong>Live Co-Pilot model</strong> card appears
+            immediately below the Workflow card. Enable{" "}
+            <em>Use a different model for live ticks</em>.
+          </li>
+          <li>
+            Provider: <strong>OpenAI-compatible</strong>.
+          </li>
+          <li>
+            Model id: the exact name from{" "}
+            <code className="text-[11px]">ollama list</code> (typically{" "}
+            <code className="text-[11px]">llama3.1</code> or{" "}
+            <code className="text-[11px]">llama3.1:latest</code>).
+          </li>
+          <li>
+            Base URL:{" "}
+            <code className="text-[11px]">http://localhost:11434/v1</code>
+            .
+          </li>
+          <li>
+            API key: anything non-empty (e.g.{" "}
+            <code className="text-[11px]">ollama</code>). Ollama ignores
+            it; the OpenAI SDK we use just won&apos;t construct without
+            one.
+          </li>
+          <li>Save Settings.</li>
+        </ol>
+
+        <p className="font-medium pt-2">Verify it&apos;s actually hitting Ollama</p>
+        <p>
+          Start a recording with Co-Pilot on. The live ticks should
+          arrive in the Co-Pilot panel within ~45 seconds. To confirm
+          where each tick is going, three checks:
+        </p>
+        <ul className="list-disc pl-5 space-y-1">
+          <li>
+            Tail{" "}
+            <code className="text-[11px]">
+              %LOCALAPPDATA%/Ollama/server.log
+            </code>{" "}
+            (Windows) or{" "}
+            <code className="text-[11px]">~/.ollama/logs/server.log</code>{" "}
+            (macOS) — every tick produces a{" "}
+            <code className="text-[11px]">POST /api/chat</code> line.
+          </li>
+          <li>
+            Run <code className="text-[11px]">ollama ps</code> while a
+            tick is in flight — you&apos;ll see your model loaded with
+            its memory footprint.
+          </li>
+          <li>
+            Anthropic&apos;s console (
+            <a
+              href="https://console.anthropic.com"
+              target="_blank"
+              rel="noreferrer"
+              className="text-primary hover:underline"
+            >
+              console.anthropic.com
+            </a>{" "}
+            → Usage) should show <em>no</em> spike during the recording
+            and a brief burst right after Stop (the post-meeting
+            extractions still run on the main provider).
+          </li>
+        </ul>
+
+        <p className="font-medium pt-2">Two-provider configuration recap</p>
+        <p>
+          The right setup for most users is{" "}
+          <strong>main provider = Anthropic Claude (Haiku 4.5)</strong>{" "}
+          for post-meeting summaries (it has vision and reads
+          screenshots) and{" "}
+          <strong>Live Co-Pilot override = Ollama / OpenRouter free</strong>{" "}
+          for the in-call ticks. If you set <em>both</em> to Ollama, the
+          screenshots you capture during the meeting won&apos;t show up
+          in the summary — Ollama text models are text-only and the app
+          silently drops images for OpenAI-compatible providers.
+        </p>
+      </>
+    ),
+  },
+  {
     id: "clients",
     title: "Clients & Projects",
     content: (

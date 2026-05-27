@@ -169,6 +169,22 @@ export function QAView({ onOpenSession }: Props) {
 
   return (
     <div className="mx-auto max-w-4xl flex flex-col h-full">
+      {/* Top-of-view explainer — sibling to the one in search-view.tsx,
+          drawing the same distinction so the user understands which
+          tab to use for which job. */}
+      <div className="rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground mb-4">
+        <strong className="text-foreground">Ask generates an answer.</strong>{" "}
+        Type a question; Claude reads matching chunks from your meeting
+        history and writes a synthesized response with{" "}
+        <span className="text-primary">[session]</span> citations you can
+        click to jump to source.{" "}
+        <span className="text-foreground/80">
+          Just want the matching chunks themselves? Use{" "}
+          <strong>Search</strong> — same retrieval, no LLM
+          synthesis, faster, cheaper.
+        </span>
+      </div>
+
       {/* Scope filters — collapsed in their own row to leave the input
           a clean full width below. */}
       <div className="flex items-center gap-3 mb-3 text-xs flex-wrap">

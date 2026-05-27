@@ -174,6 +174,17 @@ class SessionService:
                 # Record view auto-tag client from the current calendar
                 # meeting's attendees without an extra per-session fetch.
                 "attendees": list(data.get("attendees") or []),
+                # Compact map of speaker_id -> display_name so list-side
+                # consumers (Follow-ups, Commitments) can resolve labels
+                # like "SPEAKER_03" that the LLM extracted into a typed
+                # human name when the user has renamed that speaker.
+                # Omitting empty display_names so the wire is small —
+                # the resolver treats a missing key as "no rename yet".
+                "speakers": {
+                    sid: sd.get("display_name", "")
+                    for sid, sd in (data.get("speakers") or {}).items()
+                    if sd.get("display_name")
+                },
                 "json_path": str(path),
             })
 

@@ -111,6 +111,11 @@ export interface Settings {
   live_openai_api_key: string;
   live_openai_base_url: string;
   live_anthropic_api_key: string;
+  // Free-text the SA pins per-engagement — appended to every co-pilot
+  // tick prompt as authoritative role / topic framing. Lets the user
+  // tighten suggestions without code changes ("focus on Genesys
+  // migration", "client is healthcare, PHI compliance matters").
+  copilot_custom_context: string;
 }
 
 export interface CoPilotTickResponse {
@@ -163,6 +168,11 @@ export interface SessionSummary {
   // against (if any). Used for the auto-tag-client-from-attendees
   // heuristic in the Record view.
   attendees: string[];
+  // Compact speaker_id -> display_name map for sessions where the user
+  // has renamed speakers. Used by Follow-ups (and other list views) to
+  // resolve owner labels like "SPEAKER_03" back to the real person.
+  // Empty / missing when no speakers have been renamed.
+  speakers?: Record<string, string>;
 }
 
 /**
@@ -491,6 +501,14 @@ export const api = {
   // next 45s tick fires.
   copilotHistory: () =>
     request<{ ticks: CoPilotTickResponse[] }>("/recording/copilot/history"),
+  // Full live-transcript segment history for the active recording.
+  // Lets the LiveTranscriptPanel rehydrate after a tab switch instead
+  // of starting empty and only catching segments published from that
+  // moment forward. Returns 409 when no recording is active.
+  transcriptHistory: () =>
+    request<{ segments: Array<{ start: number; end: number; text: string; speaker?: string }> }>(
+      "/recording/transcript/history",
+    ),
   // Lightweight setter for live_copilot_enabled only. Unlike the full
   // POST /settings, this endpoint works while a recording is in
   // progress so the user can flip the panel on/off from the Record bar.
@@ -514,20 +532,38 @@ export const api = {
       body: JSON.stringify({ path }),
     }),
 
-  // "Never auto-record this meeting" list. Keyed by subject so a
-  // recurring series stays blocked on every occurrence.
+  // "Never auto-record this meeting" list. Two layers: exact `subjects`
+  // (a recurring series stays blocked on every occurrence) and
+  // case-insensitive substring `patterns` (e.g. "canceled" catches
+  // "Canceled: Weekly Sync" and any other meeting whose title contains
+  // the word). The backend returns both on every mutation.
   getAutoRecordBlocklist: () =>
-    request<{ subjects: string[] }>("/auto-record/blocklist"),
+    request<{ subjects: string[]; patterns: string[] }>(
+      "/auto-record/blocklist"),
   addAutoRecordBlocklist: (subject: string) =>
-    request<{ ok: boolean; subjects: string[] }>("/auto-record/blocklist", {
-      method: "POST",
-      body: JSON.stringify({ subject }),
-    }),
+    request<{ ok: boolean; subjects: string[]; patterns: string[] }>(
+      "/auto-record/blocklist", {
+        method: "POST",
+        body: JSON.stringify({ subject }),
+      }),
   removeAutoRecordBlocklist: (subject: string) =>
-    request<{ ok: boolean; subjects: string[] }>("/auto-record/blocklist", {
-      method: "DELETE",
-      body: JSON.stringify({ subject }),
-    }),
+    request<{ ok: boolean; subjects: string[]; patterns: string[] }>(
+      "/auto-record/blocklist", {
+        method: "DELETE",
+        body: JSON.stringify({ subject }),
+      }),
+  addAutoRecordBlocklistPattern: (pattern: string) =>
+    request<{ ok: boolean; subjects: string[]; patterns: string[] }>(
+      "/auto-record/blocklist/patterns", {
+        method: "POST",
+        body: JSON.stringify({ subject: pattern }),
+      }),
+  removeAutoRecordBlocklistPattern: (pattern: string) =>
+    request<{ ok: boolean; subjects: string[]; patterns: string[] }>(
+      "/auto-record/blocklist/patterns", {
+        method: "DELETE",
+        body: JSON.stringify({ subject: pattern }),
+      }),
 
   // AI extraction
   processSession: (id: string) =>
@@ -873,10 +909,12 @@ export const api = {
       body: JSON.stringify({ client, project }),
     }),
 
-  prepBrief: (subject: string, client: string, project: string) =>
+  prepBrief: (subject: string, client: string, project: string, userContext = "") =>
     request<{ brief: string; related_count: number }>("/prep-brief", {
       method: "POST",
-      body: JSON.stringify({ subject, client, project }),
+      body: JSON.stringify({
+        subject, client, project, user_context: userContext,
+      }),
     }),
 
   // ── Commitments tracker ───────────────────────────────────────────
@@ -954,6 +992,7 @@ export const api = {
     client: string;
     project: string;
     body?: string;
+    user_context?: string;
   }) =>
     request<{
       markdown: string;
@@ -1160,11 +1199,23 @@ export interface EngagementRegister {
   project: string;
   generated_at: string;
   session_count: number;
+  // ISO timestamps of the first and most recent meeting that fed this
+  // register. Empty string when no sessions exist yet.
+  first_meeting_at: string;
+  last_meeting_at: string;
   counts: {
     open_requirements: number;
     decisions: number;
     open_action_items: number;
     open_questions: number;
+    outstanding_commitments: number;
+    total_commitments: number;
+  };
+  commitments: {
+    outstanding: number;
+    delivered: number;
+    dismissed: number;
+    total: number;
   };
   requirements: EngagementRecord[];
   decisions: EngagementRecord[];

@@ -20,6 +20,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Loader2, Cog, Sparkles, ClipboardList, FileText, Target,
   Users, Save, X, Pencil, Check, StickyNote, Mail, Image as ImageIcon,
+  Copy,
 } from "lucide-react";
 
 interface Props {
@@ -704,19 +705,30 @@ function TranscriptView({ session }: { session: SessionFull }) {
   if (!session.segments || session.segments.length === 0) {
     return <p className="text-sm text-muted-foreground text-center py-8">No transcript yet. Run Process.</p>;
   }
+  // Build a copy-ready plain-text version with resolved speaker names
+  // so the clipboard contents look the same as what's on screen.
+  const plain = session.segments.map((seg) => {
+    const name = session.speakers[seg.speaker_id]?.display_name || seg.speaker_id;
+    return `[${formatTime(seg.start)}] ${name}: ${seg.text}`;
+  }).join("\n");
   return (
-    <div className="space-y-1 font-mono text-sm leading-relaxed max-w-full">
-      {session.segments.map((seg, i) => {
-        const name = session.speakers[seg.speaker_id]?.display_name || seg.speaker_id;
-        const start = formatTime(seg.start);
-        return (
-          <div key={i} className="flex gap-3 py-0.5 hover:bg-muted/30 rounded px-2 min-w-0">
-            <span className="text-xs text-muted-foreground w-12 shrink-0 pt-0.5">{start}</span>
-            <span className="font-semibold text-primary w-32 shrink-0 truncate">{name}</span>
-            <span className="flex-1 min-w-0 break-words">{seg.text}</span>
-          </div>
-        );
-      })}
+    <div className="space-y-2">
+      <div className="flex justify-end">
+        <CopyButton text={plain} label="Copy transcript" />
+      </div>
+      <div className="space-y-1 font-mono text-sm leading-relaxed max-w-full">
+        {session.segments.map((seg, i) => {
+          const name = session.speakers[seg.speaker_id]?.display_name || seg.speaker_id;
+          const start = formatTime(seg.start);
+          return (
+            <div key={i} className="flex gap-3 py-0.5 hover:bg-muted/30 rounded px-2 min-w-0">
+              <span className="text-xs text-muted-foreground w-12 shrink-0 pt-0.5">{start}</span>
+              <span className="font-semibold text-primary w-32 shrink-0 truncate">{name}</span>
+              <span className="flex-1 min-w-0 break-words">{seg.text}</span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -938,9 +950,56 @@ function MarkdownBlock({ content }: { content: string }) {
     return <p className="text-sm text-muted-foreground text-center py-8">Nothing here yet.</p>;
   }
   return (
-    <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed bg-muted/40 rounded-lg p-5 max-w-full overflow-x-hidden">
-      {content}
-    </pre>
+    <div className="relative">
+      <CopyButton text={content} className="absolute right-2 top-2 z-10" />
+      <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed bg-muted/40 rounded-lg p-5 pr-12 max-w-full overflow-x-hidden">
+        {content}
+      </pre>
+    </div>
+  );
+}
+
+// Shared one-click clipboard copy. Lives next to the content it copies
+// so the user doesn't have to select-all / right-click / paste — the
+// pattern that motivated this in the first place. Falls back to a
+// textarea + execCommand path when navigator.clipboard isn't available
+// (older WebViews, non-secure contexts).
+function CopyButton({
+  text, label = "Copy", className = "",
+}: { text: string; label?: string; className?: string }) {
+  const [copied, setCopied] = useState(false);
+  const onClick = async () => {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setCopied(true);
+      toast.success("Copied to clipboard");
+      setTimeout(() => setCopied(false), 1500);
+    } catch (e) {
+      toast.error(`Copy failed: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      className={`h-7 text-xs ${className}`}
+      onClick={onClick}
+      title="Copy to clipboard"
+    >
+      {copied ? <Check className="h-3.5 w-3.5 mr-1" /> : <Copy className="h-3.5 w-3.5 mr-1" />}
+      {copied ? "Copied" : label}
+    </Button>
   );
 }
 
