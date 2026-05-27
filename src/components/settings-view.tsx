@@ -11,6 +11,7 @@ import { SemanticIndexSection } from "./semantic-index-section";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
@@ -446,6 +447,13 @@ export function SettingsView() {
         </CardContent>
       </Card>
 
+      {/* Auto-record blocklist patterns — substring matches that suppress
+          auto-recording for any meeting whose subject contains the
+          pattern (case-insensitive). Per-meeting exact blocks still live
+          on the Record view (the "No auto" toggle on each tile); this
+          card is for the catch-all patterns like "canceled". */}
+      <AutoRecordBlocklistPatternsCard />
+
       {/* Workflow */}
       <Card>
         <CardHeader>
@@ -496,6 +504,54 @@ export function SettingsView() {
           override → reuses the main provider, same as Phase A. */}
       {settings.live_copilot_enabled && (
         <LiveCoPilotModelCard settings={settings} update={update} />
+      )}
+
+      {/* Custom coaching context — free-text the SA pins per-engagement.
+          Appended to every co-pilot tick prompt as authoritative role /
+          topic framing. The biggest lever the user has to make the
+          co-pilot suggestions actually relevant, especially when running
+          on a smaller / local model that needs more explicit grounding. */}
+      {settings.live_copilot_enabled && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">
+              Coaching context{" "}
+              <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                optional
+              </span>
+            </CardTitle>
+            <p className="text-xs text-muted-foreground mt-1">
+              Pinned context the co-pilot uses on every tick. Treat this
+              like a persistent system prompt addition — the model treats
+              it as authoritative role and topic framing. Especially
+              important when using a smaller / local model (Ollama,
+              free-tier OpenRouter) where the baked-in SA framing alone
+              isn&apos;t enough to keep suggestions specific.
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <Label>Pinned context for this engagement / role</Label>
+            <Textarea
+              value={settings.copilot_custom_context || ""}
+              onChange={(e) =>
+                update("copilot_custom_context", e.target.value)
+              }
+              placeholder={
+                "e.g. Current focus is a Genesys → Amazon Connect migration "
+                + "for a US healthcare client (~800 agents). PHI compliance "
+                + "drives every architectural choice. Watch for scope creep "
+                + "around Salesforce screen-pop and FAX intake."
+              }
+              rows={5}
+              className="resize-y text-sm font-mono"
+            />
+            <p className="text-[10px] text-muted-foreground italic">
+              Persists across recordings. Update whenever you move between
+              engagements. Clear it to fall back to the SA-default prompt
+              only.
+            </p>
+          </CardContent>
+        </Card>
       )}
 
       {/* Auto-stop watchdog — protects against forgotten recordings
@@ -1117,6 +1173,127 @@ function LiveCoPilotModelCard({
               so the cap kicks in after one long meeting).
             </div>
           </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// Auto-record substring patterns. Each pattern is matched
+// case-insensitively against the meeting subject; if it appears anywhere
+// the meeting is skipped. The user's exact "this specific meeting"
+// blocks still live on the Record view per-tile; this card is for
+// patterns that apply across many meetings — most notably the
+// Outlook-prefixed "Canceled: …" series.
+function AutoRecordBlocklistPatternsCard() {
+  const [patterns, setPatterns] = useState<string[]>([]);
+  const [exactCount, setExactCount] = useState(0);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const reload = async () => {
+    try {
+      const r = await api.getAutoRecordBlocklist();
+      setPatterns(r.patterns || []);
+      setExactCount(r.subjects?.length ?? 0);
+    } catch {
+      /* ignore — empty state is fine */
+    }
+  };
+
+  useEffect(() => { void reload(); }, []);
+
+  const add = async () => {
+    const v = input.trim();
+    if (!v) return;
+    setBusy(true);
+    try {
+      const r = await api.addAutoRecordBlocklistPattern(v);
+      setPatterns(r.patterns || []);
+      setInput("");
+      toast.success(`Auto-record blocked for meetings containing "${v}"`);
+    } catch (e) {
+      toast.error(`Couldn't add: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (p: string) => {
+    setBusy(true);
+    try {
+      const r = await api.removeAutoRecordBlocklistPattern(p);
+      setPatterns(r.patterns || []);
+    } catch (e) {
+      toast.error(`Couldn't remove: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Auto-record skip patterns</CardTitle>
+        <p className="text-xs text-muted-foreground mt-1">
+          Don&apos;t auto-record any meeting whose title <em>contains</em>{" "}
+          one of these substrings (case-insensitive). Useful for the
+          Outlook <strong>&quot;Canceled: …&quot;</strong> prefix or any other
+          catch-all you want to skip without flagging individual meetings.
+          Per-meeting exact blocks still live on the Record view&apos;s
+          <em> No auto</em> toggle.
+          {exactCount > 0 && (
+            <span className="block mt-1 italic">
+              {exactCount} exact-subject block{exactCount === 1 ? "" : "s"}{" "}
+              also active (manage from the Record view).
+            </span>
+          )}
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex gap-2">
+          <Input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && add()}
+            placeholder="e.g. canceled"
+            disabled={busy}
+          />
+          <Button
+            onClick={add}
+            disabled={busy || !input.trim()}
+            size="default"
+          >
+            <Plus className="h-4 w-4 mr-1" />
+            Add
+          </Button>
+        </div>
+        {patterns.length === 0 ? (
+          <p className="text-xs italic text-muted-foreground">
+            No patterns yet. Add &quot;canceled&quot; to skip any meeting
+            that Outlook prefixes with &quot;Canceled:&quot; when the
+            organizer cancels it.
+          </p>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {patterns.map((p) => (
+              <Badge
+                key={p}
+                variant="secondary"
+                className="text-xs gap-1 py-1 pl-2 pr-1"
+              >
+                {p}
+                <button
+                  onClick={() => remove(p)}
+                  disabled={busy}
+                  className="ml-1 inline-flex items-center justify-center rounded hover:bg-destructive/15 hover:text-destructive transition-colors disabled:opacity-50 h-4 w-4"
+                  title={`Remove pattern "${p}"`}
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              </Badge>
+            ))}
+          </div>
         )}
       </CardContent>
     </Card>

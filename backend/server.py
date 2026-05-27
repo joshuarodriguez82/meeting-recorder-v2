@@ -561,10 +561,16 @@ class Services:
                             f"Migration of {_filename} failed ({_e}); "
                             f"reading from legacy USER_DATA_DIR location.")
             self.client_cfg_svc = ClientConfigService(_recordings_dir)
-            # Pure aggregator over session JSONs + client configs — no
-            # state of its own, so it's safe to build eagerly here.
+            # CommitmentsService is built BEFORE the engagement service
+            # because the engagement register pulls open / outstanding
+            # commitment counts via it. Sidecar JSONs next to session
+            # pickles; no state of its own.
+            self.commitments_svc = CommitmentsService(self.session_svc)
+            # Pure aggregator over session JSONs + client configs +
+            # commitments — no state of its own, so it's safe to build
+            # eagerly here.
             self.engagement_svc = EngagementService(
-                self.session_svc, self.client_cfg_svc)
+                self.session_svc, self.client_cfg_svc, self.commitments_svc)
             self.template_svc = TemplateService(_recordings_dir)
             # Speaker profiles stay per-machine: voice fingerprints are
             # mic-hardware-dependent, syncing them across devices with
@@ -579,9 +585,6 @@ class Services:
             # session embeddings live next to session JSONs, so it just
             # needs that handle. Lazy index load happens on first search.
             self.search_svc = SearchService(self.session_svc)
-            # CommitmentsService is the same shape — sidecar JSONs next
-            # to session pickles. No state of its own.
-            self.commitments_svc = CommitmentsService(self.session_svc)
             # ItemStatusService overlays per-session "checked off" state
             # on top of the markdown-parsed follow-ups and decisions.
             self.item_status_svc = ItemStatusService(self.session_svc)
@@ -758,6 +761,12 @@ class SettingsDTO(BaseModel):
     live_openai_api_key: str = ""
     live_openai_base_url: str = ""
     live_anthropic_api_key: str = ""
+    # Free-text context the SA pins for the live co-pilot — appended to
+    # every coach_tick prompt as authoritative role / topic framing.
+    # Examples: "Current engagement is a Genesys → Connect migration for
+    # a healthcare client, ~800 agents, focus on PHI compliance." Empty
+    # by default so the baked-in SA-flavored prompt runs as-is.
+    copilot_custom_context: str = ""
 
 
 class StartRecordingRequest(BaseModel):
@@ -934,6 +943,7 @@ async def get_settings():
         live_openai_api_key=s.live_openai_api_key,
         live_openai_base_url=s.live_openai_base_url,
         live_anthropic_api_key=s.live_anthropic_api_key,
+        copilot_custom_context=s.copilot_custom_context,
     )
 
 
@@ -1003,6 +1013,7 @@ async def save_settings(payload: SettingsDTO):
         live_openai_api_key=payload.live_openai_api_key or "",
         live_openai_base_url=(payload.live_openai_base_url or "").strip(),
         live_anthropic_api_key=payload.live_anthropic_api_key or "",
+        copilot_custom_context=(payload.copilot_custom_context or "").strip(),
     )
     # If the recordings folder changed, migrate client + template state
     # from the previous folder to the new one. Copy, not move, so the
@@ -1756,13 +1767,15 @@ class BlocklistRequest(BaseModel):
 
 @app.get("/auto-record/blocklist")
 async def get_auto_record_blocklist():
-    """Subjects the user flagged 'never auto-record'. Matched
-    case/whitespace-insensitively by subject so a recurring series stays
-    blocked every occurrence."""
+    """Subjects + patterns the user flagged 'never auto-record'. Exact
+    entries are matched case/whitespace-insensitively by subject; patterns
+    are matched as case-insensitive substrings anywhere in the subject
+    so a recurring 'Cancelled: …' prefix can be caught with one pattern."""
     if not svc.auto_record_blocklist_svc:
-        return {"subjects": []}
+        return {"subjects": [], "patterns": []}
     subjects = await asyncio.to_thread(svc.auto_record_blocklist_svc.list_all)
-    return {"subjects": subjects}
+    patterns = await asyncio.to_thread(svc.auto_record_blocklist_svc.list_patterns)
+    return {"subjects": subjects, "patterns": patterns}
 
 
 @app.post("/auto-record/blocklist")
@@ -1775,7 +1788,8 @@ async def add_auto_record_blocklist(req: BlocklistRequest):
         raise HTTPException(status_code=400, detail="subject is required")
     await asyncio.to_thread(svc.auto_record_blocklist_svc.add, subject)
     subjects = await asyncio.to_thread(svc.auto_record_blocklist_svc.list_all)
-    return {"ok": True, "subjects": subjects}
+    patterns = await asyncio.to_thread(svc.auto_record_blocklist_svc.list_patterns)
+    return {"ok": True, "subjects": subjects, "patterns": patterns}
 
 
 @app.delete("/auto-record/blocklist")
@@ -1786,7 +1800,39 @@ async def remove_auto_record_blocklist(req: BlocklistRequest):
     await asyncio.to_thread(
         svc.auto_record_blocklist_svc.remove, (req.subject or "").strip())
     subjects = await asyncio.to_thread(svc.auto_record_blocklist_svc.list_all)
-    return {"ok": True, "subjects": subjects}
+    patterns = await asyncio.to_thread(svc.auto_record_blocklist_svc.list_patterns)
+    return {"ok": True, "subjects": subjects, "patterns": patterns}
+
+
+@app.post("/auto-record/blocklist/patterns")
+async def add_auto_record_blocklist_pattern(req: BlocklistRequest):
+    """Add a case-insensitive substring pattern. Any meeting whose
+    subject contains the pattern anywhere will be skipped — e.g. the
+    pattern 'canceled' blocks 'Canceled: Weekly Sync' and
+    'Project X (Canceled)' alike."""
+    if not svc.auto_record_blocklist_svc:
+        raise HTTPException(status_code=503,
+                            detail="Blocklist service not initialized")
+    pattern = (req.subject or "").strip()
+    if not pattern:
+        raise HTTPException(status_code=400, detail="pattern is required")
+    await asyncio.to_thread(svc.auto_record_blocklist_svc.add_pattern, pattern)
+    subjects = await asyncio.to_thread(svc.auto_record_blocklist_svc.list_all)
+    patterns = await asyncio.to_thread(svc.auto_record_blocklist_svc.list_patterns)
+    return {"ok": True, "subjects": subjects, "patterns": patterns}
+
+
+@app.delete("/auto-record/blocklist/patterns")
+async def remove_auto_record_blocklist_pattern(req: BlocklistRequest):
+    if not svc.auto_record_blocklist_svc:
+        raise HTTPException(status_code=503,
+                            detail="Blocklist service not initialized")
+    await asyncio.to_thread(
+        svc.auto_record_blocklist_svc.remove_pattern,
+        (req.subject or "").strip())
+    subjects = await asyncio.to_thread(svc.auto_record_blocklist_svc.list_all)
+    patterns = await asyncio.to_thread(svc.auto_record_blocklist_svc.list_patterns)
+    return {"ok": True, "subjects": subjects, "patterns": patterns}
 
 
 @app.get("/recording/screenshot/dir")
@@ -1931,8 +1977,19 @@ async def copilot_tick():
     if sess is not None:
         meeting_name = getattr(sess, "meeting_name", "") or ""
 
+    # Pass any custom coaching context the SA pinned in Settings —
+    # per-engagement framing the baked-in prompt can't anticipate.
+    # Also pass the prior tick (if any) so the model can build on its
+    # last suggestion instead of repeating it.
+    custom_context = getattr(svc.settings, "copilot_custom_context", "") or ""
+    prior_ticks = (
+        list(sess.copilot_ticks)
+        if sess is not None and getattr(sess, "copilot_ticks", None)
+        else None
+    )
     result = await coach.coach_tick(
         segments=segments, meeting_name=meeting_name,
+        custom_context=custom_context, prior_ticks=prior_ticks,
     )
     payload = {
         "clarifying_questions": result.get("clarifying_questions", []),
@@ -2001,12 +2058,32 @@ async def set_live_copilot_enabled(payload: dict):
         live_openai_api_key=s.live_openai_api_key,
         live_openai_base_url=s.live_openai_base_url,
         live_anthropic_api_key=s.live_anthropic_api_key,
+        copilot_custom_context=s.copilot_custom_context,
     )
     # Update the cached Settings in-place so the change is visible
     # immediately, without going through load_settings() which would
     # rebuild RecordingService and orphan the active capture.
     svc.settings = dataclasses.replace(s, live_copilot_enabled=enabled)
     return {"live_copilot_enabled": enabled}
+
+
+@app.get("/recording/transcript/history")
+async def get_transcript_history():
+    """Return every live-transcript segment captured during the current
+    recording so the UI's transcript panel can rehydrate after a tab
+    switch / page reload. Without this, the panel resets to empty and
+    only catches segments published from that moment forward, even
+    though the backend still has the full history in memory.
+
+    Returns 409 when no recording is active — same shape as the SSE
+    stream endpoint so the client can distinguish "no recording" from
+    "empty history."""
+    if not svc.recording_svc or not svc.recording_svc.is_recording:
+        raise HTTPException(status_code=409, detail="No recording active.")
+    transcriber = svc.recording_svc.live_transcriber
+    if transcriber is None or not transcriber.is_running:
+        return {"segments": []}
+    return {"segments": transcriber.all_segments()}
 
 
 @app.get("/recording/copilot/history")
@@ -3065,6 +3142,41 @@ class TemplateRequest(BaseModel):
     template: str = "General"
 
 
+def _copilot_observations_blob(session) -> str:
+    """Roll the session's live-copilot ticks into a deduplicated bullet
+    blob for the summarizer. Returns empty string when there are no
+    ticks (no co-pilot enabled, or no useful suggestions emitted).
+
+    Dedupe is normalized-substring-aware: an earlier tick that said
+    'Ask about VPC peering' won't repeat later as 'ask about vpc
+    peering' — same observation surfaces once. We preserve original
+    casing from the first occurrence."""
+    ticks = list(getattr(session, "copilot_ticks", []) or [])
+    if not ticks:
+        return ""
+    sections = (
+        ("clarifying_questions", "Clarifying questions raised"),
+        ("risks", "Risks flagged"),
+        ("follow_ups", "Follow-ups suggested"),
+    )
+    out_lines: list[str] = []
+    for key, header in sections:
+        seen: dict[str, str] = {}
+        for tick in ticks:
+            for item in (tick.get(key) or []):
+                if not isinstance(item, str):
+                    continue
+                norm = " ".join(item.split()).lower()
+                if norm and norm not in seen:
+                    seen[norm] = item.strip()
+        if seen:
+            out_lines.append(f"{header}:")
+            for original in seen.values():
+                out_lines.append(f"  • {original}")
+            out_lines.append("")
+    return "\n".join(out_lines).rstrip()
+
+
 @app.post("/sessions/{session_id}/summarize")
 async def summarize_session(session_id: str, req: TemplateRequest):
     svc.load_settings()
@@ -3085,6 +3197,7 @@ async def summarize_session(session_id: str, req: TemplateRequest):
             notes=session.notes or "",
             template_name=req.template,
             image_paths=list(session.screenshots or []),
+            copilot_observations=_copilot_observations_blob(session),
         )
         session.summary = result
         session.template = req.template
@@ -3336,7 +3449,8 @@ async def _extract_and_save(
         result = await method(
             transcript, prompt=prompt_text,
             notes=notes, template_name=template,
-            image_paths=list(session.screenshots or []))
+            image_paths=list(session.screenshots or []),
+            copilot_observations=_copilot_observations_blob(session))
         session.template = template
     else:
         # All four markdown extractors now accept image_paths so
@@ -3886,6 +4000,11 @@ class PrepBriefRequest(BaseModel):
     subject: str
     client: str = ""
     project: str = ""
+    # Free-text from the user — pasted exec ask, agenda notes, recent
+    # email thread, anything the meeting history wouldn't capture.
+    # Optional; older clients omit it and the brief behaves exactly as
+    # before.
+    user_context: str = ""
 
 
 class PrepBriefFromMeetingRequest(BaseModel):
@@ -3908,6 +4027,10 @@ class PrepBriefFromMeetingRequest(BaseModel):
     # detail. Optional — older callers / meetings without a body just
     # omit it and the brief behaves exactly as before.
     body: str = ""
+    # Free-text from the user — see PrepBriefRequest. Allows the SA to
+    # feed authoritative context the calendar invite and meeting history
+    # can't capture.
+    user_context: str = ""
 
 
 @app.post("/prep-brief/from-meeting")
@@ -4045,6 +4168,7 @@ async def prep_brief_from_meeting(req: PrepBriefFromMeetingRequest):
             identified_project=req.project,
             prior_notes=prior_notes,
             agenda=req.body or "",
+            user_context=req.user_context,
         )
     except Exception as e:
         logger.exception("Calendar prep brief failed")
@@ -4105,7 +4229,8 @@ async def prep_brief(req: PrepBriefRequest):
     prior_notes = "\n\n---\n\n".join(parts)
 
     try:
-        brief = await svc.summarizer.meeting_prep_brief(prior_notes, req.subject)
+        brief = await svc.summarizer.meeting_prep_brief(
+            prior_notes, req.subject, user_context=req.user_context)
         return {"brief": brief, "related_count": len(related)}
     except Exception as e:
         logger.exception("Prep brief failed")

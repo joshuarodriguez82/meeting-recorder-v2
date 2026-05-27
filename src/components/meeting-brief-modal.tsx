@@ -7,7 +7,8 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Loader2, Sparkles, Copy, Mic, Clock, Users, Building2 } from "lucide-react";
+import { Textarea } from "@/components/ui/textarea";
+import { Loader2, Sparkles, Copy, Mic, Clock, Users, Building2, RefreshCw } from "lucide-react";
 
 // One-click pre-meeting brief, opened from a calendar tile in the
 // Upcoming Meetings list.
@@ -58,6 +59,12 @@ export function MeetingBriefModal({
     started_at: string | null;
   }>>([]);
   const [lastMeetingAt, setLastMeetingAt] = useState<string | null>(null);
+  // Free-text the user types in to feed the LLM context the invite +
+  // meeting history can't see (exec asks, recent emails, customer mood,
+  // procurement redlines just received). Empty on initial generation
+  // so first-load is one-click; clicking "Regenerate with context"
+  // re-runs the brief with whatever's in the box.
+  const [userContext, setUserContext] = useState("");
 
   // Resolve client + project from attendees once the modal mounts on
   // a meeting. Same algorithm as record-view's useMeeting auto-tag,
@@ -82,50 +89,56 @@ export function MeetingBriefModal({
     return { client: c, project: p };
   }, [meeting, allSessions]);
 
-  // Fetch the brief whenever the modal opens with a fresh meeting.
-  useEffect(() => {
-    if (!open || !meeting) return;
-    let cancelled = false;
+  // Generate (or regenerate) the brief. Extracted so the "Regenerate
+  // with context" button can re-run after the user types into the
+  // user-context box. extraContext defaults to the current state value
+  // so the initial open-time generation runs without it.
+  const generateBrief = async (extraContext: string = "") => {
+    if (!meeting) return;
     setLoading(true);
     setError(null);
+    // Pull the invite agenda/body first so Claude can tailor the
+    // brief to what THIS meeting is actually about. Best-effort —
+    // if it fails (no body, calendar hiccup), the brief still
+    // generates from prior-meeting context exactly as before.
+    let body = "";
+    try {
+      const d = await api.getMeetingDetail(meeting.subject, meeting.start);
+      body = d.body || "";
+    } catch {
+      /* agenda is a bonus, not required */
+    }
+    try {
+      const res = await api.prepBriefFromMeeting({
+        subject: meeting.subject,
+        attendees: meeting.attendees || [],
+        scheduled_start_iso: meeting.start,
+        scheduled_end_iso: meeting.end,
+        client,
+        project,
+        body,
+        user_context: extraContext,
+      });
+      setBrief(res.markdown || "");
+      setReferenced(res.referenced_sessions || []);
+      setLastMeetingAt(res.last_meeting_at);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Fetch the brief whenever the modal opens with a fresh meeting.
+  // First open is always empty user_context — keeps the modal one-click.
+  useEffect(() => {
+    if (!open || !meeting) return;
     setBrief("");
     setReferenced([]);
     setLastMeetingAt(null);
-    (async () => {
-      // Pull the invite agenda/body first so Claude can tailor the
-      // brief to what THIS meeting is actually about. Best-effort —
-      // if it fails (no body, calendar hiccup), the brief still
-      // generates from prior-meeting context exactly as before.
-      let body = "";
-      try {
-        const d = await api.getMeetingDetail(meeting.subject, meeting.start);
-        if (cancelled) return;
-        body = d.body || "";
-      } catch {
-        /* agenda is a bonus, not required */
-      }
-      try {
-        const res = await api.prepBriefFromMeeting({
-          subject: meeting.subject,
-          attendees: meeting.attendees || [],
-          scheduled_start_iso: meeting.start,
-          scheduled_end_iso: meeting.end,
-          client,
-          project,
-          body,
-        });
-        if (cancelled) return;
-        setBrief(res.markdown || "");
-        setReferenced(res.referenced_sessions || []);
-        setLastMeetingAt(res.last_meeting_at);
-      } catch (e) {
-        if (cancelled) return;
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
+    setUserContext("");
+    void generateBrief("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, meeting, client, project]);
 
   const copyToClipboard = () => {
@@ -180,6 +193,40 @@ export function MeetingBriefModal({
               referenced={referenced}
               onOpenSession={onOpenSession}
             />
+          )}
+
+          {/* User-context box — appears under the brief so the first
+              read is uninterrupted, then the SA can add what the LLM
+              couldn't see (exec asks, procurement redlines, recent
+              email thread) and regenerate. Hidden during the first
+              load so the modal doesn't feel form-heavy on open. */}
+          {!loading && !error && brief && (
+            <div className="space-y-2 pt-2 border-t">
+              <div className="flex items-baseline justify-between">
+                <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                  Add context & regenerate
+                </label>
+                <span className="text-[10px] text-muted-foreground italic">
+                  Optional — things the invite & meeting history can&apos;t see
+                </span>
+              </div>
+              <Textarea
+                value={userContext}
+                onChange={(e) => setUserContext(e.target.value)}
+                placeholder="e.g. Customer's CFO just joined this engagement and wants a 60-day plan. Procurement flagged the SLA section yesterday. Focus on the API integration timeline."
+                rows={3}
+                className="resize-y text-sm"
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void generateBrief(userContext)}
+                disabled={loading || !userContext.trim()}
+              >
+                <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${loading ? "animate-spin" : ""}`} />
+                Regenerate with context
+              </Button>
+            </div>
           )}
         </div>
 

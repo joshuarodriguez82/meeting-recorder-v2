@@ -264,7 +264,13 @@ export function DecisionsView({ sessions, onOpenSession }: Props) {
           </CardContent>
         </Card>
 
-        <Card>
+        {/* Sticky detail panel — stays visible as the user scrolls the
+            list. Without this, clicking a row halfway down the list
+            leaves the detail off-screen above and the user has to
+            scroll back up to see anything they just selected. Internal
+            overflow handles very long details (e.g. a decision with a
+            lot of rationale) without spilling past the viewport. */}
+        <Card className="md:sticky md:top-0 md:self-start md:max-h-[calc(100vh-8rem)] md:overflow-y-auto">
           <CardContent className="p-6">
             {selected ? (
               <div className="space-y-4">
