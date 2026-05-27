@@ -686,6 +686,7 @@ class Summarizer:
         identified_project: str,
         prior_notes: str,
         agenda: str = "",
+        user_context: str = "",
     ) -> str:
         """Richer prep brief used by the click-from-calendar-tile flow.
         Includes hot-topics + suggested-questions sections and asks
@@ -712,6 +713,18 @@ class Summarizer:
         agenda_block = (
             f"\n\n=== MEETING INVITE / AGENDA ===\n{agenda}" if agenda else ""
         )
+        # Optional user-provided context — anchored with explicit framing
+        # so the model treats it as authoritative rather than background.
+        user_context_block = ""
+        if user_context.strip():
+            user_context_block = (
+                "\n\n=== ADDITIONAL CONTEXT FROM THE USER ===\n"
+                "Treat this as authoritative — the user knows things the "
+                "calendar invite and prior meetings don't capture. Weave "
+                "it into the appropriate brief sections and prioritize "
+                "questions / discussion points around it.\n"
+                f"{user_context.strip()}\n"
+            )
         try:
             result = await self._chat(
                 (
@@ -753,7 +766,8 @@ class Summarizer:
                     f"When: {upcoming_when}\n"
                     f"Attendees: {attendee_blob}\n"
                     f"Account: {scope_blob}"
-                    f"{agenda_block}\n\n"
+                    f"{agenda_block}"
+                    f"{user_context_block}\n\n"
                     f"=== PRIOR MEETING NOTES ===\n{prior_notes}"
                 ),
                 max_tokens=1500, timeout=90.0,
@@ -763,9 +777,31 @@ class Summarizer:
         except Exception as e:
             raise RuntimeError(f"Prep brief generation failed: {e}") from e
 
-    async def meeting_prep_brief(self, prior_notes: str, upcoming_subject: str) -> str:
-        """Generate a prep brief from prior meeting notes for an upcoming meeting."""
+    async def meeting_prep_brief(
+        self, prior_notes: str, upcoming_subject: str,
+        user_context: str = "",
+    ) -> str:
+        """Generate a prep brief from prior meeting notes for an upcoming meeting.
+
+        user_context is free-text the SA types in to feed the LLM extra
+        situational context — exec asks, customer mood, specific agenda
+        items, redlines just received, etc. It's treated as authoritative
+        (the SA knows things the meeting history doesn't capture) so the
+        prompt instructs the model to weave it in explicitly."""
         logger.info(f"Generating prep brief for: {upcoming_subject} via {self._provider}/{self._model}")
+        # Optional user-provided context block. Anchored with a heading
+        # the prompt explicitly tells the model to honor; without that
+        # framing the model treats it as background and underweights it.
+        user_block = ""
+        if user_context.strip():
+            user_block = (
+                "\n\n=== ADDITIONAL CONTEXT FROM THE USER ===\n"
+                "Treat this as authoritative — the user knows things the "
+                "meeting history below does not capture. Weave it into "
+                "the appropriate brief sections and call it out under "
+                "'Suggested Discussion Points' when actionable.\n"
+                f"{user_context.strip()}\n"
+            )
         try:
             result = await self._chat(
                 (
@@ -784,7 +820,8 @@ class Summarizer:
                     "What you should raise or follow up on in this meeting.\n\n"
                     "Keep it tight and actionable. If a section has no content, "
                     "write 'None.'\n\n"
-                    f"Upcoming meeting: {upcoming_subject}\n\n"
+                    f"Upcoming meeting: {upcoming_subject}"
+                    f"{user_block}\n\n"
                     f"=== PRIOR MEETING NOTES ===\n{prior_notes}"
                 ),
                 max_tokens=1024, timeout=60.0,

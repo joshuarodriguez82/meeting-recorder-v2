@@ -3908,6 +3908,11 @@ class PrepBriefRequest(BaseModel):
     subject: str
     client: str = ""
     project: str = ""
+    # Free-text from the user — pasted exec ask, agenda notes, recent
+    # email thread, anything the meeting history wouldn't capture.
+    # Optional; older clients omit it and the brief behaves exactly as
+    # before.
+    user_context: str = ""
 
 
 class PrepBriefFromMeetingRequest(BaseModel):
@@ -3930,6 +3935,10 @@ class PrepBriefFromMeetingRequest(BaseModel):
     # detail. Optional — older callers / meetings without a body just
     # omit it and the brief behaves exactly as before.
     body: str = ""
+    # Free-text from the user — see PrepBriefRequest. Allows the SA to
+    # feed authoritative context the calendar invite and meeting history
+    # can't capture.
+    user_context: str = ""
 
 
 @app.post("/prep-brief/from-meeting")
@@ -4067,6 +4076,7 @@ async def prep_brief_from_meeting(req: PrepBriefFromMeetingRequest):
             identified_project=req.project,
             prior_notes=prior_notes,
             agenda=req.body or "",
+            user_context=req.user_context,
         )
     except Exception as e:
         logger.exception("Calendar prep brief failed")
@@ -4127,7 +4137,8 @@ async def prep_brief(req: PrepBriefRequest):
     prior_notes = "\n\n---\n\n".join(parts)
 
     try:
-        brief = await svc.summarizer.meeting_prep_brief(prior_notes, req.subject)
+        brief = await svc.summarizer.meeting_prep_brief(
+            prior_notes, req.subject, user_context=req.user_context)
         return {"brief": brief, "related_count": len(related)}
     except Exception as e:
         logger.exception("Prep brief failed")
