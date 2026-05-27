@@ -1265,6 +1265,22 @@ export const api = {
       { method: "POST" },
     );
   },
+
+  // Manual engagement overlay — status, exec sponsor, next milestone,
+  // free-form notes. Layered on top of the auto-rolled register.
+  putEngagementOverlay: (
+    client: string,
+    overlay: { project?: string; status?: string; exec_sponsor?: string;
+               next_milestone?: string; notes?: string },
+  ) =>
+    request<{ ok: boolean; overlay: EngagementOverlay }>(
+      `/engagements/${encodeURIComponent(client)}/overlay`, {
+        method: "PUT",
+        body: JSON.stringify(overlay),
+      }),
+
+  engagementKnownStatuses: () =>
+    request<{ statuses: string[] }>("/engagements/known-statuses"),
 };
 
 export interface EngagementOccurrence {
@@ -1280,6 +1296,17 @@ export interface EngagementRecord {
   // record-type-specific fields (text/title/decided/owner/…)
   [k: string]: unknown;
 }
+// Per-engagement manual overlay — fields the user pins by hand that
+// can't be auto-rolled from meeting data. Merged into the register
+// response by the backend.
+export interface EngagementOverlay {
+  status: string;
+  exec_sponsor: string;
+  next_milestone: string;
+  notes: string;
+  updated_at: string;
+}
+
 export interface EngagementRegister {
   client: string;
   project: string;
@@ -1307,6 +1334,10 @@ export interface EngagementRegister {
   decisions: EngagementRecord[];
   action_items: EngagementRecord[];
   open_questions: EngagementRecord[];
+  // Manual overlay merged in by the backend. Always present (with
+  // empty fields when nothing has been set yet) so the UI doesn't
+  // have to null-check.
+  overlay: EngagementOverlay;
 }
 
 export interface InsightsRow {

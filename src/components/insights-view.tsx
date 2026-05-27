@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   api, formatDuration, type InsightsSummary, type InsightsRow,
   type StaleCommitment, type OpenDecision, type OpenActionItem,
+  type SessionSummary,
 } from "@/lib/api";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,6 +13,9 @@ import { Badge } from "@/components/ui/badge";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Clock, TrendingUp, AlertCircle, ChevronRight, Loader2,
 } from "lucide-react";
@@ -49,6 +53,13 @@ export function InsightsView({ onOpenSession, existingClients }: Props) {
   const [clientFilter, setClientFilter] = useState<string>("__all__");
   const [data, setData] = useState<InsightsSummary | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // Drill-down state: clicking a topic bubble opens this modal with
+  // the sessions whose summary contains that phrase. Loaded lazily —
+  // we don't pull the full sessions list until the user actually
+  // clicks a topic.
+  const [selectedTopic, setSelectedTopic] = useState<
+    { client: string; phrase: string } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -142,7 +153,12 @@ export function InsightsView({ onOpenSession, existingClients }: Props) {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <TopicCloud topics={data?.topics || {}} clientFilter={clientFilter} />
+          <TopicCloud
+            topics={data?.topics || {}}
+            clientFilter={clientFilter}
+            onTopicClick={(client, phrase) =>
+              setSelectedTopic({ client, phrase })}
+          />
         </CardContent>
       </Card>
 
@@ -174,7 +190,140 @@ export function InsightsView({ onOpenSession, existingClients }: Props) {
           />
         </CardContent>
       </Card>
+
+      {/* Topic drill-down modal — opens when a topic bubble is
+          clicked. Lists the sessions where that phrase appears in
+          the summary, with click-to-open. */}
+      <TopicDrillDownDialog
+        open={selectedTopic !== null}
+        topic={selectedTopic}
+        onOpenChange={(v) => { if (!v) setSelectedTopic(null); }}
+        onOpenSession={(id) => {
+          setSelectedTopic(null);
+          onOpenSession(id);
+        }}
+      />
     </div>
+  );
+}
+
+// ── Topic drill-down modal ─────────────────────────────────────────
+// Loads the full session list lazily and filters to sessions whose
+// summary text contains the topic phrase. Cheap — even a heavy SA
+// caps out around a few hundred sessions so filtering client-side is
+// fine, and it doesn't need a new backend endpoint.
+function TopicDrillDownDialog({
+  open, topic, onOpenChange, onOpenSession,
+}: {
+  open: boolean;
+  topic: { client: string; phrase: string } | null;
+  onOpenChange: (v: boolean) => void;
+  onOpenSession: (id: string) => void;
+}) {
+  const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!open || !topic) return;
+    let cancelled = false;
+    setLoading(true);
+    api.listSessions()
+      .then((res) => { if (!cancelled) setSessions(res); })
+      .catch((e) => {
+        if (!cancelled) toast.error(
+          `Could not load sessions: ${e instanceof Error ? e.message : e}`);
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [open, topic]);
+
+  const matches = useMemo(() => {
+    if (!topic || !sessions) return [];
+    const phraseLower = topic.phrase.toLowerCase();
+    return sessions
+      .filter((s) => {
+        // Client must match if the topic was bucketed under a real
+        // client. "Untagged" buckets sessions with no client tag.
+        const sClient = (s.client || "").trim() || "Untagged";
+        if (sClient !== topic.client) return false;
+        // Topic phrase must appear in the summary.
+        return (s.summary || "").toLowerCase().includes(phraseLower);
+      })
+      .sort((a, b) =>
+        (b.started_at || "").localeCompare(a.started_at || ""));
+  }, [topic, sessions]);
+
+  if (!topic) return null;
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col">
+        <DialogHeader>
+          <DialogTitle className="flex items-baseline gap-2">
+            <span>&ldquo;{topic.phrase}&rdquo;</span>
+            <span className="text-sm text-muted-foreground font-normal">
+              in {topic.client}
+            </span>
+          </DialogTitle>
+        </DialogHeader>
+
+        {loading && !sessions ? (
+          <div className="flex items-center justify-center py-12 text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin mr-2" />
+            Loading sessions…
+          </div>
+        ) : matches.length === 0 ? (
+          <p className="py-12 text-sm text-muted-foreground italic text-center">
+            No sessions found where this topic appears in the summary.
+            The topic count was derived from a different sample window —
+            try widening the Insights window above.
+          </p>
+        ) : (
+          <div className="flex-1 overflow-y-auto -mx-6 px-6">
+            <p className="text-xs text-muted-foreground mb-3">
+              {matches.length} session{matches.length === 1 ? "" : "s"} mention this topic.
+              Click any row to open it.
+            </p>
+            <div className="divide-y rounded border">
+              {matches.map((s) => (
+                <button
+                  key={s.session_id}
+                  type="button"
+                  onClick={() => onOpenSession(s.session_id)}
+                  className="w-full text-left p-3 hover:bg-muted/50 flex items-start gap-3 transition-colors"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium truncate">
+                      {s.display_name || "Untitled meeting"}
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-2 flex-wrap">
+                      {s.client && (
+                        <Badge variant="outline" className="text-[10px]">
+                          {s.client}
+                        </Badge>
+                      )}
+                      {s.project && (
+                        <Badge variant="outline" className="text-[10px]">
+                          {s.project}
+                        </Badge>
+                      )}
+                      <span>
+                        {s.started_at
+                          ? new Date(s.started_at).toLocaleDateString()
+                          : ""}
+                      </span>
+                      {s.duration_s > 0 && (
+                        <span>· {formatDuration(s.duration_s)}</span>
+                      )}
+                    </div>
+                  </div>
+                  <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0 mt-0.5" />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -221,10 +370,11 @@ function TimeBars({ title, rows, emptyText }: { title: string; rows: InsightsRow
 // ── Topic cloud ──────────────────────────────────────────────────────
 
 function TopicCloud({
-  topics, clientFilter,
+  topics, clientFilter, onTopicClick,
 }: {
   topics: Record<string, { phrase: string; count: number }[]>;
   clientFilter: string;
+  onTopicClick: (client: string, phrase: string) => void;
 }) {
   const entries = useMemo(() => {
     const ents = Object.entries(topics);
@@ -257,15 +407,17 @@ function TopicCloud({
                 const ratio = max > 0 ? r.count / max : 0;
                 const size = 12 + Math.round(ratio * 4);
                 return (
-                  <span
+                  <button
+                    type="button"
                     key={r.phrase}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-muted text-foreground/90"
+                    onClick={() => onTopicClick(clientName, r.phrase)}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-muted text-foreground/90 hover:bg-accent hover:text-accent-foreground transition-colors cursor-pointer"
                     style={{ fontSize: `${size}px` }}
-                    title={`${r.count} meetings`}
+                    title={`Click to see the ${r.count} meeting${r.count === 1 ? "" : "s"} where "${r.phrase}" came up`}
                   >
                     {r.phrase}
                     <span className="text-[10px] text-muted-foreground tabular-nums">×{r.count}</span>
-                  </span>
+                  </button>
                 );
               })}
             </div>
