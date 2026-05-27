@@ -1318,6 +1318,12 @@ fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
        // MEETING_RECORDER_PORT and falls back to 17645 only if it's
        // unset (e.g. running standalone for debugging).
        .env("MEETING_RECORDER_PORT", port.to_string())
+       // Pass our (Tauri shell) PID so the Python backend can watch
+       // for our death. If the shell exits without cleanly killing
+       // the backend (force-quit, crash, BSOD), the backend's
+       // parent-PID watchdog detects this within seconds and shuts
+       // itself down — preventing the orphan-recording scenario.
+       .env("MEETING_RECORDER_PARENT_PID", std::process::id().to_string())
        // Intel Fortran runtime workarounds — Windows-only but harmless on
        // POSIX (FOR_DISABLE_* are simply ignored when MKL isn't present).
        .env("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "1")
