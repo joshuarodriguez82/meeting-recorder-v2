@@ -6,12 +6,21 @@ import {
   type SessionSummary,
   type EngagementRegister,
   type EngagementRecord,
+  type EngagementOverlay,
 } from "@/lib/api";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Loader2, FileSpreadsheet, RefreshCw } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
+import {
+  Loader2, FileSpreadsheet, RefreshCw, Pencil, Save,
+} from "lucide-react";
 
 interface Props {
   sessions: SessionSummary[];
@@ -284,6 +293,17 @@ export function EngagementView({ sessions }: Props) {
             )}
           </div>
 
+          {/* Manual overlay — status, sponsor, milestone, notes.
+              The auto-roll handles "what's the system know"; this
+              handles "what's the SA know." Click Edit to open the
+              editor inline; values persist across sessions. */}
+          <EngagementOverlayCard
+            client={reg.client}
+            project={reg.project}
+            overlay={reg.overlay}
+            onSaved={(next) => setReg({ ...reg, overlay: next })}
+          />
+
           <Section
             title="Requirements"
             records={reg.requirements}
@@ -326,5 +346,231 @@ export function EngagementView({ sessions }: Props) {
         </>
       )}
     </div>
+  );
+}
+
+// Manual overlay card. Two states: read (compact display of whatever's
+// set, with an Edit button) and edit (form). Status uses a select with
+// known values, the others are inputs / textarea. Auto-detects unset
+// state and shows a CTA.
+function EngagementOverlayCard({
+  client, project, overlay, onSaved,
+}: {
+  client: string;
+  project: string;
+  overlay: EngagementOverlay;
+  onSaved: (next: EngagementOverlay) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [knownStatuses, setKnownStatuses] = useState<string[]>([
+    "active", "on-hold", "at-risk", "won", "lost", "archived",
+  ]);
+  const [form, setForm] = useState<EngagementOverlay>(overlay);
+
+  useEffect(() => { setForm(overlay); }, [overlay]);
+
+  // Pull canonical status list lazily on mount so the dropdown always
+  // reflects what the backend will accept.
+  useEffect(() => {
+    api.engagementKnownStatuses()
+      .then((r) => { if (r.statuses?.length) setKnownStatuses(r.statuses); })
+      .catch(() => { /* fall back to local list */ });
+  }, []);
+
+  const isEmpty = !overlay.status && !overlay.exec_sponsor
+    && !overlay.next_milestone && !overlay.notes;
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const res = await api.putEngagementOverlay(client, {
+        project,
+        status: form.status,
+        exec_sponsor: form.exec_sponsor,
+        next_milestone: form.next_milestone,
+        notes: form.notes,
+      });
+      onSaved(res.overlay);
+      setEditing(false);
+      toast.success("Engagement details saved");
+    } catch (e) {
+      toast.error(`Save failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // ── Read mode ──
+  if (!editing) {
+    return (
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+          <CardTitle className="text-sm font-medium">Engagement details</CardTitle>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setEditing(true)}
+            className="h-7"
+          >
+            <Pencil className="h-3 w-3 mr-1.5" />
+            {isEmpty ? "Add details" : "Edit"}
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          {isEmpty ? (
+            <p className="text-muted-foreground italic text-xs">
+              Add status, exec sponsor, next milestone, and free-form
+              notes — context that isn&apos;t in any recorded meeting.
+              Stored separately from the auto-rolled register.
+            </p>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3">
+              {overlay.status && (
+                <OverlayReadField label="Status">
+                  <OverlayStatusBadge status={overlay.status} />
+                </OverlayReadField>
+              )}
+              {overlay.exec_sponsor && (
+                <OverlayReadField label="Exec sponsor">
+                  {overlay.exec_sponsor}
+                </OverlayReadField>
+              )}
+              {overlay.next_milestone && (
+                <OverlayReadField label="Next milestone">
+                  {overlay.next_milestone}
+                </OverlayReadField>
+              )}
+              {overlay.updated_at && (
+                <OverlayReadField label="Last updated">
+                  <span className="text-muted-foreground text-xs">
+                    {new Date(overlay.updated_at).toLocaleString()}
+                  </span>
+                </OverlayReadField>
+              )}
+              {overlay.notes && (
+                <div className="md:col-span-2 space-y-1">
+                  <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                    Notes
+                  </div>
+                  <div className="whitespace-pre-wrap text-sm leading-relaxed bg-muted/40 rounded-md p-3">
+                    {overlay.notes}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    );
+  }
+
+  // ── Edit mode ──
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+        <CardTitle className="text-sm font-medium">Engagement details</CardTitle>
+        <div className="flex gap-2">
+          <Button
+            size="sm" variant="ghost" className="h-7"
+            onClick={() => { setForm(overlay); setEditing(false); }}
+            disabled={saving}
+          >
+            Cancel
+          </Button>
+          <Button size="sm" className="h-7" onClick={save} disabled={saving}>
+            {saving
+              ? <Loader2 className="h-3 w-3 animate-spin mr-1.5" />
+              : <Save className="h-3 w-3 mr-1.5" />}
+            Save
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="space-y-1.5">
+            <Label className="text-xs">Status</Label>
+            <Select
+              value={form.status || "__none__"}
+              onValueChange={(v) =>
+                setForm({ ...form, status: !v || v === "__none__" ? "" : v })}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Pick a status…" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">— None —</SelectItem>
+                {knownStatuses.map((s) => (
+                  <SelectItem key={s} value={s}>{s}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <Label className="text-xs">Exec sponsor</Label>
+            <Input
+              value={form.exec_sponsor}
+              onChange={(e) =>
+                setForm({ ...form, exec_sponsor: e.target.value })}
+              placeholder="e.g. Carla Rivera, CTO"
+            />
+          </div>
+          <div className="md:col-span-2 space-y-1.5">
+            <Label className="text-xs">Next milestone</Label>
+            <Input
+              value={form.next_milestone}
+              onChange={(e) =>
+                setForm({ ...form, next_milestone: e.target.value })}
+              placeholder="e.g. SOW signature target 2026-06-15"
+            />
+          </div>
+          <div className="md:col-span-2 space-y-1.5">
+            <Label className="text-xs">Notes</Label>
+            <Textarea
+              value={form.notes}
+              onChange={(e) => setForm({ ...form, notes: e.target.value })}
+              placeholder="Anything the auto-rolled register can't see — exec asks, political dynamics, commercial context, redlines just received…"
+              rows={5}
+              className="resize-y"
+            />
+          </div>
+        </div>
+        <p className="text-[11px] text-muted-foreground italic">
+          Stored separately from session data so editing here can&apos;t
+          break any meeting records.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function OverlayReadField({
+  label, children,
+}: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="space-y-1">
+      <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+        {label}
+      </div>
+      <div className="text-sm">{children}</div>
+    </div>
+  );
+}
+
+function OverlayStatusBadge({ status }: { status: string }) {
+  // Map known statuses to badge variants. Unknown values still
+  // render — they just use the neutral outline variant. Named
+  // separately from the per-record StatusBadge above (which renders
+  // record-level statuses like "open" / "met" / "dropped").
+  const variant: "default" | "secondary" | "destructive" | "outline" =
+    status === "active" ? "default"
+    : status === "at-risk" ? "destructive"
+    : status === "on-hold" ? "secondary"
+    : status === "won" ? "default"
+    : "outline";
+  return (
+    <Badge variant={variant} className="text-xs capitalize">
+      {status}
+    </Badge>
   );
 }
