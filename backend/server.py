@@ -776,6 +776,10 @@ class SettingsDTO(BaseModel):
     # Defaults match what those services seed: SA persona, General type.
     live_copilot_mode: str = "SA"
     live_copilot_meeting_type: str = "General"
+    # Polling intervals (seconds). Wide = full ~10 min window, hot =
+    # last ~90s. Hot=0 disables the hot tier (only wide runs).
+    live_copilot_wide_interval_sec: int = 45
+    live_copilot_hot_interval_sec: int = 0
     # Free-text context the SA pins for the live co-pilot — appended to
     # every coach_tick prompt as authoritative role / topic framing.
     # Examples: "Current engagement is a Genesys → Connect migration for
@@ -960,6 +964,8 @@ async def get_settings():
         live_anthropic_api_key=s.live_anthropic_api_key,
         live_copilot_mode=s.live_copilot_mode,
         live_copilot_meeting_type=s.live_copilot_meeting_type,
+        live_copilot_wide_interval_sec=s.live_copilot_wide_interval_sec,
+        live_copilot_hot_interval_sec=s.live_copilot_hot_interval_sec,
         copilot_custom_context=s.copilot_custom_context,
     )
 
@@ -1032,6 +1038,8 @@ async def save_settings(payload: SettingsDTO):
         live_anthropic_api_key=payload.live_anthropic_api_key or "",
         live_copilot_mode=(payload.live_copilot_mode or "").strip() or "SA",
         live_copilot_meeting_type=(payload.live_copilot_meeting_type or "").strip() or "General",
+        live_copilot_wide_interval_sec=max(15, min(300, payload.live_copilot_wide_interval_sec or 45)),
+        live_copilot_hot_interval_sec=max(0, min(60, payload.live_copilot_hot_interval_sec or 0)),
         copilot_custom_context=(payload.copilot_custom_context or "").strip(),
     )
     # If the recordings folder changed, migrate client + template state
@@ -2049,6 +2057,83 @@ async def copilot_tick():
     return payload
 
 
+@app.post("/recording/copilot/hot-tick")
+async def copilot_hot_tick():
+    """Hot variant of /recording/copilot/tick.
+
+    Reads only the last ~90 seconds of transcript (vs ~10 min for the
+    wide tick) and uses a tighter prompt biased toward EMPTINESS —
+    fires only when something time-sensitive is happening RIGHT NOW.
+    Frontend can poll this every ~15 seconds in parallel with the
+    wide tick; most calls return empty arrays, the ones that fire
+    arrive while the moment is still live.
+
+    Uses the same mode + meeting-type + custom-context composition as
+    the wide tick; just swaps the operational rules. Cheaper per
+    call (max_tokens=256, timeout=10s) so the 3-4x call rate doesn't
+    triple LLM cost. Hot-tick payloads are STILL persisted to
+    session.copilot_ticks so the post-meeting summary sees them.
+    """
+    s = svc.load_settings()
+    if not s.live_copilot_enabled:
+        raise HTTPException(status_code=403, detail="Live Co-Pilot is disabled in Settings.")
+    if not svc.recording_svc or not svc.recording_svc.is_recording:
+        raise HTTPException(status_code=409, detail="No recording is active.")
+    transcriber = svc.recording_svc.live_transcriber
+    if transcriber is None or not transcriber.is_running:
+        raise HTTPException(status_code=409, detail="Live transcription isn't running for this recording.")
+    coach = svc.live_summarizer or svc.summarizer
+    if coach is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Summarizer not ready — check provider/API key in Settings.")
+
+    segments = transcriber.recent_segments(last_seconds=90.0)
+    sess = svc.recording_svc.current_session
+    meeting_name = ""
+    if sess is not None:
+        meeting_name = getattr(sess, "meeting_name", "") or ""
+
+    custom_context = getattr(svc.settings, "copilot_custom_context", "") or ""
+    prior_ticks = (
+        list(sess.copilot_ticks)
+        if sess is not None and getattr(sess, "copilot_ticks", None)
+        else None
+    )
+    mode_name = getattr(svc.settings, "live_copilot_mode", "") or "SA"
+    type_name = getattr(svc.settings, "live_copilot_meeting_type", "") or "General"
+    mode_prompt = (
+        svc.copilot_mode_svc.get_prompt(mode_name)
+        if svc.copilot_mode_svc else ""
+    )
+    type_prompt = (
+        svc.copilot_meeting_type_svc.get_prompt(type_name)
+        if svc.copilot_meeting_type_svc else ""
+    )
+    result = await coach.coach_tick(
+        segments=segments, meeting_name=meeting_name,
+        custom_context=custom_context, prior_ticks=prior_ticks,
+        mode_name=mode_name, mode_prompt=mode_prompt,
+        meeting_type_name=type_name, meeting_type_prompt=type_prompt,
+        hot=True,
+    )
+    payload = {
+        "clarifying_questions": result.get("clarifying_questions", []),
+        "risks": result.get("risks", []),
+        "follow_ups": result.get("follow_ups", []),
+        "segment_count": len(segments),
+        "generated_at": datetime.now().isoformat(),
+        "hot": True,
+    }
+    if sess is not None and (
+        payload["clarifying_questions"]
+        or payload["risks"]
+        or payload["follow_ups"]
+    ):
+        sess.copilot_ticks.append(payload)
+    return payload
+
+
 @app.post("/settings/live-copilot")
 async def set_live_copilot_enabled(payload: dict):
     """Lightweight setter for `live_copilot_enabled` only.
@@ -2095,6 +2180,8 @@ async def set_live_copilot_enabled(payload: dict):
         live_anthropic_api_key=s.live_anthropic_api_key,
         live_copilot_mode=s.live_copilot_mode,
         live_copilot_meeting_type=s.live_copilot_meeting_type,
+        live_copilot_wide_interval_sec=s.live_copilot_wide_interval_sec,
+        live_copilot_hot_interval_sec=s.live_copilot_hot_interval_sec,
         copilot_custom_context=s.copilot_custom_context,
     )
     # Update the cached Settings in-place so the change is visible
@@ -2134,6 +2221,74 @@ async def get_copilot_history():
     if sess is None:
         return {"ticks": []}
     return {"ticks": list(sess.copilot_ticks)}
+
+
+class CoPilotSaveRequest(BaseModel):
+    """One co-pilot tick bullet the user wants persisted onto the
+    active session as a real artifact (not just a render-cache item).
+
+    kind: "follow_up" -> appended to session.action_items as a `- [ ]`
+                         markdown line, so post-processing surfaces it
+                         in the Follow-ups tab alongside everything
+                         else extracted from the transcript.
+          "decision"  -> appended to session.decisions as a `###` heading
+                         followed by the bullet text. Post-processing
+                         picks it up in the Decisions tab.
+          "note"      -> appended to session.notes as a free-form line.
+                         Notes never get LLM-extracted; this lets the
+                         user pin the suggestion as a personal reminder.
+    text: the bullet content itself.
+    """
+    kind: str
+    text: str
+
+
+@app.post("/recording/copilot/save")
+async def save_copilot_suggestion(req: CoPilotSaveRequest):
+    """Append a co-pilot tick suggestion as a real artifact on the
+    active session. Idempotent: if the exact text is already present
+    in the target field, we no-op rather than double-write."""
+    if not svc.recording_svc or not svc.recording_svc.is_recording:
+        raise HTTPException(status_code=409, detail="No recording active.")
+    sess = svc.recording_svc.current_session
+    if sess is None:
+        raise HTTPException(status_code=409, detail="No active session.")
+
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    kind = (req.kind or "").strip().lower()
+
+    def _append_if_missing(current: str, new_block: str) -> str:
+        """Append new_block to current iff the trimmed payload isn't
+        already present anywhere in current. Keeps a blank line between
+        existing content and the new addition for markdown readability."""
+        if current and text in current:
+            return current
+        if not current:
+            return new_block
+        sep = "\n\n" if not current.endswith("\n\n") else ""
+        return f"{current}{sep}{new_block}"
+
+    if kind == "follow_up":
+        line = f"- [ ] {text}"
+        sess.action_items = _append_if_missing(sess.action_items or "", line)
+    elif kind == "decision":
+        block = f"### Decision\n{text}"
+        sess.decisions = _append_if_missing(sess.decisions or "", block)
+    elif kind == "note":
+        line = f"• {text}"
+        sess.notes = _append_if_missing(sess.notes or "", line)
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"kind must be one of follow_up/decision/note (got {req.kind!r})")
+
+    # We persist in-memory only here — the session JSON gets written
+    # on stop_recording / process_session, same as copilot_ticks.append
+    # in the tick endpoint. Saving N times mid-call has zero I/O cost.
+    return {"ok": True, "kind": kind}
 
 
 def _stop_recording_sync():
@@ -4593,6 +4748,8 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         live_anthropic_api_key=s.live_anthropic_api_key,
         live_copilot_mode=new_mode,
         live_copilot_meeting_type=new_type,
+        live_copilot_wide_interval_sec=s.live_copilot_wide_interval_sec,
+        live_copilot_hot_interval_sec=s.live_copilot_hot_interval_sec,
         copilot_custom_context=s.copilot_custom_context,
     )
     svc.settings = dataclasses.replace(
