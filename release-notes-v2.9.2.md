@@ -1,8 +1,18 @@
 # Meeting Recorder v2.9.2
 
-Two deferred-from-v2.8 features land in one small, focused release: clickable Insights topics + manual fields for engagements that the auto-roll can't see. No co-pilot changes, no design overhaul — that's v3.0's job.
+Two deferred-from-v2.8 features land in one small, focused release: clickable Insights topics + manual fields for engagements that the auto-roll can't see. Plus a real bug fix in the v2.9.0 co-pilot mode/type switcher.
 
-(Why v2.9.2 and not v2.9.1: v2.9.1 is reserved for any smoke-test bug-fix that comes out of v2.9.0 install testing. This release is pure feature work, so it skips ahead.)
+(Why v2.9.2 and not v2.9.1: caught the mode-switcher bug below late, so it joined this release rather than getting its own.)
+
+---
+
+## Bug fix — Co-pilot mode/type switching mid-recording
+
+v2.9.0 shipped with a `NameError` in the `/settings/copilot-active` endpoint — `dataclasses` was imported inside one function but not at the module level, so every attempt to change the co-pilot mode or meeting type during a recording failed with "Couldn't set type: Failed to fetch."
+
+Fix is one line (local import inside the endpoint, matching the sibling `/settings/live-copilot` endpoint). All other co-pilot operations were unaffected; the bug ONLY hit the active-mode setter.
+
+If you tried changing mode/type mid-call on v2.9.0 and saw the fetch error, this is it. Upgrade to v2.9.2 and try again.
 
 ---
 
