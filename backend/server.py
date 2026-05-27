@@ -561,10 +561,16 @@ class Services:
                             f"Migration of {_filename} failed ({_e}); "
                             f"reading from legacy USER_DATA_DIR location.")
             self.client_cfg_svc = ClientConfigService(_recordings_dir)
-            # Pure aggregator over session JSONs + client configs — no
-            # state of its own, so it's safe to build eagerly here.
+            # CommitmentsService is built BEFORE the engagement service
+            # because the engagement register pulls open / outstanding
+            # commitment counts via it. Sidecar JSONs next to session
+            # pickles; no state of its own.
+            self.commitments_svc = CommitmentsService(self.session_svc)
+            # Pure aggregator over session JSONs + client configs +
+            # commitments — no state of its own, so it's safe to build
+            # eagerly here.
             self.engagement_svc = EngagementService(
-                self.session_svc, self.client_cfg_svc)
+                self.session_svc, self.client_cfg_svc, self.commitments_svc)
             self.template_svc = TemplateService(_recordings_dir)
             # Speaker profiles stay per-machine: voice fingerprints are
             # mic-hardware-dependent, syncing them across devices with
@@ -579,9 +585,6 @@ class Services:
             # session embeddings live next to session JSONs, so it just
             # needs that handle. Lazy index load happens on first search.
             self.search_svc = SearchService(self.session_svc)
-            # CommitmentsService is the same shape — sidecar JSONs next
-            # to session pickles. No state of its own.
-            self.commitments_svc = CommitmentsService(self.session_svc)
             # ItemStatusService overlays per-session "checked off" state
             # on top of the markdown-parsed follow-ups and decisions.
             self.item_status_svc = ItemStatusService(self.session_svc)

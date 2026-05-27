@@ -60,3 +60,9 @@ backend/python/
 backend/.venv/
 backend/recordings/
 .env
+# Catch ANY *.env (config.env, secrets.env, prod.env, etc.). The
+# runtime config.env at %LOCALAPPDATA%\MeetingRecorder\ already lives
+# outside this repo, but this defends against someone dropping a copy
+# at the project root for testing.
+*.env
+config.env
