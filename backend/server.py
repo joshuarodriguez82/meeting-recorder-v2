@@ -1496,9 +1496,11 @@ async def recording_status():
         duration_s = int((datetime.now() - svc.record_started_at).total_seconds())
         started_iso = svc.record_started_at.isoformat()
 
-    # Tick the auto-stop watchdog every poll (frontend polls /status
-    # every 1s while recording — that's the heartbeat we use for
-    # condition evaluation, no separate background task needed).
+    # Tick the auto-stop watchdog here too — duplicate of the timer
+    # in _watchdog_loop, kept on the status path so the UI sees the
+    # most-recent warnings list on every poll. The timer is the
+    # authoritative driver (it fires regardless of whether anyone's
+    # polling); this handler's tick is a freshness optimization.
     # If the watchdog says we should stop, do it BEFORE returning the
     # status so the UI sees is_recording=False on the same tick.
     warnings: list[dict] = []
@@ -3304,6 +3306,48 @@ async def process_session(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Exponential-backoff retry for LLM calls that hit 429 / rate-limit
+# responses. v2.9.0 shipped without this and a single Anthropic rate
+# burst would cascade-fail every subsequent extractor in process_full
+# (summary, action_items, decisions, requirements all in the same
+# minute bucket). With this, each extractor gets three attempts at
+# 2s / 8s / 30s before giving up.
+#
+# Detection is intentionally broad — the Anthropic SDK and OpenAI SDK
+# raise different exception types but both surface "429" or "rate" in
+# the message. Keep this textual rather than catching specific
+# exception classes; the alternative is a fragile import-time SDK
+# detection that breaks the moment a new provider is added.
+async def _llm_call_with_retry(coro_factory, op_name: str,
+                                max_attempts: int = 3):
+    delays = [2.0, 8.0, 30.0]
+    last_err: Optional[Exception] = None
+    for attempt in range(max_attempts):
+        try:
+            return await coro_factory()
+        except Exception as e:
+            msg = str(e).lower()
+            is_rate_limit = (
+                "429" in msg
+                or "rate limit" in msg
+                or "ratelimit" in msg
+                or "too many requests" in msg
+            )
+            last_err = e
+            if not is_rate_limit or attempt == max_attempts - 1:
+                # Not a rate-limit error, or out of attempts — propagate.
+                raise
+            delay = delays[min(attempt, len(delays) - 1)]
+            logger.warning(
+                f"{op_name}: rate-limited, retrying in {delay:.0f}s "
+                f"(attempt {attempt + 2}/{max_attempts}): {e}")
+            await asyncio.sleep(delay)
+    # Unreachable; mypy/typing comfort.
+    if last_err:
+        raise last_err
+    raise RuntimeError(f"{op_name}: unreachable retry exit")
+
+
 async def _run_extraction(session_id: str, extractor_name: str, field_name: str,
                            export_fn_name: str, extra_arg=None):
     svc.load_settings()
@@ -3320,10 +3364,14 @@ async def _run_extraction(session_id: str, extractor_name: str, field_name: str,
     user_notes = session.notes or ""
     try:
         method = getattr(svc.summarizer, extractor_name)
-        if extra_arg is not None:
-            result = await method(transcript, extra_arg, notes=user_notes)
-        else:
-            result = await method(transcript, notes=user_notes)
+        # Wrap the actual LLM call in the retry helper. Coro factory
+        # rebuilds the coroutine on each retry — coroutines can't be
+        # awaited twice.
+        async def _invoke():
+            if extra_arg is not None:
+                return await method(transcript, extra_arg, notes=user_notes)
+            return await method(transcript, notes=user_notes)
+        result = await _llm_call_with_retry(_invoke, extractor_name)
         setattr(session, field_name, result)
         await asyncio.to_thread(svc.session_svc.save, session)
         try:
@@ -3391,14 +3439,16 @@ async def summarize_session(session_id: str, req: TemplateRequest):
         # can't bake a prompt into the summarizer anymore.
         prompt_text = await asyncio.to_thread(
             svc.template_svc.get_prompt, req.template)
-        result = await svc.summarizer.summarize(
-            session.full_transcript(),
-            prompt=prompt_text,
-            notes=session.notes or "",
-            template_name=req.template,
-            image_paths=list(session.screenshots or []),
-            copilot_observations=_copilot_observations_blob(session),
-        )
+        async def _summarize():
+            return await svc.summarizer.summarize(
+                session.full_transcript(),
+                prompt=prompt_text,
+                notes=session.notes or "",
+                template_name=req.template,
+                image_paths=list(session.screenshots or []),
+                copilot_observations=_copilot_observations_blob(session),
+            )
+        result = await _llm_call_with_retry(_summarize, "summarize")
         session.summary = result
         session.template = req.template
         await asyncio.to_thread(svc.session_svc.save, session)
@@ -3687,11 +3737,14 @@ async def _extract_and_save(
         # `template=<name>` directly was a vestige of the old API.
         prompt_text = await asyncio.to_thread(
             svc.template_svc.get_prompt, template)
-        result = await method(
-            transcript, prompt=prompt_text,
-            notes=notes, template_name=template,
-            image_paths=list(session.screenshots or []),
-            copilot_observations=_copilot_observations_blob(session))
+        # Wrap the LLM call in retry-on-429 — see _llm_call_with_retry.
+        async def _summarize():
+            return await method(
+                transcript, prompt=prompt_text,
+                notes=notes, template_name=template,
+                image_paths=list(session.screenshots or []),
+                copilot_observations=_copilot_observations_blob(session))
+        result = await _llm_call_with_retry(_summarize, method_name)
         session.template = template
     else:
         # All four markdown extractors now accept image_paths so
@@ -3699,10 +3752,12 @@ async def _extract_and_save(
         # the same way they inform the summary. Older builds passed
         # only the transcript; this widening is backwards-compatible
         # with the Summarizer signatures (image_paths default = None).
-        result = await method(
-            transcript, notes=notes,
-            image_paths=list(session.screenshots or []),
-        )
+        async def _extract():
+            return await method(
+                transcript, notes=notes,
+                image_paths=list(session.screenshots or []),
+            )
+        result = await _llm_call_with_retry(_extract, method_name)
     setattr(session, field_name, result)
     await asyncio.to_thread(svc.session_svc.save, session)
 
@@ -4811,6 +4866,129 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
     return {"mode": new_mode, "meeting_type": new_type}
 
 
+# ── Backend-driven watchdog tick ────────────────────────────────────
+#
+# CRITICAL: previously the watchdog only ticked when the frontend
+# polled /recording/status. If no UI was driving the polls (orphan
+# backend, frontend crashed, network blip), the watchdog NEVER fired
+# and recordings ran indefinitely. The 4h17m orphan-recording incident
+# happened in exactly this state — there was nothing polling /status
+# for the orphan backend, so its watchdog never evaluated hard cap,
+# silence, or overrun.
+#
+# Now we fire the watchdog from an asyncio task on a 1-second
+# cadence regardless of whether anyone's polling. Same logic the
+# /recording/status handler uses, just on a backend-owned timer.
+async def _watchdog_loop():
+    while True:
+        try:
+            await asyncio.sleep(1.0)
+            rec = svc.recording_svc
+            if rec is None or not rec.is_recording:
+                continue
+            decision = await asyncio.to_thread(rec.watchdog_tick)
+            if decision.get("should_auto_stop"):
+                reason = decision.get("reason", "?")
+                logger.info(
+                    f"Watchdog (timer-driven) auto-stopping recording: "
+                    f"{reason}")
+                try:
+                    await asyncio.to_thread(_stop_recording_sync)
+                except Exception as e:
+                    logger.exception(
+                        f"Watchdog auto-stop raised: {e}")
+        except Exception as e:
+            logger.warning(f"Watchdog tick failed: {e}")
+
+
+# ── Parent-PID deadman switch ───────────────────────────────────────
+#
+# CRITICAL SAFETY LAYER. If the Tauri shell that spawned us dies
+# (force-quit, crash, BSOD, Windows kills the tree weirdly), this
+# backend must NOT continue recording silently in the background. We
+# poll the parent PID every 5 seconds — if it goes missing we cleanly
+# stop any active recording and exit.
+#
+# This prevents the v2.9.0 incident where an orphan backend recorded
+# 4h17m of audio across multiple meetings because Tauri couldn't kill
+# it on shell exit.
+#
+# Trip wire is the env var MEETING_RECORDER_PARENT_PID set by the
+# Tauri spawn in lib.rs. When the var is absent (e.g. running server.py
+# standalone for dev), the watchdog no-ops.
+async def _parent_pid_watchdog():
+    raw = os.environ.get("MEETING_RECORDER_PARENT_PID", "").strip()
+    if not raw:
+        logger.info("Parent-PID watchdog disabled (no PID env var)")
+        return
+    try:
+        parent_pid = int(raw)
+    except ValueError:
+        logger.warning(
+            f"Parent-PID watchdog: invalid PID '{raw}', disabling")
+        return
+    logger.info(f"Parent-PID watchdog armed (parent={parent_pid})")
+    poll_interval = 5.0
+    while True:
+        try:
+            await asyncio.sleep(poll_interval)
+            if not _pid_alive(parent_pid):
+                logger.critical(
+                    f"Parent process {parent_pid} died. "
+                    f"Stopping any active recording and exiting NOW.")
+                # Best-effort stop the recording so the WAV file is
+                # finalized cleanly rather than left as a `_recording_*`
+                # orphan. The auto-recover routine on next launch would
+                # pick it up, but a clean stop is better.
+                try:
+                    if svc.recording_svc and svc.recording_svc.is_recording:
+                        await asyncio.to_thread(
+                            svc.recording_svc.stop_recording)
+                except Exception as e:
+                    logger.exception(
+                        f"Parent-PID watchdog: clean stop failed: {e}")
+                # Force-exit. os._exit() bypasses any pending tasks
+                # (we explicitly DO NOT want graceful shutdown here —
+                # the parent is gone, there's nothing left to serve).
+                os._exit(0)
+        except Exception as e:
+            logger.warning(f"Parent-PID watchdog tick failed: {e}")
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True if a process with PID exists. Cross-platform."""
+    if sys.platform == "win32":
+        # Windows: use OpenProcess with PROCESS_QUERY_LIMITED_INFORMATION
+        # so we don't need elevated rights. Returns NULL handle on
+        # missing PID. Avoids spawning a wmic / Get-Process child.
+        try:
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False
+            # Check if it's still running (exit code 259 = STILL_ACTIVE)
+            exit_code = ctypes.c_ulong()
+            ok = kernel32.GetExitCodeProcess(
+                handle, ctypes.byref(exit_code))
+            kernel32.CloseHandle(handle)
+            return bool(ok) and exit_code.value == 259
+        except Exception:
+            return True  # fail open — don't kill ourselves on uncertainty
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True  # process exists, just no permission to signal
+        except Exception:
+            return True
+
+
 # ── Startup ──────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
@@ -4819,6 +4997,22 @@ async def startup():
         logger.info("Backend started")
     except Exception as e:
         logger.warning(f"Settings not yet configured: {e}")
+
+    # PARENT-PID WATCHDOG — first thing after settings. If our Tauri
+    # shell dies, we exit within ~5 seconds.
+    try:
+        asyncio.create_task(_parent_pid_watchdog())
+    except Exception as e:
+        logger.error(f"Could not start parent-PID watchdog: {e}")
+
+    # RECORDING WATCHDOG — runs on its own timer regardless of whether
+    # the frontend is polling. Without this, an orphan backend (or one
+    # whose UI has crashed) records forever because nothing evaluates
+    # the auto-stop conditions.
+    try:
+        asyncio.create_task(_watchdog_loop())
+    except Exception as e:
+        logger.error(f"Could not start recording watchdog loop: {e}")
 
     # Start the calendar-driven auto-recorder if the user left it on
     # last session. Safe no-op when settings load failed above.
