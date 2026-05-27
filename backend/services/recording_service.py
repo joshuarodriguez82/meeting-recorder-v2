@@ -574,10 +574,8 @@ class RecordingService:
         should_stop = False
         stop_reason = ""
 
-        # Hard cap — always-on safety net. If the user disabled it (set
-        # to 0) we skip; but the default is 4 hours, which is the
-        # main thing protecting against "I left the recording running
-        # overnight" scenarios.
+        # Hard cap — user-configurable safety net. Default 4 hours.
+        # 0 = disabled (but the absolute cap below still applies).
         hard_cap_h = max(0, getattr(s, "hard_cap_hours", 0))
         # We need the recording start time. Fall back to session.started_at
         # since RecordingService doesn't track it independently.
@@ -594,6 +592,33 @@ class RecordingService:
                         f"hard cap. Change in Settings → Workflow."),
                     "since_seconds": int(elapsed_h * 3600),
                 })
+
+        # ABSOLUTE CAP — independent of user settings, cannot be
+        # disabled. After an incident where an orphan backend recorded
+        # 4h17m of audio across multiple meetings, we enforce a system-
+        # wide ceiling that triggers regardless of what the user has
+        # configured. 6 hours is generous (longest legit meeting we've
+        # seen is ~3.5 hours) but tight enough that any "the recording
+        # ran all day" scenario hits this wall.
+        ABSOLUTE_CAP_HOURS = 6
+        if started_at and not should_stop:
+            elapsed_h = (now - started_at).total_seconds() / 3600.0
+            if elapsed_h >= ABSOLUTE_CAP_HOURS:
+                should_stop = True
+                stop_reason = "absolute_cap"
+                warnings.append({
+                    "code": "absolute_cap_hit",
+                    "message": (
+                        f"Recording stopped at the {ABSOLUTE_CAP_HOURS}-hour "
+                        f"absolute system maximum. This cannot be disabled. "
+                        f"If you genuinely need longer recordings, please "
+                        f"contact the developer — this limit exists to "
+                        f"prevent runaway capture in failure scenarios."),
+                    "since_seconds": int(elapsed_h * 3600),
+                })
+                logger.critical(
+                    f"ABSOLUTE_CAP fired at {elapsed_h:.2f}h — "
+                    f"stopping recording regardless of user settings")
 
         # Dead-air: how long since the last chunk above the silence floor.
         if self._last_speech_at:
