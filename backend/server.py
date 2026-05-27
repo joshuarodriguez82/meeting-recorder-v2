@@ -1496,9 +1496,11 @@ async def recording_status():
         duration_s = int((datetime.now() - svc.record_started_at).total_seconds())
         started_iso = svc.record_started_at.isoformat()
 
-    # Tick the auto-stop watchdog every poll (frontend polls /status
-    # every 1s while recording — that's the heartbeat we use for
-    # condition evaluation, no separate background task needed).
+    # Tick the auto-stop watchdog here too — duplicate of the timer
+    # in _watchdog_loop, kept on the status path so the UI sees the
+    # most-recent warnings list on every poll. The timer is the
+    # authoritative driver (it fires regardless of whether anyone's
+    # polling); this handler's tick is a freshness optimization.
     # If the watchdog says we should stop, do it BEFORE returning the
     # status so the UI sees is_recording=False on the same tick.
     warnings: list[dict] = []
@@ -4864,6 +4866,41 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
     return {"mode": new_mode, "meeting_type": new_type}
 
 
+# ── Backend-driven watchdog tick ────────────────────────────────────
+#
+# CRITICAL: previously the watchdog only ticked when the frontend
+# polled /recording/status. If no UI was driving the polls (orphan
+# backend, frontend crashed, network blip), the watchdog NEVER fired
+# and recordings ran indefinitely. The 4h17m orphan-recording incident
+# happened in exactly this state — there was nothing polling /status
+# for the orphan backend, so its watchdog never evaluated hard cap,
+# silence, or overrun.
+#
+# Now we fire the watchdog from an asyncio task on a 1-second
+# cadence regardless of whether anyone's polling. Same logic the
+# /recording/status handler uses, just on a backend-owned timer.
+async def _watchdog_loop():
+    while True:
+        try:
+            await asyncio.sleep(1.0)
+            rec = svc.recording_svc
+            if rec is None or not rec.is_recording:
+                continue
+            decision = await asyncio.to_thread(rec.watchdog_tick)
+            if decision.get("should_auto_stop"):
+                reason = decision.get("reason", "?")
+                logger.info(
+                    f"Watchdog (timer-driven) auto-stopping recording: "
+                    f"{reason}")
+                try:
+                    await asyncio.to_thread(_stop_recording_sync)
+                except Exception as e:
+                    logger.exception(
+                        f"Watchdog auto-stop raised: {e}")
+        except Exception as e:
+            logger.warning(f"Watchdog tick failed: {e}")
+
+
 # ── Parent-PID deadman switch ───────────────────────────────────────
 #
 # CRITICAL SAFETY LAYER. If the Tauri shell that spawned us dies
@@ -4967,6 +5004,15 @@ async def startup():
         asyncio.create_task(_parent_pid_watchdog())
     except Exception as e:
         logger.error(f"Could not start parent-PID watchdog: {e}")
+
+    # RECORDING WATCHDOG — runs on its own timer regardless of whether
+    # the frontend is polling. Without this, an orphan backend (or one
+    # whose UI has crashed) records forever because nothing evaluates
+    # the auto-stop conditions.
+    try:
+        asyncio.create_task(_watchdog_loop())
+    except Exception as e:
+        logger.error(f"Could not start recording watchdog loop: {e}")
 
     # Start the calendar-driven auto-recorder if the user left it on
     # last session. Safe no-op when settings load failed above.
