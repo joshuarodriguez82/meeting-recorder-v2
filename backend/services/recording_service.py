@@ -139,6 +139,9 @@ class RecordingService:
         self._meeting_scheduled_end: Optional[datetime] = None
         self._watchdog_warnings: List[dict] = []
         self._watchdog_lock = threading.Lock()
+        # Rate-limit the per-tick watchdog diagnostic log so it doesn't
+        # drown out the rest of backend.log (status polls fire at 1 Hz).
+        self._watchdog_last_log_at: Optional[datetime] = None
 
     @property
     def current_session(self) -> Optional[Session]:
@@ -649,6 +652,28 @@ class RecordingService:
 
         with self._watchdog_lock:
             self._watchdog_warnings = warnings
+
+        # Diagnostic log — rate-limited to once a minute. Lets us
+        # reconstruct why the watchdog did or didn't fire when a user
+        # reports "it never auto-stopped". Format is greppable.
+        log_due = (
+            self._watchdog_last_log_at is None
+            or (now - self._watchdog_last_log_at).total_seconds() >= 60
+        )
+        if log_due:
+            self._watchdog_last_log_at = now
+            last_speech_age = (
+                int((now - self._last_speech_at).total_seconds())
+                if self._last_speech_at else None
+            )
+            logger.info(
+                f"watchdog: silence_s={silence_s} "
+                f"last_speech_age={last_speech_age} "
+                f"loopback_ema={self._loopback_level_ema:.4f} "
+                f"silence_warn_min={silence_warn_min} "
+                f"silence_stop_min={silence_stop_min} "
+                f"should_stop={should_stop} reason={stop_reason!r}")
+
         return {
             "warnings": warnings,
             "should_auto_stop": should_stop,
@@ -731,7 +756,14 @@ class RecordingService:
             # makes the silence timer run even though the other people
             # are still talking — the recorder would auto-stop mid-call.
             # This runs whether or not live transcription is enabled.
-            if chunk_rms > SILENCE_RMS_FLOOR:
+            #
+            # Loopback uses DUCK_LEVEL_THRESHOLD (not SILENCE_RMS_FLOOR
+            # like the mic does) because the system audio stream
+            # typically carries low-level codec hiss / keepalive noise
+            # even after the meeting ends. The lower mic floor is right
+            # for whispered speech; the higher loopback floor only
+            # counts actual far-end speech.
+            if chunk_rms > DUCK_LEVEL_THRESHOLD:
                 self._last_speech_at = datetime.now()
         except Exception:
             # Never let RMS math kill the audio path.

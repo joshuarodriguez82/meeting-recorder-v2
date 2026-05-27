@@ -1173,11 +1173,23 @@ export interface EngagementRegister {
   project: string;
   generated_at: string;
   session_count: number;
+  // ISO timestamps of the first and most recent meeting that fed this
+  // register. Empty string when no sessions exist yet.
+  first_meeting_at: string;
+  last_meeting_at: string;
   counts: {
     open_requirements: number;
     decisions: number;
     open_action_items: number;
     open_questions: number;
+    outstanding_commitments: number;
+    total_commitments: number;
+  };
+  commitments: {
+    outstanding: number;
+    delivered: number;
+    dismissed: number;
+    total: number;
   };
   requirements: EngagementRecord[];
   decisions: EngagementRecord[];

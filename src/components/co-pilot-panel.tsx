@@ -48,6 +48,9 @@ export function CoPilotPanel({ recording, enabled }: Props) {
   const [loading, setLoading] = useState(false);
   const [paused, setPaused] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
+  // Surfaced when a manual Refresh-now click returns an empty tick.
+  // Cleared on the next non-empty tick or the next manual click.
+  const [refreshNote, setRefreshNote] = useState<string | null>(null);
   // Track in-flight ticks so a manual "Refresh now" doesn't overlap
   // with the timer-driven one. Ref (not state) so the latest value is
   // visible inside the timer callback without re-creating the interval.
@@ -76,10 +79,11 @@ export function CoPilotPanel({ recording, enabled }: Props) {
     })();
   }, [recording, enabled]);
 
-  const tick = useCallback(async () => {
+  const tick = useCallback(async (manual = false) => {
     if (inFlight.current) return;
     inFlight.current = true;
     setLoading(true);
+    if (manual) setRefreshNote(null);
     try {
       const r = await api.copilotTick();
       // Drop empty ticks so the history doesn't fill up with no-ops
@@ -92,6 +96,11 @@ export function CoPilotPanel({ recording, enabled }: Props) {
         r.follow_ups.length === 0;
       if (!isEmpty) {
         setTicks((prev) => [r, ...prev]);
+        setRefreshNote(null);
+      } else if (manual) {
+        // User clicked Refresh and got nothing — say so, otherwise it
+        // looks like the button is broken.
+        setRefreshNote("No new coaching content since the last tick.");
       }
       setLastError(null);
     } catch (e) {
@@ -99,6 +108,8 @@ export function CoPilotPanel({ recording, enabled }: Props) {
         // Feature disabled or no active recording — stop trying, the
         // parent will unmount us shortly anyway.
         setLastError(null);
+      } else if (e instanceof ApiError && e.status === 429) {
+        setLastError("Rate-limited by the LLM — retrying on the next tick.");
       } else {
         setLastError(e instanceof Error ? e.message : "Tick failed");
       }
@@ -146,7 +157,7 @@ export function CoPilotPanel({ recording, enabled }: Props) {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => void tick()}
+            onClick={() => void tick(true)}
             disabled={loading || paused}
             title="Refresh now"
           >
@@ -189,11 +200,13 @@ export function CoPilotPanel({ recording, enabled }: Props) {
             ? ` · ${ticks[0].segment_count} recent segments`
             : ""}
         </span>
-        {lastError && (
+        {lastError ? (
           <span className="text-amber-600 dark:text-amber-400">
             {lastError}
           </span>
-        )}
+        ) : refreshNote ? (
+          <span className="text-muted-foreground italic">{refreshNote}</span>
+        ) : null}
       </div>
     </div>
   );
