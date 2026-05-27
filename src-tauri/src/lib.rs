@@ -124,6 +124,65 @@ fn venv_python_candidates(venv: &std::path::Path) -> Vec<std::path::PathBuf> {
     ]
 }
 
+/// Kill any pythonw/python processes that were spawned by a previous
+/// launch of this app but never cleaned up — leaving them running can
+/// keep recording audio silently in the background. Identifies orphans
+/// by executable path matching `python_exe` (the venv's pythonw.exe).
+///
+/// Windows-only because the orphan-accumulation scenario only reproduces
+/// there reliably; macOS process management handles this case cleanly.
+fn kill_orphan_backends(python_exe: &std::path::Path) {
+    #[cfg(windows)]
+    {
+        // Pull every process whose ExecutablePath matches our venv's
+        // pythonw.exe. The `wmic` CLI is deprecated in Windows 11 but
+        // still ships; PowerShell's Get-CimInstance is the modern
+        // replacement. Try Get-CimInstance first, fall back to wmic.
+        let target = python_exe.to_string_lossy().replace('\\', "\\\\");
+        let ps_cmd = format!(
+            "Get-CimInstance Win32_Process | \
+             Where-Object {{ $_.ExecutablePath -eq '{}' }} | \
+             ForEach-Object {{ \
+                 Write-Output \"orphan-pid=$($_.ProcessId)\"; \
+                 Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue \
+             }}",
+            python_exe.to_string_lossy().replace('\'', "''")
+        );
+
+        let mut cmd = Command::new("powershell");
+        cmd.arg("-NoProfile").arg("-NonInteractive")
+           .arg("-Command").arg(&ps_cmd);
+        no_window(&mut cmd);
+
+        match cmd.output() {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let pids: Vec<&str> = stdout.lines()
+                    .filter(|l| l.starts_with("orphan-pid="))
+                    .collect();
+                if pids.is_empty() {
+                    rlog("No orphan backends found");
+                } else {
+                    rlog(&format!(
+                        "Killed {} orphan backend(s): {} (target: {})",
+                        pids.len(),
+                        pids.join(", "),
+                        target,
+                    ));
+                }
+            }
+            Err(e) => {
+                rlog(&format!(
+                    "Orphan-backend scan failed (continuing anyway): {}", e));
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = python_exe; // silence unused-var warning
+    }
+}
+
 /// Apply the Windows CREATE_NO_WINDOW flag if compiled for Windows. No-op
 /// on POSIX where there's no console-flash issue to suppress.
 fn no_window(cmd: &mut Command) -> &mut Command {
@@ -1227,6 +1286,14 @@ fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
     rlog(&format!("Spawning Python: {}", python_exe.display()));
     rlog(&format!("  server.py: {}", server_py.display()));
     rlog(&format!("  backend.log: {}", backend_log_path().display()));
+
+    // CRITICAL: kill any orphan Python backends from previous app
+    // launches before we spawn a new one. Without this, force-quits /
+    // crash-restarts / double-launches accumulate orphan processes
+    // that keep recording audio in the background. One user
+    // accumulated three orphans over 30 hours, one of which captured
+    // 4h17m of audio silently.
+    kill_orphan_backends(&python_exe);
 
     let log_file = OpenOptions::new()
         .create(true)
