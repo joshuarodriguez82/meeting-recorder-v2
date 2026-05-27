@@ -242,6 +242,38 @@ def _coerce_json(text: str) -> Optional[dict]:
     return None
 
 
+# ── Co-Pilot prompt composition ──────────────────────────────────────
+#
+# The live co-pilot prompt is composed at tick time from three editable
+# pieces (mode + meeting type + custom context) and one fixed piece
+# (output rules). The fixed piece guarantees the wire format the panel
+# parses, so the user editing modes / types can't accidentally break
+# the JSON contract. Fallbacks below are baked-in defaults used when
+# the service layer hasn't been wired or has returned empty for some
+# reason — keeps coaching alive instead of erroring.
+_COACH_OUTPUT_RULES = (
+    "Reply with a JSON object — and nothing else — using exactly these keys:\n"
+    '  "clarifying_questions": up to 3 short questions, ≤120 chars each.\n'
+    '  "risks": up to 3 short flags, ≤120 chars each.\n'
+    '  "follow_ups": up to 3 short concrete suggestions, ≤120 chars each.\n'
+    "If a category has nothing useful for THIS specific moment, return "
+    "an empty array — do NOT fabricate generic advice to fill the slot. "
+    "Do not include markdown, prose, or code fences around the JSON."
+)
+
+_FALLBACK_MODE_PROMPT = (
+    "You are a live in-call co-pilot for a Solutions Architect at "
+    "[scrubbed] Digital, focused on Amazon Connect / CCaaS / contact-center "
+    "work. Coach in real time."
+)
+
+_FALLBACK_MEETING_TYPE_PROMPT = (
+    "No specific meeting-type lens applies. Use general meeting "
+    "judgment — surface what the participants seem to be working "
+    "toward and what's getting in the way."
+)
+
+
 class Summarizer:
 
     def __init__(
@@ -457,6 +489,10 @@ class Summarizer:
         self, segments: List[dict], meeting_name: str = "",
         custom_context: str = "",
         prior_ticks: Optional[List[dict]] = None,
+        mode_name: str = "",
+        mode_prompt: str = "",
+        meeting_type_name: str = "",
+        meeting_type_prompt: str = "",
     ) -> dict:
         """In-call coaching tick. Given the last few minutes of live
         transcript segments, produce three short bullet lists:
@@ -473,7 +509,21 @@ class Summarizer:
 
         Tight max_tokens (512) and a 20s timeout because this is called
         from a 45s frontend poll loop; a slow response would queue up.
-        """
+
+        Prompt composition (three editable layers + one fixed):
+          mode_prompt          — persona (SA / Sales / Executive)
+          meeting_type_prompt  — meeting-type modifier (Discovery / SOW /
+                                 Status / etc.) applied within the mode
+          custom_context       — per-engagement pinned framing from Settings
+          OUTPUT_RULES         — fixed JSON schema; appended here so the
+                                 panel's parsing contract is guaranteed
+                                 regardless of how the user edits the
+                                 mode/meeting-type prompts
+
+        Backwards-compatible: when mode_prompt / meeting_type_prompt
+        come in empty (older callers / un-migrated state), we fall
+        through to a sensible SA + General default baked into this
+        method so coaching keeps working."""
         if not segments:
             return {"clarifying_questions": [], "risks": [], "follow_ups": []}
 
@@ -494,7 +544,8 @@ class Summarizer:
         )
 
         # Optional custom context the SA pinned in Settings — per-
-        # engagement framing the baked-in prompt can't anticipate.
+        # engagement framing the mode + meeting-type prompts can't
+        # anticipate.
         custom_block = ""
         if custom_context and custom_context.strip():
             custom_block = (
@@ -531,41 +582,19 @@ class Summarizer:
                     "evolved, what's been answered, what's gone unaddressed.\n"
                 )
 
+        # Compose mode + meeting type. Either layer empty falls through
+        # to a baked-in default — keeps older callers (and broken
+        # service state) from blowing up coaching.
+        mode_block = (mode_prompt or "").strip() or _FALLBACK_MODE_PROMPT
+        meeting_type_block = (meeting_type_prompt or "").strip()
+        type_label = (meeting_type_name or "").strip() or "General"
+        if not meeting_type_block:
+            meeting_type_block = _FALLBACK_MEETING_TYPE_PROMPT
+
         prompt = (
-            "You are a live in-call co-pilot for a Solutions Architect at "
-            "[scrubbed] Digital. The SA's focus areas are Amazon Connect, "
-            "CCaaS migrations (from Genesys / NICE / Cisco UCCX / Five9 / "
-            "Webex Contact Center), contact-center IVR/contact flow design, "
-            "Lambda + Bedrock integrations, IAM trust chains, and "
-            "agent-experience design. You coach in real time as the call "
-            "happens.\n\n"
-            "Read the recent transcript (last few minutes of a meeting in "
-            "progress) and reply with a JSON object — and nothing else — "
-            "using exactly these keys:\n"
-            '  "clarifying_questions": up to 3 short questions the SA '
-            "should ask NOW to fill scope gaps, surface unstated "
-            "assumptions, or pressure-test customer claims. Prefer "
-            "concrete CCaaS / Connect / integration / commercial-scope "
-            "questions over generic 'what do you mean by that?' filler.\n"
-            '  "risks": up to 3 short flags. Examples of what counts as a '
-            "risk worth surfacing: scope creep, undefined integration "
-            "boundary (CRM/IAM/data), unrealistic timeline, missing "
-            "stakeholder, vendor-lock-in implication, hidden licensing "
-            "cost, contact-flow gotcha (DTMF vs ASR, queue overflow, "
-            "after-hours routing), legacy-system constraint nobody named. "
-            "Skip generic 'communication risk' / 'team alignment' "
-            "platitudes.\n"
-            '  "follow_ups": up to 3 short concrete next-step suggestions. '
-            "Tie to a named owner if the transcript identifies one. "
-            "Examples: 'send capability comparison vs Genesys', "
-            "'confirm IAM trust policy with customer security', 'pull "
-            "current contact flow JSON for review', 'schedule technical "
-            "deep-dive on Lex bot intents'.\n\n"
-            "Rules: each bullet must be one sentence, ≤120 characters. "
-            "If a category genuinely has nothing useful for THIS specific "
-            "moment, return an empty array — do NOT fabricate generic "
-            "advice to fill the slot. Do not include markdown, prose, or "
-            "code fences around the JSON.\n"
+            f"{mode_block}\n\n"
+            f"This meeting is a **{type_label}**. {meeting_type_block}\n\n"
+            f"{_COACH_OUTPUT_RULES}\n"
             f"{custom_block}"
             f"{prior_block}\n"
             f"{header}Recent transcript:\n{transcript}"

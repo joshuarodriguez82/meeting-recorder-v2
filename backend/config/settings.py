@@ -207,6 +207,11 @@ class Settings:
     live_openai_api_key: str
     live_openai_base_url: str
     live_anthropic_api_key: str
+    # Active co-pilot persona + meeting-type modifier names. Both resolve
+    # through the CoPilotMode / CoPilotMeetingType services, which seed
+    # editable defaults. Defaults: SA persona, General type.
+    live_copilot_mode: str
+    live_copilot_meeting_type: str
     # Free-text the SA pins per-engagement as authoritative role / topic
     # framing for the co-pilot. Appended to every coach_tick prompt.
     # Empty by default — the baked-in SA-flavored prompt runs as-is.
@@ -319,6 +324,9 @@ class Settings:
             live_openai_api_key=_get("LIVE_OPENAI_API_KEY", ""),
             live_openai_base_url=_get("LIVE_OPENAI_BASE_URL", ""),
             live_anthropic_api_key=_get("LIVE_ANTHROPIC_API_KEY", ""),
+            live_copilot_mode=_get("LIVE_COPILOT_MODE", "SA"),
+            live_copilot_meeting_type=_get(
+                "LIVE_COPILOT_MEETING_TYPE", "General"),
             # Mirrors the escape in save() — `\n` literal on disk →
             # real newlines in the runtime value.
             copilot_custom_context=_get(
@@ -391,6 +399,8 @@ class Settings:
         live_openai_api_key: str = "",
         live_openai_base_url: str = "",
         live_anthropic_api_key: str = "",
+        live_copilot_mode: str = "SA",
+        live_copilot_meeting_type: str = "General",
         copilot_custom_context: str = "",
     ) -> None:
         """Write settings back to the .env file.
@@ -448,6 +458,8 @@ class Settings:
             f"LIVE_OPENAI_API_KEY={live_openai_api_key}\n"
             f"LIVE_OPENAI_BASE_URL={live_openai_base_url}\n"
             f"LIVE_ANTHROPIC_API_KEY={live_anthropic_api_key}\n"
+            f"LIVE_COPILOT_MODE={live_copilot_mode}\n"
+            f"LIVE_COPILOT_MEETING_TYPE={live_copilot_meeting_type}\n"
             # Newlines in copilot_custom_context would break the .env line
             # format — escape them to literal \n so the value round-trips
             # cleanly through dotenv. from_env unescapes on read.
