@@ -302,6 +302,16 @@ class LiveTranscriber:
             except ValueError:
                 pass
 
+    def all_segments(self) -> List[dict]:
+        """Snapshot of every segment published during the current
+        recording (subject to the rolling history cap of 2000 entries).
+        Used by the live-transcript rehydrate endpoint so the UI panel
+        can repopulate after the user navigates away from the Record
+        tab and back — without this, the panel resets to empty and
+        new SSE events start fresh from whatever's next."""
+        with self._history_lock:
+            return list(self._history)
+
     def recent_segments(self, last_seconds: float = 600.0) -> List[dict]:
         """Snapshot of published segments whose `end` falls within the
         last `last_seconds` of the recording's timeline. The co-pilot

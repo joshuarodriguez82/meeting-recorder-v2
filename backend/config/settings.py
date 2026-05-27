@@ -207,6 +207,10 @@ class Settings:
     live_openai_api_key: str
     live_openai_base_url: str
     live_anthropic_api_key: str
+    # Free-text the SA pins per-engagement as authoritative role / topic
+    # framing for the co-pilot. Appended to every coach_tick prompt.
+    # Empty by default — the baked-in SA-flavored prompt runs as-is.
+    copilot_custom_context: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -315,6 +319,10 @@ class Settings:
             live_openai_api_key=_get("LIVE_OPENAI_API_KEY", ""),
             live_openai_base_url=_get("LIVE_OPENAI_BASE_URL", ""),
             live_anthropic_api_key=_get("LIVE_ANTHROPIC_API_KEY", ""),
+            # Mirrors the escape in save() — `\n` literal on disk →
+            # real newlines in the runtime value.
+            copilot_custom_context=_get(
+                "COPILOT_CUSTOM_CONTEXT", "").replace("\\n", "\n"),
         )
 
     @property
@@ -383,6 +391,7 @@ class Settings:
         live_openai_api_key: str = "",
         live_openai_base_url: str = "",
         live_anthropic_api_key: str = "",
+        copilot_custom_context: str = "",
     ) -> None:
         """Write settings back to the .env file.
 
@@ -439,6 +448,10 @@ class Settings:
             f"LIVE_OPENAI_API_KEY={live_openai_api_key}\n"
             f"LIVE_OPENAI_BASE_URL={live_openai_base_url}\n"
             f"LIVE_ANTHROPIC_API_KEY={live_anthropic_api_key}\n"
+            # Newlines in copilot_custom_context would break the .env line
+            # format — escape them to literal \n so the value round-trips
+            # cleanly through dotenv. from_env unescapes on read.
+            f"COPILOT_CUSTOM_CONTEXT={(copilot_custom_context or '').replace(chr(10), '\\n').replace(chr(13), '')}\n"
         )
         # Write to the canonical LOCALAPPDATA location first. In rare cases
         # a Tauri-spawned Python child cannot open files under LOCALAPPDATA
