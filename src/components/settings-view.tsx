@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api, formatBytes, type Settings, type TemplateEntry, type CoPilotPromptEntry } from "@/lib/api";
+import { estimateCopilotCost, formatUsd } from "@/lib/copilot-cost";
 import { confirmDialog } from "@/lib/confirm";
 import { toast } from "sonner";
 import { Loader2, Save, Trash2, Plus, RotateCcw } from "lucide-react";
@@ -504,6 +505,15 @@ export function SettingsView() {
           override → reuses the main provider, same as Phase A. */}
       {settings.live_copilot_enabled && (
         <LiveCoPilotModelCard settings={settings} update={update} />
+      )}
+
+      {/* Polling cadence + live cost estimate. The wide tick is the
+          existing 45s baseline; the hot tick (off by default) layers a
+          tighter window on top for time-sensitive coaching. Cost
+          estimate recalculates as the user touches the inputs or
+          switches providers. */}
+      {settings.live_copilot_enabled && (
+        <CoPilotCadenceCard settings={settings} update={update} />
       )}
 
       {/* Custom coaching context — free-text the SA pins per-engagement.
@@ -1921,5 +1931,138 @@ function CoPilotPromptEditDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+// Live Co-Pilot polling cadence — two intervals + a live cost
+// estimator. Helps the user trade response latency against LLM cost
+// without having to guess at the math. Estimator reads provider /
+// model / base URL straight from settings (live override wins over
+// main) so the numbers reflect what's ACTUALLY going to run.
+function CoPilotCadenceCard({
+  settings, update,
+}: {
+  settings: Settings;
+  update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
+}) {
+  const wide = settings.live_copilot_wide_interval_sec || 45;
+  const hot = settings.live_copilot_hot_interval_sec || 0;
+
+  // Live override → main fallback. The override card above is what
+  // sets these when the user opts in to a separate tick provider.
+  const provider = (settings.live_ai_provider || settings.ai_provider || "anthropic").trim();
+  const model = (settings.live_claude_model || settings.claude_model || "").trim();
+  const baseUrl = (settings.live_openai_base_url || settings.openai_base_url || "").trim();
+
+  const est = estimateCopilotCost({
+    wideIntervalSec: wide,
+    hotIntervalSec: hot,
+    provider, model, baseUrl,
+  });
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">
+          Co-Pilot Cadence{" "}
+          <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            optional
+          </span>
+        </CardTitle>
+        <p className="text-xs text-muted-foreground mt-1">
+          Two polling tiers. <strong>Wide</strong> tick runs the full
+          ~10 minute context window every N seconds — the existing
+          coaching behavior. <strong>Hot</strong> tick runs only the
+          last ~90 seconds with a tighter prompt biased toward EMPTY
+          — fires only when something time-sensitive happens. Cheaper
+          per call, but the per-minute call rate adds up.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="space-y-1.5">
+            <Label className="text-xs">Wide tick interval (seconds)</Label>
+            <Input
+              type="number" min={15} max={300} step={5}
+              value={wide}
+              onChange={(e) => {
+                const v = Math.max(15, Math.min(300, parseInt(e.target.value) || 45));
+                update("live_copilot_wide_interval_sec", v);
+              }}
+            />
+            <p className="text-[10px] text-muted-foreground">
+              Range 15–300s. Lower = more responsive, higher = cheaper. Default 45.
+            </p>
+          </div>
+          <div className="space-y-1.5">
+            <Label className="text-xs">Hot tick interval (seconds, 0 = off)</Label>
+            <Input
+              type="number" min={0} max={60} step={5}
+              value={hot}
+              onChange={(e) => {
+                const v = Math.max(0, Math.min(60, parseInt(e.target.value) || 0));
+                update("live_copilot_hot_interval_sec", v);
+              }}
+            />
+            <p className="text-[10px] text-muted-foreground">
+              Range 0–60s. 0 disables the hot tier entirely. Try 15s if you want just-in-time prompts.
+            </p>
+          </div>
+        </div>
+
+        {/* Live cost estimate. Recalculates as the user touches any
+            input or switches the live-provider override above. */}
+        <div className="rounded-md border bg-muted/30 p-3 space-y-2 text-xs">
+          <div className="flex items-baseline gap-2 flex-wrap">
+            <span className="font-medium">Estimated cost:</span>
+            <span className="text-muted-foreground">
+              {est.callsPerMinute.toFixed(1)} call{est.callsPerMinute === 1 ? "" : "s"}
+              /min ({est.widePerHour.toFixed(0)} wide
+              {est.hotPerHour > 0 ? ` + ${est.hotPerHour.toFixed(0)} hot` : ""}
+              /hour)
+            </span>
+          </div>
+          {est.currentHourlyUsd !== null ? (
+            <p>
+              At your current provider ({provider}
+              {model ? ` / ${model}` : ""}):{" "}
+              <strong>{formatUsd(est.currentHourlyUsd)} per hour of recording</strong>
+            </p>
+          ) : (
+            <p className="italic text-muted-foreground">
+              No price on file for{" "}
+              <code className="font-mono">{provider}{model ? `:${model}` : ""}</code>.
+              Cost is unknown — compare against the rows below or check
+              your provider&apos;s pricing page.
+            </p>
+          )}
+          {est.currentNote && (
+            <p className="text-amber-600 dark:text-amber-400 italic">
+              {est.currentNote}
+            </p>
+          )}
+          <div className="pt-2 border-t border-muted">
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">
+              For comparison
+            </p>
+            <ul className="space-y-0.5">
+              {est.comparisons.map((c) => (
+                <li key={c.label} className="flex items-baseline gap-2">
+                  <span className="flex-1">{c.label}</span>
+                  <span className="font-mono tabular-nums">
+                    {formatUsd(c.hourlyUsd)}/hr
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="text-[10px] text-muted-foreground italic mt-2">
+              Estimates assume ~2k input + ~200 output tokens per wide
+              tick, ~1.2k + ~100 per hot tick. Rough — within ~30%.
+              Local/Ollama and OpenRouter free tier cost $0 directly.
+            </p>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
