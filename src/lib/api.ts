@@ -886,10 +886,12 @@ export const api = {
       body: JSON.stringify({ client, project }),
     }),
 
-  prepBrief: (subject: string, client: string, project: string) =>
+  prepBrief: (subject: string, client: string, project: string, userContext = "") =>
     request<{ brief: string; related_count: number }>("/prep-brief", {
       method: "POST",
-      body: JSON.stringify({ subject, client, project }),
+      body: JSON.stringify({
+        subject, client, project, user_context: userContext,
+      }),
     }),
 
   // ── Commitments tracker ───────────────────────────────────────────
@@ -967,6 +969,7 @@ export const api = {
     client: string;
     project: string;
     body?: string;
+    user_context?: string;
   }) =>
     request<{
       markdown: string;

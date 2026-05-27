@@ -288,7 +288,8 @@ export function CommitmentsView({ onOpenSession }: Props) {
           </CardContent>
         </Card>
 
-        <Card>
+        {/* Sticky detail panel — see decisions-view.tsx for rationale. */}
+        <Card className="md:sticky md:top-0 md:self-start md:max-h-[calc(100vh-8rem)] md:overflow-y-auto">
           <CardContent className="p-6">
             {selected ? (
               <CommitmentDetail
