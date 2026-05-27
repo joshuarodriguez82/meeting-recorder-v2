@@ -212,6 +212,12 @@ class Settings:
     # editable defaults. Defaults: SA persona, General type.
     live_copilot_mode: str
     live_copilot_meeting_type: str
+    # Co-Pilot polling intervals (seconds). The wide tick uses the full
+    # ~10 min window; the hot tick uses only the last ~90s and biases
+    # toward emptiness for just-in-time coaching. Set hot to 0 to
+    # disable the hot tier entirely (just the wide pass runs).
+    live_copilot_wide_interval_sec: int
+    live_copilot_hot_interval_sec: int
     # Free-text the SA pins per-engagement as authoritative role / topic
     # framing for the co-pilot. Appended to every coach_tick prompt.
     # Empty by default — the baked-in SA-flavored prompt runs as-is.
@@ -327,6 +333,10 @@ class Settings:
             live_copilot_mode=_get("LIVE_COPILOT_MODE", "SA"),
             live_copilot_meeting_type=_get(
                 "LIVE_COPILOT_MEETING_TYPE", "General"),
+            live_copilot_wide_interval_sec=_get_int(
+                "LIVE_COPILOT_WIDE_INTERVAL_SEC", 45),
+            live_copilot_hot_interval_sec=_get_int(
+                "LIVE_COPILOT_HOT_INTERVAL_SEC", 0),
             # Mirrors the escape in save() — `\n` literal on disk →
             # real newlines in the runtime value.
             copilot_custom_context=_get(
@@ -401,6 +411,8 @@ class Settings:
         live_anthropic_api_key: str = "",
         live_copilot_mode: str = "SA",
         live_copilot_meeting_type: str = "General",
+        live_copilot_wide_interval_sec: int = 45,
+        live_copilot_hot_interval_sec: int = 0,
         copilot_custom_context: str = "",
     ) -> None:
         """Write settings back to the .env file.
@@ -460,6 +472,8 @@ class Settings:
             f"LIVE_ANTHROPIC_API_KEY={live_anthropic_api_key}\n"
             f"LIVE_COPILOT_MODE={live_copilot_mode}\n"
             f"LIVE_COPILOT_MEETING_TYPE={live_copilot_meeting_type}\n"
+            f"LIVE_COPILOT_WIDE_INTERVAL_SEC={live_copilot_wide_interval_sec}\n"
+            f"LIVE_COPILOT_HOT_INTERVAL_SEC={live_copilot_hot_interval_sec}\n"
             # Newlines in copilot_custom_context would break the .env line
             # format — escape them to literal \n so the value round-trips
             # cleanly through dotenv. from_env unescapes on read.

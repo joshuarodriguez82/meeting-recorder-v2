@@ -116,6 +116,11 @@ export interface Settings {
   // summary-template library). Default: SA + General.
   live_copilot_mode: string;
   live_copilot_meeting_type: string;
+  // Polling intervals (seconds). Wide tick uses the full window
+  // (~10 min); hot tick uses ~90s only and biases empty. Hot=0
+  // disables the hot tier entirely.
+  live_copilot_wide_interval_sec: number;
+  live_copilot_hot_interval_sec: number;
   // Free-text the SA pins per-engagement — appended to every co-pilot
   // tick prompt as authoritative role / topic framing. Lets the user
   // tighten suggestions without code changes ("focus on Genesys
@@ -563,6 +568,25 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ mode, meeting_type: meetingType }),
       }),
+
+  // Promote a single co-pilot bullet to an artifact on the active
+  // session. Idempotent on exact-text — repeated clicks don't duplicate.
+  saveCopilotSuggestion: (
+    kind: "follow_up" | "decision" | "note", text: string,
+  ) =>
+    request<{ ok: boolean; kind: string }>(
+      "/recording/copilot/save", {
+        method: "POST",
+        body: JSON.stringify({ kind, text }),
+      }),
+
+  // Hot variant of copilotTick — narrower window, tighter prompt,
+  // biased toward empty. Frontend can poll this every ~15s alongside
+  // the wide tick for just-in-time coaching. Same response shape.
+  copilotHotTick: () =>
+    request<CoPilotTickResponse>("/recording/copilot/hot-tick", {
+      method: "POST",
+    }),
   // Full live-transcript segment history for the active recording.
   // Lets the LiveTranscriptPanel rehydrate after a tab switch instead
   // of starting empty and only catching segments published from that
