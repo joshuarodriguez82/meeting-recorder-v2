@@ -4761,6 +4761,11 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
     """Update the active co-pilot mode + meeting type. Either field
     optional — pass only the one you're changing. Persists to
     config.env so the choice survives restarts."""
+    # Local import — `dataclasses` isn't imported at module level.
+    # The sibling `/settings/live-copilot` endpoint imports it the
+    # same way (line 2155). v2.9.0 shipped without this import here,
+    # producing a NameError on every mid-recording mode/type change.
+    import dataclasses
     s = svc.load_settings()
     new_mode = (req.mode or s.live_copilot_mode or "SA").strip()
     new_type = (req.meeting_type or s.live_copilot_meeting_type or "General").strip()
