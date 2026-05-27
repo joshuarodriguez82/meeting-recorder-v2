@@ -529,34 +529,64 @@ export default function Home() {
         )}
 
         {recordingNow.isRecording && (
-          <button
-            type="button"
-            onClick={() => setNav("record")}
-            className="flex items-center gap-2 border-b border-border bg-red-500/10 px-4 py-2 text-xs text-foreground hover:bg-red-500/15 transition-colors w-full text-left"
+          // Two affordances in one strip: clicking the body opens the
+          // Record view; clicking the dedicated Stop button halts the
+          // recording from anywhere in the app. CRITICAL — without
+          // the in-strip stop, the only way to halt an auto-record
+          // was to navigate to Record view, and a UI-state race could
+          // hide the stop button there (the 4h17m orphan-record
+          // incident traced partly to this).
+          <div
+            className="flex items-stretch border-b border-border bg-red-500/10 text-xs text-foreground"
             title={recordingNow.autoSubject
               ? `Auto-recording: ${recordingNow.autoSubject}`
-              : "Recording in progress — click to open the Record view"}
+              : "Recording in progress"}
           >
-            <span className="relative inline-flex h-2.5 w-2.5 shrink-0">
-              <span className="absolute inset-0 inline-flex h-full w-full animate-ping rounded-full bg-red-500 opacity-75" />
-              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
-            </span>
-            <span className="truncate flex-1">
-              {recordingNow.autoSubject
-                ? `Auto-recording: ${recordingNow.autoSubject}`
-                : "Recording…"}
-            </span>
-            <span className="font-mono text-[11px] text-muted-foreground shrink-0">
-              {(() => {
-                const s = recordingElapsedS;
-                const h = Math.floor(s / 3600);
-                const m = Math.floor((s % 3600) / 60);
-                const ss = s % 60;
-                const pad = (n: number) => String(n).padStart(2, "0");
-                return h ? `${h}:${pad(m)}:${pad(ss)}` : `${m}:${pad(ss)}`;
-              })()}
-            </span>
-          </button>
+            <button
+              type="button"
+              onClick={() => setNav("record")}
+              className="flex items-center gap-2 px-4 py-2 hover:bg-red-500/15 transition-colors flex-1 min-w-0 text-left"
+              title="Open the Record view"
+            >
+              <span className="relative inline-flex h-2.5 w-2.5 shrink-0">
+                <span className="absolute inset-0 inline-flex h-full w-full animate-ping rounded-full bg-red-500 opacity-75" />
+                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
+              </span>
+              <span className="truncate flex-1">
+                {recordingNow.autoSubject
+                  ? `Auto-recording: ${recordingNow.autoSubject}`
+                  : "Recording…"}
+              </span>
+              <span className="font-mono text-[11px] text-muted-foreground shrink-0">
+                {(() => {
+                  const s = recordingElapsedS;
+                  const h = Math.floor(s / 3600);
+                  const m = Math.floor((s % 3600) / 60);
+                  const ss = s % 60;
+                  const pad = (n: number) => String(n).padStart(2, "0");
+                  return h ? `${h}:${pad(m)}:${pad(ss)}` : `${m}:${pad(ss)}`;
+                })()}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={async (e) => {
+                e.stopPropagation();
+                try {
+                  await api.stopRecording();
+                  toast.success("Recording stopped");
+                } catch (err) {
+                  toast.error(`Couldn't stop: ${err instanceof Error ? err.message : err}`);
+                }
+              }}
+              className="flex items-center justify-center px-3 border-l border-red-500/30 hover:bg-red-500/25 transition-colors text-red-700 dark:text-red-300 font-medium"
+              title="Stop recording"
+              aria-label="Stop recording"
+            >
+              <span className="h-2.5 w-2.5 rounded-[2px] bg-red-600 dark:bg-red-400" />
+              <span className="ml-1.5 text-[11px]">Stop</span>
+            </button>
+          </div>
         )}
 
         <nav className="flex-1 overflow-y-auto p-3">

@@ -104,6 +104,10 @@ export function RecordView({
 
   const [recording, setRecording] = useState(false);
   const [duration, setDuration] = useState(0);
+  // The active recording's session_id, captured from /recording/status.
+  // Lets mid-recording form edits PATCH the right session without
+  // having to ask the backend again on every keystroke.
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   // Screenshots captured during the current recording. Count is shown
   // on the button; the files themselves are attached server-side and
   // fed to the summarizer as visual context.
@@ -407,9 +411,33 @@ export function RecordView({
   const selectedMic = inputDevices.find((d) => d.index === micIdx);
   const selectedOut = outputDevices.find((d) => d.index === outIdx);
 
-  // Poll recording status while recording
+  // Live-patch the active session when the user edits meeting name /
+  // client / project mid-recording. Debounced so we don't fire on
+  // every keystroke. Without this, a user discovering an auto-record
+  // in progress had to wait for it to stop before tagging the session.
   useEffect(() => {
-    if (!recording) return;
+    if (!recording || !activeSessionId) return;
+    const t = setTimeout(() => {
+      api.patchSession(activeSessionId, {
+        display_name: meetingName || undefined,
+        client: client || undefined,
+        project: project || undefined,
+        template: template || undefined,
+      }).catch(() => {
+        // Best-effort — the next debounce or the post-stop save will
+        // cover any transient failure.
+      });
+    }, 600);
+    return () => clearTimeout(t);
+  }, [meetingName, client, project, template, activeSessionId, recording]);
+
+  // Poll recording status ALWAYS — not just when this view thinks
+  // it's recording. Auto-record starts a recording without this view
+  // knowing; without continuous polling the form would stay visible
+  // even though a recording is in progress. CRITICAL for the
+  // 4h17m-orphan scenario where auto-record fired and the user had
+  // no UI signal it was happening.
+  useEffect(() => {
     const t = setInterval(async () => {
       try {
         const s = await api.recordingStatus();
@@ -425,15 +453,48 @@ export function RecordView({
           notifiedCodesRef.current.add(w.code);
           fireNativeNotification(w.code, w.message);
         }
+        // Sync local recording state with backend on EVERY tick.
+        // This handles both:
+        //   - The rising edge: an external trigger (auto-record from
+        //     calendar, /recording/start fired from somewhere else)
+        //     starts a recording without this view initiating it.
+        //   - The falling edge: watchdog auto-stop, parent-PID
+        //     deadman switch, user clicked Stop in sidebar.
+        if (s.is_recording !== recording) {
+          setRecording(s.is_recording);
+          if (s.is_recording) {
+            // Rising edge: auto-record (or other external start)
+            // just fired. Pull the meeting name + scope hints the
+            // backend set when it started this recording so the form
+            // reflects them.
+            if (s.auto_record_subject) {
+              setMeetingName((current) =>
+                current.trim() ? current : s.auto_record_subject!);
+            }
+            if (s.session_id) setActiveSessionId(s.session_id);
+            // Reset notification dedupe + warning history for the
+            // newly-detected recording.
+            notifiedCodesRef.current = new Set();
+            setWatchdogWarnings([]);
+          } else {
+            // Falling edge — clear the captured session id.
+            setActiveSessionId(null);
+          }
+        }
+        // Keep the captured session_id fresh in case we missed the
+        // rising edge (e.g. view mounted after recording was already
+        // in progress).
+        if (s.is_recording && s.session_id && !activeSessionId) {
+          setActiveSessionId(s.session_id);
+        }
         if (!s.is_recording) {
-          setRecording(false);
           // If the watchdog auto-stopped us, the last poll's warning
           // is what we want to surface as an explanatory toast — the
           // user wasn't watching the screen, that's the whole point.
           const stopWarn = warns.find(
             (w) => w.code.endsWith("_stop") || w.code === "hard_cap_hit"
           );
-          if (stopWarn) {
+          if (stopWarn && recording) {
             toast.warning("Recording auto-stopped", {
               description: stopWarn.message,
             });
@@ -445,7 +506,7 @@ export function RecordView({
       } catch {}
     }, 1000);
     return () => clearInterval(t);
-  }, [recording, onSessionsChanged]);
+  }, [recording, activeSessionId, onSessionsChanged]);
 
   // Poll for model readiness
   useEffect(() => {
@@ -817,15 +878,19 @@ export function RecordView({
               value={meetingName}
               onChange={(e) => setMeetingName(e.target.value)}
               placeholder="e.g. Design Review — 2026-04-20"
-              disabled={recording}
               autoComplete="off"
             />
+            {recording && (
+              <p className="text-[11px] text-muted-foreground italic">
+                Editing during recording — changes auto-save to the active session.
+              </p>
+            )}
           </div>
 
           {/* Row 2: Template (full width, since it's a key choice) */}
           <div className="space-y-2">
             <Label>Template</Label>
-            <Select value={template} onValueChange={(v) => v && setTemplate(v)} disabled={recording}>
+            <Select value={template} onValueChange={(v) => v && setTemplate(v)}>
               <SelectTrigger className="w-full">
                 <SelectValue />
               </SelectTrigger>
@@ -847,7 +912,6 @@ export function RecordView({
                 value={client}
                 onChange={(e) => setClient(e.target.value)}
                 placeholder="Type new or pick existing"
-                disabled={recording}
                 autoComplete="off"
               />
               <datalist id="clients-list">
@@ -864,7 +928,6 @@ export function RecordView({
                 value={project}
                 onChange={(e) => setProject(e.target.value)}
                 placeholder="Type new or pick existing"
-                disabled={recording}
                 autoComplete="off"
               />
               <datalist id="projects-list">
