@@ -206,6 +206,18 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT"
           ls -la artifacts/
 
+      # Upload built installers as workflow artifacts on EVERY run
+      # (tag push + manual dispatch). Lets us grab a test build off a
+      # branch via `gh run download <id>` without cutting a real tag.
+      # Tag-triggered runs ALSO publish to GitHub Releases below.
+      - name: Upload installers as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.label }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         # Only attach to the release on tag-triggered runs. Manual
