@@ -302,6 +302,9 @@ from core.audio_capture import list_input_devices, list_output_devices
 from services.template_service import TemplateService
 from services.copilot_mode_service import CoPilotModeService
 from services.copilot_meeting_type_service import CoPilotMeetingTypeService
+from services.engagement_overlay_service import (
+    EngagementOverlayService, KNOWN_STATUSES,
+)
 from models.session import Session
 from services.calendar_service import (
     get_todays_meetings, get_upcoming_meetings, is_outlook_available,
@@ -473,6 +476,7 @@ class Services:
         self.template_svc: Optional[TemplateService] = None
         self.copilot_mode_svc: Optional[CoPilotModeService] = None
         self.copilot_meeting_type_svc: Optional[CoPilotMeetingTypeService] = None
+        self.engagement_overlay_svc: Optional[EngagementOverlayService] = None
         self.recording_svc: Optional[RecordingService] = None
         self.speaker_profile_svc: Optional[SpeakerProfileService] = None
         self.auto_record_blocklist_svc: Optional[AutoRecordBlocklistService] = None
@@ -581,6 +585,10 @@ class Services:
             # can edit / reset / delete from Settings.
             self.copilot_mode_svc = CoPilotModeService(_recordings_dir)
             self.copilot_meeting_type_svc = CoPilotMeetingTypeService(_recordings_dir)
+            # Manual fields the SA pins per-engagement (status, sponsor,
+            # next milestone, notes). Layered on top of the auto-rolled
+            # register so users get one merged view.
+            self.engagement_overlay_svc = EngagementOverlayService(_recordings_dir)
             # Speaker profiles stay per-machine: voice fingerprints are
             # mic-hardware-dependent, syncing them across devices with
             # different mics risks false positives.
@@ -3454,12 +3462,53 @@ async def engagement_register(client: str, project: str = ""):
     try:
         register = await asyncio.to_thread(
             svc.engagement_svc.build_register, client, project)
+        # Merge the user's manual overlay (status, sponsor, milestone,
+        # notes) into the auto-rolled register. Frontend gets one
+        # cohesive payload — separate object so the auto-rolled fields
+        # stay unambiguously distinct.
+        if svc.engagement_overlay_svc:
+            overlay = await asyncio.to_thread(
+                svc.engagement_overlay_svc.get, client, project)
+            register["overlay"] = overlay.to_dict()
         return {"ok": True, "register": register}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception("Engagement register build failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class EngagementOverlayRequest(BaseModel):
+    project: str = ""
+    status: str = ""
+    exec_sponsor: str = ""
+    next_milestone: str = ""
+    notes: str = ""
+
+
+@app.put("/engagements/{client}/overlay")
+async def engagement_overlay_put(client: str, req: EngagementOverlayRequest):
+    """Replace the user's manual overlay for an engagement scope.
+    Empty strings clear the corresponding field. Always returns the
+    canonical stored overlay so the UI can sync timestamps."""
+    if not svc.engagement_overlay_svc:
+        raise HTTPException(status_code=503, detail="Overlay service not initialized")
+    try:
+        overlay = await asyncio.to_thread(
+            svc.engagement_overlay_svc.put,
+            client, req.project,
+            req.status, req.exec_sponsor, req.next_milestone, req.notes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "overlay": overlay.to_dict()}
+
+
+@app.get("/engagements/known-statuses")
+async def engagement_known_statuses():
+    """Canonical list of engagement status values. Frontend uses
+    this to render the status dropdown — keeps wire format and UI
+    options in sync without baking the enum into the frontend."""
+    return {"statuses": KNOWN_STATUSES}
 
 
 @app.post("/engagements/{client}/export")
