@@ -4864,6 +4864,94 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
     return {"mode": new_mode, "meeting_type": new_type}
 
 
+# ── Parent-PID deadman switch ───────────────────────────────────────
+#
+# CRITICAL SAFETY LAYER. If the Tauri shell that spawned us dies
+# (force-quit, crash, BSOD, Windows kills the tree weirdly), this
+# backend must NOT continue recording silently in the background. We
+# poll the parent PID every 5 seconds — if it goes missing we cleanly
+# stop any active recording and exit.
+#
+# This prevents the v2.9.0 incident where an orphan backend recorded
+# 4h17m of audio across multiple meetings because Tauri couldn't kill
+# it on shell exit.
+#
+# Trip wire is the env var MEETING_RECORDER_PARENT_PID set by the
+# Tauri spawn in lib.rs. When the var is absent (e.g. running server.py
+# standalone for dev), the watchdog no-ops.
+async def _parent_pid_watchdog():
+    raw = os.environ.get("MEETING_RECORDER_PARENT_PID", "").strip()
+    if not raw:
+        logger.info("Parent-PID watchdog disabled (no PID env var)")
+        return
+    try:
+        parent_pid = int(raw)
+    except ValueError:
+        logger.warning(
+            f"Parent-PID watchdog: invalid PID '{raw}', disabling")
+        return
+    logger.info(f"Parent-PID watchdog armed (parent={parent_pid})")
+    poll_interval = 5.0
+    while True:
+        try:
+            await asyncio.sleep(poll_interval)
+            if not _pid_alive(parent_pid):
+                logger.critical(
+                    f"Parent process {parent_pid} died. "
+                    f"Stopping any active recording and exiting NOW.")
+                # Best-effort stop the recording so the WAV file is
+                # finalized cleanly rather than left as a `_recording_*`
+                # orphan. The auto-recover routine on next launch would
+                # pick it up, but a clean stop is better.
+                try:
+                    if svc.recording_svc and svc.recording_svc.is_recording:
+                        await asyncio.to_thread(
+                            svc.recording_svc.stop_recording)
+                except Exception as e:
+                    logger.exception(
+                        f"Parent-PID watchdog: clean stop failed: {e}")
+                # Force-exit. os._exit() bypasses any pending tasks
+                # (we explicitly DO NOT want graceful shutdown here —
+                # the parent is gone, there's nothing left to serve).
+                os._exit(0)
+        except Exception as e:
+            logger.warning(f"Parent-PID watchdog tick failed: {e}")
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True if a process with PID exists. Cross-platform."""
+    if sys.platform == "win32":
+        # Windows: use OpenProcess with PROCESS_QUERY_LIMITED_INFORMATION
+        # so we don't need elevated rights. Returns NULL handle on
+        # missing PID. Avoids spawning a wmic / Get-Process child.
+        try:
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False
+            # Check if it's still running (exit code 259 = STILL_ACTIVE)
+            exit_code = ctypes.c_ulong()
+            ok = kernel32.GetExitCodeProcess(
+                handle, ctypes.byref(exit_code))
+            kernel32.CloseHandle(handle)
+            return bool(ok) and exit_code.value == 259
+        except Exception:
+            return True  # fail open — don't kill ourselves on uncertainty
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True  # process exists, just no permission to signal
+        except Exception:
+            return True
+
+
 # ── Startup ──────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
@@ -4872,6 +4960,13 @@ async def startup():
         logger.info("Backend started")
     except Exception as e:
         logger.warning(f"Settings not yet configured: {e}")
+
+    # PARENT-PID WATCHDOG — first thing after settings. If our Tauri
+    # shell dies, we exit within ~5 seconds.
+    try:
+        asyncio.create_task(_parent_pid_watchdog())
+    except Exception as e:
+        logger.error(f"Could not start parent-PID watchdog: {e}")
 
     # Start the calendar-driven auto-recorder if the user left it on
     # last session. Safe no-op when settings load failed above.
