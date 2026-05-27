@@ -262,6 +262,15 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
                       {s.client && (<><span>·</span><span>{s.client}</span></>)}
                       {s.project && (<><span>·</span><span>{s.project}</span></>)}
                     </div>
+                    {s.audio_integrity_warning && (
+                      <div
+                        className="text-[11px] text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/40 rounded px-2 py-1 mt-1.5 flex items-start gap-1.5"
+                        title="The audio file is shorter than the recording window. Click the session to see details."
+                      >
+                        <span aria-hidden className="font-bold leading-none mt-0.5">⚠</span>
+                        <span className="flex-1">{s.audio_integrity_warning}</span>
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-1 flex-wrap justify-end">
                     <StatusIcons session={s} />

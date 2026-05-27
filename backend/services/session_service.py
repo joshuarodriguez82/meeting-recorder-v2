@@ -185,6 +185,16 @@ class SessionService:
                     for sid, sd in (data.get("speakers") or {}).items()
                     if sd.get("display_name")
                 },
+                # Audio integrity flags — set when WAV duration disagrees
+                # significantly with the recording window. Lets the
+                # Sessions list render a warning chip without loading
+                # the full session JSON.
+                "audio_integrity_warning":
+                    data.get("audio_integrity_warning"),
+                "audio_actual_duration_s":
+                    data.get("audio_actual_duration_s"),
+                "audio_expected_duration_s":
+                    data.get("audio_expected_duration_s"),
                 "json_path": str(path),
             })
 

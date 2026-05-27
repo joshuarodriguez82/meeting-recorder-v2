@@ -193,6 +193,13 @@ export interface SessionSummary {
   // resolve owner labels like "SPEAKER_03" back to the real person.
   // Empty / missing when no speakers have been renamed.
   speakers?: Record<string, string>;
+  // Audio integrity — set when the WAV duration meaningfully disagrees
+  // with the recording window (ended_at - started_at). UI surfaces a
+  // warning chip on the session so the user knows the audio is
+  // incomplete before they trust the recording. null = healthy.
+  audio_integrity_warning?: string | null;
+  audio_actual_duration_s?: number | null;
+  audio_expected_duration_s?: number | null;
 }
 
 /**
@@ -309,6 +316,10 @@ export interface SessionFull {
   // made during the recording. Persisted with the session so the
   // bullets the model produced mid-call survive past the meeting.
   copilot_ticks?: CoPilotTickResponse[];
+  // Audio integrity — same fields as on SessionSummary, see above.
+  audio_integrity_warning?: string | null;
+  audio_actual_duration_s?: number | null;
+  audio_expected_duration_s?: number | null;
 }
 
 export interface Speaker {

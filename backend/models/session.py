@@ -62,6 +62,17 @@ class Session:
         # typed model) because the prompt schema may evolve before the
         # feature leaves beta.
         self.copilot_ticks: List[Dict] = []
+        # Audio integrity: set at stop_recording when the actual WAV
+        # duration significantly disagrees with (ended_at - started_at).
+        # Causes include process collisions, OneDrive sync truncation,
+        # mic device hand-off mid-recording, or any silent capture
+        # failure. When set, the Sessions list surfaces a warning so the
+        # user doesn't trust an incomplete recording. None = healthy.
+        # The actual + expected durations (seconds) are stored so the
+        # UI can show a precise "you got 30 min out of 60" message.
+        self.audio_integrity_warning: Optional[str] = None
+        self.audio_actual_duration_s: Optional[float] = None
+        self.audio_expected_duration_s: Optional[float] = None
 
     def get_or_create_speaker(self, speaker_id: str) -> Speaker:
         if speaker_id not in self.speakers:
@@ -109,6 +120,9 @@ class Session:
             "exported_audio_paths": list(self.exported_audio_paths),
             "screenshots": list(self.screenshots),
             "copilot_ticks": list(self.copilot_ticks),
+            "audio_integrity_warning": self.audio_integrity_warning,
+            "audio_actual_duration_s": self.audio_actual_duration_s,
+            "audio_expected_duration_s": self.audio_expected_duration_s,
         }
 
     @classmethod
@@ -153,6 +167,9 @@ class Session:
         session.exported_audio_paths = list(data.get("exported_audio_paths") or [])
         session.screenshots = list(data.get("screenshots") or [])
         session.copilot_ticks = list(data.get("copilot_ticks") or [])
+        session.audio_integrity_warning = data.get("audio_integrity_warning") or None
+        session.audio_actual_duration_s = data.get("audio_actual_duration_s")
+        session.audio_expected_duration_s = data.get("audio_expected_duration_s")
 
         # Rebuild speakers
         speakers_data = data.get("speakers") or {}
