@@ -3304,6 +3304,48 @@ async def process_session(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Exponential-backoff retry for LLM calls that hit 429 / rate-limit
+# responses. v2.9.0 shipped without this and a single Anthropic rate
+# burst would cascade-fail every subsequent extractor in process_full
+# (summary, action_items, decisions, requirements all in the same
+# minute bucket). With this, each extractor gets three attempts at
+# 2s / 8s / 30s before giving up.
+#
+# Detection is intentionally broad — the Anthropic SDK and OpenAI SDK
+# raise different exception types but both surface "429" or "rate" in
+# the message. Keep this textual rather than catching specific
+# exception classes; the alternative is a fragile import-time SDK
+# detection that breaks the moment a new provider is added.
+async def _llm_call_with_retry(coro_factory, op_name: str,
+                                max_attempts: int = 3):
+    delays = [2.0, 8.0, 30.0]
+    last_err: Optional[Exception] = None
+    for attempt in range(max_attempts):
+        try:
+            return await coro_factory()
+        except Exception as e:
+            msg = str(e).lower()
+            is_rate_limit = (
+                "429" in msg
+                or "rate limit" in msg
+                or "ratelimit" in msg
+                or "too many requests" in msg
+            )
+            last_err = e
+            if not is_rate_limit or attempt == max_attempts - 1:
+                # Not a rate-limit error, or out of attempts — propagate.
+                raise
+            delay = delays[min(attempt, len(delays) - 1)]
+            logger.warning(
+                f"{op_name}: rate-limited, retrying in {delay:.0f}s "
+                f"(attempt {attempt + 2}/{max_attempts}): {e}")
+            await asyncio.sleep(delay)
+    # Unreachable; mypy/typing comfort.
+    if last_err:
+        raise last_err
+    raise RuntimeError(f"{op_name}: unreachable retry exit")
+
+
 async def _run_extraction(session_id: str, extractor_name: str, field_name: str,
                            export_fn_name: str, extra_arg=None):
     svc.load_settings()
@@ -3320,10 +3362,14 @@ async def _run_extraction(session_id: str, extractor_name: str, field_name: str,
     user_notes = session.notes or ""
     try:
         method = getattr(svc.summarizer, extractor_name)
-        if extra_arg is not None:
-            result = await method(transcript, extra_arg, notes=user_notes)
-        else:
-            result = await method(transcript, notes=user_notes)
+        # Wrap the actual LLM call in the retry helper. Coro factory
+        # rebuilds the coroutine on each retry — coroutines can't be
+        # awaited twice.
+        async def _invoke():
+            if extra_arg is not None:
+                return await method(transcript, extra_arg, notes=user_notes)
+            return await method(transcript, notes=user_notes)
+        result = await _llm_call_with_retry(_invoke, extractor_name)
         setattr(session, field_name, result)
         await asyncio.to_thread(svc.session_svc.save, session)
         try:
@@ -3391,14 +3437,16 @@ async def summarize_session(session_id: str, req: TemplateRequest):
         # can't bake a prompt into the summarizer anymore.
         prompt_text = await asyncio.to_thread(
             svc.template_svc.get_prompt, req.template)
-        result = await svc.summarizer.summarize(
-            session.full_transcript(),
-            prompt=prompt_text,
-            notes=session.notes or "",
-            template_name=req.template,
-            image_paths=list(session.screenshots or []),
-            copilot_observations=_copilot_observations_blob(session),
-        )
+        async def _summarize():
+            return await svc.summarizer.summarize(
+                session.full_transcript(),
+                prompt=prompt_text,
+                notes=session.notes or "",
+                template_name=req.template,
+                image_paths=list(session.screenshots or []),
+                copilot_observations=_copilot_observations_blob(session),
+            )
+        result = await _llm_call_with_retry(_summarize, "summarize")
         session.summary = result
         session.template = req.template
         await asyncio.to_thread(svc.session_svc.save, session)
@@ -3687,11 +3735,14 @@ async def _extract_and_save(
         # `template=<name>` directly was a vestige of the old API.
         prompt_text = await asyncio.to_thread(
             svc.template_svc.get_prompt, template)
-        result = await method(
-            transcript, prompt=prompt_text,
-            notes=notes, template_name=template,
-            image_paths=list(session.screenshots or []),
-            copilot_observations=_copilot_observations_blob(session))
+        # Wrap the LLM call in retry-on-429 — see _llm_call_with_retry.
+        async def _summarize():
+            return await method(
+                transcript, prompt=prompt_text,
+                notes=notes, template_name=template,
+                image_paths=list(session.screenshots or []),
+                copilot_observations=_copilot_observations_blob(session))
+        result = await _llm_call_with_retry(_summarize, method_name)
         session.template = template
     else:
         # All four markdown extractors now accept image_paths so
@@ -3699,10 +3750,12 @@ async def _extract_and_save(
         # the same way they inform the summary. Older builds passed
         # only the transcript; this widening is backwards-compatible
         # with the Summarizer signatures (image_paths default = None).
-        result = await method(
-            transcript, notes=notes,
-            image_paths=list(session.screenshots or []),
-        )
+        async def _extract():
+            return await method(
+                transcript, notes=notes,
+                image_paths=list(session.screenshots or []),
+            )
+        result = await _llm_call_with_retry(_extract, method_name)
     setattr(session, field_name, result)
     await asyncio.to_thread(svc.session_svc.save, session)
 
