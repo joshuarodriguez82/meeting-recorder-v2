@@ -394,7 +394,8 @@ class Summarizer:
 
     async def summarize(self, transcript: str, prompt: str,
                          notes: str = "", template_name: str = "",
-                         image_paths: Optional[List[str]] = None) -> str:
+                         image_paths: Optional[List[str]] = None,
+                         copilot_observations: str = "") -> str:
         """
         Summarize a transcript against a caller-supplied prompt. The
         server-side templates service resolves the template name into
@@ -404,12 +405,21 @@ class Summarizer:
         `image_paths` are screenshots the user captured during the
         meeting — passed to Claude as visual context so the summary can
         reference what was on screen (diagrams, dashboards, slides).
+
+        `copilot_observations` is the deduplicated bullet-list output
+        from the live co-pilot ticks fired during the recording. When
+        present it's added to the prompt with explicit "you noted these
+        in-meeting" framing so the model can incorporate the SA's
+        real-time coaching into the final summary instead of re-deriving
+        everything from the raw transcript.
         """
         label = template_name or "custom"
         n_imgs = len(image_paths or [])
         logger.info(
             f"Requesting meeting summary (template={label}, "
-            f"screenshots={n_imgs}) via {self._provider}/{self._model}")
+            f"screenshots={n_imgs}, "
+            f"copilot_observations={'yes' if copilot_observations.strip() else 'no'}"
+            f") via {self._provider}/{self._model}")
         instruction = prompt
         if n_imgs:
             instruction = (
@@ -417,6 +427,21 @@ class Summarizer:
                 f"{'s' if n_imgs != 1 else ''} captured during the meeting "
                 f"(shown above). Use them as additional context — refer to "
                 f"what they show where it sharpens the summary.")
+        if copilot_observations.strip():
+            instruction = (
+                f"{instruction}\n\n"
+                "The user had a live co-pilot running during this meeting. "
+                "These are the deduplicated observations it surfaced in "
+                "real time (clarifying questions raised, risks flagged, "
+                "follow-ups suggested). Use them as a corroborating second "
+                "pass on the transcript — incorporate items that hold up "
+                "against the full transcript; do not invent details. When "
+                "you cover a follow-up the co-pilot flagged, prefer the "
+                "co-pilot's phrasing if it's clearer than the transcript "
+                "evidence.\n\n"
+                f"=== CO-PILOT IN-MEETING OBSERVATIONS ===\n"
+                f"{copilot_observations.strip()}\n"
+            )
         try:
             summary = await self._chat(
                 _with_user_notes(instruction, transcript, notes),
@@ -430,6 +455,8 @@ class Summarizer:
 
     async def coach_tick(
         self, segments: List[dict], meeting_name: str = "",
+        custom_context: str = "",
+        prior_ticks: Optional[List[dict]] = None,
     ) -> dict:
         """In-call coaching tick. Given the last few minutes of live
         transcript segments, produce three short bullet lists:
@@ -465,20 +492,82 @@ class Summarizer:
             f"Meeting: {meeting_name}\n\n"
             if meeting_name else ""
         )
+
+        # Optional custom context the SA pinned in Settings — per-
+        # engagement framing the baked-in prompt can't anticipate.
+        custom_block = ""
+        if custom_context and custom_context.strip():
+            custom_block = (
+                "\n\nADDITIONAL CONTEXT THE USER PINNED FOR THIS ENGAGEMENT "
+                "(weight this heavily — treat as authoritative role and "
+                "topic framing):\n"
+                f"{custom_context.strip()}\n"
+            )
+
+        # Memory across ticks: the LAST tick's outputs get inlined so the
+        # model can build on prior coaching instead of repeating it.
+        # Bounded to the most recent tick only because each tick already
+        # fits in a tight context window — older ticks would crowd out
+        # the actual transcript.
+        prior_block = ""
+        if prior_ticks:
+            last = prior_ticks[-1]
+            prior_lines = []
+            for key, label in (
+                ("clarifying_questions", "asked about"),
+                ("risks", "flagged"),
+                ("follow_ups", "suggested following up on"),
+            ):
+                items = last.get(key) or []
+                if items:
+                    prior_lines.append(
+                        f"  Already {label}: " + "; ".join(items[:3])
+                    )
+            if prior_lines:
+                prior_block = (
+                    "\n\nIN THE LAST TICK YOU ALREADY SAID:\n"
+                    + "\n".join(prior_lines)
+                    + "\nDo not repeat these. Build on them — note what's "
+                    "evolved, what's been answered, what's gone unaddressed.\n"
+                )
+
         prompt = (
-            "You are a live meeting co-pilot. Read the recent transcript "
-            "below (last few minutes of a meeting in progress) and reply "
-            "with a JSON object — and nothing else — using exactly these "
-            "keys:\n"
-            '  "clarifying_questions": up to 3 short questions the user '
-            "should ask now to clarify ambiguity or missing detail.\n"
-            '  "risks": up to 3 short flags or unspoken assumptions worth '
-            "surfacing.\n"
-            '  "follow_ups": up to 3 short concrete next-step suggestions.\n\n'
+            "You are a live in-call co-pilot for a Solutions Architect at "
+            "TTEC Digital. The SA's focus areas are Amazon Connect, "
+            "CCaaS migrations (from Genesys / NICE / Cisco UCCX / Five9 / "
+            "Webex Contact Center), contact-center IVR/contact flow design, "
+            "Lambda + Bedrock integrations, IAM trust chains, and "
+            "agent-experience design. You coach in real time as the call "
+            "happens.\n\n"
+            "Read the recent transcript (last few minutes of a meeting in "
+            "progress) and reply with a JSON object — and nothing else — "
+            "using exactly these keys:\n"
+            '  "clarifying_questions": up to 3 short questions the SA '
+            "should ask NOW to fill scope gaps, surface unstated "
+            "assumptions, or pressure-test customer claims. Prefer "
+            "concrete CCaaS / Connect / integration / commercial-scope "
+            "questions over generic 'what do you mean by that?' filler.\n"
+            '  "risks": up to 3 short flags. Examples of what counts as a '
+            "risk worth surfacing: scope creep, undefined integration "
+            "boundary (CRM/IAM/data), unrealistic timeline, missing "
+            "stakeholder, vendor-lock-in implication, hidden licensing "
+            "cost, contact-flow gotcha (DTMF vs ASR, queue overflow, "
+            "after-hours routing), legacy-system constraint nobody named. "
+            "Skip generic 'communication risk' / 'team alignment' "
+            "platitudes.\n"
+            '  "follow_ups": up to 3 short concrete next-step suggestions. '
+            "Tie to a named owner if the transcript identifies one. "
+            "Examples: 'send capability comparison vs Genesys', "
+            "'confirm IAM trust policy with customer security', 'pull "
+            "current contact flow JSON for review', 'schedule technical "
+            "deep-dive on Lex bot intents'.\n\n"
             "Rules: each bullet must be one sentence, ≤120 characters. "
-            "If a category genuinely has nothing useful to add, return an "
-            "empty array for it — do not fabricate. Do not include "
-            "markdown, prose, or code fences around the JSON.\n\n"
+            "If a category genuinely has nothing useful for THIS specific "
+            "moment, return an empty array — do NOT fabricate generic "
+            "advice to fill the slot. Do not include markdown, prose, or "
+            "code fences around the JSON.\n"
+            f"{custom_block}"
+            f"{prior_block}\n"
             f"{header}Recent transcript:\n{transcript}"
         )
 

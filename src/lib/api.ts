@@ -111,6 +111,11 @@ export interface Settings {
   live_openai_api_key: string;
   live_openai_base_url: string;
   live_anthropic_api_key: string;
+  // Free-text the SA pins per-engagement — appended to every co-pilot
+  // tick prompt as authoritative role / topic framing. Lets the user
+  // tighten suggestions without code changes ("focus on Genesys
+  // migration", "client is healthcare, PHI compliance matters").
+  copilot_custom_context: string;
 }
 
 export interface CoPilotTickResponse {
@@ -527,20 +532,38 @@ export const api = {
       body: JSON.stringify({ path }),
     }),
 
-  // "Never auto-record this meeting" list. Keyed by subject so a
-  // recurring series stays blocked on every occurrence.
+  // "Never auto-record this meeting" list. Two layers: exact `subjects`
+  // (a recurring series stays blocked on every occurrence) and
+  // case-insensitive substring `patterns` (e.g. "canceled" catches
+  // "Canceled: Weekly Sync" and any other meeting whose title contains
+  // the word). The backend returns both on every mutation.
   getAutoRecordBlocklist: () =>
-    request<{ subjects: string[] }>("/auto-record/blocklist"),
+    request<{ subjects: string[]; patterns: string[] }>(
+      "/auto-record/blocklist"),
   addAutoRecordBlocklist: (subject: string) =>
-    request<{ ok: boolean; subjects: string[] }>("/auto-record/blocklist", {
-      method: "POST",
-      body: JSON.stringify({ subject }),
-    }),
+    request<{ ok: boolean; subjects: string[]; patterns: string[] }>(
+      "/auto-record/blocklist", {
+        method: "POST",
+        body: JSON.stringify({ subject }),
+      }),
   removeAutoRecordBlocklist: (subject: string) =>
-    request<{ ok: boolean; subjects: string[] }>("/auto-record/blocklist", {
-      method: "DELETE",
-      body: JSON.stringify({ subject }),
-    }),
+    request<{ ok: boolean; subjects: string[]; patterns: string[] }>(
+      "/auto-record/blocklist", {
+        method: "DELETE",
+        body: JSON.stringify({ subject }),
+      }),
+  addAutoRecordBlocklistPattern: (pattern: string) =>
+    request<{ ok: boolean; subjects: string[]; patterns: string[] }>(
+      "/auto-record/blocklist/patterns", {
+        method: "POST",
+        body: JSON.stringify({ subject: pattern }),
+      }),
+  removeAutoRecordBlocklistPattern: (pattern: string) =>
+    request<{ ok: boolean; subjects: string[]; patterns: string[] }>(
+      "/auto-record/blocklist/patterns", {
+        method: "DELETE",
+        body: JSON.stringify({ subject: pattern }),
+      }),
 
   // AI extraction
   processSession: (id: string) =>
