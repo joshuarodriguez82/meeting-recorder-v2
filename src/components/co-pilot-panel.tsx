@@ -3,6 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, Pause, Play, RefreshCw, Sparkles, Copy, Check } from "lucide-react";
 import { toast } from "sonner";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
 import { api, ApiError, type CoPilotTickResponse } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 
@@ -52,6 +55,67 @@ export function CoPilotPanel({ recording, enabled }: Props) {
   // Surfaced when a manual Refresh-now click returns an empty tick.
   // Cleared on the next non-empty tick or the next manual click.
   const [refreshNote, setRefreshNote] = useState<string | null>(null);
+  // Active persona + meeting-type. Hydrated from /settings on mount so
+  // the dropdowns reflect what the backend will actually use for the
+  // next tick. Changing a dropdown POSTs /settings/copilot-active so
+  // the next 45s tick picks up the new framing — no app restart needed.
+  const [activeMode, setActiveMode] = useState<string>("SA");
+  const [activeType, setActiveType] = useState<string>("General");
+  const [modes, setModes] = useState<string[]>([]);
+  const [meetingTypes, setMeetingTypes] = useState<string[]>([]);
+
+  // Load mode + meeting-type names and the current settings selection
+  // once the panel mounts in a recording. Best-effort — if either fails
+  // we fall through to the SA/General defaults already in state and the
+  // dropdowns just show those single entries until the next reload.
+  useEffect(() => {
+    if (!recording || !enabled) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [m, t, s] = await Promise.all([
+          api.getCopilotModes(),
+          api.getCopilotMeetingTypes(),
+          api.getSettings(),
+        ]);
+        if (cancelled) return;
+        setModes(m.map((x) => x.name));
+        setMeetingTypes(t.map((x) => x.name));
+        if (s.live_copilot_mode) setActiveMode(s.live_copilot_mode);
+        if (s.live_copilot_meeting_type) setActiveType(s.live_copilot_meeting_type);
+      } catch {
+        // Library load failed — leave defaults; dropdowns will be empty
+        // and just show the SA/General current choice.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [recording, enabled]);
+
+  const changeMode = async (next: string | null) => {
+    if (!next || next === activeMode) return;
+    const prev = activeMode;
+    setActiveMode(next);
+    try {
+      await api.setCopilotActive(next, undefined);
+      toast.success(`Co-pilot mode: ${next}`);
+    } catch (e) {
+      setActiveMode(prev);
+      toast.error(`Couldn't set mode: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  const changeType = async (next: string | null) => {
+    if (!next || next === activeType) return;
+    const prev = activeType;
+    setActiveType(next);
+    try {
+      await api.setCopilotActive(undefined, next);
+      toast.success(`Meeting type: ${next}`);
+    } catch (e) {
+      setActiveType(prev);
+      toast.error(`Couldn't set type: ${e instanceof Error ? e.message : e}`);
+    }
+  };
   // Track in-flight ticks so a manual "Refresh now" doesn't overlap
   // with the timer-driven one. Ref (not state) so the latest value is
   // visible inside the timer callback without re-creating the interval.
@@ -140,7 +204,7 @@ export function CoPilotPanel({ recording, enabled }: Props) {
 
   return (
     <div className="rounded-lg border bg-card p-4 space-y-3">
-      <div className="flex items-center gap-2 text-sm font-medium">
+      <div className="flex items-center gap-2 text-sm font-medium flex-wrap">
         <Sparkles className="h-4 w-4 text-primary" />
         Live Co-Pilot
         <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
@@ -149,7 +213,33 @@ export function CoPilotPanel({ recording, enabled }: Props) {
         {loading && (
           <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
         )}
-        <span className="ml-2 text-[10px] text-muted-foreground">
+
+        {/* Persona + meeting-type pickers. Both updates persist to
+            config.env and take effect on the NEXT tick — current
+            in-flight tick keeps its prompt. Names render compact in
+            the header; full prompt editing lives in Settings. */}
+        <Select value={activeMode} onValueChange={changeMode}>
+          <SelectTrigger className="h-7 w-32 text-xs" title="Co-pilot persona">
+            <SelectValue placeholder="Mode" />
+          </SelectTrigger>
+          <SelectContent>
+            {(modes.length ? modes : [activeMode]).map((m) => (
+              <SelectItem key={m} value={m}>{m}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select value={activeType} onValueChange={changeType}>
+          <SelectTrigger className="h-7 w-40 text-xs" title="Meeting type">
+            <SelectValue placeholder="Meeting type" />
+          </SelectTrigger>
+          <SelectContent>
+            {(meetingTypes.length ? meetingTypes : [activeType]).map((t) => (
+              <SelectItem key={t} value={t}>{t}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        <span className="text-[10px] text-muted-foreground">
           {ticks.length > 0
             ? `${ticks.length} update${ticks.length === 1 ? "" : "s"}`
             : ""}

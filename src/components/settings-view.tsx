@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, formatBytes, type Settings, type TemplateEntry } from "@/lib/api";
+import { api, formatBytes, type Settings, type TemplateEntry, type CoPilotPromptEntry } from "@/lib/api";
 import { confirmDialog } from "@/lib/confirm";
 import { toast } from "sonner";
 import { Loader2, Save, Trash2, Plus, RotateCcw } from "lucide-react";
@@ -552,6 +552,35 @@ export function SettingsView() {
             </p>
           </CardContent>
         </Card>
+      )}
+
+      {/* Two editable libraries the Live Co-Pilot composes at tick
+          time: persona ("you are an SA / sales / executive") and
+          meeting-type modifier ("this is a discovery call / SOW
+          review / status sync"). Both seeded with defaults the user
+          can edit, reset, or add to. Gated on the same toggle as
+          everything else co-pilot-related. */}
+      {settings.live_copilot_enabled && (
+        <CoPilotPromptLibraryCard
+          title="Co-Pilot Modes"
+          description="The persona framing the co-pilot uses on every tick. Pick the active mode from the dropdown in the panel header while recording. Three defaults ship — edit them or add your own."
+          newItemPlaceholder="e.g. Engineering Lead, Customer Success"
+          load={() => api.getCopilotModes()}
+          save={(name, prompt) => api.putCopilotMode(name, prompt)}
+          remove={(name) => api.deleteCopilotMode(name)}
+          reset={(name) => api.resetCopilotMode(name)}
+        />
+      )}
+      {settings.live_copilot_enabled && (
+        <CoPilotPromptLibraryCard
+          title="Co-Pilot Meeting Types"
+          description="The meeting-type modifier layered on top of the mode — Discovery, SOW Review, Status, Technical, etc. Any mode × any meeting type combination just works."
+          newItemPlaceholder="e.g. Post-Mortem, Quarterly Business Review"
+          load={() => api.getCopilotMeetingTypes()}
+          save={(name, prompt) => api.putCopilotMeetingType(name, prompt)}
+          remove={(name) => api.deleteCopilotMeetingType(name)}
+          reset={(name) => api.resetCopilotMeetingType(name)}
+        />
       )}
 
       {/* Auto-stop watchdog — protects against forgotten recordings
@@ -1645,6 +1674,249 @@ function TemplateEditDialog({
           <Button onClick={save} disabled={!name.trim() || !prompt.trim() || saving}>
             {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <Save className="h-3.5 w-3.5 mr-2" />}
             {isNew ? "Create" : "Save"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// Reusable list + editor for either the Co-Pilot Modes or the Meeting
+// Types library. Both have identical shape — list of CoPilotPromptEntry,
+// edit/save/reset/delete operations — so we pass the API methods in
+// and stamp out two cards. Same edit-and-reset semantics as the
+// SummaryTemplatesCard above so user mental model is consistent.
+function CoPilotPromptLibraryCard({
+  title, description, newItemPlaceholder, load, save, remove, reset,
+}: {
+  title: string;
+  description: string;
+  newItemPlaceholder: string;
+  load: () => Promise<CoPilotPromptEntry[]>;
+  save: (name: string, prompt: string) => Promise<CoPilotPromptEntry>;
+  remove: (name: string) => Promise<unknown>;
+  reset: (name: string) => Promise<CoPilotPromptEntry>;
+}) {
+  const [entries, setEntries] = useState<CoPilotPromptEntry[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [editing, setEditing] = useState<CoPilotPromptEntry | null>(null);
+  const [creating, setCreating] = useState(false);
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      const xs = await load();
+      setEntries(xs);
+    } catch (e) {
+      toast.error(`Could not load: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => { refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+
+  const handleSave = async (name: string, prompt: string) => {
+    try {
+      await save(name, prompt);
+      toast.success(`Saved "${name}"`);
+      setEditing(null);
+      setCreating(false);
+      refresh();
+    } catch (e) {
+      toast.error(`Save failed: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  const handleDelete = async (t: CoPilotPromptEntry) => {
+    const label = t.is_default ? "Hide" : "Delete";
+    const detail = t.is_default
+      ? "This is a default — hiding it keeps the prompt on disk so you can restore it later."
+      : "This permanently removes your custom entry.";
+    if (!(await confirmDialog(`${label} "${t.name}"?\n\n${detail}`, { title: label }))) return;
+    try {
+      await remove(t.name);
+      toast.success(t.is_default ? "Hidden" : "Deleted");
+      refresh();
+    } catch (e) {
+      toast.error(`Delete failed: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  const handleReset = async (t: CoPilotPromptEntry) => {
+    if (!(await confirmDialog(`Reset "${t.name}" to the shipped default?`, { title: "Reset" }))) return;
+    try {
+      const fresh = await reset(t.name);
+      toast.success("Reset to default");
+      setEditing(fresh);
+      refresh();
+    } catch (e) {
+      toast.error(`Reset failed: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <CardTitle className="text-base">{title}</CardTitle>
+            <p className="text-xs text-muted-foreground mt-1">{description}</p>
+          </div>
+          <Button variant="outline" size="sm" onClick={() => setCreating(true)}>
+            <Plus className="h-3.5 w-3.5 mr-2" />
+            New
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-1">
+        {loading && !entries ? (
+          <div className="flex justify-center py-4 text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+          </div>
+        ) : !entries || entries.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-4 text-center">
+            None yet. Click New to add one.
+          </p>
+        ) : (
+          entries.map((t) => {
+            const edited = t.is_default && t.default_prompt !== null
+              && t.prompt !== t.default_prompt;
+            return (
+              <div
+                key={t.name}
+                className="flex items-center gap-3 rounded-md px-3 py-2 hover:bg-muted/50 cursor-pointer"
+                onClick={() => setEditing(t)}
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium truncate">{t.name}</span>
+                    {t.is_default && (
+                      <Badge variant="outline" className="text-[10px]">default</Badge>
+                    )}
+                    {edited && (
+                      <Badge variant="outline" className="text-[10px] border-amber-400 text-amber-700">edited</Badge>
+                    )}
+                  </div>
+                  <div className="text-xs text-muted-foreground truncate mt-0.5">
+                    {t.prompt.slice(0, 120)}{t.prompt.length > 120 ? "…" : ""}
+                  </div>
+                </div>
+                {t.is_default && edited && (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); handleReset(t); }}
+                    className="h-7 w-7 inline-flex items-center justify-center rounded-md hover:bg-accent text-muted-foreground"
+                    title="Reset to shipped default"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); handleDelete(t); }}
+                  className="h-7 w-7 inline-flex items-center justify-center rounded-md hover:bg-destructive/10 text-muted-foreground hover:text-destructive"
+                  title={t.is_default ? "Hide this default" : "Delete"}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            );
+          })
+        )}
+      </CardContent>
+      <CoPilotPromptEditDialog
+        open={editing !== null}
+        initial={editing}
+        onOpenChange={(v) => !v && setEditing(null)}
+        onSave={handleSave}
+      />
+      <CoPilotPromptEditDialog
+        open={creating}
+        initial={null}
+        onOpenChange={(v) => !v && setCreating(false)}
+        onSave={handleSave}
+        placeholder={newItemPlaceholder}
+      />
+    </Card>
+  );
+}
+
+function CoPilotPromptEditDialog({
+  open, initial, onOpenChange, onSave, placeholder = "",
+}: {
+  open: boolean;
+  initial: CoPilotPromptEntry | null;
+  onOpenChange: (v: boolean) => void;
+  onSave: (name: string, prompt: string) => Promise<void> | void;
+  placeholder?: string;
+}) {
+  const [name, setName] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [saving, setSaving] = useState(false);
+  const isNew = initial === null;
+
+  useEffect(() => {
+    if (open) {
+      setName(initial?.name || "");
+      setPrompt(initial?.prompt || "");
+    }
+  }, [open, initial]);
+
+  const save = async () => {
+    const n = name.trim();
+    const p = prompt.trim();
+    if (!n || !p) return;
+    setSaving(true);
+    try {
+      await onSave(n, p);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{isNew ? "New entry" : `Edit "${initial?.name}"`}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3 py-2">
+          <div className="space-y-2">
+            <Label>Name</Label>
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={placeholder}
+              disabled={!isNew}
+              autoComplete="off"
+            />
+            {!isNew && (
+              <p className="text-[11px] text-muted-foreground">
+                Renaming isn&apos;t supported here — delete this one and create a new name to rename.
+              </p>
+            )}
+          </div>
+          <div className="space-y-2">
+            <Label>Prompt</Label>
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              rows={14}
+              className="w-full rounded-md border bg-background p-3 text-xs font-mono resize-y leading-relaxed"
+              placeholder="The role / topic framing. The JSON output rules are appended automatically — you don't need to repeat them."
+            />
+            <p className="text-[11px] text-muted-foreground italic">
+              The JSON output schema (clarifying_questions / risks /
+              follow_ups) is appended by the system after this prompt —
+              don&apos;t restate it. Edit only the role / topic framing.
+            </p>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button onClick={save} disabled={saving || !name.trim() || !prompt.trim()}>
+            {saving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Save className="h-4 w-4 mr-2" />}
+            Save
           </Button>
         </DialogFooter>
       </DialogContent>

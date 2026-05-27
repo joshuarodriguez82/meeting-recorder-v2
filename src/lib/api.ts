@@ -111,11 +111,26 @@ export interface Settings {
   live_openai_api_key: string;
   live_openai_base_url: string;
   live_anthropic_api_key: string;
+  // Active co-pilot persona + meeting-type modifier names. Resolved
+  // through the mode / meeting-type libraries (separate from the
+  // summary-template library). Default: SA + General.
+  live_copilot_mode: string;
+  live_copilot_meeting_type: string;
   // Free-text the SA pins per-engagement — appended to every co-pilot
   // tick prompt as authoritative role / topic framing. Lets the user
   // tighten suggestions without code changes ("focus on Genesys
   // migration", "client is healthcare, PHI compliance matters").
   copilot_custom_context: string;
+}
+
+// A single co-pilot mode (persona) or meeting-type (modifier). Shape
+// mirrors TemplateEntry on the summary side so the UI editor pattern
+// is reusable.
+export interface CoPilotPromptEntry {
+  name: string;
+  prompt: string;
+  is_default: boolean;
+  default_prompt: string | null;
 }
 
 export interface CoPilotTickResponse {
@@ -501,6 +516,53 @@ export const api = {
   // next 45s tick fires.
   copilotHistory: () =>
     request<{ ticks: CoPilotTickResponse[] }>("/recording/copilot/history"),
+
+  // Co-Pilot mode + meeting-type libraries. Editable persona/modifier
+  // prompts the user picks from at recording time; same edit/reset/
+  // delete semantics as the summary template library.
+  getCopilotModes: () =>
+    request<CoPilotPromptEntry[]>("/copilot/modes"),
+  putCopilotMode: (name: string, prompt: string) =>
+    request<CoPilotPromptEntry>(`/copilot/modes/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      body: JSON.stringify({ prompt }),
+    }),
+  deleteCopilotMode: (name: string) =>
+    request<{ ok: boolean }>(`/copilot/modes/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+  resetCopilotMode: (name: string) =>
+    request<CoPilotPromptEntry>(
+      `/copilot/modes/${encodeURIComponent(name)}/reset`, { method: "POST" }),
+
+  getCopilotMeetingTypes: () =>
+    request<CoPilotPromptEntry[]>("/copilot/meeting-types"),
+  putCopilotMeetingType: (name: string, prompt: string) =>
+    request<CoPilotPromptEntry>(
+      `/copilot/meeting-types/${encodeURIComponent(name)}`, {
+        method: "PUT",
+        body: JSON.stringify({ prompt }),
+      }),
+  deleteCopilotMeetingType: (name: string) =>
+    request<{ ok: boolean }>(
+      `/copilot/meeting-types/${encodeURIComponent(name)}`, {
+        method: "DELETE",
+      }),
+  resetCopilotMeetingType: (name: string) =>
+    request<CoPilotPromptEntry>(
+      `/copilot/meeting-types/${encodeURIComponent(name)}/reset`, {
+        method: "POST",
+      }),
+
+  // Lightweight setter — flips active mode and/or meeting type without
+  // rebuilding RecordingService (the full POST /settings would orphan
+  // active capture threads). Lets the panel change them mid-recording.
+  setCopilotActive: (mode?: string, meetingType?: string) =>
+    request<{ mode: string; meeting_type: string }>(
+      "/settings/copilot-active", {
+        method: "POST",
+        body: JSON.stringify({ mode, meeting_type: meetingType }),
+      }),
   // Full live-transcript segment history for the active recording.
   // Lets the LiveTranscriptPanel rehydrate after a tab switch instead
   // of starting empty and only catching segments published from that
