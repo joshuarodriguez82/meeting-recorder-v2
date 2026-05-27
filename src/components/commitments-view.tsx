@@ -10,7 +10,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import {
-  Loader2, Check, X, RotateCcw, Building2, Clock, AlertTriangle,
+  Loader2, RotateCcw, Building2, Clock, AlertTriangle,
   Quote, MessageCircle,
 } from "lucide-react";
 
@@ -151,6 +151,11 @@ export function CommitmentsView({ onOpenSession }: Props) {
     }
   };
 
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = (filtered || []).find((c) => c.commitment_id === selectedId)
+    || (items || []).find((c) => c.commitment_id === selectedId)
+    || null;
+
   return (
     <div className="mx-auto max-w-5xl space-y-4">
       <div className="flex items-center gap-3 flex-wrap text-xs">
@@ -223,45 +228,89 @@ export function CommitmentsView({ onOpenSession }: Props) {
         </p>
       )}
 
-      <Card>
-        <CardContent className="p-0">
-          {loading && !items && (
-            <div className="p-8 text-center text-sm text-muted-foreground flex items-center gap-2 justify-center">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Loading commitments…
-            </div>
-          )}
-          {error && (
-            <p className="p-8 text-center text-sm text-destructive italic">{error}</p>
-          )}
-          {filtered && filtered.length === 0 && !loading && !error && (
-            <p className="p-8 text-center text-sm text-muted-foreground">
-              {statusFilter === "active"
-                ? "No active commitments. The tracker auto-mines commitments after every processed meeting; once you've recorded a few you'll see them appear here."
-                : "Nothing matches the current filter."}
-            </p>
-          )}
-          {filtered && filtered.length > 0 && (
-            <div className="divide-y">
-              {filtered.map((c) => (
-                <CommitmentRow
-                  key={c.commitment_id}
-                  commitment={c}
-                  onMarkDelivered={() => updateStatus(c.commitment_id, "delivered")}
-                  onDismiss={() => updateStatus(c.commitment_id, "dismissed")}
-                  onReopen={() => updateStatus(c.commitment_id, "awaiting")}
-                  onOpenSession={onOpenSession}
-                />
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      {/* Split-pane: list of rows on the left, full detail + status
+          control on the right. Matches the Decisions and Follow-ups
+          tabs so the three "things to act on" views feel like one
+          application instead of three. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Card>
+          <CardContent className="p-0">
+            {loading && !items && (
+              <div className="p-8 text-center text-sm text-muted-foreground flex items-center gap-2 justify-center">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Loading commitments…
+              </div>
+            )}
+            {error && (
+              <p className="p-8 text-center text-sm text-destructive italic">{error}</p>
+            )}
+            {filtered && filtered.length === 0 && !loading && !error && (
+              <p className="p-8 text-center text-sm text-muted-foreground">
+                {statusFilter === "active"
+                  ? "No active commitments. The tracker auto-mines commitments after every processed meeting; once you've recorded a few you'll see them appear here."
+                  : "Nothing matches the current filter."}
+              </p>
+            )}
+            {filtered && filtered.length > 0 && (
+              <div className="divide-y">
+                {filtered.map((c) => (
+                  <button
+                    key={c.commitment_id}
+                    onClick={() => setSelectedId(c.commitment_id)}
+                    className={`w-full text-left p-3 hover:bg-muted/40 transition-colors ${
+                      selectedId === c.commitment_id ? "bg-accent" : ""
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      <StatusBadge
+                        status={c.status}
+                        isOverdue={c.is_overdue && c.status === "awaiting"}
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-medium truncate">
+                          {c.owner} — {c.description}
+                        </div>
+                        <div className="text-[11px] text-muted-foreground mt-0.5 flex items-center gap-2 flex-wrap">
+                          {c.session_client && (
+                            <span className="inline-flex items-center gap-1">
+                              <Building2 className="h-3 w-3" />
+                              {c.session_client}
+                            </span>
+                          )}
+                          <span className="truncate">{c.session_display_name || "Source meeting"}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent className="p-6">
+            {selected ? (
+              <CommitmentDetail
+                commitment={selected}
+                onMarkDelivered={() => updateStatus(selected.commitment_id, "delivered")}
+                onDismiss={() => updateStatus(selected.commitment_id, "dismissed")}
+                onReopen={() => updateStatus(selected.commitment_id, "awaiting")}
+                onOpenSession={onOpenSession}
+              />
+            ) : (
+              <p className="text-sm text-muted-foreground text-center py-12">
+                Select a commitment to see the verbatim quote, due date, and change its status.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 }
 
-function CommitmentRow({
+function CommitmentDetail({
   commitment, onMarkDelivered, onDismiss, onReopen, onOpenSession,
 }: {
   commitment: Commitment;
@@ -272,78 +321,86 @@ function CommitmentRow({
 }) {
   const c = commitment;
   const due = c.due_date_iso ? new Date(c.due_date_iso) : null;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
   const isOverdue = c.is_overdue && c.status === "awaiting";
 
   return (
-    <div className="p-4 hover:bg-muted/30 transition-colors">
-      <div className="flex items-start gap-3">
+    <div className="space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <h2 className="text-base font-semibold flex-1 min-w-0">{c.description}</h2>
         <StatusBadge status={c.status} isOverdue={isOverdue} />
-        <div className="flex-1 min-w-0">
-          <div className="flex items-baseline gap-2 flex-wrap">
-            <span className="font-medium text-sm">{c.owner}</span>
-            <SideBadge side={c.side} />
-            {c.session_client && (
-              <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-                <Building2 className="h-3 w-3" />
-                {c.session_client}
-                {c.session_project ? ` / ${c.session_project}` : ""}
-              </span>
-            )}
-          </div>
-          <p className="text-sm mt-1">{c.description}</p>
-          {c.quote && (
-            <blockquote className="text-[11px] italic text-muted-foreground border-l-2 border-muted pl-2 mt-2">
-              <Quote className="inline h-2.5 w-2.5 mr-0.5 -mt-0.5" />
-              {c.quote}
-            </blockquote>
-          )}
-          <div className="flex items-center gap-3 mt-2 text-[11px] text-muted-foreground flex-wrap">
-            {due && (
-              <span className={`inline-flex items-center gap-1 ${isOverdue ? "text-destructive font-medium" : ""}`}>
-                <Clock className="h-3 w-3" />
-                Due {due.toLocaleDateString()}
-                {isOverdue ? ` (${formatRelative(due)})` : ""}
-              </span>
-            )}
-            {!due && c.status === "awaiting" && (
-              <span className="text-muted-foreground">No deadline set</span>
-            )}
-            <button
-              onClick={() => onOpenSession(c.session_id)}
-              className="inline-flex items-center gap-1 hover:text-primary hover:underline"
-              title="Open the source meeting"
-            >
-              <MessageCircle className="h-3 w-3" />
-              {c.session_display_name || "Source meeting"}
-            </button>
-            {c.resolved_at && (
-              <span className="italic">
-                {c.status} {formatRelative(new Date(c.resolved_at))}
-              </span>
-            )}
-          </div>
+      </div>
+
+      <div>
+        <div className="text-[10px] font-medium uppercase tracking-wider text-primary mb-1">
+          Status
         </div>
-        <div className="flex flex-col gap-1.5 shrink-0">
-          {c.status === "awaiting" ? (
-            <>
-              <Button size="sm" variant="default" onClick={onMarkDelivered} className="h-7 text-[11px]">
-                <Check className="h-3 w-3 mr-1" />
-                Delivered
-              </Button>
-              <Button size="sm" variant="ghost" onClick={onDismiss} className="h-7 text-[11px]">
-                <X className="h-3 w-3 mr-1" />
-                Dismiss
-              </Button>
-            </>
-          ) : (
-            <Button size="sm" variant="outline" onClick={onReopen} className="h-7 text-[11px]">
-              <RotateCcw className="h-3 w-3 mr-1" />
-              Reopen
-            </Button>
-          )}
+        <Select
+          value={c.status}
+          onValueChange={(v) => {
+            if (!v || v === c.status) return;
+            if (v === "delivered") onMarkDelivered();
+            else if (v === "dismissed") onDismiss();
+            else if (v === "awaiting") onReopen();
+          }}
+        >
+          <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="awaiting">Awaiting</SelectItem>
+            <SelectItem value="delivered">Delivered</SelectItem>
+            <SelectItem value="dismissed">Dismissed</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="space-y-1">
+        <div className="text-[10px] font-medium uppercase tracking-wider text-primary">Owner</div>
+        <div className="text-sm flex items-center gap-2 flex-wrap">
+          <span>{c.owner}</span>
+          <SideBadge side={c.side} />
         </div>
       </div>
+
+      {due && (
+        <div className="space-y-1">
+          <div className="text-[10px] font-medium uppercase tracking-wider text-primary">Due</div>
+          <div className={`text-sm inline-flex items-center gap-1 ${isOverdue ? "text-destructive font-medium" : ""}`}>
+            <Clock className="h-3 w-3" />
+            {due.toLocaleDateString()}
+            {isOverdue ? ` (${formatRelative(due)})` : ""}
+          </div>
+        </div>
+      )}
+
+      {c.quote && (
+        <div className="space-y-1">
+          <div className="text-[10px] font-medium uppercase tracking-wider text-primary">Verbatim</div>
+          <blockquote className="text-xs italic text-muted-foreground border-l-2 border-muted pl-2">
+            <Quote className="inline h-2.5 w-2.5 mr-0.5 -mt-0.5" />
+            {c.quote}
+          </blockquote>
+        </div>
+      )}
+
+      <div className="pt-3 border-t flex items-center justify-between text-xs text-muted-foreground flex-wrap gap-2">
+        <span>
+          From <span className="font-medium text-foreground">{c.session_display_name || "source meeting"}</span>
+          {c.session_client ? ` · ${c.session_client}` : ""}
+          {c.session_project ? ` / ${c.session_project}` : ""}
+        </span>
+        <button
+          onClick={() => onOpenSession(c.session_id)}
+          className="text-xs text-primary hover:underline font-medium inline-flex items-center gap-1"
+        >
+          <MessageCircle className="h-3 w-3" />
+          Open meeting
+        </button>
+      </div>
+
+      {c.resolved_at && c.status !== "awaiting" && (
+        <p className="text-[11px] italic text-muted-foreground">
+          {c.status} {formatRelative(new Date(c.resolved_at))}
+        </p>
+      )}
     </div>
   );
 }

@@ -253,6 +253,16 @@ export function EngagementView({ sessions }: Props) {
               {reg.session_count} session
               {reg.session_count === 1 ? "" : "s"}
             </Badge>
+            {reg.last_meeting_at && (
+              <Badge variant="outline">
+                Last: {new Date(reg.last_meeting_at).toLocaleDateString()}
+              </Badge>
+            )}
+            {reg.first_meeting_at && reg.first_meeting_at !== reg.last_meeting_at && (
+              <Badge variant="outline">
+                Since: {new Date(reg.first_meeting_at).toLocaleDateString()}
+              </Badge>
+            )}
             <Badge variant="outline">
               {reg.counts.open_requirements} open requirements
             </Badge>
@@ -265,6 +275,13 @@ export function EngagementView({ sessions }: Props) {
             <Badge variant="outline">
               {reg.counts.open_questions} open questions
             </Badge>
+            {reg.counts.total_commitments > 0 && (
+              <Badge variant={reg.counts.outstanding_commitments > 0 ? "default" : "outline"}>
+                {reg.counts.outstanding_commitments} outstanding commitment
+                {reg.counts.outstanding_commitments === 1 ? "" : "s"}
+                {" "}of {reg.counts.total_commitments}
+              </Badge>
+            )}
           </div>
 
           <Section

@@ -59,9 +59,14 @@ def _scope_key(client: str, project: str = "") -> str:
 
 
 class EngagementService:
-    def __init__(self, session_svc, client_cfg_svc=None):
+    def __init__(self, session_svc, client_cfg_svc=None, commitments_svc=None):
         self._sessions = session_svc
         self._client_cfg = client_cfg_svc
+        # Optional — when provided, the register surfaces rolled-up
+        # commitment counts (outstanding / delivered / dismissed) so the
+        # engagement view can show "what's still owed across every call
+        # on this account." Tolerant of None for tests / older callers.
+        self._commitments = commitments_svc
 
     # ---- public API -------------------------------------------------
 
@@ -90,11 +95,59 @@ class EngagementService:
                 loaded.append((meta, full))
 
         body = self._aggregate(loaded)
+
+        # Auto-rolled meeting date range — option (a) in the engagement
+        # update design: every recorded meeting silently updates the
+        # engagement summary without the SA having to type anything.
+        # First + last lets the UI show "active since X / last touched Y".
+        first_meeting_at = ""
+        last_meeting_at = ""
+        if matched:
+            starts = [
+                (m.get("started_at") or "") for m in matched
+                if (m.get("started_at") or "")
+            ]
+            if starts:
+                starts.sort()
+                first_meeting_at = starts[0]
+                last_meeting_at = starts[-1]
+
+        # Rolled-up commitment counts. Best-effort: a commitments-svc
+        # outage must not break the register render — the rest is still
+        # useful.
+        commit_counts = {
+            "outstanding": 0, "delivered": 0, "dismissed": 0, "total": 0,
+        }
+        if self._commitments is not None:
+            try:
+                rows = self._commitments.list_all(
+                    client=client, project=project or None)
+                for r in rows:
+                    st = r.get("status", "awaiting")
+                    commit_counts["total"] += 1
+                    if st == "awaiting":
+                        commit_counts["outstanding"] += 1
+                    elif st == "delivered":
+                        commit_counts["delivered"] += 1
+                    elif st == "dismissed":
+                        commit_counts["dismissed"] += 1
+            except Exception as e:
+                logger.warning(f"engagement commitments roll-up failed: {e}")
+
+        # Merge the auto-roll fields into the existing counts dict so
+        # the frontend reads one cohesive bag of numbers.
+        body.setdefault("counts", {})
+        body["counts"]["outstanding_commitments"] = commit_counts["outstanding"]
+        body["counts"]["total_commitments"] = commit_counts["total"]
+
         register = {
             "client": self._display_client(client),
             "project": project or "",
             "generated_at": datetime.datetime.now().isoformat(),
             "session_count": len(loaded),
+            "first_meeting_at": first_meeting_at,
+            "last_meeting_at": last_meeting_at,
+            "commitments": commit_counts,
             **body,
         }
         self._write_cache(client_key, project_key, register)
