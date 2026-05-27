@@ -170,6 +170,22 @@ export function SearchView({ onOpenSession }: { onOpenSession: (id: string) => v
 
   return (
     <div className="mx-auto max-w-4xl space-y-4">
+      {/* Top-of-view explainer — Search and Ask are NOT the same.
+          Search finds matching transcript chunks. Ask synthesizes an
+          answer from those chunks via the LLM. Users have asked which
+          to use; this banner answers that question once, in context. */}
+      <div className="rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
+        <strong className="text-foreground">Search finds matching chunks.</strong>{" "}
+        Two modes: <strong>Keyword</strong> grep across summaries +
+        transcripts, or <strong>Semantic</strong> embedding similarity.
+        You get snippets back — go read them yourself.{" "}
+        <span className="text-foreground/80">
+          Want a written answer instead? Use{" "}
+          <strong>Ask</strong> — it pulls the same chunks but pipes them
+          through Claude to write a synthesized response with citations.
+        </span>
+      </div>
+
       {/* Mode picker — one row, two buttons. Could be a Tabs/Select but
           two options don't justify the chrome. */}
       <div className="flex items-center gap-1 rounded-lg border bg-muted/30 p-1 w-fit">
