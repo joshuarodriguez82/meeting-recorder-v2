@@ -640,14 +640,40 @@ function CoPilotTicksView({ session }: { session: SessionFull }) {
     );
   }
   const newestFirst = [...ticks].reverse();
+
+  // Build an "all-ticks" plain-text dump for the header Copy button —
+  // headed by section + timestamp, ordered newest-first the same way
+  // the cards render. Empty sections skipped so the clipboard isn't
+  // padded with blank headers.
+  const allText = newestFirst.map((t) => {
+    const generated = t.generated_at
+      ? new Date(t.generated_at).toLocaleString()
+      : "";
+    const blocks: string[] = [];
+    if (generated) blocks.push(`=== ${generated} ===`);
+    const sections: Array<[string, string[] | undefined]> = [
+      ["Clarifying questions", t.clarifying_questions],
+      ["Risks & assumptions", t.risks],
+      ["Suggested follow-ups", t.follow_ups],
+    ];
+    for (const [title, items] of sections) {
+      if (!items || items.length === 0) continue;
+      blocks.push(`${title}:\n${items.map((s) => `  • ${s}`).join("\n")}`);
+    }
+    return blocks.join("\n\n");
+  }).join("\n\n---\n\n");
+
   return (
     <div className="space-y-3">
-      <p className="text-xs text-muted-foreground">
-        {ticks.length} coaching update{ticks.length === 1 ? "" : "s"} the
-        Live Co-Pilot produced during this meeting, newest first. Each
-        update reflected what had been said in the previous ~10 minutes
-        at the time the tick fired.
-      </p>
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-xs text-muted-foreground flex-1">
+          {ticks.length} coaching update{ticks.length === 1 ? "" : "s"} the
+          Live Co-Pilot produced during this meeting, newest first. Each
+          update reflected what had been said in the previous ~10 minutes
+          at the time the tick fired.
+        </p>
+        <CopyButton text={allText} label="Copy all ticks" />
+      </div>
       {newestFirst.map((t, i) => {
         const sections: Array<{
           title: string;
@@ -660,6 +686,21 @@ function CoPilotTicksView({ session }: { session: SessionFull }) {
         const generated = t.generated_at
           ? new Date(t.generated_at).toLocaleString()
           : "";
+
+        // Plain-text version of this single tick — for the per-card
+        // Copy button. Same format as the all-ticks blob above so
+        // pasted output is consistent regardless of which button was
+        // used.
+        const tickText = (() => {
+          const blocks: string[] = [];
+          if (generated) blocks.push(`=== ${generated} ===`);
+          for (const { title, items } of sections) {
+            if (!items || items.length === 0) continue;
+            blocks.push(`${title}:\n${items.map((s) => `  • ${s}`).join("\n")}`);
+          }
+          return blocks.join("\n\n");
+        })();
+
         return (
           <div
             key={(t.generated_at || "") + i}
@@ -667,27 +708,40 @@ function CoPilotTicksView({ session }: { session: SessionFull }) {
           >
             <div className="flex items-center justify-between text-[10px] uppercase tracking-wide text-muted-foreground">
               <span>{generated}</span>
-              {t.segment_count > 0 && (
-                <span>{t.segment_count} segments</span>
-              )}
+              <div className="flex items-center gap-2">
+                {t.segment_count > 0 && (
+                  <span>{t.segment_count} segments</span>
+                )}
+                <CopyButton text={tickText} label="Copy" />
+              </div>
             </div>
             {sections.map(({ title, items }) => {
               if (!items || items.length === 0) return null;
+              const sectionText =
+                `${title}:\n${items.map((s) => `  • ${s}`).join("\n")}`;
               return (
                 <div key={title} className="space-y-1">
-                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                    {title}
-                  </p>
+                  <div className="flex items-center justify-between">
+                    <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                      {title}
+                    </p>
+                    <CopyButton text={sectionText} label="Copy" />
+                  </div>
                   <ul className="space-y-1">
                     {items.map((s, j) => (
                       <li
                         key={j}
-                        className="text-sm leading-snug flex gap-2"
+                        className="text-sm leading-snug flex gap-2 group"
                       >
                         <span className="text-muted-foreground select-none">
                           •
                         </span>
-                        <span>{s}</span>
+                        <span className="flex-1">{s}</span>
+                        <CopyButton
+                          text={s}
+                          label="Copy"
+                          className="opacity-0 group-hover:opacity-100"
+                        />
                       </li>
                     ))}
                   </ul>
