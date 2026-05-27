@@ -300,6 +300,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from config.settings import Settings
 from core.audio_capture import list_input_devices, list_output_devices
 from services.template_service import TemplateService
+from services.copilot_mode_service import CoPilotModeService
+from services.copilot_meeting_type_service import CoPilotMeetingTypeService
 from models.session import Session
 from services.calendar_service import (
     get_todays_meetings, get_upcoming_meetings, is_outlook_available,
@@ -469,6 +471,8 @@ class Services:
         self.client_cfg_svc: Optional[ClientConfigService] = None
         self.engagement_svc: Optional[EngagementService] = None
         self.template_svc: Optional[TemplateService] = None
+        self.copilot_mode_svc: Optional[CoPilotModeService] = None
+        self.copilot_meeting_type_svc: Optional[CoPilotMeetingTypeService] = None
         self.recording_svc: Optional[RecordingService] = None
         self.speaker_profile_svc: Optional[SpeakerProfileService] = None
         self.auto_record_blocklist_svc: Optional[AutoRecordBlocklistService] = None
@@ -572,6 +576,11 @@ class Services:
             self.engagement_svc = EngagementService(
                 self.session_svc, self.client_cfg_svc, self.commitments_svc)
             self.template_svc = TemplateService(_recordings_dir)
+            # Co-Pilot mode + meeting-type libraries. Same shape as
+            # TemplateService — seeds defaults on first launch, user
+            # can edit / reset / delete from Settings.
+            self.copilot_mode_svc = CoPilotModeService(_recordings_dir)
+            self.copilot_meeting_type_svc = CoPilotMeetingTypeService(_recordings_dir)
             # Speaker profiles stay per-machine: voice fingerprints are
             # mic-hardware-dependent, syncing them across devices with
             # different mics risks false positives.
@@ -761,6 +770,12 @@ class SettingsDTO(BaseModel):
     live_openai_api_key: str = ""
     live_openai_base_url: str = ""
     live_anthropic_api_key: str = ""
+    # Active co-pilot persona + meeting-type modifier. Names resolve
+    # through CoPilotModeService / CoPilotMeetingTypeService; the
+    # prompts themselves are edited in Settings as their own library.
+    # Defaults match what those services seed: SA persona, General type.
+    live_copilot_mode: str = "SA"
+    live_copilot_meeting_type: str = "General"
     # Free-text context the SA pins for the live co-pilot — appended to
     # every coach_tick prompt as authoritative role / topic framing.
     # Examples: "Current engagement is a Genesys → Connect migration for
@@ -943,6 +958,8 @@ async def get_settings():
         live_openai_api_key=s.live_openai_api_key,
         live_openai_base_url=s.live_openai_base_url,
         live_anthropic_api_key=s.live_anthropic_api_key,
+        live_copilot_mode=s.live_copilot_mode,
+        live_copilot_meeting_type=s.live_copilot_meeting_type,
         copilot_custom_context=s.copilot_custom_context,
     )
 
@@ -1013,6 +1030,8 @@ async def save_settings(payload: SettingsDTO):
         live_openai_api_key=payload.live_openai_api_key or "",
         live_openai_base_url=(payload.live_openai_base_url or "").strip(),
         live_anthropic_api_key=payload.live_anthropic_api_key or "",
+        live_copilot_mode=(payload.live_copilot_mode or "").strip() or "SA",
+        live_copilot_meeting_type=(payload.live_copilot_meeting_type or "").strip() or "General",
         copilot_custom_context=(payload.copilot_custom_context or "").strip(),
     )
     # If the recordings folder changed, migrate client + template state
@@ -1987,9 +2006,25 @@ async def copilot_tick():
         if sess is not None and getattr(sess, "copilot_ticks", None)
         else None
     )
+    # Resolve mode + meeting-type names to their current prompt text.
+    # Both libraries seed defaults at startup so missing entries should
+    # only happen if the user deleted everything; the services fall
+    # back internally so we don't need to defend here.
+    mode_name = getattr(svc.settings, "live_copilot_mode", "") or "SA"
+    type_name = getattr(svc.settings, "live_copilot_meeting_type", "") or "General"
+    mode_prompt = (
+        svc.copilot_mode_svc.get_prompt(mode_name)
+        if svc.copilot_mode_svc else ""
+    )
+    type_prompt = (
+        svc.copilot_meeting_type_svc.get_prompt(type_name)
+        if svc.copilot_meeting_type_svc else ""
+    )
     result = await coach.coach_tick(
         segments=segments, meeting_name=meeting_name,
         custom_context=custom_context, prior_ticks=prior_ticks,
+        mode_name=mode_name, mode_prompt=mode_prompt,
+        meeting_type_name=type_name, meeting_type_prompt=type_prompt,
     )
     payload = {
         "clarifying_questions": result.get("clarifying_questions", []),
@@ -2058,6 +2093,8 @@ async def set_live_copilot_enabled(payload: dict):
         live_openai_api_key=s.live_openai_api_key,
         live_openai_base_url=s.live_openai_base_url,
         live_anthropic_api_key=s.live_anthropic_api_key,
+        live_copilot_mode=s.live_copilot_mode,
+        live_copilot_meeting_type=s.live_copilot_meeting_type,
         copilot_custom_context=s.copilot_custom_context,
     )
     # Update the cached Settings in-place so the change is visible
@@ -4398,6 +4435,169 @@ async def reset_template(name: str):
         "is_default": t.is_default,
         "default_prompt": t.default_prompt,
     }
+
+
+# ── Co-Pilot mode + meeting-type library ─────────────────────────────
+#
+# Same CRUD shape as /templates above. Two parallel resources because
+# modes and meeting types compose multiplicatively (3 modes × 7 types
+# = 21 working combinations from 10 editable prompts).
+
+def _mode_dict(m) -> dict:
+    return {
+        "name": m.name, "prompt": m.prompt,
+        "is_default": m.is_default, "default_prompt": m.default_prompt,
+    }
+
+
+class CoPilotPromptUpsertRequest(BaseModel):
+    prompt: str
+
+
+@app.get("/copilot/modes")
+async def get_copilot_modes():
+    svc.load_settings()
+    if not svc.copilot_mode_svc:
+        return []
+    return await asyncio.to_thread(
+        lambda: [_mode_dict(m) for m in svc.copilot_mode_svc.list_all()])
+
+
+@app.put("/copilot/modes/{name}")
+async def put_copilot_mode(name: str, req: CoPilotPromptUpsertRequest):
+    svc.load_settings()
+    if not svc.copilot_mode_svc:
+        raise HTTPException(status_code=503, detail="Mode service not initialized")
+    try:
+        m = await asyncio.to_thread(svc.copilot_mode_svc.upsert, name, req.prompt)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _mode_dict(m)
+
+
+@app.delete("/copilot/modes/{name}")
+async def delete_copilot_mode(name: str):
+    svc.load_settings()
+    if not svc.copilot_mode_svc:
+        raise HTTPException(status_code=503, detail="Mode service not initialized")
+    await asyncio.to_thread(svc.copilot_mode_svc.delete, name)
+    return {"ok": True}
+
+
+@app.post("/copilot/modes/{name}/reset")
+async def reset_copilot_mode(name: str):
+    svc.load_settings()
+    if not svc.copilot_mode_svc:
+        raise HTTPException(status_code=503, detail="Mode service not initialized")
+    m = await asyncio.to_thread(svc.copilot_mode_svc.reset, name)
+    if not m:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{name}' isn't a default mode — nothing to reset to.")
+    return _mode_dict(m)
+
+
+@app.get("/copilot/meeting-types")
+async def get_copilot_meeting_types():
+    svc.load_settings()
+    if not svc.copilot_meeting_type_svc:
+        return []
+    return await asyncio.to_thread(
+        lambda: [_mode_dict(m) for m in svc.copilot_meeting_type_svc.list_all()])
+
+
+@app.put("/copilot/meeting-types/{name}")
+async def put_copilot_meeting_type(name: str, req: CoPilotPromptUpsertRequest):
+    svc.load_settings()
+    if not svc.copilot_meeting_type_svc:
+        raise HTTPException(status_code=503, detail="Meeting-type service not initialized")
+    try:
+        m = await asyncio.to_thread(
+            svc.copilot_meeting_type_svc.upsert, name, req.prompt)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _mode_dict(m)
+
+
+@app.delete("/copilot/meeting-types/{name}")
+async def delete_copilot_meeting_type(name: str):
+    svc.load_settings()
+    if not svc.copilot_meeting_type_svc:
+        raise HTTPException(status_code=503, detail="Meeting-type service not initialized")
+    await asyncio.to_thread(svc.copilot_meeting_type_svc.delete, name)
+    return {"ok": True}
+
+
+@app.post("/copilot/meeting-types/{name}/reset")
+async def reset_copilot_meeting_type(name: str):
+    svc.load_settings()
+    if not svc.copilot_meeting_type_svc:
+        raise HTTPException(status_code=503, detail="Meeting-type service not initialized")
+    m = await asyncio.to_thread(svc.copilot_meeting_type_svc.reset, name)
+    if not m:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{name}' isn't a default meeting type — nothing to reset to.")
+    return _mode_dict(m)
+
+
+# ── Lightweight setter for the active mode/type ──────────────────────
+# Mirrors /settings/live-copilot — flips just these two fields without
+# rebuilding RecordingService (which the full POST /settings does),
+# so the panel dropdown can change them mid-recording without orphaning
+# capture threads.
+
+class CoPilotActiveModeRequest(BaseModel):
+    mode: Optional[str] = None
+    meeting_type: Optional[str] = None
+
+
+@app.post("/settings/copilot-active")
+async def set_copilot_active(req: CoPilotActiveModeRequest):
+    """Update the active co-pilot mode + meeting type. Either field
+    optional — pass only the one you're changing. Persists to
+    config.env so the choice survives restarts."""
+    s = svc.load_settings()
+    new_mode = (req.mode or s.live_copilot_mode or "SA").strip()
+    new_type = (req.meeting_type or s.live_copilot_meeting_type or "General").strip()
+    Settings.save_to_env(
+        anthropic_api_key=s.anthropic_api_key,
+        hf_token=s.hf_token,
+        whisper_model=s.whisper_model,
+        max_speakers=s.max_speakers,
+        recordings_dir=s.recordings_dir,
+        email_to=s.email_to,
+        claude_model=s.claude_model,
+        notify_minutes_before=s.notify_minutes_before,
+        auto_process_after_stop=s.auto_process_after_stop,
+        launch_on_startup=s.launch_on_startup,
+        auto_follow_up_email=s.auto_follow_up_email,
+        retention_enabled=s.retention_enabled,
+        retention_processed_days=s.retention_processed_days,
+        retention_unprocessed_days=s.retention_unprocessed_days,
+        ai_provider=s.ai_provider,
+        openai_api_key=s.openai_api_key,
+        openai_base_url=s.openai_base_url,
+        live_transcription_enabled=s.live_transcription_enabled,
+        silence_warn_min=s.silence_warn_min,
+        silence_stop_min=s.silence_stop_min,
+        overrun_warn_min=s.overrun_warn_min,
+        overrun_stop_min=s.overrun_stop_min,
+        hard_cap_hours=s.hard_cap_hours,
+        auto_record_enabled=s.auto_record_enabled,
+        live_copilot_enabled=s.live_copilot_enabled,
+        live_ai_provider=s.live_ai_provider,
+        live_claude_model=s.live_claude_model,
+        live_openai_api_key=s.live_openai_api_key,
+        live_openai_base_url=s.live_openai_base_url,
+        live_anthropic_api_key=s.live_anthropic_api_key,
+        live_copilot_mode=new_mode,
+        live_copilot_meeting_type=new_type,
+        copilot_custom_context=s.copilot_custom_context,
+    )
+    svc.settings = dataclasses.replace(
+        s, live_copilot_mode=new_mode, live_copilot_meeting_type=new_type)
+    return {"mode": new_mode, "meeting_type": new_type}
 
 
 # ── Startup ──────────────────────────────────────────────────────────
