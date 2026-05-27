@@ -261,6 +261,22 @@ _COACH_OUTPUT_RULES = (
     "Do not include markdown, prose, or code fences around the JSON."
 )
 
+# Hot-tick variant: same wire format, but the rules emphasize urgency
+# and bias the model toward emptiness. Hot ticks fire every ~15s on a
+# narrow window so most of them SHOULD be empty — only the ones that
+# catch something time-sensitive earn a render.
+_COACH_OUTPUT_RULES_HOT = (
+    "HOT TICK MODE — you're looking at only the last ~90 seconds of "
+    "transcript. Only fire suggestions if there's something TIME-"
+    "SENSITIVE the SA should act on RIGHT NOW (a question that needs "
+    "asking before the topic moves on, a number that needs verifying, "
+    "a risk that's actively materializing in the conversation). When "
+    "in doubt, return empty arrays — a quiet hot tick is correct most "
+    "of the time. The wide-context tick fires every ~45s on a much "
+    "larger window and handles the slower, contextual coaching.\n\n"
+    + _COACH_OUTPUT_RULES
+)
+
 _FALLBACK_MODE_PROMPT = (
     "You are a live in-call co-pilot for a Solutions Architect at "
     "[scrubbed] Digital, focused on Amazon Connect / CCaaS / contact-center "
@@ -493,6 +509,7 @@ class Summarizer:
         mode_prompt: str = "",
         meeting_type_name: str = "",
         meeting_type_prompt: str = "",
+        hot: bool = False,
     ) -> dict:
         """In-call coaching tick. Given the last few minutes of live
         transcript segments, produce three short bullet lists:
@@ -591,17 +608,23 @@ class Summarizer:
         if not meeting_type_block:
             meeting_type_block = _FALLBACK_MEETING_TYPE_PROMPT
 
+        output_rules = _COACH_OUTPUT_RULES_HOT if hot else _COACH_OUTPUT_RULES
         prompt = (
             f"{mode_block}\n\n"
             f"This meeting is a **{type_label}**. {meeting_type_block}\n\n"
-            f"{_COACH_OUTPUT_RULES}\n"
+            f"{output_rules}\n"
             f"{custom_block}"
             f"{prior_block}\n"
             f"{header}Recent transcript:\n{transcript}"
         )
 
         try:
-            raw = await self._chat(prompt, max_tokens=512, timeout=20.0)
+            # Hot ticks have a tighter budget — narrower window, more
+            # frequent firing, much higher chance the answer is empty.
+            # Wide ticks keep the original 512/20s budget.
+            tokens = 256 if hot else 512
+            timeout_s = 10.0 if hot else 20.0
+            raw = await self._chat(prompt, max_tokens=tokens, timeout=timeout_s)
         except Exception as e:
             # Include the exception type because some exceptions
             # (asyncio.TimeoutError in particular) have an empty __str__,
