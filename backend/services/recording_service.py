@@ -213,6 +213,11 @@ class RecordingService:
         # has come through.
         self._last_speech_at = datetime.now()
         self._meeting_scheduled_end = scheduled_end
+        # Reset the diagnostic-log rate limiter too so the FIRST tick of
+        # this recording always emits a line — otherwise a stop+restart
+        # within 60s suppresses the very log entry you'd need to debug
+        # an early auto-stop on the new recording.
+        self._watchdog_last_log_at = None
         with self._watchdog_lock:
             self._watchdog_warnings = []
 
