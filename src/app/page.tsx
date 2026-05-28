@@ -7,8 +7,10 @@ import {
   Mic, History, CheckSquare, Target, Search,
   LayoutDashboard, Settings as SettingsIcon, HelpCircle, Loader2,
   Sparkles, MessageCircle, Handshake, BarChart3, FileSpreadsheet,
+  Sun,
 } from "lucide-react";
 import { InsightsView } from "@/components/insights-view";
+import { TodayView } from "@/components/today-view";
 import { RecordView } from "@/components/record-view";
 import { SettingsView } from "@/components/settings-view";
 import { SessionsView } from "@/components/sessions-view";
@@ -26,6 +28,7 @@ import { SessionDetailDialog } from "@/components/session-detail-dialog";
 import { useUnprocessedSessions } from "@/lib/useUnprocessedSessions";
 
 const NAV_ITEMS = [
+  { id: "today", label: "Today", icon: Sun },
   { id: "record", label: "Record", icon: Mic },
   { id: "sessions", label: "Sessions", icon: History },
   { id: "follow-ups", label: "Follow-Ups", icon: CheckSquare },
@@ -41,7 +44,7 @@ const NAV_ITEMS = [
 
 export default function Home() {
   const [backendReady, setBackendReady] = useState(false);
-  const [nav, setNav] = useState<string>("record");
+  const [nav, setNav] = useState<string>("today");
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   // Configured clients (from client_configs.json). Merged into
   // existingClients so the Sessions detail dialog's client picker also
@@ -668,6 +671,7 @@ export default function Home() {
           <div>
             <h1 className="text-lg font-semibold capitalize">{nav.replace("-", " ")}</h1>
             <p className="text-xs text-muted-foreground">
+              {nav === "today" && "Your daily briefing — top priority, agenda, action items, FYI"}
               {nav === "record" && "Start a new recording or pick one from your calendar"}
               {nav === "sessions" && "Browse every meeting you've recorded"}
               {nav === "follow-ups" && "Track action items across every meeting"}
@@ -686,6 +690,7 @@ export default function Home() {
         </header>
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden p-8 min-h-0">
+          {nav === "today" && <TodayView onNavigate={setNav} />}
           {nav === "record" && (
             <RecordView
               onSessionsChanged={reloadSessions}
