@@ -27,8 +27,10 @@ import { CalendarMonitor } from "@/components/calendar-monitor";
 import { SessionDetailDialog } from "@/components/session-detail-dialog";
 import { useUnprocessedSessions } from "@/lib/useUnprocessedSessions";
 
+// "today" is opt-in (Settings → Daily Briefing). It's prepended to the
+// nav at render time only when today_view_enabled is true, so it's not
+// in this static list.
 const NAV_ITEMS = [
-  { id: "today", label: "Today", icon: Sun },
   { id: "record", label: "Record", icon: Mic },
   { id: "sessions", label: "Sessions", icon: History },
   { id: "follow-ups", label: "Follow-Ups", icon: CheckSquare },
@@ -44,7 +46,14 @@ const NAV_ITEMS = [
 
 export default function Home() {
   const [backendReady, setBackendReady] = useState(false);
-  const [nav, setNav] = useState<string>("today");
+  const [nav, setNav] = useState<string>("record");
+  // Opt-in "Today" daily-briefing tab. Hidden + skipped as landing view
+  // unless the user enables it in Settings. Persisted server-side.
+  const [todayEnabled, setTodayEnabled] = useState(false);
+  // Auto-land on Today only ONCE per app launch (when enabled) — so the
+  // periodic settings refresh on window focus doesn't yank the user back
+  // to Today after they've navigated elsewhere.
+  const didInitialLandRef = useRef(false);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   // Configured clients (from client_configs.json). Merged into
   // existingClients so the Sessions detail dialog's client picker also
@@ -343,7 +352,18 @@ export default function Home() {
       setSessions(s);
       setStorage(stats);
       setClientConfigs(cfgs);
-      if (settings) setNotifyMinutes(settings.notify_minutes_before);
+      if (settings) {
+        setNotifyMinutes(settings.notify_minutes_before);
+        const enabled = !!settings.today_view_enabled;
+        setTodayEnabled(enabled);
+        // First settings resolution after launch: if Today is enabled,
+        // make it the landing view. Guarded by the ref so re-fetches on
+        // focus don't re-navigate the user mid-session.
+        if (enabled && !didInitialLandRef.current) {
+          setNav("today");
+        }
+        didInitialLandRef.current = true;
+      }
     } catch (e) {
       console.error(e);
     }
@@ -434,6 +454,17 @@ export default function Home() {
       reloadCalendar();
     }
   }, [backendReady, reloadCalendar]);
+
+  // If Today gets disabled (in Settings) while the user is sitting on it,
+  // bounce them to Record so they're not stranded on a now-hidden tab.
+  useEffect(() => {
+    if (!todayEnabled && nav === "today") setNav("record");
+  }, [todayEnabled, nav]);
+
+  // Nav list with the opt-in Today tab prepended only when enabled.
+  const navItems = todayEnabled
+    ? [{ id: "today", label: "Today", icon: Sun }, ...NAV_ITEMS]
+    : NAV_ITEMS;
 
   // Notification system — polls /sessions/unprocessed every 60s and fires
   // a Windows toast the first time a new unprocessed session appears. The
@@ -597,7 +628,7 @@ export default function Home() {
             Workspace
           </div>
           <ul className="space-y-0.5">
-            {NAV_ITEMS.map((item) => {
+            {navItems.map((item) => {
               const Icon = item.icon;
               const active = nav === item.id;
               const badge = item.id === "sessions" && unprocessedCount > 0
@@ -690,7 +721,7 @@ export default function Home() {
         </header>
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden p-8 min-h-0">
-          {nav === "today" && <TodayView onNavigate={setNav} />}
+          {nav === "today" && todayEnabled && <TodayView onNavigate={setNav} />}
           {nav === "record" && (
             <RecordView
               onSessionsChanged={reloadSessions}
@@ -727,7 +758,7 @@ export default function Home() {
             />
           )}
           {nav === "prep-brief" && <PrepBriefView sessions={sessions} meetings={meetings} />}
-          {nav === "settings" && <SettingsView />}
+          {nav === "settings" && <SettingsView onSaved={reloadSessions} />}
           {nav === "help" && <UsageGuideView />}
         </div>
       </main>

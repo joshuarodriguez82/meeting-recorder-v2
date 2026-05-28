@@ -126,6 +126,11 @@ export interface Settings {
   // tighten suggestions without code changes ("focus on Genesys
   // migration", "client is healthcare, PHI compliance matters").
   copilot_custom_context: string;
+  // Opt-in toggle for the "Today" daily-briefing tab. OFF by default —
+  // depends on the user running an M365 Copilot scheduled prompt and
+  // pasting its output in. When false the Today nav item is hidden and
+  // the app lands on Record instead.
+  today_view_enabled: boolean;
 }
 
 // A single co-pilot mode (persona) or meeting-type (modifier). Shape

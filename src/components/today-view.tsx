@@ -129,22 +129,12 @@ export function TodayView({ onNavigate }: Props) {
     return () => clearInterval(t);
   }, [refreshBriefing, refreshRecording]);
 
-  // Pre-fill paste textarea with current clipboard contents the moment
-  // the dialog opens — Tauri webview won't auto-paste on open, but if
-  // the user already copied from M365 Copilot before clicking Import,
-  // we save them the Ctrl+V.
-  useEffect(() => {
-    if (!importOpen) return;
-    (async () => {
-      try {
-        const txt = await navigator.clipboard?.readText?.();
-        if (txt && txt.trim() && !pasteText) setPasteText(txt);
-      } catch {
-        /* clipboard read can fail (perms, focus); not worth surfacing */
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [importOpen]);
+  // The dialog used to auto-pull the system clipboard on open, intending
+  // to save the user a Ctrl+V if they'd just copied from M365 Copilot.
+  // But it silently dumped WHATEVER was on the clipboard (a stray gh
+  // command, a code snippet, a URL — anything copied recently) into the
+  // textarea, which is the kind of surprising side-effect that costs
+  // trust. Removed. Users paste with Ctrl+V like every other app.
 
   const handleImport = async () => {
     const txt = pasteText.trim();
@@ -673,8 +663,22 @@ function ImportDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
-        <DialogHeader>
+      {/*
+        Constrained-height layout: header (auto) + body (1fr, scrolls)
+        + footer (auto). v2.10.0 shipped without a max-height so a
+        long briefing pasted into the textarea blew the modal off-
+        screen and hid the Parse button. The textarea also caps its
+        own height + scrolls internally so the SURROUNDING modal
+        never grows beyond the viewport.
+      */}
+      <DialogContent
+        className={
+          "!max-w-3xl w-[min(900px,calc(100vw-2rem))] " +
+          "h-[min(720px,calc(100vh-4rem))] " +
+          "flex flex-col gap-0 p-0 overflow-hidden"
+        }
+      >
+        <DialogHeader className="p-4 pb-3 border-b shrink-0">
           <DialogTitle>Import daily briefing</DialogTitle>
           <DialogDescription>
             Paste the output from your Microsoft 365 Copilot scheduled
@@ -682,12 +686,15 @@ function ImportDialog({
             items, and FYI sections.
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-2">
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-2">
           <Textarea
             value={text}
             onChange={(e) => onText(e.target.value)}
-            placeholder="Paste your briefing here…"
-            className="min-h-[280px] font-mono text-xs"
+            placeholder="Paste your M365 Copilot briefing here (Ctrl+V)…"
+            className={
+              "h-[420px] min-h-[280px] max-h-[55vh] " +
+              "resize-none overflow-y-auto font-mono text-xs"
+            }
             autoFocus
           />
           <p className="text-[11px] text-muted-foreground">
@@ -701,7 +708,7 @@ function ImportDialog({
             </div>
           )}
         </div>
-        <DialogFooter>
+        <DialogFooter className="shrink-0 m-0 rounded-b-xl">
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={importing}>
             <X className="h-4 w-4 mr-1" /> Cancel
           </Button>
