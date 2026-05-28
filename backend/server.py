@@ -4908,15 +4908,14 @@ async def import_daily_briefing(req: BriefingImportRequest):
         # this large is either pasted email chain or a mistake.
         raise HTTPException(status_code=400, detail="Briefing too large (>50KB)")
 
-    # Reuse the Summarizer the rest of the app already built at startup
-    # with the user's real provider/model/key resolution. The previous
-    # implementation hardcoded provider="anthropic" and ignored
-    # live_ai_provider — users running live co-pilot against OpenRouter
-    # or Ollama (with a non-Claude model name like "llama3.1") got a
-    # 404 from the Anthropic SDK because llama3.1 isn't a Claude model.
-    # Prefer live_summarizer (built from live_* settings, the same wiring
-    # the live tick endpoints use) and fall back to the main summarizer.
-    summ = svc.live_summarizer or svc.summarizer
+    # Use the MAIN summarizer (Anthropic / quality model), not the live
+    # co-pilot one. Briefing parsing is a single ~2k-token call a few
+    # times a day — same quality bar as post-meeting summaries — so it
+    # belongs on the main provider, not the live tick model (which is
+    # often a cheap Ollama / OpenRouter free-tier model picked because
+    # ticks fire constantly). Fall back to live_summarizer only if the
+    # user hasn't configured a main provider at all.
+    summ = svc.summarizer or svc.live_summarizer
     if summ is None:
         raise HTTPException(
             status_code=400,
