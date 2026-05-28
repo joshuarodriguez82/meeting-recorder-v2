@@ -1529,7 +1529,12 @@ async def recording_status():
                 # the audio file finalises cleanly. Off-loop because
                 # stop_recording does I/O.
                 try:
-                    await asyncio.to_thread(_stop_recording_sync)
+                    session = await asyncio.to_thread(_stop_recording_sync)
+                    # Same backend-owned auto-process as every other stop
+                    # path. Idempotent per session, so if the timer-driven
+                    # watchdog already fired for this session this is a
+                    # no-op.
+                    _maybe_auto_process(session)
                 except Exception as e:
                     logger.exception(
                         f"Watchdog auto-stop raised: {e}")
@@ -2327,6 +2332,75 @@ def _stop_recording_sync():
     return session
 
 
+# ── Backend-driven auto-process after stop ──────────────────────────
+#
+# CRITICAL: auto-processing used to be triggered ONLY by the Record
+# view's frontend stop() handler — it called processFull after stopping.
+# That meant any stop path that DIDN'T go through that handler finalized
+# the WAV but never processed it:
+#   - the watchdog auto-stop (silence / overrun / hard cap), which calls
+#     _stop_recording_sync directly on a backend timer
+#   - the sidebar recording-pill Stop button, which calls /recording/stop
+#     without the frontend processFull hook
+# An auto-recorded + auto-stopped meeting therefore saved audio with zero
+# AI output, even with AUTO_PROCESS_AFTER_STOP=true. Same class of bug as
+# the watchdog-was-frontend-polled issue (v2.9.3): a critical step was
+# UI-driven, so it silently didn't happen when the UI wasn't the thing
+# driving the stop.
+#
+# Fix: the backend owns auto-process now. Every stop path calls
+# _maybe_auto_process(session); it fires the full pipeline as a
+# fire-and-forget task when the setting is on. Idempotent per session so
+# overlapping triggers (e.g. endpoint + a racing watchdog tick) can't
+# double-process. The frontend no longer triggers processing itself.
+_auto_processed_sessions: set[str] = set()
+
+
+async def _auto_process_session(session_id: str, template: str,
+                                follow_up: bool) -> None:
+    """Run the full extraction pipeline for a just-stopped session in the
+    background. Reuses the same code path as the manual process_full
+    endpoint so behavior is identical. Best-effort: logs and moves on."""
+    try:
+        req = ProcessFullRequest(
+            template=template or "General", follow_up_drafts=follow_up)
+        result = await process_full(session_id, req)
+        logger.info(
+            f"[auto-process] session {session_id} complete: "
+            f"{result.get('stages') if isinstance(result, dict) else result}")
+    except HTTPException as e:
+        # Not-configured / not-found surface here — log, don't crash.
+        logger.warning(
+            f"[auto-process] session {session_id} skipped: {e.detail}")
+    except Exception as e:
+        logger.exception(f"[auto-process] session {session_id} failed: {e}")
+    finally:
+        _auto_processed_sessions.discard(session_id)
+
+
+def _maybe_auto_process(session) -> None:
+    """Kick off backend auto-processing for a freshly-finalized session
+    when AUTO_PROCESS_AFTER_STOP is on. Safe to call from every stop path
+    — idempotent per session. Must be called on the event loop (uses
+    asyncio.create_task), i.e. after the to_thread(_stop_recording_sync)
+    returns, not inside it."""
+    if session is None:
+        return
+    s = svc.settings
+    if not s or not getattr(s, "auto_process_after_stop", False):
+        return
+    sid = getattr(session, "session_id", "") or ""
+    if not sid or sid in _auto_processed_sessions:
+        return
+    _auto_processed_sessions.add(sid)
+    template = getattr(session, "template", "") or "General"
+    follow_up = bool(getattr(s, "auto_follow_up_email", False))
+    logger.info(
+        f"[auto-process] kicking off for session {sid} "
+        f"(template={template}, follow_up={follow_up})")
+    asyncio.create_task(_auto_process_session(sid, template, follow_up))
+
+
 @app.post("/recording/stop")
 async def stop_recording():
     svc.load_settings()
@@ -2341,6 +2415,10 @@ async def stop_recording():
         svc.auto_record_subject = None  # recording is ending; clear the auto label
         session = await asyncio.to_thread(_stop_recording_sync)
         if session:
+            # Backend-owned auto-process: fires for ANY stop that reaches
+            # this endpoint (Record view button, sidebar pill). The
+            # frontend no longer triggers processing itself.
+            _maybe_auto_process(session)
             return {"session_id": session.session_id, "audio_path": session.audio_path}
         raise HTTPException(status_code=500, detail="Stop returned no session")
     except Exception as e:
@@ -5008,7 +5086,12 @@ async def _watchdog_loop():
                     f"Watchdog (timer-driven) auto-stopping recording: "
                     f"{reason}")
                 try:
-                    await asyncio.to_thread(_stop_recording_sync)
+                    session = await asyncio.to_thread(_stop_recording_sync)
+                    # Auto-process the watchdog-stopped session too — this
+                    # is the path that silently skipped processing before
+                    # (auto-recorded meeting that auto-stops on silence /
+                    # overrun never went through the frontend stop hook).
+                    _maybe_auto_process(session)
                 except Exception as e:
                     logger.exception(
                         f"Watchdog auto-stop raised: {e}")

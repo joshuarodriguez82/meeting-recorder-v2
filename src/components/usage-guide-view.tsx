@@ -270,12 +270,17 @@ const SECTIONS: Section[] = [
           <li><strong>Requirements</strong> — FR/NFR tables.</li>
         </ul>
         <Tip>
-          <strong>Auto-process is on by default.</strong> When you Stop a
-          recording the full pipeline (transcribe → speakers → summary →
-          actions → decisions → requirements → commitments) now runs
+          <strong>Auto-process is on by default.</strong> When a recording
+          stops the full pipeline (transcribe → speakers → summary →
+          actions → decisions → requirements → commitments) runs
           automatically — no need to open each session and click Process.
-          Toggle it under Settings → &quot;Auto-process after recording
-          stops&quot; if you&apos;d rather do it manually.
+          This now fires no matter HOW the recording stopped: the Record
+          view Stop button, the sidebar recording-pill Stop, or an
+          automatic stop (silence / overrun / hard cap on an auto-recorded
+          meeting). Processing runs in the background; the session fills in
+          its AI tabs on its own when it finishes. Toggle it under
+          Settings → &quot;Auto-process after recording stops&quot; if
+          you&apos;d rather do it manually.
         </Tip>
         <Tip>
           Tabs are disabled if their content hasn&apos;t been generated yet. Go to the Overview tab and
