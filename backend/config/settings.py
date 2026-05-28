@@ -222,6 +222,12 @@ class Settings:
     # framing for the co-pilot. Appended to every coach_tick prompt.
     # Empty by default — the baked-in SA-flavored prompt runs as-is.
     copilot_custom_context: str
+    # When True, the "Today" daily-briefing tab is shown and becomes the
+    # default landing view. OFF by default — Today depends on the user
+    # running a Microsoft 365 Copilot scheduled prompt and pasting its
+    # output in; that's a power-user setup not everyone has. Opt-in from
+    # Settings; persists across restarts like every other toggle.
+    today_view_enabled: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -341,6 +347,7 @@ class Settings:
             # real newlines in the runtime value.
             copilot_custom_context=_get(
                 "COPILOT_CUSTOM_CONTEXT", "").replace("\\n", "\n"),
+            today_view_enabled=_get_bool("TODAY_VIEW_ENABLED", False),
         )
 
     @property
@@ -414,6 +421,7 @@ class Settings:
         live_copilot_wide_interval_sec: int = 45,
         live_copilot_hot_interval_sec: int = 0,
         copilot_custom_context: str = "",
+        today_view_enabled: bool = False,
     ) -> None:
         """Write settings back to the .env file.
 
@@ -478,6 +486,7 @@ class Settings:
             # format — escape them to literal \n so the value round-trips
             # cleanly through dotenv. from_env unescapes on read.
             f"COPILOT_CUSTOM_CONTEXT={(copilot_custom_context or '').replace(chr(10), '\\n').replace(chr(13), '')}\n"
+            f"TODAY_VIEW_ENABLED={'true' if today_view_enabled else 'false'}\n"
         )
         # Write to the canonical LOCALAPPDATA location first. In rare cases
         # a Tauri-spawned Python child cannot open files under LOCALAPPDATA

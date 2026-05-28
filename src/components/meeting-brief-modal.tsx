@@ -176,6 +176,53 @@ export function MeetingBriefModal({
             />
           )}
 
+          {/* User-context box — visible on open (not hidden behind the
+              first generation) so the SA can drop in what the invite +
+              meeting history can't see BEFORE re-running the brief.
+              The first brief still auto-generates with empty context
+              on open so the modal stays one-click for the common
+              case; the box gives a discoverable second pass. Same
+              pattern as the Prep Brief tab. */}
+          <div className="space-y-2 rounded-lg border bg-muted/20 p-3">
+            <div className="flex items-baseline justify-between gap-2 flex-wrap">
+              <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                Add context
+              </label>
+              <span className="text-[10px] text-muted-foreground italic">
+                Optional — things the invite & meeting history can&apos;t see
+              </span>
+            </div>
+            <Textarea
+              value={userContext}
+              onChange={(e) => setUserContext(e.target.value)}
+              placeholder="e.g. Customer's CFO just joined this engagement and wants a 60-day plan. Procurement flagged the SLA section yesterday. Focus on the API integration timeline."
+              rows={3}
+              className="resize-y text-sm bg-background"
+              disabled={loading}
+            />
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void generateBrief(userContext)}
+                disabled={loading || !userContext.trim()}
+              >
+                <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${loading ? "animate-spin" : ""}`} />
+                {brief ? "Regenerate with context" : "Generate with context"}
+              </Button>
+              {userContext.trim() && (
+                <button
+                  type="button"
+                  onClick={() => setUserContext("")}
+                  disabled={loading}
+                  className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+
           {loading && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -193,40 +240,6 @@ export function MeetingBriefModal({
               referenced={referenced}
               onOpenSession={onOpenSession}
             />
-          )}
-
-          {/* User-context box — appears under the brief so the first
-              read is uninterrupted, then the SA can add what the LLM
-              couldn't see (exec asks, procurement redlines, recent
-              email thread) and regenerate. Hidden during the first
-              load so the modal doesn't feel form-heavy on open. */}
-          {!loading && !error && brief && (
-            <div className="space-y-2 pt-2 border-t">
-              <div className="flex items-baseline justify-between">
-                <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                  Add context & regenerate
-                </label>
-                <span className="text-[10px] text-muted-foreground italic">
-                  Optional — things the invite & meeting history can&apos;t see
-                </span>
-              </div>
-              <Textarea
-                value={userContext}
-                onChange={(e) => setUserContext(e.target.value)}
-                placeholder="e.g. Customer's CFO just joined this engagement and wants a 60-day plan. Procurement flagged the SLA section yesterday. Focus on the API integration timeline."
-                rows={3}
-                className="resize-y text-sm"
-              />
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => void generateBrief(userContext)}
-                disabled={loading || !userContext.trim()}
-              >
-                <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${loading ? "animate-spin" : ""}`} />
-                Regenerate with context
-              </Button>
-            </div>
           )}
         </div>
 

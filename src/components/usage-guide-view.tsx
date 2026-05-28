@@ -105,6 +105,14 @@ const SECTIONS: Section[] = [
           the output of the scheduled prompt you already run in Microsoft 365 Copilot every
           morning.
         </p>
+        <Tip>
+          <strong>Off by default — turn it on in Settings.</strong> Today is an opt-in feature
+          because it assumes you run a daily Microsoft 365 Copilot scheduled prompt and paste
+          its output in. If you don&apos;t have that setup, leave it off. To enable:
+          <strong> Settings → Today / Daily Briefing tab</strong>. Once on, a Today tab appears
+          at the top of the sidebar and becomes the default landing view. The toggle persists —
+          off stays off, on stays on, across restarts.
+        </Tip>
         <p className="mt-2">
           M365 Copilot doesn&apos;t expose scheduled-prompt output via any API, so the import is
           manual but cheap: copy the briefing in Copilot → click <strong>Import briefing</strong>{" "}
@@ -112,9 +120,10 @@ const SECTIONS: Section[] = [
           structured view.
         </p>
         <ol className="list-decimal pl-5 mt-2 space-y-1">
+          <li>Enable the tab in <strong>Settings → Today / Daily Briefing tab</strong> (one-time).</li>
           <li>Run your scheduled prompt in M365 Copilot, copy the output.</li>
           <li>Open Meeting Recorder → Today tab → <strong>Import briefing</strong>.</li>
-          <li>Paste (the dialog auto-pulls your clipboard when it opens).</li>
+          <li>Paste the briefing (Ctrl+V) into the dialog.</li>
           <li>Click <strong>Parse and import</strong>. Today renders the structured briefing.</li>
           <li>Check off action items as you complete them. Re-importing the same day preserves
             what you&apos;ve already checked.</li>
@@ -125,7 +134,6 @@ const SECTIONS: Section[] = [
           Record view; when you&apos;re idle, it shows the next agenda item from the briefing.
         </Tip>
         <Tip>
-          Today is the default landing tab — opens automatically when you launch the app.
           Re-import as many times as you want during the day; the parser stores one briefing
           per calendar date.
         </Tip>
@@ -210,6 +218,17 @@ const SECTIONS: Section[] = [
           invite). The agenda is also fed into the AI <strong>Brief</strong>
           so it&apos;s tailored to what that specific meeting is about.
           Details load on demand to keep the list fast.
+        </Tip>
+        <Tip>
+          <strong>Add context to a Brief.</strong> The Brief modal on
+          each upcoming meeting now has a context box at the top —
+          drop in things the invite & meeting history can&apos;t see
+          (exec asks, procurement redlines, recent email thread, a
+          customer mood shift) and hit <strong>Regenerate with
+          context</strong>. The first brief auto-generates with no
+          context on open so the modal stays one-click for the common
+          case; the box is there if you need to sharpen the output.
+          Same pattern as the Prep Brief tab&apos;s context input.
         </Tip>
         <Tip>
           <strong>Never auto-record a meeting.</strong> Each calendar tile
