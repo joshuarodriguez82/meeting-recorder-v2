@@ -800,6 +800,11 @@ class SettingsDTO(BaseModel):
     # a healthcare client, ~800 agents, focus on PHI compliance." Empty
     # by default so the baked-in SA-flavored prompt runs as-is.
     copilot_custom_context: str = ""
+    # Opt-in toggle for the "Today" daily-briefing tab. OFF by default —
+    # depends on the user running an M365 Copilot scheduled prompt and
+    # pasting its output in. Persisted; gates the nav item + default
+    # landing view on the frontend.
+    today_view_enabled: bool = False
 
 
 class StartRecordingRequest(BaseModel):
@@ -981,6 +986,7 @@ async def get_settings():
         live_copilot_wide_interval_sec=s.live_copilot_wide_interval_sec,
         live_copilot_hot_interval_sec=s.live_copilot_hot_interval_sec,
         copilot_custom_context=s.copilot_custom_context,
+        today_view_enabled=s.today_view_enabled,
     )
 
 
@@ -1055,6 +1061,7 @@ async def save_settings(payload: SettingsDTO):
         live_copilot_wide_interval_sec=max(15, min(300, payload.live_copilot_wide_interval_sec or 45)),
         live_copilot_hot_interval_sec=max(0, min(60, payload.live_copilot_hot_interval_sec or 0)),
         copilot_custom_context=(payload.copilot_custom_context or "").strip(),
+        today_view_enabled=bool(payload.today_view_enabled),
     )
     # If the recordings folder changed, migrate client + template state
     # from the previous folder to the new one. Copy, not move, so the
@@ -2199,6 +2206,7 @@ async def set_live_copilot_enabled(payload: dict):
         live_copilot_wide_interval_sec=s.live_copilot_wide_interval_sec,
         live_copilot_hot_interval_sec=s.live_copilot_hot_interval_sec,
         copilot_custom_context=s.copilot_custom_context,
+        today_view_enabled=s.today_view_enabled,
     )
     # Update the cached Settings in-place so the change is visible
     # immediately, without going through load_settings() which would
@@ -4866,6 +4874,7 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         live_copilot_wide_interval_sec=s.live_copilot_wide_interval_sec,
         live_copilot_hot_interval_sec=s.live_copilot_hot_interval_sec,
         copilot_custom_context=s.copilot_custom_context,
+        today_view_enabled=s.today_view_enabled,
     )
     svc.settings = dataclasses.replace(
         s, live_copilot_mode=new_mode, live_copilot_meeting_type=new_type)

@@ -132,7 +132,7 @@ function isMac(): boolean {
   return navigator.userAgent.toLowerCase().includes("mac");
 }
 
-export function SettingsView() {
+export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [storage, setStorage] = useState<{
     total_bytes: number;
@@ -181,6 +181,10 @@ export function SettingsView() {
     try {
       await api.saveSettings(settings);
       toast.success("Settings saved. Restart for API/model changes to take effect.");
+      // Let the parent re-pull settings so toggles that affect the shell
+      // (e.g. the Today tab's visibility) reflect immediately without a
+      // restart or focus event.
+      onSaved?.();
     } catch (e) {
       toast.error(`Save failed: ${e instanceof Error ? e.message : e}`);
     } finally {
@@ -478,6 +482,12 @@ export function SettingsView() {
             description="Every ~45s during a recording, asks the configured LLM for three short bullet lists (clarifying questions, risks, suggested follow-ups) based on the last few minutes of conversation. Requires Live transcription to also be on. Costs an LLM call per tick — about $0.10–$0.20 per hour on Anthropic Haiku."
             checked={settings.live_copilot_enabled}
             onChange={(v) => update("live_copilot_enabled", v)}
+          />
+          <Toggle
+            label="Today / Daily Briefing tab"
+            description="Adds a 'Today' tab (and makes it the default landing view) that imports your Microsoft 365 Copilot scheduled-prompt briefing and renders it as an interactive dashboard — top priority, agenda, action items, FYI. Off by default: it assumes you run a daily Copilot scheduled prompt and paste its output in. Turn it on only if you have that setup."
+            checked={settings.today_view_enabled}
+            onChange={(v) => update("today_view_enabled", v)}
           />
           <Toggle
             label="Auto-draft follow-up email"
