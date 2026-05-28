@@ -4908,18 +4908,23 @@ async def import_daily_briefing(req: BriefingImportRequest):
         # this large is either pasted email chain or a mistake.
         raise HTTPException(status_code=400, detail="Briefing too large (>50KB)")
 
-    s = svc.settings
-    if not s or not (s.live_anthropic_api_key or s.anthropic_api_key):
+    # Reuse the Summarizer the rest of the app already built at startup
+    # with the user's real provider/model/key resolution. The previous
+    # implementation hardcoded provider="anthropic" and ignored
+    # live_ai_provider — users running live co-pilot against OpenRouter
+    # or Ollama (with a non-Claude model name like "llama3.1") got a
+    # 404 from the Anthropic SDK because llama3.1 isn't a Claude model.
+    # Prefer live_summarizer (built from live_* settings, the same wiring
+    # the live tick endpoints use) and fall back to the main summarizer.
+    summ = svc.live_summarizer or svc.summarizer
+    if summ is None:
         raise HTTPException(
             status_code=400,
-            detail="Anthropic API key not configured — set it in Settings before importing.")
-
-    # Reuse the same Summarizer wiring as live coaching (preferring the
-    # live-copilot key/model if set, otherwise the main key).
-    from core.summarizer import Summarizer
-    api_key = s.live_anthropic_api_key or s.anthropic_api_key
-    model = s.live_claude_model or s.claude_model
-    summ = Summarizer(api_key=api_key, model=model, provider="anthropic")
+            detail=(
+                "No AI provider configured. Set an API key + model in "
+                "Settings (or configure a Live Co-Pilot provider) "
+                "before importing a briefing."
+            ))
     try:
         parsed = await summ.parse_daily_briefing(text)
     except RuntimeError as e:
