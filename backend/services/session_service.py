@@ -195,6 +195,10 @@ class SessionService:
                     data.get("audio_actual_duration_s"),
                 "audio_expected_duration_s":
                     data.get("audio_expected_duration_s"),
+                # Auto-process failure (retries exhausted). Lets the
+                # Sessions list badge a failed session so it doesn't sit
+                # silently unprocessed.
+                "processing_error": data.get("processing_error"),
                 "json_path": str(path),
             })
 

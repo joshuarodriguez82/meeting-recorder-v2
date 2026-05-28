@@ -205,6 +205,10 @@ export interface SessionSummary {
   audio_integrity_warning?: string | null;
   audio_actual_duration_s?: number | null;
   audio_expected_duration_s?: number | null;
+  // Set when backend auto-processing exhausted its retries. UI badges the
+  // session so a processing failure is visible instead of the session
+  // silently sitting unprocessed. Cleared on a successful (re)process.
+  processing_error?: string | null;
 }
 
 /**
@@ -325,6 +329,7 @@ export interface SessionFull {
   audio_integrity_warning?: string | null;
   audio_actual_duration_s?: number | null;
   audio_expected_duration_s?: number | null;
+  processing_error?: string | null;
 }
 
 export interface Speaker {

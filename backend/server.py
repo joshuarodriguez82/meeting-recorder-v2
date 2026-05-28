@@ -2367,24 +2367,86 @@ def _stop_recording_sync():
 _auto_processed_sessions: set[str] = set()
 
 
+# Retry schedule for backend auto-processing. Most failures are
+# transient — Claude 429s, a brief Ollama hiccup, a OneDrive file lock on
+# the WAV mid-finalize. Backoff gives them time to clear. Delays in
+# seconds; the list length is the attempt count.
+_AUTO_PROCESS_RETRY_DELAYS = [30, 120, 300]  # 30s, 2min, 5min
+
+
+def _stamp_processing_error(session_id: str, message: Optional[str]) -> None:
+    """Persist (or clear) a session's processing_error so the Sessions
+    list can badge a failed auto-process. message=None clears it."""
+    try:
+        session = svc.session_svc.load_full(session_id)
+        if not session:
+            return
+        session.processing_error = message
+        svc.session_svc.save(session)
+    except Exception as e:
+        logger.warning(
+            f"[auto-process] could not stamp error on {session_id}: {e}")
+
+
 async def _auto_process_session(session_id: str, template: str,
                                 follow_up: bool) -> None:
     """Run the full extraction pipeline for a just-stopped session in the
-    background. Reuses the same code path as the manual process_full
-    endpoint so behavior is identical. Best-effort: logs and moves on."""
+    background, with retry + backoff. Reuses the manual process_full code
+    path. On final failure, stamps session.processing_error so the failure
+    is VISIBLE in the Sessions list instead of the session silently
+    sitting unprocessed (the exact silent-failure class behind the ASM
+    no-AI-output incident).
+
+    'Failure' = process_full raised, or returned ok:False (the critical
+    transcribe/diarize stage died). Per-extraction failures (a single 429
+    on, say, decisions) leave ok:True with a transcript + partial output —
+    not worth retrying the whole pipeline for, and the user can re-run a
+    single extraction from the session dialog."""
+    req = ProcessFullRequest(
+        template=template or "General", follow_up_drafts=follow_up)
+    attempts = len(_AUTO_PROCESS_RETRY_DELAYS) + 1
+    last_reason = ""
     try:
-        req = ProcessFullRequest(
-            template=template or "General", follow_up_drafts=follow_up)
-        result = await process_full(session_id, req)
-        logger.info(
-            f"[auto-process] session {session_id} complete: "
-            f"{result.get('stages') if isinstance(result, dict) else result}")
-    except HTTPException as e:
-        # Not-configured / not-found surface here — log, don't crash.
-        logger.warning(
-            f"[auto-process] session {session_id} skipped: {e.detail}")
-    except Exception as e:
-        logger.exception(f"[auto-process] session {session_id} failed: {e}")
+        for attempt in range(1, attempts + 1):
+            try:
+                result = await process_full(session_id, req)
+                ok = result.get("ok", False) if isinstance(result, dict) else False
+                if ok:
+                    logger.info(
+                        f"[auto-process] session {session_id} complete "
+                        f"(attempt {attempt}): "
+                        f"{result.get('stages')}")
+                    _stamp_processing_error(session_id, None)  # clear any prior
+                    return
+                # ok:False → critical stage failed; capture reason + retry.
+                stages = result.get("stages", {}) if isinstance(result, dict) else {}
+                last_reason = next(
+                    (v for v in stages.values()
+                     if isinstance(v, str) and v.startswith("failed")),
+                    "processing failed")
+            except HTTPException as e:
+                # Not-configured / not-found: no point retrying.
+                logger.warning(
+                    f"[auto-process] session {session_id} skipped: {e.detail}")
+                _stamp_processing_error(session_id, str(e.detail))
+                return
+            except Exception as e:
+                last_reason = f"{type(e).__name__}: {e}"
+                logger.warning(
+                    f"[auto-process] session {session_id} attempt {attempt} "
+                    f"raised: {last_reason}")
+
+            if attempt <= len(_AUTO_PROCESS_RETRY_DELAYS):
+                delay = _AUTO_PROCESS_RETRY_DELAYS[attempt - 1]
+                logger.info(
+                    f"[auto-process] retrying session {session_id} in {delay}s "
+                    f"(attempt {attempt + 1}/{attempts})")
+                await asyncio.sleep(delay)
+
+        # Exhausted all attempts — make the failure visible.
+        msg = f"Auto-processing failed after {attempts} attempts: {last_reason}"
+        logger.error(f"[auto-process] session {session_id}: {msg}")
+        _stamp_processing_error(session_id, msg)
     finally:
         _auto_processed_sessions.discard(session_id)
 
@@ -3818,6 +3880,16 @@ async def process_full(session_id: str, req: ProcessFullRequest):
             except Exception as e:
                 logger.exception(f"process_full register refresh failed: {e}")
         asyncio.create_task(_do_register())
+
+    # Clear any prior auto-process failure badge — a successful run (manual
+    # or auto retry) means the session is no longer in a failed state.
+    try:
+        fresh = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+        if fresh and fresh.processing_error:
+            fresh.processing_error = None
+            await asyncio.to_thread(svc.session_svc.save, fresh)
+    except Exception as e:
+        logger.warning(f"could not clear processing_error on {session_id}: {e}")
 
     return {"ok": True, "stages": stages}
 
