@@ -306,6 +306,7 @@ from services.engagement_overlay_service import (
     EngagementOverlayService, KNOWN_STATUSES,
 )
 from services.daily_briefing_service import DailyBriefingService
+from services.terminology_service import TerminologyService
 from models.session import Session
 from services.calendar_service import (
     get_todays_meetings, get_upcoming_meetings, is_outlook_available,
@@ -479,6 +480,7 @@ class Services:
         self.copilot_meeting_type_svc: Optional[CoPilotMeetingTypeService] = None
         self.engagement_overlay_svc: Optional[EngagementOverlayService] = None
         self.daily_briefing_svc: Optional[DailyBriefingService] = None
+        self.terminology_svc: Optional[TerminologyService] = None
         self.recording_svc: Optional[RecordingService] = None
         self.speaker_profile_svc: Optional[SpeakerProfileService] = None
         self.auto_record_blocklist_svc: Optional[AutoRecordBlocklistService] = None
@@ -595,6 +597,10 @@ class Services:
             # per calendar date, populated by user pasting M365 Copilot
             # scheduled-prompt output into the Today tab's Import dialog.
             self.daily_briefing_svc = DailyBriefingService(_recordings_dir)
+            # Domain terminology glossary (Whisper bias + mis-hear
+            # corrections). Seeds a curated SA/CCaaS/cloud/sales vocab on
+            # first launch; user-editable from Settings.
+            self.terminology_svc = TerminologyService(_recordings_dir)
             # Speaker profiles stay per-machine: voice fingerprints are
             # mic-hardware-dependent, syncing them across devices with
             # different mics risks false positives.
@@ -622,6 +628,11 @@ class Services:
                 profile_service=self.speaker_profile_svc,
                 on_status=self._record_status,
             )
+            # Wire the domain glossary into the recorder so transcription
+            # biases toward the user's vocabulary (Whisper initial_prompt)
+            # and corrects known mis-hears afterward. Set after construction
+            # so the RecordingService signature stays unchanged.
+            self.recording_svc.terminology = self.terminology_svc
             # The summarizer is constructed whenever an LLM is configured
             # — either Anthropic (anthropic_api_key) or an OpenAI-compatible
             # endpoint (openai_base_url / openai_api_key, or a local Ollama
@@ -5057,6 +5068,42 @@ async def patch_briefing_action(date: str, action_id: str,
     if updated is None:
         raise HTTPException(status_code=404, detail=f"No briefing for {date}")
     return updated
+
+
+# ── Domain terminology glossary ─────────────────────────────────────
+#
+# Biases Whisper toward the user's jargon (initial_prompt) and corrects
+# known mis-hears post-transcription. Seeded with a curated SA / CCaaS /
+# cloud / sales vocabulary; fully user-editable.
+
+class TerminologyUpdateRequest(BaseModel):
+    terms: List[str] = []
+    corrections: Dict[str, str] = {}
+
+
+@app.get("/terminology")
+async def get_terminology():
+    svc.load_settings()
+    if not svc.terminology_svc:
+        return {"terms": [], "corrections": {}}
+    return await asyncio.to_thread(svc.terminology_svc.get_all)
+
+
+@app.put("/terminology")
+async def put_terminology(req: TerminologyUpdateRequest):
+    svc.load_settings()
+    if not svc.terminology_svc:
+        raise HTTPException(status_code=503, detail="Terminology service not initialized")
+    return await asyncio.to_thread(
+        svc.terminology_svc.set_all, req.terms, req.corrections)
+
+
+@app.post("/terminology/reset")
+async def reset_terminology():
+    svc.load_settings()
+    if not svc.terminology_svc:
+        raise HTTPException(status_code=503, detail="Terminology service not initialized")
+    return await asyncio.to_thread(svc.terminology_svc.reset)
 
 
 # ── Backend-driven watchdog tick ────────────────────────────────────

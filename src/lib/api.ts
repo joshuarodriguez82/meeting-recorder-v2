@@ -1314,7 +1314,27 @@ export const api = {
     request<DailyBriefing>(
       `/briefing/${encodeURIComponent(date)}/actions/${encodeURIComponent(actionId)}`,
       { method: "PATCH", body: JSON.stringify({ done }) }),
+
+  // Domain terminology glossary — biases transcription toward the user's
+  // jargon and corrects known mis-hears. Seeded server-side with a
+  // curated SA / CCaaS / cloud / sales vocabulary.
+  getTerminology: () => request<Terminology>("/terminology"),
+  putTerminology: (t: Terminology) =>
+    request<Terminology>("/terminology", {
+      method: "PUT",
+      body: JSON.stringify(t),
+    }),
+  resetTerminology: () =>
+    request<Terminology>("/terminology/reset", { method: "POST" }),
 };
+
+export interface Terminology {
+  // Canonical terms fed into Whisper's initial_prompt to bias decoding.
+  terms: string[];
+  // Known mis-hears → canonical replacement (applied post-transcription,
+  // case-insensitive, word-boundary). Keys are lowercased server-side.
+  corrections: Record<string, string>;
+}
 
 // --- Daily Briefing types ---
 export interface BriefingTopPriority {

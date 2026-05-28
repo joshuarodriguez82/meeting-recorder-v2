@@ -101,6 +101,12 @@ class RecordingService:
         # SPEAKER_XX labels until manually renamed). Server.py wires it
         # up by default.
         self._profile_service = profile_service
+        # Domain glossary used to bias transcription (Whisper
+        # initial_prompt) and to correct known mis-hears afterward.
+        # Optional + settable so server.py can wire it without changing
+        # the constructor signature; None → transcription behaves exactly
+        # as before.
+        self.terminology = None
         self._on_status = on_status or (lambda _: None)
         self._session: Optional[Session] = None
         self._capture: Optional[AudioCapture] = None
@@ -499,11 +505,32 @@ class RecordingService:
                 "and restart the app to enable transcription and diarization.")
 
         self._on_status("__stage:transcribe:active__")
-        raw_segments = await self._transcription.transcribe(self._session.audio_path)
+        # Bias Whisper toward the user's domain vocabulary when a glossary
+        # is configured. Best-effort — any failure building the prompt
+        # falls back to plain transcription.
+        initial_prompt = ""
+        if self.terminology is not None:
+            try:
+                initial_prompt = self.terminology.build_initial_prompt()
+            except Exception as e:
+                logger.warning(f"terminology initial_prompt build failed: {e}")
+        raw_segments = await self._transcription.transcribe(
+            self._session.audio_path, initial_prompt=initial_prompt)
 
         if not raw_segments:
             self._on_status("Transcription produced no output. Check audio quality.")
             return self._session
+
+        # Post-transcription correction of known mis-hears (Genesys,
+        # CCaaS, UCCX, MEDDIC, ...) so the canonical spelling propagates
+        # into every downstream extraction. Best-effort per segment.
+        if self.terminology is not None:
+            try:
+                for raw in raw_segments:
+                    raw["text"] = self.terminology.apply_corrections(
+                        raw.get("text", ""))
+            except Exception as e:
+                logger.warning(f"terminology correction pass failed: {e}")
 
         self._on_status("__stage:transcribe:done____stage:diarize:active__")
         diarization_turns = await self._diarization.diarize(self._session.audio_path)

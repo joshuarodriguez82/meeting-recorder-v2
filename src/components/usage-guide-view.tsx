@@ -1289,6 +1289,19 @@ Copy-Item -Path "$source\\*" -Destination $target -Recurse -Force`}</code></pre>
           Models are downloaded on first use into <code>%USERPROFILE%\.cache\huggingface</code>,
           which is one-time per model. Switching models is just a Settings change + app restart.
         </p>
+        <Tip>
+          <strong>Domain terminology fixes the jargon problem.</strong> Whisper
+          mangles dense terms — &quot;Genesys&quot; → &quot;Genesis&quot;,
+          &quot;UCCX&quot; → &quot;you see ex&quot;, &quot;CCaaS&quot; →
+          &quot;see-cass&quot; — and every mistranscription poisons the
+          downstream summary and extractions. <strong>Settings → Domain
+          terminology</strong> ships seeded with a curated Solutions Architect
+          / CCaaS / cloud / sales vocabulary that biases the transcriber
+          toward the right spelling, plus a list of specific mis-hears it
+          corrects after the fact. Edit the lists to add your clients&apos;
+          names and your own acronyms. Applies to the next recording you
+          process — no model change or restart needed.
+        </Tip>
       </>
     ),
   },
