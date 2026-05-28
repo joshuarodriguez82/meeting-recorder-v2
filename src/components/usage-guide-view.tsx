@@ -95,6 +95,44 @@ const SECTIONS: Section[] = [
     ),
   },
   {
+    id: "today",
+    title: "Today (daily briefing)",
+    content: (
+      <>
+        <p>
+          The <strong>Today</strong> tab is your morning dashboard — top priority, today&apos;s
+          agenda, action items needing a response, FYI items. It&apos;s populated by importing
+          the output of the scheduled prompt you already run in Microsoft 365 Copilot every
+          morning.
+        </p>
+        <p className="mt-2">
+          M365 Copilot doesn&apos;t expose scheduled-prompt output via any API, so the import is
+          manual but cheap: copy the briefing in Copilot → click <strong>Import briefing</strong>{" "}
+          on the Today tab → paste → Parse. Claude reshapes the free-form briefing into the
+          structured view.
+        </p>
+        <ol className="list-decimal pl-5 mt-2 space-y-1">
+          <li>Run your scheduled prompt in M365 Copilot, copy the output.</li>
+          <li>Open Meeting Recorder → Today tab → <strong>Import briefing</strong>.</li>
+          <li>Paste (the dialog auto-pulls your clipboard when it opens).</li>
+          <li>Click <strong>Parse and import</strong>. Today renders the structured briefing.</li>
+          <li>Check off action items as you complete them. Re-importing the same day preserves
+            what you&apos;ve already checked.</li>
+        </ol>
+        <Tip>
+          The <strong>Right Now</strong> tile on the Today page reflects the current recording
+          state — when you&apos;re mid-meeting, it shows the live recording and a link to the
+          Record view; when you&apos;re idle, it shows the next agenda item from the briefing.
+        </Tip>
+        <Tip>
+          Today is the default landing tab — opens automatically when you launch the app.
+          Re-import as many times as you want during the day; the parser stores one briefing
+          per calendar date.
+        </Tip>
+      </>
+    ),
+  },
+  {
     id: "recording",
     title: "Recording",
     content: (
