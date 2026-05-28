@@ -1072,3 +1072,127 @@ class Summarizer:
     def summary_to_html(self, summary: str) -> str:
         """Convert a markdown summary to formatted HTML for email."""
         return _markdown_to_html(summary)
+
+    async def parse_daily_briefing(self, raw_text: str) -> dict:
+        """Parse the free-form daily briefing the user pastes from
+        their Microsoft 365 Copilot scheduled prompt into the
+        structured JSON the Today view consumes.
+
+        The user's prompt output varies day to day (Copilot does not
+        emit a fixed schema), so we hand the LLM the whole blob and ask
+        for canonical fields. Returns a dict matching the shape
+        DailyBriefingService._normalize_briefing expects; the service
+        layer fills in ids / defaults / timestamps and merges existing
+        done-state on import.
+
+        Output schema:
+          top_priority: { title, detail, why } | null
+          needs_response: [{ title, detail, who, due, source }]
+          agenda: [{ title, time, duration, role, meeting_type,
+                     client, attendees[], notes, status }]
+          schedule_notes: [str]
+          fyi: [{ title, detail, category }]
+          greeting: str
+
+        `meeting_type` values should align with the meeting-type tags
+        used elsewhere in the app: discovery, sow, status, technical,
+        demo, internal, general. `role` is one of host, attendee,
+        optional.
+
+        Tolerates malformed model output by returning a minimal
+        skeleton — Today view degrades to "no items" rather than the
+        whole import failing.
+        """
+        text = (raw_text or "").strip()
+        if not text:
+            return {
+                "top_priority": None, "needs_response": [],
+                "agenda": [], "schedule_notes": [], "fyi": [],
+                "greeting": "",
+            }
+
+        logger.info(
+            f"Parsing daily briefing ({len(text)} chars) "
+            f"via {self._provider}/{self._model}")
+
+        instruction = (
+            "You are parsing a daily briefing the user receives every "
+            "morning from a Microsoft 365 Copilot scheduled prompt. "
+            "The format is conversational markdown — sections are not "
+            "guaranteed. Extract the canonical structure below.\n\n"
+            "Return ONLY a JSON object (no prose, no code fences) with "
+            "these keys:\n\n"
+            "{\n"
+            '  "greeting": "short greeting line if present, else empty",\n'
+            '  "top_priority": {\n'
+            '    "title": "the single most important thing today",\n'
+            '    "detail": "1-2 sentences of context",\n'
+            '    "why": "why it matters today specifically"\n'
+            '  },\n'
+            '  "needs_response": [\n'
+            '    { "title": "...", "detail": "...", "who": "person/team",\n'
+            '      "due": "today / EOD / Friday / etc", "source": "email / Teams / etc" }\n'
+            '  ],\n'
+            '  "agenda": [\n'
+            '    { "title": "meeting title", "time": "9:30 AM",\n'
+            '      "duration": "30 min", "role": "host | attendee | optional",\n'
+            '      "meeting_type": "discovery | sow | status | technical | demo | internal | general",\n'
+            '      "client": "client name if applicable, else empty",\n'
+            '      "attendees": ["names"], "notes": "prep note if any",\n'
+            '      "status": "scheduled | cancelled | now" }\n'
+            '  ],\n'
+            '  "schedule_notes": ["heads-ups about the day shape — conflicts, '
+            'overruns, packed afternoons"],\n'
+            '  "fyi": [\n'
+            '    { "title": "headline", "detail": "1-2 sentences",\n'
+            '      "category": "market | client | internal | personal" }\n'
+            '  ]\n'
+            "}\n\n"
+            "Rules:\n"
+            "- If a section is absent, return an empty array (or null for "
+            "top_priority). Never invent items.\n"
+            "- Keep titles short (under 100 chars). Detail under 400 chars.\n"
+            "- For agenda items the briefing flags as cancelled, set "
+            'status to "cancelled" — keep the entry so the user sees the '
+            "schedule change.\n"
+            "- Meeting type is your best guess from the title/context "
+            "(e.g. 'Discovery Call' -> discovery, 'Weekly Sync' -> status, "
+            "'SOW Review' -> sow, 'AWS Demo' -> demo). Default 'general'.\n"
+            "- Role: 'host' if user is running the meeting, 'attendee' "
+            "for normal participation, 'optional' if briefing says so.\n"
+            "- Do not include any text outside the JSON object.\n\n"
+            "=== BRIEFING TEXT ===\n"
+            f"{text}\n"
+            "=== END BRIEFING TEXT ==="
+        )
+
+        try:
+            raw = await self._chat(instruction, max_tokens=2048, timeout=60.0)
+        except Exception as e:
+            logger.warning(
+                f"parse_daily_briefing chat failed: {type(e).__name__}: {e}")
+            raise RuntimeError(f"Briefing parse failed: {e}") from e
+
+        parsed = _coerce_json(raw) or {}
+        if not isinstance(parsed, dict):
+            logger.warning("Briefing parse returned non-dict; using skeleton")
+            parsed = {}
+
+        # Defensive shape: caller will normalize, but guarantee the
+        # top-level keys exist so the normalizer's _list_of_dicts comp-
+        # rehensions never KeyError.
+        skeleton = {
+            "greeting": "", "top_priority": None,
+            "needs_response": [], "agenda": [],
+            "schedule_notes": [], "fyi": [],
+        }
+        for k, default in skeleton.items():
+            if k not in parsed:
+                parsed[k] = default
+
+        logger.info(
+            f"Briefing parsed: agenda={len(parsed.get('agenda') or [])}, "
+            f"needs_response={len(parsed.get('needs_response') or [])}, "
+            f"fyi={len(parsed.get('fyi') or [])}"
+        )
+        return parsed
