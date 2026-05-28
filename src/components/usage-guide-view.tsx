@@ -212,6 +212,17 @@ const SECTIONS: Section[] = [
           Details load on demand to keep the list fast.
         </Tip>
         <Tip>
+          <strong>Add context to a Brief.</strong> The Brief modal on
+          each upcoming meeting now has a context box at the top —
+          drop in things the invite & meeting history can&apos;t see
+          (exec asks, procurement redlines, recent email thread, a
+          customer mood shift) and hit <strong>Regenerate with
+          context</strong>. The first brief auto-generates with no
+          context on open so the modal stays one-click for the common
+          case; the box is there if you need to sharpen the output.
+          Same pattern as the Prep Brief tab&apos;s context input.
+        </Tip>
+        <Tip>
           <strong>Never auto-record a meeting.</strong> Each calendar tile
           has a <strong>No auto</strong> toggle. Flag a meeting (e.g. a
           recurring 1:1) and it&apos;s permanently skipped by auto-record,
