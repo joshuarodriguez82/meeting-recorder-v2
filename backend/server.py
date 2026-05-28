@@ -800,6 +800,11 @@ class SettingsDTO(BaseModel):
     # a healthcare client, ~800 agents, focus on PHI compliance." Empty
     # by default so the baked-in SA-flavored prompt runs as-is.
     copilot_custom_context: str = ""
+    # Opt-in toggle for the "Today" daily-briefing tab. OFF by default —
+    # depends on the user running an M365 Copilot scheduled prompt and
+    # pasting its output in. Persisted; gates the nav item + default
+    # landing view on the frontend.
+    today_view_enabled: bool = False
 
 
 class StartRecordingRequest(BaseModel):
@@ -981,6 +986,7 @@ async def get_settings():
         live_copilot_wide_interval_sec=s.live_copilot_wide_interval_sec,
         live_copilot_hot_interval_sec=s.live_copilot_hot_interval_sec,
         copilot_custom_context=s.copilot_custom_context,
+        today_view_enabled=s.today_view_enabled,
     )
 
 
@@ -1055,6 +1061,7 @@ async def save_settings(payload: SettingsDTO):
         live_copilot_wide_interval_sec=max(15, min(300, payload.live_copilot_wide_interval_sec or 45)),
         live_copilot_hot_interval_sec=max(0, min(60, payload.live_copilot_hot_interval_sec or 0)),
         copilot_custom_context=(payload.copilot_custom_context or "").strip(),
+        today_view_enabled=bool(payload.today_view_enabled),
     )
     # If the recordings folder changed, migrate client + template state
     # from the previous folder to the new one. Copy, not move, so the
@@ -2199,6 +2206,7 @@ async def set_live_copilot_enabled(payload: dict):
         live_copilot_wide_interval_sec=s.live_copilot_wide_interval_sec,
         live_copilot_hot_interval_sec=s.live_copilot_hot_interval_sec,
         copilot_custom_context=s.copilot_custom_context,
+        today_view_enabled=s.today_view_enabled,
     )
     # Update the cached Settings in-place so the change is visible
     # immediately, without going through load_settings() which would
@@ -4866,6 +4874,7 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         live_copilot_wide_interval_sec=s.live_copilot_wide_interval_sec,
         live_copilot_hot_interval_sec=s.live_copilot_hot_interval_sec,
         copilot_custom_context=s.copilot_custom_context,
+        today_view_enabled=s.today_view_enabled,
     )
     svc.settings = dataclasses.replace(
         s, live_copilot_mode=new_mode, live_copilot_meeting_type=new_type)
@@ -4908,18 +4917,22 @@ async def import_daily_briefing(req: BriefingImportRequest):
         # this large is either pasted email chain or a mistake.
         raise HTTPException(status_code=400, detail="Briefing too large (>50KB)")
 
-    s = svc.settings
-    if not s or not (s.live_anthropic_api_key or s.anthropic_api_key):
+    # Use the MAIN summarizer (Anthropic / quality model), not the live
+    # co-pilot one. Briefing parsing is a single ~2k-token call a few
+    # times a day — same quality bar as post-meeting summaries — so it
+    # belongs on the main provider, not the live tick model (which is
+    # often a cheap Ollama / OpenRouter free-tier model picked because
+    # ticks fire constantly). Fall back to live_summarizer only if the
+    # user hasn't configured a main provider at all.
+    summ = svc.summarizer or svc.live_summarizer
+    if summ is None:
         raise HTTPException(
             status_code=400,
-            detail="Anthropic API key not configured — set it in Settings before importing.")
-
-    # Reuse the same Summarizer wiring as live coaching (preferring the
-    # live-copilot key/model if set, otherwise the main key).
-    from core.summarizer import Summarizer
-    api_key = s.live_anthropic_api_key or s.anthropic_api_key
-    model = s.live_claude_model or s.claude_model
-    summ = Summarizer(api_key=api_key, model=model, provider="anthropic")
+            detail=(
+                "No AI provider configured. Set an API key + model in "
+                "Settings (or configure a Live Co-Pilot provider) "
+                "before importing a briefing."
+            ))
     try:
         parsed = await summ.parse_daily_briefing(text)
     except RuntimeError as e:

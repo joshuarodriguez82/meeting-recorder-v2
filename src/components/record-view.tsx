@@ -122,6 +122,12 @@ export function RecordView({
   // Subjects flagged "never auto-record" (permanent, server-persisted,
   // matched by subject so a recurring series stays blocked).
   const [blockedSubjects, setBlockedSubjects] = useState<string[]>([]);
+  // Case-insensitive substring patterns (managed in Settings → Auto-record
+  // skip patterns). A meeting is blocked if any pattern occurs anywhere
+  // in its subject. The backend already enforces these; the frontend
+  // tracks them too so the meeting tile can SHOW that a meeting is
+  // pattern-blocked instead of looking unblocked.
+  const [blockedPatterns, setBlockedPatterns] = useState<string[]>([]);
   // Lazy per-meeting detail (agenda/body, attendees, join link). Keyed
   // by subject|start. Only the expanded meeting is fetched, so the
   // calendar list stays fast.
@@ -697,17 +703,50 @@ export function RecordView({
     }
   };
 
-  const isBlocked = (subject: string) =>
+  // Exact-match block: the user flagged THIS specific subject via the
+  // tile's "No auto" toggle. Removable per-meeting.
+  const isExactBlocked = (subject: string) =>
     blockedSubjects.some(
       (s) => s.trim().toLowerCase() === (subject || "").trim().toLowerCase());
 
+  // Pattern block: a Settings substring pattern matches this subject.
+  // Mirrors the backend's is_blocked() pattern check exactly (case-
+  // insensitive substring). Returns the matching pattern (for the
+  // tooltip) or null. Not removable per-meeting — the user edits the
+  // pattern in Settings.
+  const matchingPattern = (subject: string): string | null => {
+    const lower = (subject || "").toLowerCase();
+    for (const p of blockedPatterns) {
+      const pat = (p || "").trim().toLowerCase();
+      if (pat && lower.includes(pat)) return p;
+    }
+    return null;
+  };
+
+  // A meeting is blocked if EITHER an exact entry or a pattern matches —
+  // same OR the backend applies. Used for the tile's blocked styling.
+  const isBlocked = (subject: string) =>
+    isExactBlocked(subject) || matchingPattern(subject) !== null;
+
   const toggleBlock = async (subject: string) => {
-    const blocked = isBlocked(subject);
+    // Pattern-blocked meetings can't be toggled off here — the block
+    // comes from a Settings pattern, not a per-meeting flag. Tell the
+    // user where to change it instead of silently adding a redundant
+    // exact entry that wouldn't un-block anything.
+    const pat = matchingPattern(subject);
+    if (pat && !isExactBlocked(subject)) {
+      toast.info(
+        `Skipped by your "${pat}" auto-record pattern. ` +
+        `Remove or edit it in Settings → Auto-record skip patterns.`);
+      return;
+    }
+    const blocked = isExactBlocked(subject);
     try {
       const res = blocked
         ? await api.removeAutoRecordBlocklist(subject)
         : await api.addAutoRecordBlocklist(subject);
       setBlockedSubjects(res.subjects);
+      setBlockedPatterns(res.patterns);
       toast.success(
         blocked
           ? "Auto-record re-enabled for this meeting"
@@ -718,10 +757,14 @@ export function RecordView({
     }
   };
 
-  // Load the persisted "never auto-record" list once on mount.
+  // Load the persisted "never auto-record" list once on mount — both the
+  // exact subjects and the substring patterns, so tiles can reflect both.
   useEffect(() => {
     api.getAutoRecordBlocklist()
-      .then((r) => setBlockedSubjects(r.subjects))
+      .then((r) => {
+        setBlockedSubjects(r.subjects);
+        setBlockedPatterns(r.patterns || []);
+      })
       .catch(() => {});
   }, []);
 
@@ -738,6 +781,15 @@ export function RecordView({
       if (now - lastRefreshed < 30_000) return;
       lastRefreshed = now;
       onRefreshCalendar(true);
+      // Also re-pull the blocklist so a pattern the user just added in
+      // Settings (a separate view) is reflected on the meeting tiles
+      // when they tab back to Record. Cheap, no COM call.
+      api.getAutoRecordBlocklist()
+        .then((r) => {
+          setBlockedSubjects(r.subjects);
+          setBlockedPatterns(r.patterns || []);
+        })
+        .catch(() => {});
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
@@ -1143,9 +1195,11 @@ export function RecordView({
                             variant="ghost"
                             onClick={() => toggleBlock(m.subject)}
                             title={
-                              isBlocked(m.subject)
-                                ? "On your never-auto-record list. Click to allow auto-record again."
-                                : "Never auto-record this meeting (applies to the whole recurring series, permanently)"
+                              matchingPattern(m.subject) && !isExactBlocked(m.subject)
+                                ? `Skipped by your "${matchingPattern(m.subject)}" auto-record pattern (Settings → Auto-record skip patterns).`
+                                : isExactBlocked(m.subject)
+                                  ? "On your never-auto-record list. Click to allow auto-record again."
+                                  : "Never auto-record this meeting (applies to the whole recurring series, permanently)"
                             }
                             className={`px-2 ${
                               isBlocked(m.subject)
@@ -1154,7 +1208,11 @@ export function RecordView({
                             }`}
                           >
                             <Ban className="h-3.5 w-3.5 mr-1" />
-                            {isBlocked(m.subject) ? "Auto-record off" : "No auto"}
+                            {matchingPattern(m.subject) && !isExactBlocked(m.subject)
+                              ? "Skipped (pattern)"
+                              : isExactBlocked(m.subject)
+                                ? "Auto-record off"
+                                : "No auto"}
                           </Button>
                           <Button size="sm" variant="outline" onClick={() => useMeeting(m)} disabled={recording}>
                             Use
