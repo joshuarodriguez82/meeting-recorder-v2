@@ -131,6 +131,10 @@ export interface Settings {
   // pasting its output in. When false the Today nav item is hidden and
   // the app lands on Record instead.
   today_view_enabled: boolean;
+  // Auto pre-meeting brief: generate + notify before each meeting.
+  // OFF by default (one LLM call/meeting). Lead = minutes before start.
+  auto_prep_brief_enabled: boolean;
+  auto_prep_brief_lead_min: number;
 }
 
 // A single co-pilot mode (persona) or meeting-type (modifier). Shape
@@ -1336,7 +1340,27 @@ export const api = {
   // Settings → Diagnostics so failures (Ollama down, dir not writable,
   // no mic) are visible without reading logs by hand.
   getDiagnostics: () => request<Diagnostics>("/diagnostics"),
+
+  // Auto pre-meeting briefs — generated backend-side before meetings.
+  getAutoPrepBriefs: () => request<AutoPrepBrief[]>("/prep-brief/auto"),
+  getPendingAutoPrepBriefs: () =>
+    request<AutoPrepBrief[]>("/prep-brief/auto/pending"),
+  markAutoPrepBriefNotified: (key: string) =>
+    request<{ ok: boolean }>(
+      `/prep-brief/auto/${encodeURIComponent(key)}/notified`,
+      { method: "POST" }),
 };
+
+export interface AutoPrepBrief {
+  key: string;
+  subject: string;
+  start_iso: string;
+  markdown: string;
+  related_count?: number;
+  minutes_before?: number;
+  generated_at?: string;
+  notified?: boolean;
+}
 
 export interface DiagnosticCheck {
   id: string;

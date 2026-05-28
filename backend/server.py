@@ -307,6 +307,9 @@ from services.engagement_overlay_service import (
 )
 from services.daily_briefing_service import DailyBriefingService
 from services.terminology_service import TerminologyService
+from services.prep_brief_cache_service import (
+    PrepBriefCacheService, meeting_key as _prep_meeting_key,
+)
 from models.session import Session
 from services.calendar_service import (
     get_todays_meetings, get_upcoming_meetings, is_outlook_available,
@@ -481,6 +484,7 @@ class Services:
         self.engagement_overlay_svc: Optional[EngagementOverlayService] = None
         self.daily_briefing_svc: Optional[DailyBriefingService] = None
         self.terminology_svc: Optional[TerminologyService] = None
+        self.prep_brief_cache_svc: Optional[PrepBriefCacheService] = None
         self.recording_svc: Optional[RecordingService] = None
         self.speaker_profile_svc: Optional[SpeakerProfileService] = None
         self.auto_record_blocklist_svc: Optional[AutoRecordBlocklistService] = None
@@ -601,6 +605,10 @@ class Services:
             # corrections). Seeds a curated SA/CCaaS/cloud/sales vocab on
             # first launch; user-editable from Settings.
             self.terminology_svc = TerminologyService(_recordings_dir)
+            # Auto pre-meeting brief cache — backend loop fills it before
+            # meetings; frontend reads it for the "ready" notification +
+            # instant brief view.
+            self.prep_brief_cache_svc = PrepBriefCacheService(_recordings_dir)
             # Speaker profiles stay per-machine: voice fingerprints are
             # mic-hardware-dependent, syncing them across devices with
             # different mics risks false positives.
@@ -816,6 +824,10 @@ class SettingsDTO(BaseModel):
     # pasting its output in. Persisted; gates the nav item + default
     # landing view on the frontend.
     today_view_enabled: bool = False
+    # Auto pre-meeting brief: generate a brief shortly before each calendar
+    # meeting and notify when ready. OFF by default (one LLM call/meeting).
+    auto_prep_brief_enabled: bool = False
+    auto_prep_brief_lead_min: int = 10
 
 
 class StartRecordingRequest(BaseModel):
@@ -998,6 +1010,8 @@ async def get_settings():
         live_copilot_hot_interval_sec=s.live_copilot_hot_interval_sec,
         copilot_custom_context=s.copilot_custom_context,
         today_view_enabled=s.today_view_enabled,
+        auto_prep_brief_enabled=s.auto_prep_brief_enabled,
+        auto_prep_brief_lead_min=s.auto_prep_brief_lead_min,
     )
 
 
@@ -1073,6 +1087,8 @@ async def save_settings(payload: SettingsDTO):
         live_copilot_hot_interval_sec=max(0, min(60, payload.live_copilot_hot_interval_sec or 0)),
         copilot_custom_context=(payload.copilot_custom_context or "").strip(),
         today_view_enabled=bool(payload.today_view_enabled),
+        auto_prep_brief_enabled=bool(payload.auto_prep_brief_enabled),
+        auto_prep_brief_lead_min=max(1, min(120, payload.auto_prep_brief_lead_min or 10)),
     )
     # If the recordings folder changed, migrate client + template state
     # from the previous folder to the new one. Copy, not move, so the
@@ -2223,6 +2239,8 @@ async def set_live_copilot_enabled(payload: dict):
         live_copilot_hot_interval_sec=s.live_copilot_hot_interval_sec,
         copilot_custom_context=s.copilot_custom_context,
         today_view_enabled=s.today_view_enabled,
+        auto_prep_brief_enabled=s.auto_prep_brief_enabled,
+        auto_prep_brief_lead_min=s.auto_prep_brief_lead_min,
     )
     # Update the cached Settings in-place so the change is visible
     # immediately, without going through load_settings() which would
@@ -5036,6 +5054,8 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         live_copilot_hot_interval_sec=s.live_copilot_hot_interval_sec,
         copilot_custom_context=s.copilot_custom_context,
         today_view_enabled=s.today_view_enabled,
+        auto_prep_brief_enabled=s.auto_prep_brief_enabled,
+        auto_prep_brief_lead_min=s.auto_prep_brief_lead_min,
     )
     svc.settings = dataclasses.replace(
         s, live_copilot_mode=new_mode, live_copilot_meeting_type=new_type)
@@ -5386,6 +5406,118 @@ async def _watchdog_loop():
             logger.warning(f"Watchdog tick failed: {e}")
 
 
+# ── Auto pre-meeting brief loop ─────────────────────────────────────
+#
+# Generates a prep brief shortly before each calendar meeting so it's
+# ready when the user needs it. Backend-driven (not gated on the Record
+# view being open) per the lesson from the auto-process bug. The brief is
+# cached; the frontend polls /prep-brief/auto/pending to fire the native
+# "ready" notification.
+async def _auto_prep_brief_loop():
+    # First tick after a short delay so the app finishes booting.
+    await asyncio.sleep(20.0)
+    while True:
+        try:
+            await asyncio.sleep(60.0)
+            s = svc.settings
+            if not s or not getattr(s, "auto_prep_brief_enabled", False):
+                continue
+            if not svc.summarizer or not svc.prep_brief_cache_svc:
+                continue
+            lead = max(1, int(getattr(s, "auto_prep_brief_lead_min", 10) or 10))
+
+            # Upcoming meetings in the next few hours (cache-friendly).
+            try:
+                meetings = await asyncio.to_thread(
+                    get_upcoming_meetings, 24, False)
+            except Exception as e:
+                logger.warning(f"[auto-brief] calendar fetch failed: {e}")
+                continue
+
+            now = datetime.now()
+            for m in meetings or []:
+                try:
+                    subject = (m.get("subject") or "").strip()
+                    start_iso = m.get("start") or ""
+                    if not subject or not start_iso:
+                        continue
+                    try:
+                        start_dt = datetime.fromisoformat(start_iso)
+                    except ValueError:
+                        continue
+                    mins_until = (start_dt - now).total_seconds() / 60.0
+                    # In the lead window and not already started.
+                    if mins_until <= 0 or mins_until > lead:
+                        continue
+                    key = _prep_meeting_key(subject, start_iso)
+                    if svc.prep_brief_cache_svc.has(key):
+                        continue  # already briefed this occurrence
+
+                    logger.info(
+                        f"[auto-brief] generating brief for '{subject}' "
+                        f"(~{int(mins_until)} min out)")
+                    req = PrepBriefFromMeetingRequest(
+                        subject=subject,
+                        attendees=list(m.get("attendees") or []),
+                        scheduled_start_iso=start_iso,
+                        scheduled_end_iso=m.get("end") or "",
+                        client="",
+                        project="",
+                        body="",
+                        user_context="",
+                    )
+                    try:
+                        result = await prep_brief_from_meeting(req)
+                    except Exception as e:
+                        logger.warning(
+                            f"[auto-brief] generation failed for "
+                            f"'{subject}': {e}")
+                        continue
+                    await asyncio.to_thread(
+                        svc.prep_brief_cache_svc.put,
+                        {
+                            "key": key,
+                            "subject": subject,
+                            "start_iso": start_iso,
+                            "markdown": result.get("markdown", ""),
+                            "related_count": result.get("related_count", 0),
+                            "minutes_before": int(mins_until),
+                        },
+                    )
+                    # One generation per tick keeps LLM load gentle; the
+                    # next tick (60s) picks up any other in-window meeting.
+                    break
+                except Exception as e:
+                    logger.warning(f"[auto-brief] per-meeting error: {e}")
+        except Exception as e:
+            logger.warning(f"[auto-brief] loop tick failed: {e}")
+
+
+@app.get("/prep-brief/auto")
+async def get_auto_prep_briefs():
+    svc.load_settings()
+    if not svc.prep_brief_cache_svc:
+        return []
+    return await asyncio.to_thread(svc.prep_brief_cache_svc.list_today)
+
+
+@app.get("/prep-brief/auto/pending")
+async def get_pending_auto_prep_briefs():
+    svc.load_settings()
+    if not svc.prep_brief_cache_svc:
+        return []
+    return await asyncio.to_thread(svc.prep_brief_cache_svc.pending_notifications)
+
+
+@app.post("/prep-brief/auto/{key}/notified")
+async def mark_auto_prep_brief_notified(key: str):
+    svc.load_settings()
+    if not svc.prep_brief_cache_svc:
+        raise HTTPException(status_code=503, detail="Prep-brief cache not initialized")
+    await asyncio.to_thread(svc.prep_brief_cache_svc.mark_notified, key)
+    return {"ok": True}
+
+
 # ── Parent-PID deadman switch ───────────────────────────────────────
 #
 # CRITICAL SAFETY LAYER. If the Tauri shell that spawned us dies
@@ -5514,6 +5646,14 @@ async def startup():
         asyncio.create_task(_retention_loop())
     except Exception as e:
         logger.warning(f"Auto-retention bootstrap failed: {e}")
+
+    # Auto pre-meeting brief generator. Backend timer (not frontend-poll
+    # driven) so briefs are ready even if the Record view isn't open.
+    # No-ops while the setting is off.
+    try:
+        asyncio.create_task(_auto_prep_brief_loop())
+    except Exception as e:
+        logger.warning(f"Auto prep-brief bootstrap failed: {e}")
 
     # Crash recovery: if a previous run died mid-`/recording/stop`, merge
     # the orphan `_recording_*.wav` / `_loopback_*.wav` temp files into

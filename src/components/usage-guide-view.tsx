@@ -220,6 +220,15 @@ const SECTIONS: Section[] = [
           Details load on demand to keep the list fast.
         </Tip>
         <Tip>
+          <strong>Auto pre-meeting briefs.</strong> Turn on
+          <strong> Settings → Auto pre-meeting brief</strong> and the app
+          will generate a prep brief from your prior sessions a few minutes
+          before each calendar meeting (configurable lead time) and fire a
+          notification when it&apos;s ready. Runs on a backend timer, so it
+          works even if the app isn&apos;t focused. Off by default — it
+          costs one LLM call per meeting.
+        </Tip>
+        <Tip>
           <strong>Add context to a Brief.</strong> The Brief modal on
           each upcoming meeting now has a context box at the top —
           drop in things the invite & meeting history can&apos;t see

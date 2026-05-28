@@ -461,6 +461,46 @@ export default function Home() {
     if (!todayEnabled && nav === "today") setNav("record");
   }, [todayEnabled, nav]);
 
+  // Auto pre-meeting brief notifications. The backend loop generates
+  // briefs before meetings and flags un-notified ones; we poll, fire a
+  // native "prep brief ready" toast, and mark them notified so each
+  // fires once. Fully backend-driven generation — this only surfaces it.
+  useEffect(() => {
+    if (!backendReady) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const pending = await api.getPendingAutoPrepBriefs();
+        if (cancelled || !pending.length) return;
+        for (const b of pending) {
+          try {
+            const { sendNotification, isPermissionGranted, requestPermission } =
+              await import("@tauri-apps/plugin-notification");
+            let granted = await isPermissionGranted();
+            if (!granted) granted = (await requestPermission()) === "granted";
+            if (granted) {
+              await sendNotification({
+                title: "Prep brief ready",
+                body: `${b.subject} — starts in ~${b.minutes_before ?? "a few"} min. Brief is ready in the app.`,
+              });
+            }
+          } catch {
+            /* plugin unavailable (dev browser) — in-app toast still fires */
+          }
+          toast.info(`Prep brief ready: ${b.subject}`, {
+            description: "Generated from your prior sessions with this client.",
+          });
+          await api.markAutoPrepBriefNotified(b.key).catch(() => {});
+        }
+      } catch {
+        /* transient — try again next tick */
+      }
+    };
+    poll();
+    const id = setInterval(poll, 60_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [backendReady]);
+
   // Nav list with the opt-in Today tab prepended only when enabled.
   const navItems = todayEnabled
     ? [{ id: "today", label: "Today", icon: Sun }, ...NAV_ITEMS]

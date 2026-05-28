@@ -490,6 +490,33 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
             onChange={(v) => update("today_view_enabled", v)}
           />
           <Toggle
+            label="Auto pre-meeting brief"
+            description="A few minutes before each calendar meeting, automatically generate a prep brief from your prior sessions with that client and fire a notification when it's ready. Runs on a backend timer (works even if the app isn't focused). Costs one LLM call per meeting."
+            checked={settings.auto_prep_brief_enabled}
+            onChange={(v) => update("auto_prep_brief_enabled", v)}
+          />
+          {settings.auto_prep_brief_enabled && (
+            <div className="flex items-center gap-2 pl-1 -mt-1">
+              <Label htmlFor="prep-lead" className="text-sm text-muted-foreground">
+                Generate
+              </Label>
+              <Input
+                id="prep-lead"
+                type="number"
+                min={1}
+                max={120}
+                value={settings.auto_prep_brief_lead_min}
+                onChange={(e) =>
+                  update("auto_prep_brief_lead_min",
+                    Math.max(1, Math.min(120, Number(e.target.value) || 10)))}
+                className="h-8 w-20"
+              />
+              <span className="text-sm text-muted-foreground">
+                minutes before the meeting starts
+              </span>
+            </div>
+          )}
+          <Toggle
             label="Auto-draft follow-up email"
             description={isMac()
               ? "Creates a Mail.app (or Outlook for Mac) draft to attendees after processing"
