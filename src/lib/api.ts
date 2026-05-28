@@ -1292,7 +1292,70 @@ export const api = {
 
   engagementKnownStatuses: () =>
     request<{ statuses: string[] }>("/engagements/known-statuses"),
+
+  // Daily Briefing (Today view). User pastes their M365 Copilot
+  // scheduled-prompt output; backend LLM-parses it and stores one
+  // briefing per calendar date. Re-import preserves any action items
+  // already checked off this morning.
+  getTodayBriefing: () => request<DailyBriefing | {}>("/briefing/today"),
+  getBriefingByDate: (date: string) =>
+    request<DailyBriefing | {}>(`/briefing/${encodeURIComponent(date)}`),
+  importBriefing: (text: string, date?: string) =>
+    request<DailyBriefing>("/briefing/import", {
+      method: "POST",
+      body: JSON.stringify({ text, ...(date ? { date } : {}) }),
+    }),
+  setBriefingActionDone: (date: string, actionId: string, done: boolean) =>
+    request<DailyBriefing>(
+      `/briefing/${encodeURIComponent(date)}/actions/${encodeURIComponent(actionId)}`,
+      { method: "PATCH", body: JSON.stringify({ done }) }),
 };
+
+// --- Daily Briefing types ---
+export interface BriefingTopPriority {
+  title: string;
+  detail: string;
+  why: string;
+}
+export interface BriefingAction {
+  id: string;
+  title: string;
+  detail: string;
+  who: string;
+  due: string;
+  source: string;
+  done_at: string | null;
+}
+export interface BriefingAgendaItem {
+  id: string;
+  title: string;
+  time: string;
+  duration: string;
+  role: string; // host | attendee | optional | ""
+  meeting_type: string; // discovery | sow | status | technical | demo | internal | general | ""
+  client: string;
+  attendees: string[];
+  notes: string;
+  status: "scheduled" | "cancelled" | "now" | "done";
+}
+export interface BriefingFyi {
+  id: string;
+  title: string;
+  detail: string;
+  category: string; // market | client | internal | personal | ""
+}
+export interface DailyBriefing {
+  date: string;
+  imported_at: string;
+  source: string;
+  greeting: string;
+  top_priority: BriefingTopPriority | null;
+  needs_response: BriefingAction[];
+  agenda: BriefingAgendaItem[];
+  schedule_notes: string[];
+  fyi: BriefingFyi[];
+  raw_text: string;
+}
 
 export interface EngagementOccurrence {
   session_id: string;

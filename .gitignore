@@ -66,3 +66,9 @@ backend/recordings/
 # at the project root for testing.
 *.env
 config.env
+
+# Local-only — never commit
+backend/python.disabled/
+test-build-v2.9/
+.claude/
+
