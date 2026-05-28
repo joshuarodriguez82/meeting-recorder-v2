@@ -1326,7 +1326,23 @@ export const api = {
     }),
   resetTerminology: () =>
     request<Terminology>("/terminology/reset", { method: "POST" }),
+
+  // Diagnostics — system health checks + a backend.log tail. Powers
+  // Settings → Diagnostics so failures (Ollama down, dir not writable,
+  // no mic) are visible without reading logs by hand.
+  getDiagnostics: () => request<Diagnostics>("/diagnostics"),
 };
+
+export interface DiagnosticCheck {
+  id: string;
+  label: string;
+  status: "ok" | "warn" | "error" | "info";
+  detail: string;
+}
+export interface Diagnostics {
+  checks: DiagnosticCheck[];
+  log_tail: string;
+}
 
 export interface Terminology {
   // Canonical terms fed into Whisper's initial_prompt to bias decoding.

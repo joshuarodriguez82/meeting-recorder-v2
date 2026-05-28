@@ -5106,6 +5106,174 @@ async def reset_terminology():
     return await asyncio.to_thread(svc.terminology_svc.reset)
 
 
+# ── Diagnostics ─────────────────────────────────────────────────────
+#
+# One endpoint that surfaces the health signals we've repeatedly had to
+# dig out of backend.log by hand: is the live co-pilot's model reachable,
+# is the main AI provider configured, are mic + loopback visible, is the
+# recordings dir writable, and a tail of the log itself. Powers the
+# Settings → Diagnostics panel so support questions don't require
+# PowerShell archaeology.
+
+def _probe_http(url: str, timeout: float = 3.0) -> tuple[bool, str]:
+    """Best-effort GET to check an HTTP endpoint is alive. Returns
+    (reachable, detail). Uses stdlib urllib so there's no dependency on
+    the LLM SDK's HTTP client being importable here."""
+    import urllib.request
+    import urllib.error
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return True, f"HTTP {resp.status}"
+    except urllib.error.HTTPError as e:
+        # A 4xx still means something is listening — endpoint is up.
+        return True, f"HTTP {e.code}"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _gather_diagnostics() -> dict:
+    checks: list[dict] = []
+
+    def add(cid: str, label: str, status: str, detail: str = ""):
+        checks.append({"id": cid, "label": label,
+                       "status": status, "detail": detail})
+
+    s = svc.settings
+
+    # 1. Recordings dir — exists + writable (OneDrive KFM bites here).
+    try:
+        from pathlib import Path as _P
+        rd = _P(s.recordings_dir) if s and s.recordings_dir else None
+        if not rd:
+            add("recordings_dir", "Recordings folder", "error", "Not configured")
+        elif not rd.exists():
+            add("recordings_dir", "Recordings folder", "error",
+                f"Does not exist: {rd}")
+        else:
+            probe = rd / ".write_test.tmp"
+            try:
+                probe.write_text("ok", encoding="utf-8")
+                probe.unlink()
+                add("recordings_dir", "Recordings folder", "ok", str(rd))
+            except Exception as e:
+                add("recordings_dir", "Recordings folder", "error",
+                    f"Not writable ({type(e).__name__}): {rd}")
+    except Exception as e:
+        add("recordings_dir", "Recordings folder", "error", str(e))
+
+    # 2. Main AI provider configured.
+    try:
+        if s and s.is_configured:
+            provider = (s.ai_provider or "anthropic")
+            model = s.claude_model if provider != "openai" else (s.openai_base_url or "openai-compatible")
+            add("main_provider", "AI provider (summaries/extractions)",
+                "ok", f"{provider} · {model}")
+        else:
+            add("main_provider", "AI provider (summaries/extractions)",
+                "error", "Not configured — set keys in Settings")
+    except Exception as e:
+        add("main_provider", "AI provider", "error", str(e))
+
+    # 3. Live Co-Pilot model reachability — THE one that silently failed
+    #    the webinar (Ollama wasn't running).
+    try:
+        if not s or not s.live_copilot_enabled:
+            add("copilot_model", "Live Co-Pilot model", "info",
+                "Live Co-Pilot disabled")
+        else:
+            provider = (s.live_ai_provider or "").strip().lower()
+            if provider and provider != "anthropic":
+                base = (s.live_openai_base_url or "").strip().rstrip("/")
+                model = (s.live_claude_model or "").strip()
+                if not base:
+                    add("copilot_model", "Live Co-Pilot model", "warn",
+                        "OpenAI-compatible provider with no base URL set")
+                else:
+                    # OpenAI-compatible servers (incl. Ollama) expose /models.
+                    ok, detail = _probe_http(f"{base}/models")
+                    if ok:
+                        add("copilot_model", "Live Co-Pilot model", "ok",
+                            f"{model or 'model'} reachable at {base}")
+                    else:
+                        add("copilot_model", "Live Co-Pilot model", "error",
+                            f"Can't reach {base} ({detail}). "
+                            f"If this is Ollama, is it running?")
+            else:
+                # Anthropic path — can't cheaply ping; just confirm a key.
+                key = (s.live_anthropic_api_key or s.anthropic_api_key or "").strip()
+                add("copilot_model", "Live Co-Pilot model",
+                    "ok" if key else "error",
+                    f"Anthropic · {s.live_claude_model or s.claude_model}"
+                    if key else "No Anthropic key configured")
+    except Exception as e:
+        add("copilot_model", "Live Co-Pilot model", "error", str(e))
+
+    # 4. Audio devices.
+    try:
+        ins = list_input_devices()
+        outs = list_output_devices()
+        if ins:
+            add("mic", "Microphone input", "ok",
+                f"{len(ins)} input device(s) available")
+        else:
+            add("mic", "Microphone input", "error", "No input devices found")
+        # Loopback = output device used for system-audio capture.
+        if outs:
+            add("loopback", "System-audio (loopback)", "ok",
+                f"{len(outs)} output device(s) available")
+        else:
+            add("loopback", "System-audio (loopback)", "warn",
+                "No output devices found for loopback")
+    except Exception as e:
+        add("mic", "Audio devices", "error", str(e))
+
+    # 5. Models loaded.
+    try:
+        loaded = bool(svc.recording_svc and svc.recording_svc.can_process)
+        add("models", "Transcription + diarization models",
+            "ok" if loaded else "warn",
+            "Loaded" if loaded
+            else "Not loaded yet (load on first Process, ~200MB one-time)")
+    except Exception as e:
+        add("models", "Models", "warn", str(e))
+
+    # 6. Recording state.
+    try:
+        rec = bool(svc.recording_svc and svc.recording_svc.is_recording)
+        add("recording", "Recording state", "info",
+            "Recording in progress" if rec else "Idle")
+    except Exception:
+        pass
+
+    # Log tail — last lines of backend.log so the user never has to open
+    # PowerShell to read it.
+    log_tail = ""
+    try:
+        from config.settings import USER_DATA_DIR
+        log_path = USER_DATA_DIR / "backend.log"
+        if log_path.exists():
+            # Read the tail without slurping a 40MB file into memory.
+            with open(log_path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                back = min(size, 64 * 1024)  # last 64KB is plenty for ~150 lines
+                f.seek(size - back)
+                chunk = f.read().decode("utf-8", errors="replace")
+            lines = chunk.splitlines()[-150:]
+            log_tail = "\n".join(lines)
+    except Exception as e:
+        log_tail = f"(could not read backend.log: {e})"
+
+    return {"checks": checks, "log_tail": log_tail}
+
+
+@app.get("/diagnostics")
+async def get_diagnostics():
+    svc.load_settings()
+    return await asyncio.to_thread(_gather_diagnostics)
+
+
 # ── Backend-driven watchdog tick ────────────────────────────────────
 #
 # CRITICAL: previously the watchdog only ticked when the frontend

@@ -665,6 +665,9 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
       {/* GPU acceleration */}
       <GpuAccelerationCard />
 
+      {/* Diagnostics — health checks + log tail */}
+      <DiagnosticsCard />
+
       {/* Domain terminology — biases transcription + fixes mis-hears */}
       <TerminologyCard />
 
@@ -2075,6 +2078,108 @@ function CoPilotCadenceCard({
             </p>
           </div>
         </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// System health panel. Surfaces the signals we kept having to dig out of
+// backend.log by hand — live-model reachability (the silent Ollama
+// failure), provider config, mic/loopback, recordings-dir writability —
+// plus a log tail so the user never needs PowerShell.
+function DiagnosticsCard() {
+  const [diag, setDiag] = useState<import("@/lib/api").Diagnostics | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [showLog, setShowLog] = useState(false);
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      setDiag(await api.getDiagnostics());
+    } catch (e) {
+      toast.error(`Diagnostics failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { refresh(); }, []);
+
+  const dot = (status: string) => {
+    const cls =
+      status === "ok" ? "bg-green-500"
+        : status === "warn" ? "bg-amber-500"
+          : status === "error" ? "bg-red-500"
+            : "bg-zinc-400";
+    return <span className={`inline-block h-2.5 w-2.5 rounded-full ${cls} shrink-0`} />;
+  };
+
+  const copyLog = () => {
+    if (!diag?.log_tail) return;
+    navigator.clipboard?.writeText(diag.log_tail).then(
+      () => toast.success("Log tail copied"),
+      () => toast.error("Couldn't copy"),
+    );
+  };
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between">
+        <CardTitle className="text-base">Diagnostics</CardTitle>
+        <Button size="sm" variant="outline" onClick={refresh} disabled={loading}>
+          {loading
+            ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+            : <RotateCcw className="h-4 w-4 mr-1.5" />}
+          Refresh
+        </Button>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <p className="text-sm text-muted-foreground">
+          Live health of the things that fail quietly — your Live Co-Pilot
+          model (is Ollama running?), AI provider config, microphone +
+          system-audio devices, and whether the recordings folder is
+          writable.
+        </p>
+
+        {diag && (
+          <div className="space-y-1.5">
+            {diag.checks.map((c) => (
+              <div key={c.id} className="flex items-start gap-2.5 text-sm">
+                <span className="mt-1.5">{dot(c.status)}</span>
+                <div className="min-w-0">
+                  <span className="font-medium text-foreground">{c.label}</span>
+                  {c.detail && (
+                    <span className="text-muted-foreground"> — {c.detail}</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {diag && (
+          <div className="space-y-2 pt-1">
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setShowLog((v) => !v)}
+              >
+                {showLog ? "Hide" : "Show"} recent backend log
+              </Button>
+              {showLog && (
+                <Button size="sm" variant="ghost" onClick={copyLog}>
+                  Copy log
+                </Button>
+              )}
+            </div>
+            {showLog && (
+              <pre className="max-h-80 overflow-auto rounded-md border bg-muted/40 p-3 text-[11px] leading-relaxed font-mono whitespace-pre-wrap break-words">
+                {diag.log_tail || "(log empty)"}
+              </pre>
+            )}
+          </div>
+        )}
       </CardContent>
     </Card>
   );
