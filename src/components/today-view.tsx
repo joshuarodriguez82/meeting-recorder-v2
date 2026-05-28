@@ -129,22 +129,12 @@ export function TodayView({ onNavigate }: Props) {
     return () => clearInterval(t);
   }, [refreshBriefing, refreshRecording]);
 
-  // Pre-fill paste textarea with current clipboard contents the moment
-  // the dialog opens — Tauri webview won't auto-paste on open, but if
-  // the user already copied from M365 Copilot before clicking Import,
-  // we save them the Ctrl+V.
-  useEffect(() => {
-    if (!importOpen) return;
-    (async () => {
-      try {
-        const txt = await navigator.clipboard?.readText?.();
-        if (txt && txt.trim() && !pasteText) setPasteText(txt);
-      } catch {
-        /* clipboard read can fail (perms, focus); not worth surfacing */
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [importOpen]);
+  // The dialog used to auto-pull the system clipboard on open, intending
+  // to save the user a Ctrl+V if they'd just copied from M365 Copilot.
+  // But it silently dumped WHATEVER was on the clipboard (a stray gh
+  // command, a code snippet, a URL — anything copied recently) into the
+  // textarea, which is the kind of surprising side-effect that costs
+  // trust. Removed. Users paste with Ctrl+V like every other app.
 
   const handleImport = async () => {
     const txt = pasteText.trim();
@@ -700,7 +690,7 @@ function ImportDialog({
           <Textarea
             value={text}
             onChange={(e) => onText(e.target.value)}
-            placeholder="Paste your briefing here…"
+            placeholder="Paste your M365 Copilot briefing here (Ctrl+V)…"
             className={
               "h-[420px] min-h-[280px] max-h-[55vh] " +
               "resize-none overflow-y-auto font-mono text-xs"
