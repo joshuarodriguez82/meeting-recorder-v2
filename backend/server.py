@@ -305,6 +305,7 @@ from services.copilot_meeting_type_service import CoPilotMeetingTypeService
 from services.engagement_overlay_service import (
     EngagementOverlayService, KNOWN_STATUSES,
 )
+from services.daily_briefing_service import DailyBriefingService
 from models.session import Session
 from services.calendar_service import (
     get_todays_meetings, get_upcoming_meetings, is_outlook_available,
@@ -477,6 +478,7 @@ class Services:
         self.copilot_mode_svc: Optional[CoPilotModeService] = None
         self.copilot_meeting_type_svc: Optional[CoPilotMeetingTypeService] = None
         self.engagement_overlay_svc: Optional[EngagementOverlayService] = None
+        self.daily_briefing_svc: Optional[DailyBriefingService] = None
         self.recording_svc: Optional[RecordingService] = None
         self.speaker_profile_svc: Optional[SpeakerProfileService] = None
         self.auto_record_blocklist_svc: Optional[AutoRecordBlocklistService] = None
@@ -589,6 +591,10 @@ class Services:
             # next milestone, notes). Layered on top of the auto-rolled
             # register so users get one merged view.
             self.engagement_overlay_svc = EngagementOverlayService(_recordings_dir)
+            # Daily briefing imports (Today view) — one parsed briefing
+            # per calendar date, populated by user pasting M365 Copilot
+            # scheduled-prompt output into the Today tab's Import dialog.
+            self.daily_briefing_svc = DailyBriefingService(_recordings_dir)
             # Speaker profiles stay per-machine: voice fingerprints are
             # mic-hardware-dependent, syncing them across devices with
             # different mics risks false positives.
@@ -4864,6 +4870,102 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
     svc.settings = dataclasses.replace(
         s, live_copilot_mode=new_mode, live_copilot_meeting_type=new_type)
     return {"mode": new_mode, "meeting_type": new_type}
+
+
+# ── Daily Briefing (Today view) ─────────────────────────────────────
+#
+# The user runs a Microsoft 365 Copilot scheduled prompt every morning
+# that produces a free-form briefing (priorities, today's agenda,
+# items awaiting response, FYI). M365 Copilot exposes no API surface
+# for scheduled-prompt output, so the integration is intentionally
+# manual: user copies the output text → pastes here → LLM parses it
+# into structured JSON → DailyBriefingService stores one parsed file
+# per calendar date.
+#
+# Re-importing the same date merges done-state from the prior import
+# so a mid-morning re-paste doesn't wipe action items the user has
+# already checked off.
+
+class BriefingImportRequest(BaseModel):
+    text: str
+    date: Optional[str] = None  # YYYY-MM-DD; defaults to today
+
+
+class BriefingActionUpdateRequest(BaseModel):
+    done: bool
+
+
+@app.post("/briefing/import")
+async def import_daily_briefing(req: BriefingImportRequest):
+    svc.load_settings()
+    if not svc.daily_briefing_svc:
+        raise HTTPException(status_code=503, detail="Briefing service not initialized")
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Empty briefing text")
+    if len(text) > 50000:
+        # Generous cap — a real briefing is a few KB at most; anything
+        # this large is either pasted email chain or a mistake.
+        raise HTTPException(status_code=400, detail="Briefing too large (>50KB)")
+
+    s = svc.settings
+    if not s or not (s.live_anthropic_api_key or s.anthropic_api_key):
+        raise HTTPException(
+            status_code=400,
+            detail="Anthropic API key not configured — set it in Settings before importing.")
+
+    # Reuse the same Summarizer wiring as live coaching (preferring the
+    # live-copilot key/model if set, otherwise the main key).
+    from core.summarizer import Summarizer
+    api_key = s.live_anthropic_api_key or s.anthropic_api_key
+    model = s.live_claude_model or s.claude_model
+    summ = Summarizer(api_key=api_key, model=model, provider="anthropic")
+    try:
+        parsed = await summ.parse_daily_briefing(text)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    stored = await asyncio.to_thread(
+        svc.daily_briefing_svc.save_parsed, parsed, text, req.date)
+    return stored
+
+
+@app.get("/briefing/today")
+async def get_today_briefing():
+    svc.load_settings()
+    if not svc.daily_briefing_svc:
+        raise HTTPException(status_code=503, detail="Briefing service not initialized")
+    data = await asyncio.to_thread(svc.daily_briefing_svc.get, None)
+    return data or {}
+
+
+@app.get("/briefing/{date}")
+async def get_briefing_by_date(date: str):
+    svc.load_settings()
+    if not svc.daily_briefing_svc:
+        raise HTTPException(status_code=503, detail="Briefing service not initialized")
+    try:
+        data = await asyncio.to_thread(svc.daily_briefing_svc.get, date)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return data or {}
+
+
+@app.patch("/briefing/{date}/actions/{action_id}")
+async def patch_briefing_action(date: str, action_id: str,
+                                 req: BriefingActionUpdateRequest):
+    svc.load_settings()
+    if not svc.daily_briefing_svc:
+        raise HTTPException(status_code=503, detail="Briefing service not initialized")
+    try:
+        updated = await asyncio.to_thread(
+            svc.daily_briefing_svc.set_action_status,
+            date, action_id, bool(req.done))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"No briefing for {date}")
+    return updated
 
 
 # ── Backend-driven watchdog tick ────────────────────────────────────

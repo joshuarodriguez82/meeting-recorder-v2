@@ -1,0 +1,1231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Meeting Recorder — modern direction</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* ───────────────────────────────────────────────────────────
+     Modern direction — references: Linear, Things, Cron, Stripe.
+
+     • Pure white surfaces, near-black text, neutral grays
+     • Inter throughout, three weights (400/500/600)
+     • One single accent: emerald (#10b981) — clean, not AI-indigo
+     • Subtle 1px borders + soft shadows for depth
+     • 8px card corners, 6px buttons, 999px ONLY on the
+       recording dot (a real circle, not a "pill")
+     • Tabular numbers
+     • Status uses tiny colored dots + text, not big badges
+     ─────────────────────────────────────────────────────────── */
+  :root {
+    --bg:           #ffffff;
+    --bg-soft:      #fafafa;
+    --bg-muted:     #f4f4f5;
+    --bg-hover:     #f4f4f5;
+
+    --border:       #e8e8ea;
+    --border-soft:  #f0f0f2;
+    --border-strong:#d4d4d8;
+
+    --fg:           #18181b;
+    --fg-strong:    #09090b;
+    --fg-muted:     #71717a;
+    --fg-subtle:    #a1a1aa;
+
+    /* Primary accent — refined blue, not AI-indigo. Sits between
+       Cron's slate-blue and Stripe's. Used for primary buttons,
+       focus rings, and active selection states. */
+    --primary:      #2962ff;
+    --primary-soft: #eaf0ff;
+    --primary-text: #1d4ed8;
+
+    /* Semantic colors for content types — meeting-type tags become
+       a real color system, not just gray chips. Subtle, never
+       saturated to the point of being decorative. */
+    --t-sa:         #6366f1;       /* indigo */
+    --t-sa-soft:    #eef2ff;
+    --t-sales:      #d97706;       /* amber */
+    --t-sales-soft: #fef3c7;
+    --t-exec:       #0f172a;       /* navy */
+    --t-exec-soft:  #e2e8f0;
+    --t-disc:       #0891b2;       /* cyan */
+    --t-disc-soft:  #cffafe;
+    --t-sow:        #be123c;       /* rose */
+    --t-sow-soft:   #ffe4e6;
+    --t-status:     #16a34a;       /* green */
+    --t-status-soft:#dcfce7;
+    --t-tech:       #7c3aed;       /* violet */
+    --t-tech-soft:  #ede9fe;
+    --t-demo:       #ea580c;       /* orange */
+    --t-demo-soft:  #ffedd5;
+
+    /* State colors */
+    --accent:       #10b981;       /* emerald — for live signals */
+    --accent-soft:  #ecfdf5;
+    --accent-text:  #047857;
+    --signal-red:   #ef4444;
+    --signal-amber: #f59e0b;
+
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
+    --shadow-md: 0 4px 12px -2px rgba(0,0,0,0.05), 0 2px 4px -2px rgba(0,0,0,0.04);
+    --shadow-lg: 0 12px 32px -8px rgba(0,0,0,0.08), 0 4px 8px -4px rgba(0,0,0,0.04);
+
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);
+    --t-fast: 120ms;
+    --t-base: 180ms;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  html { background: var(--bg-soft); }
+  body {
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px; color: var(--fg);
+    line-height: 1.5;
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "cv11" on, "ss03" on;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3 {
+    margin: 0; color: var(--fg-strong);
+    letter-spacing: -0.014em;
+    font-weight: 600;
+  }
+  h1 { font-size: 22px; line-height: 1.2; }
+  h2 { font-size: 15px; line-height: 1.3; font-weight: 600; }
+
+  /* ──────────── Shell ──────────── */
+  .shell { display: flex; height: 100vh; overflow: hidden; }
+
+  /* Sidebar */
+  aside.sidebar {
+    width: 240px; flex-shrink: 0;
+    background: var(--bg-soft);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+  }
+
+  .brand {
+    padding: 18px 18px 14px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .brand-dot {
+    width: 22px; height: 22px; border-radius: 6px;
+    background: var(--fg-strong); display: flex;
+    align-items: center; justify-content: center;
+    color: white; font-size: 12px; font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  .brand-name {
+    font-size: 14px; font-weight: 600; color: var(--fg-strong);
+    letter-spacing: -0.01em; flex: 1;
+  }
+  .brand-ver {
+    font-size: 11px; color: var(--fg-subtle); font-weight: 500;
+  }
+
+  /* Cmd+K hint — clean rectangle, not a pill */
+  .cmdk-hint {
+    margin: 0 12px 14px; padding: 8px 10px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    border-radius: 6px;
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12.5px; color: var(--fg-muted);
+    cursor: pointer;
+    transition: border-color var(--t-fast) var(--ease),
+                box-shadow var(--t-fast) var(--ease);
+  }
+  .cmdk-hint:hover {
+    border-color: var(--border-strong);
+    box-shadow: var(--shadow-sm);
+  }
+  .cmdk-hint-icon {
+    width: 14px; height: 14px; color: var(--fg-subtle);
+  }
+  .cmdk-hint-text { flex: 1; }
+  .kbd {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 18px; height: 18px; padding: 0 4px;
+    background: var(--bg-muted); border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 10.5px; color: var(--fg-muted);
+  }
+
+  /* Recording status — single line with a real circular dot */
+  .recording-row {
+    margin: 0 12px 14px; padding: 10px 12px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .rec-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--signal-red);
+    box-shadow: 0 0 0 0 rgba(239,68,68,0.5);
+    animation: rec-pulse 1.8s var(--ease) infinite;
+    flex-shrink: 0;
+  }
+  @keyframes rec-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.4); }
+    70%      { box-shadow: 0 0 0 6px rgba(239,68,68,0); }
+  }
+  .rec-body { flex: 1; min-width: 0; line-height: 1.25; }
+  .rec-title {
+    font-size: 12.5px; font-weight: 500; color: var(--fg-strong);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .rec-meta {
+    font-size: 11.5px; color: var(--fg-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Nav */
+  nav.nav { flex: 1; padding: 2px 8px; overflow-y: auto; }
+  .nav-group {
+    padding: 14px 12px 6px;
+    font-size: 11px; font-weight: 600;
+    color: var(--fg-subtle);
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 12px; margin: 1px 0;
+    font-size: 13px; color: var(--fg); text-decoration: none;
+    border-radius: 6px; line-height: 1.3;
+    transition: background var(--t-fast) var(--ease);
+  }
+  .nav-item:hover { background: var(--bg-hover); }
+  .nav-item.active {
+    background: var(--bg); color: var(--fg-strong); font-weight: 500;
+    box-shadow: var(--shadow-sm);
+    border: 1px solid var(--border);
+  }
+  .nav-icon {
+    width: 14px; height: 14px;
+    color: var(--fg-muted); flex-shrink: 0;
+  }
+  .nav-item.active .nav-icon { color: var(--fg-strong); }
+  .nav-label { flex: 1; }
+  .nav-count {
+    font-size: 11.5px; color: var(--fg-subtle); font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .nav-count.attention { color: var(--accent-text); font-weight: 600; }
+
+  /* Sidebar footer */
+  .side-foot {
+    border-top: 1px solid var(--border);
+    padding: 14px 18px;
+    font-size: 12px; color: var(--fg-muted);
+  }
+  .side-foot-row { display: flex; justify-content: space-between; align-items: center; }
+  .side-foot-bar {
+    height: 3px; background: var(--bg-muted); border-radius: 3px;
+    margin: 8px 0; overflow: hidden;
+  }
+  .side-foot-bar > div {
+    height: 100%; background: var(--fg-strong); border-radius: 3px;
+  }
+  .side-foot a {
+    color: var(--fg); text-decoration: none; font-weight: 500;
+  }
+  .side-foot a:hover { color: var(--fg-strong); }
+
+  /* ──────────── Main ──────────── */
+  main.main {
+    flex: 1; min-width: 0; display: flex; flex-direction: column;
+    overflow: hidden; background: var(--bg);
+  }
+  header.topbar {
+    padding: 22px 32px 18px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 24px;
+    flex-wrap: wrap;
+  }
+  .topbar-title { flex: 1 1 280px; min-width: 0; }
+  .topbar-sub {
+    margin-top: 5px; font-size: 12.5px; color: var(--fg-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Filter dropdowns — single clean select per filter. No pills. */
+  .filter-row { display: flex; gap: 8px; align-items: center; }
+  .select {
+    background: var(--bg); border: 1px solid var(--border);
+    padding: 7px 10px 7px 12px; font-size: 12.5px; cursor: pointer;
+    color: var(--fg); font-family: inherit; font-weight: 500;
+    border-radius: 6px;
+    display: inline-flex; align-items: center; gap: 8px;
+    transition: all var(--t-fast) var(--ease);
+    min-width: 140px;
+  }
+  .select:hover { border-color: var(--border-strong); background: var(--bg-soft); }
+  .select .select-label {
+    color: var(--fg-subtle); font-weight: 400; font-size: 11.5px;
+  }
+  .select .select-value { color: var(--fg-strong); flex: 1; }
+  .select .select-caret {
+    color: var(--fg-subtle); font-size: 10px;
+    transition: transform var(--t-fast) var(--ease);
+  }
+  .select:hover .select-caret { color: var(--fg-muted); }
+
+  /* Tags — meeting type / client. Soft tinted background +
+     readable text in matching hue. Used on session cards and
+     in co-pilot. */
+  .tag {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 600; letter-spacing: 0;
+    line-height: 1.5;
+  }
+  .tag-dot {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: currentColor;
+  }
+  .tag-sa     { background: var(--t-sa-soft);     color: var(--t-sa); }
+  .tag-sales  { background: var(--t-sales-soft);  color: var(--t-sales); }
+  .tag-exec   { background: var(--t-exec-soft);   color: var(--t-exec); }
+  .tag-disc   { background: var(--t-disc-soft);   color: var(--t-disc); }
+  .tag-sow    { background: var(--t-sow-soft);    color: var(--t-sow); }
+  .tag-status { background: var(--t-status-soft); color: var(--t-status); }
+  .tag-tech   { background: var(--t-tech-soft);   color: var(--t-tech); }
+  .tag-demo   { background: var(--t-demo-soft);   color: var(--t-demo); }
+
+  /* Primary button */
+  .btn-primary {
+    background: var(--fg-strong); color: white;
+    padding: 7px 14px; border-radius: 6px;
+    font-size: 13px; font-weight: 500;
+    border: none; cursor: pointer;
+    transition: opacity var(--t-fast) var(--ease),
+                transform var(--t-fast) var(--ease);
+    font-family: inherit;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn-primary:hover { opacity: 0.88; }
+  .btn-primary:active { transform: scale(0.98); }
+
+  /* Content grid */
+  .content {
+    flex: 1; display: grid; grid-template-columns: 1.5fr 1fr;
+    overflow: hidden;
+  }
+
+  /* Sessions list */
+  .sessions-col {
+    overflow-y: auto;
+    padding: 20px 32px 40px;
+  }
+
+  .group-label {
+    margin: 18px 0 10px;
+    font-size: 11px; font-weight: 600;
+    color: var(--fg-subtle);
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .group-label:first-child { margin-top: 4px; }
+
+  /* Session card */
+  .session-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px; margin-bottom: 6px;
+    transition: border-color var(--t-fast) var(--ease),
+                box-shadow var(--t-fast) var(--ease),
+                transform var(--t-fast) var(--ease);
+    cursor: pointer;
+  }
+  .session-card:hover {
+    border-color: var(--border-strong);
+    box-shadow: var(--shadow-sm);
+  }
+  .session-card.is-recording {
+    border-color: var(--signal-red);
+    background: linear-gradient(to right, rgba(239,68,68,0.03), transparent 30%);
+  }
+
+  .session-head {
+    display: flex; align-items: center; gap: 12px;
+    min-width: 0;
+  }
+  .session-title {
+    font-size: 14.5px; font-weight: 600;
+    color: var(--fg-strong); letter-spacing: -0.005em;
+    flex: 1; min-width: 0; line-height: 1.35;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .session-meta, .session-stats { min-width: 0; flex-wrap: wrap; }
+  .session-when {
+    font-size: 11.5px; color: var(--fg-subtle);
+    flex-shrink: 0; font-variant-numeric: tabular-nums;
+  }
+  .session-meta {
+    margin-top: 6px; font-size: 12.5px; color: var(--fg-muted);
+    line-height: 1.4;
+    font-variant-numeric: tabular-nums;
+  }
+  .session-meta .strong { color: var(--fg); font-weight: 500; }
+  .session-meta .sep { color: var(--border-strong); margin: 0 6px; }
+
+  .session-stats {
+    margin-top: 10px;
+    display: flex; gap: 16px; align-items: center;
+    font-size: 12px; color: var(--fg-muted);
+  }
+  .session-stats .strong {
+    color: var(--fg); font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .session-stats .live {
+    display: flex; align-items: center; gap: 6px;
+    color: var(--accent-text); font-weight: 500;
+  }
+  .live-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent);
+  }
+  .rec-label {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; font-weight: 600; color: var(--signal-red);
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+
+  /* Mini waveform — recording sessions */
+  .wave {
+    display: inline-flex; gap: 2px; align-items: flex-end;
+    height: 12px;
+  }
+  .wave span {
+    display: block; width: 2px; background: var(--signal-red);
+    border-radius: 1px;
+    animation: wave-bar 1.1s var(--ease) infinite;
+  }
+  .wave span:nth-child(1) { animation-delay: 0ms;   height: 30%; }
+  .wave span:nth-child(2) { animation-delay: 80ms;  height: 70%; }
+  .wave span:nth-child(3) { animation-delay: 160ms; height: 50%; }
+  .wave span:nth-child(4) { animation-delay: 240ms; height: 90%; }
+  .wave span:nth-child(5) { animation-delay: 320ms; height: 40%; }
+  @keyframes wave-bar {
+    0%, 100% { transform: scaleY(0.3); }
+    50%      { transform: scaleY(1); }
+  }
+
+  /* ──────────── Session detail pane ────────────
+     The right column on Sessions view. Mirrors the
+     split-pane pattern already in Follow-ups / Commitments /
+     Decisions — click a row, see the full thing here. */
+  aside.detail {
+    overflow-y: auto;
+    border-left: 1px solid var(--border);
+    background: var(--bg-soft);
+    padding: 24px 28px 50px;
+    min-width: 0;
+  }
+  .detail-h { margin-bottom: 20px; min-width: 0; }
+  .detail-eyebrow {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 8px;
+    font-size: 11px; font-weight: 600;
+    color: var(--fg-subtle);
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .detail-eyebrow .live-dot { background: var(--signal-red); }
+  .detail-title {
+    font-size: 19px; font-weight: 600; color: var(--fg-strong);
+    line-height: 1.3; letter-spacing: -0.012em;
+  }
+  .detail-meta {
+    margin-top: 10px; font-size: 13px; color: var(--fg-muted);
+    line-height: 1.5; font-variant-numeric: tabular-nums;
+  }
+  .detail-tags {
+    display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap;
+  }
+  .detail-actions {
+    display: flex; gap: 6px; margin: 20px 0;
+    padding: 14px 0; border-top: 1px solid var(--border-soft);
+    border-bottom: 1px solid var(--border-soft);
+    flex-wrap: wrap;
+  }
+  .detail-actions button {
+    background: var(--bg); border: 1px solid var(--border);
+    padding: 6px 12px; border-radius: 6px;
+    font-size: 12.5px; font-weight: 500; color: var(--fg);
+    cursor: pointer; font-family: inherit;
+    display: inline-flex; align-items: center; gap: 6px;
+    transition: all var(--t-fast) var(--ease);
+  }
+  .detail-actions button:hover {
+    border-color: var(--border-strong);
+    box-shadow: var(--shadow-sm);
+  }
+  .detail-actions button.primary {
+    background: var(--fg-strong); color: white;
+    border-color: var(--fg-strong);
+  }
+  .detail-actions button.primary:hover { opacity: 0.88; }
+
+  .detail-section { margin-top: 24px; }
+  .detail-section h3 {
+    font-size: 11px; font-weight: 600;
+    color: var(--fg-subtle);
+    text-transform: uppercase; letter-spacing: 0.06em;
+    margin-bottom: 10px;
+  }
+  .detail-summary {
+    font-size: 13.5px; line-height: 1.6; color: var(--fg);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .detail-summary p { margin: 0 0 10px; }
+  .detail-summary p:last-child { margin-bottom: 0; }
+
+  .detail-list {
+    list-style: none; padding: 0; margin: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .detail-list li {
+    padding: 10px 14px; font-size: 13px;
+    border-bottom: 1px solid var(--border-soft);
+    display: flex; align-items: flex-start; gap: 10px;
+    line-height: 1.5;
+  }
+  .detail-list li:last-child { border-bottom: none; }
+  .detail-list .check {
+    width: 14px; height: 14px; border-radius: 4px;
+    border: 1.5px solid var(--border-strong);
+    flex-shrink: 0; margin-top: 2px;
+  }
+  .detail-list .check.done {
+    background: var(--accent); border-color: var(--accent);
+  }
+  .detail-list .li-text { flex: 1; min-width: 0; }
+  .detail-list .li-owner {
+    font-size: 11.5px; color: var(--fg-subtle);
+    margin-left: 8px; flex-shrink: 0;
+  }
+
+  /* Callout at top — explains where co-pilot actually lives */
+  .callout {
+    margin: 16px 32px 0; padding: 12px 16px;
+    background: var(--primary-soft);
+    border: 1px solid #cbd6ff;
+    border-radius: 8px;
+    display: flex; align-items: flex-start; gap: 12px;
+    font-size: 12.5px; color: var(--primary-text);
+  }
+  .callout svg {
+    width: 16px; height: 16px; flex-shrink: 0; margin-top: 1px;
+  }
+  .callout strong { color: var(--primary-text); }
+
+  .copilot-h {
+    display: flex; align-items: center; gap: 10px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 16px;
+  }
+  .copilot-h-icon {
+    width: 22px; height: 22px; border-radius: 6px;
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px;
+  }
+  .copilot-title {
+    flex: 1; font-size: 14px; font-weight: 600;
+    color: var(--fg-strong);
+  }
+  .copilot-icons { display: flex; gap: 2px; }
+  .icon-btn {
+    background: transparent; border: none;
+    width: 26px; height: 26px; border-radius: 6px;
+    cursor: pointer; color: var(--fg-muted);
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: background var(--t-fast) var(--ease);
+  }
+  .icon-btn:hover { background: var(--bg-muted); color: var(--fg-strong); }
+  .icon-btn svg { width: 14px; height: 14px; }
+
+  /* Mode + meeting type — small select pills (NOT colored).
+     Just clean rectangles with chevrons. */
+  .mode-row {
+    display: flex; gap: 6px; flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+  .mode-select {
+    background: var(--bg); border: 1px solid var(--border);
+    padding: 5px 9px; border-radius: 6px;
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--fg); font-weight: 500;
+    cursor: pointer;
+    transition: border-color var(--t-fast) var(--ease);
+  }
+  .mode-select:hover { border-color: var(--border-strong); }
+  .mode-label { color: var(--fg-subtle); font-weight: 400; }
+  .mode-caret {
+    color: var(--fg-subtle); font-size: 10px; margin-left: 2px;
+  }
+
+  /* Tick card — clean white with subtle border */
+  .tick {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px; margin-bottom: 10px;
+  }
+  .tick-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 10px;
+    font-size: 11.5px; color: var(--fg-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+  .tick-section { margin-top: 12px; }
+  .tick-section:first-of-type { margin-top: 0; }
+  .tick-h {
+    font-size: 11px; font-weight: 600;
+    color: var(--fg-muted);
+    text-transform: uppercase; letter-spacing: 0.06em;
+    margin-bottom: 6px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .tick-h-dot {
+    width: 4px; height: 4px; border-radius: 50%; background: var(--fg-muted);
+  }
+  .tick-h.warn { color: var(--signal-amber); }
+  .tick-h.warn .tick-h-dot { background: var(--signal-amber); }
+
+  .tick-bullet {
+    padding: 5px 0;
+    font-size: 13px; line-height: 1.5; color: var(--fg);
+    display: flex; gap: 10px; position: relative;
+  }
+  .tick-bullet .b-marker {
+    width: 4px; height: 4px; border-radius: 50%;
+    background: var(--border-strong); flex-shrink: 0;
+    margin-top: 8px;
+  }
+  .tick-bullet .b-text { flex: 1; }
+  .tick-bullet .b-actions {
+    display: inline-flex; gap: 2px; opacity: 0;
+    transition: opacity var(--t-fast) var(--ease);
+  }
+  .tick-bullet:hover .b-actions { opacity: 1; }
+  .b-actions button {
+    background: transparent; border: none;
+    width: 22px; height: 22px; border-radius: 4px;
+    color: var(--fg-subtle); cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: background var(--t-fast) var(--ease),
+                color var(--t-fast) var(--ease);
+  }
+  .b-actions button:hover {
+    background: var(--bg-muted); color: var(--fg-strong);
+  }
+  .b-actions button svg { width: 13px; height: 13px; }
+
+  .copilot-foot {
+    margin-top: 14px; padding-top: 12px;
+    border-top: 1px solid var(--border-soft);
+    display: flex; justify-content: space-between;
+    font-size: 11.5px; color: var(--fg-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .copilot-foot .strong { color: var(--fg); font-weight: 500; }
+
+  /* ──────────── Cmd+K palette ──────────── */
+  .cmdk-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.18);
+    backdrop-filter: blur(6px);
+    display: flex; align-items: flex-start; justify-content: center;
+    padding-top: 14vh; z-index: 100;
+    animation: overlay-fade 180ms var(--ease);
+  }
+  @keyframes overlay-fade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  .cmdk-modal {
+    width: 560px; max-width: 92vw;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow-lg);
+    overflow: hidden;
+    animation: modal-rise 200ms var(--ease);
+  }
+  @keyframes modal-rise {
+    from { opacity: 0; transform: translateY(6px) scale(0.99); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  .cmdk-input {
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px;
+  }
+  .cmdk-input svg { width: 16px; height: 16px; color: var(--fg-subtle); }
+  .cmdk-input input {
+    border: none; background: transparent; outline: none;
+    font-size: 15px; color: var(--fg-strong); flex: 1;
+    font-family: inherit;
+  }
+  .cmdk-input input::placeholder { color: var(--fg-subtle); }
+  .cmdk-results { max-height: 380px; overflow-y: auto; padding: 4px; }
+  .cmdk-group {
+    padding: 10px 14px 4px;
+    font-size: 11px; font-weight: 600;
+    color: var(--fg-subtle);
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .cmdk-row {
+    padding: 8px 14px; display: flex; align-items: center;
+    cursor: pointer; gap: 12px; border-radius: 6px;
+    font-size: 13.5px;
+    transition: background var(--t-fast) var(--ease);
+  }
+  .cmdk-row:hover, .cmdk-row.selected { background: var(--bg-soft); }
+  .cmdk-row .name { color: var(--fg-strong); font-weight: 500; flex: 1; }
+  .cmdk-row .hint {
+    color: var(--fg-muted); font-size: 12.5px;
+  }
+  .cmdk-foot {
+    padding: 10px 18px;
+    border-top: 1px solid var(--border);
+    display: flex; gap: 14px;
+    font-size: 11px; color: var(--fg-subtle);
+    background: var(--bg-soft);
+  }
+  .cmdk-foot span { display: flex; align-items: center; gap: 6px; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong); border-radius: 999px;
+    border: 2px solid transparent; background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: var(--fg-subtle); background-clip: padding-box; border: 2px solid transparent; }
+
+  /* Icons (inline SVG for sharpness) */
+  .ic { width: 14px; height: 14px; stroke-width: 1.75; }
+</style>
+</head>
+<body>
+
+<div class="shell">
+
+  <!-- ──────────── Sidebar ──────────── -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-dot">M</div>
+      <div class="brand-name">Meeting Recorder</div>
+      <div class="brand-ver">2.9</div>
+    </div>
+
+    <div class="cmdk-hint" onclick="document.getElementById('cmdk').style.display='flex'">
+      <svg class="cmdk-hint-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+      <span class="cmdk-hint-text">Quick find...</span>
+      <span class="kbd">⌘K</span>
+    </div>
+
+    <div class="recording-row">
+      <div class="rec-dot"></div>
+      <div class="rec-body">
+        <div class="rec-title">SimpliSafe — SOW Review</div>
+        <div class="rec-meta">Recording · 24:31</div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <a href="#" class="nav-item active">
+        <svg class="nav-icon ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M3 9h18M9 21V9"/></svg>
+        <span class="nav-label">Sessions</span>
+        <span class="nav-count">88</span>
+      </a>
+      <a href="#" class="nav-item">
+        <svg class="nav-icon ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4" fill="currentColor"/><circle cx="12" cy="12" r="9"/></svg>
+        <span class="nav-label">Record</span>
+      </a>
+
+      <div class="nav-group">Action</div>
+      <a href="#" class="nav-item">
+        <svg class="nav-icon ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+        <span class="nav-label">Follow-ups</span>
+        <span class="nav-count attention">12</span>
+      </a>
+      <a href="#" class="nav-item">
+        <svg class="nav-icon ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg>
+        <span class="nav-label">Commitments</span>
+        <span class="nav-count">3</span>
+      </a>
+      <a href="#" class="nav-item">
+        <svg class="nav-icon ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15 9 22 9 17 14 19 22 12 18 5 22 7 14 2 9 9 9"/></svg>
+        <span class="nav-label">Decisions</span>
+      </a>
+
+      <div class="nav-group">Workspace</div>
+      <a href="#" class="nav-item">
+        <svg class="nav-icon ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        <span class="nav-label">Search</span>
+      </a>
+      <a href="#" class="nav-item">
+        <svg class="nav-icon ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        <span class="nav-label">Ask</span>
+      </a>
+      <a href="#" class="nav-item">
+        <svg class="nav-icon ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M5 21V7l8-4v18M19 21V11l-6-4"/></svg>
+        <span class="nav-label">Clients</span>
+      </a>
+      <a href="#" class="nav-item">
+        <svg class="nav-icon ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11H5a2 2 0 0 0-2 2v7h18v-7a2 2 0 0 0-2-2h-4M9 11V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v6"/></svg>
+        <span class="nav-label">Engagements</span>
+      </a>
+      <a href="#" class="nav-item">
+        <svg class="nav-icon ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18M7 14l4-4 4 4 6-6"/></svg>
+        <span class="nav-label">Insights</span>
+      </a>
+      <a href="#" class="nav-item">
+        <svg class="nav-icon ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>
+        <span class="nav-label">Prep brief</span>
+      </a>
+    </nav>
+
+    <div class="side-foot">
+      <div class="side-foot-row">
+        <span>Storage</span>
+        <span>1.07 GB</span>
+      </div>
+      <div class="side-foot-bar"><div style="width: 22%"></div></div>
+      <div class="side-foot-row">
+        <span>88 sessions · 43 audio</span>
+        <a href="#">Settings</a>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ──────────── Main ──────────── -->
+  <main class="main">
+
+    <header class="topbar">
+      <div class="topbar-title">
+        <h1>Sessions</h1>
+        <p class="topbar-sub">88 sessions · 43 with audio · last activity 2 min ago</p>
+      </div>
+
+      <div class="filter-row">
+        <button class="select">
+          <span class="select-label">Client</span>
+          <span class="select-value">All clients</span>
+          <span class="select-caret">▾</span>
+        </button>
+        <button class="select" style="min-width: 130px;">
+          <span class="select-label">Status</span>
+          <span class="select-value">Any</span>
+          <span class="select-caret">▾</span>
+        </button>
+        <button class="select" style="min-width: 150px;">
+          <span class="select-label">Sort</span>
+          <span class="select-value">Most recent</span>
+          <span class="select-caret">▾</span>
+        </button>
+      </div>
+
+      <button class="btn-primary">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4" fill="currentColor"/></svg>
+        Start recording
+      </button>
+    </header>
+
+    <div class="content">
+
+      <!-- Sessions list -->
+      <section class="sessions-col">
+
+        <div class="group-label">Today</div>
+
+        <article class="session-card is-recording">
+          <div class="session-head">
+            <h2 class="session-title">TTEC ↔ SimpliSafe — SOW Review</h2>
+            <span class="rec-label">
+              <span class="wave"><span></span><span></span><span></span><span></span><span></span></span>
+              Recording
+            </span>
+          </div>
+          <div class="session-meta">
+            <span class="strong">SimpliSafe</span><span class="sep">·</span>
+            <span class="strong">2</span> attendees<span class="sep">·</span>
+            started <span class="strong">14:08</span><span class="sep">·</span>
+            <span class="strong">24:31</span> in
+          </div>
+          <div class="session-stats">
+            <span class="tag tag-sa"><span class="tag-dot"></span>SA</span>
+            <span class="tag tag-sow"><span class="tag-dot"></span>SOW Review</span>
+            <span class="live"><span class="live-dot"></span>Live transcript</span>
+          </div>
+        </article>
+
+        <article class="session-card">
+          <div class="session-head">
+            <h2 class="session-title">Guardian — Discovery call, round 2</h2>
+            <span class="session-when">2h ago</span>
+          </div>
+          <div class="session-meta">
+            <span class="strong">Guardian</span><span class="sep">·</span>
+            <span class="strong">5</span> attendees<span class="sep">·</span>
+            <span class="strong">11:02</span><span class="sep">·</span>
+            <span class="strong">58 min</span>
+          </div>
+          <div class="session-stats">
+            <span class="tag tag-sa"><span class="tag-dot"></span>SA</span>
+            <span class="tag tag-disc"><span class="tag-dot"></span>Discovery</span>
+            <span style="color: var(--border-strong);">·</span>
+            <span><span class="strong">5</span> follow-ups</span>
+            <span style="color: var(--border-strong);">·</span>
+            <span><span class="strong">2</span> decisions</span>
+          </div>
+        </article>
+
+        <div class="group-label">Yesterday</div>
+
+        <article class="session-card">
+          <div class="session-head">
+            <h2 class="session-title">SimpliSafe — Technical deep-dive: IAM trust chain</h2>
+            <span class="session-when">1d ago</span>
+          </div>
+          <div class="session-meta">
+            <span class="strong">SimpliSafe</span><span class="sep">·</span>
+            <span class="strong">3</span> attendees<span class="sep">·</span>
+            <span class="strong">16:45</span><span class="sep">·</span>
+            <span class="strong">47 min</span>
+          </div>
+          <div class="session-stats">
+            <span class="tag tag-sa"><span class="tag-dot"></span>SA</span>
+            <span class="tag tag-tech"><span class="tag-dot"></span>Technical</span>
+            <span style="color: var(--border-strong);">·</span>
+            <span><span class="strong">3</span> follow-ups</span>
+            <span style="color: var(--border-strong);">·</span>
+            <span><span class="strong">1</span> decision</span>
+            <span style="color: var(--border-strong);">·</span>
+            <span><span class="strong">12</span> screenshots</span>
+          </div>
+        </article>
+
+        <article class="session-card">
+          <div class="session-head">
+            <h2 class="session-title">TTEC Internal — Weekly sync</h2>
+            <span class="session-when">1d ago</span>
+          </div>
+          <div class="session-meta">
+            <span class="strong">Internal</span><span class="sep">·</span>
+            <span class="strong">6</span> attendees<span class="sep">·</span>
+            <span class="strong">09:00</span><span class="sep">·</span>
+            <span class="strong">42 min</span>
+          </div>
+          <div class="session-stats">
+            <span class="tag tag-exec"><span class="tag-dot"></span>Executive</span>
+            <span class="tag tag-status"><span class="tag-dot"></span>Status</span>
+            <span style="color: var(--border-strong);">·</span>
+            <span><span class="strong">8</span> follow-ups</span>
+            <span style="color: var(--border-strong);">·</span>
+            <span><span class="strong">3</span> decisions</span>
+          </div>
+        </article>
+
+        <div class="group-label">Earlier this week</div>
+
+        <article class="session-card">
+          <div class="session-head">
+            <h2 class="session-title">QuantumHealth — Migration kickoff</h2>
+            <span class="session-when">3d ago</span>
+          </div>
+          <div class="session-meta">
+            <span class="strong">QuantumHealth</span><span class="sep">·</span>
+            <span class="strong">8</span> attendees<span class="sep">·</span>
+            Mon <span class="strong">14:00</span><span class="sep">·</span>
+            <span class="strong">1h 12m</span>
+          </div>
+          <div class="session-stats">
+            <span class="tag tag-sa"><span class="tag-dot"></span>SA</span>
+            <span class="tag tag-disc"><span class="tag-dot"></span>Discovery</span>
+            <span style="color: var(--border-strong);">·</span>
+            <span><span class="strong">11</span> follow-ups</span>
+            <span style="color: var(--border-strong);">·</span>
+            <span><span class="strong">4</span> decisions</span>
+            <span style="color: var(--border-strong);">·</span>
+            <span><span class="strong">6</span> screenshots</span>
+          </div>
+        </article>
+
+      </section>
+
+      <!-- Session detail pane —
+           replaces the misplaced co-pilot from the earlier draft.
+           This is the right column on Sessions view: click any
+           session row on the left, the detail populates here.
+           Same split-pane pattern Follow-ups / Commitments /
+           Decisions already use. -->
+      <aside class="detail">
+        <div class="detail-h">
+          <div class="detail-eyebrow">
+            <span class="live-dot" style="width: 6px; height: 6px; border-radius: 50%; display: inline-block;"></span>
+            Recording in progress
+          </div>
+          <div class="detail-title">TTEC ↔ SimpliSafe — SOW Review</div>
+          <div class="detail-meta">
+            <span class="strong">SimpliSafe</span> · started <span class="strong">14:08</span>
+            · <span class="strong">24:31</span> in
+            <br>
+            2 attendees · Co-pilot active · Live transcript
+          </div>
+          <div class="detail-tags">
+            <span class="tag tag-sa"><span class="tag-dot"></span>SA</span>
+            <span class="tag tag-sow"><span class="tag-dot"></span>SOW Review</span>
+          </div>
+        </div>
+
+        <div class="detail-actions">
+          <button class="primary">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12"/></svg>
+            Stop recording
+          </button>
+          <button>Open</button>
+          <button>Export</button>
+          <button>Delete</button>
+        </div>
+
+        <div class="detail-section">
+          <h3>Live transcript — last 30 seconds</h3>
+          <div class="detail-summary">
+            <p><span style="font-weight: 600; color: var(--fg-strong);">Charles:</span> &mdash; right, but the acceptance criteria for §3.2 are still loose. We need to nail down what &quot;configure&quot; means before we put a number on it.</p>
+            <p><span style="font-weight: 600; color: var(--fg-strong);">Josh:</span> Agreed. Can we list out the specific contact-flow blocks we're configuring as part of phase 1?</p>
+          </div>
+        </div>
+
+        <div class="detail-section">
+          <h3>Pinned suggestions <span style="color: var(--fg-muted); font-weight: 400; text-transform: none; letter-spacing: 0;">— from Live Co-Pilot</span></h3>
+          <ul class="detail-list">
+            <li>
+              <span class="check"></span>
+              <span class="li-text">Pull current contact flow JSON before next session.</span>
+              <span class="li-owner">Charles</span>
+            </li>
+            <li>
+              <span class="check"></span>
+              <span class="li-text">Confirm PCI scope for phase 1 vs phase 2.</span>
+              <span class="li-owner">Josh</span>
+            </li>
+            <li>
+              <span class="check done"></span>
+              <span class="li-text" style="color: var(--fg-muted); text-decoration: line-through;">Flag indemnification clause to legal.</span>
+            </li>
+          </ul>
+        </div>
+
+        <div class="detail-section">
+          <h3>Jump to</h3>
+          <ul class="detail-list">
+            <li><span class="li-text">Overview</span></li>
+            <li><span class="li-text">Live transcript</span><span class="li-owner">12 segments</span></li>
+            <li><span class="li-text">Co-pilot history</span><span class="li-owner">4 ticks</span></li>
+            <li><span class="li-text">Notes</span></li>
+            <li><span class="li-text">Screenshots</span><span class="li-owner">2</span></li>
+          </ul>
+        </div>
+      </aside>
+
+      <!-- Original co-pilot mockup preserved below for reference -->
+      <aside class="copilot" style="display: none;">
+        <div class="copilot-h">
+          <div class="copilot-h-icon">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4" fill="currentColor"/><circle cx="12" cy="12" r="9"/></svg>
+          </div>
+          <div class="copilot-title">Live Co-Pilot</div>
+          <div class="copilot-icons">
+            <button class="icon-btn" title="Refresh">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5"/></svg>
+            </button>
+            <button class="icon-btn" title="Pause">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="mode-row">
+          <button class="select" style="min-width: 100px;">
+            <span class="select-label">Mode</span>
+            <span class="tag tag-sa" style="padding: 0 6px; font-size: 11px;"><span class="tag-dot"></span>SA</span>
+            <span class="select-caret">▾</span>
+          </button>
+          <button class="select" style="min-width: 150px;">
+            <span class="select-label">Type</span>
+            <span class="tag tag-sow" style="padding: 0 6px; font-size: 11px;"><span class="tag-dot"></span>SOW Review</span>
+            <span class="select-caret">▾</span>
+          </button>
+        </div>
+
+        <article class="tick">
+          <div class="tick-head">
+            <span>14:21:08</span>
+            <span>4 segments</span>
+          </div>
+
+          <div class="tick-section">
+            <h3 class="tick-h"><span class="tick-h-dot"></span>Clarifying questions</h3>
+            <div class="tick-bullet">
+              <span class="b-marker"></span>
+              <span class="b-text">What's the latency budget for the IVR-to-Connect handoff once Salesforce screen-pop fires?</span>
+              <span class="b-actions">
+                <button title="Save">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                </button>
+                <button title="Copy">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                </button>
+              </span>
+            </div>
+            <div class="tick-bullet">
+              <span class="b-marker"></span>
+              <span class="b-text">Are PCI flows in scope for this phase, or deferred to phase 2?</span>
+              <span class="b-actions">
+                <button title="Save"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg></button>
+                <button title="Copy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+              </span>
+            </div>
+          </div>
+
+          <div class="tick-section">
+            <h3 class="tick-h warn"><span class="tick-h-dot"></span>Risks &amp; assumptions</h3>
+            <div class="tick-bullet">
+              <span class="b-marker" style="background: var(--signal-amber)"></span>
+              <span class="b-text">SOW deliverable §3.2 is a verb (&quot;configure&quot;), not a noun — acceptance criteria undefined.</span>
+              <span class="b-actions">
+                <button title="Save"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg></button>
+              </span>
+            </div>
+          </div>
+
+          <div class="tick-section">
+            <h3 class="tick-h"><span class="tick-h-dot"></span>Suggested follow-ups</h3>
+            <div class="tick-bullet">
+              <span class="b-marker"></span>
+              <span class="b-text">Pull current contact flow JSON before next session — Charles.</span>
+              <span class="b-actions">
+                <button title="Save"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg></button>
+              </span>
+            </div>
+          </div>
+        </article>
+
+        <article class="tick">
+          <div class="tick-head">
+            <span>14:19:35</span>
+            <span>3 segments</span>
+          </div>
+          <div class="tick-section">
+            <h3 class="tick-h warn"><span class="tick-h-dot"></span>Risks &amp; assumptions</h3>
+            <div class="tick-bullet">
+              <span class="b-marker" style="background: var(--signal-amber)"></span>
+              <span class="b-text">Indemnification clause as-drafted is one-way — flag to legal.</span>
+              <span class="b-actions">
+                <button title="Save"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg></button>
+              </span>
+            </div>
+          </div>
+        </article>
+
+        <div class="copilot-foot">
+          <span>Refreshing every <span class="strong">45s</span> + <span class="strong">15s</span></span>
+          <span><span class="strong">$0.18</span>/hr</span>
+        </div>
+      </aside>
+
+    </div>
+  </main>
+</div>
+
+
+<!-- ──────────── Cmd+K palette ──────────── -->
+<div class="cmdk-overlay" id="cmdk" style="display: none;">
+  <div class="cmdk-modal">
+    <div class="cmdk-input">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+      <input type="text" placeholder="Type a command or search..." autofocus />
+      <span class="kbd">esc</span>
+    </div>
+    <div class="cmdk-results">
+      <div class="cmdk-group">Recording</div>
+      <div class="cmdk-row selected">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4" fill="currentColor"/></svg>
+        <span class="name">Start recording</span>
+        <span class="hint">manual</span>
+        <span class="kbd">⌘R</span>
+      </div>
+      <div class="cmdk-row">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        <span class="name">Start recording from calendar</span>
+        <span class="hint">SimpliSafe — SOW Review · 2:00pm</span>
+      </div>
+
+      <div class="cmdk-group">Recent</div>
+      <div class="cmdk-row">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg>
+        <span class="name">Guardian — Discovery call, round 2</span>
+        <span class="hint">2 hours ago</span>
+      </div>
+      <div class="cmdk-row">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg>
+        <span class="name">SimpliSafe — Technical deep-dive: IAM trust chain</span>
+        <span class="hint">yesterday</span>
+      </div>
+
+      <div class="cmdk-group">Jump to</div>
+      <div class="cmdk-row">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+        <span class="name">Follow-ups</span>
+        <span class="hint">12 open</span>
+        <span class="kbd">F</span>
+      </div>
+      <div class="cmdk-row">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        <span class="name">Ask Claude across all meetings</span>
+        <span class="hint">cross-meeting Q&amp;A</span>
+        <span class="kbd">A</span>
+      </div>
+    </div>
+    <div class="cmdk-foot">
+      <span><span class="kbd">↑↓</span> navigate</span>
+      <span><span class="kbd">↵</span> select</span>
+      <span><span class="kbd">esc</span> close</span>
+    </div>
+  </div>
+</div>
+
+<script>
+  const overlay = document.getElementById('cmdk');
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) overlay.style.display = 'none';
+  });
+  document.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      e.preventDefault();
+      overlay.style.display = overlay.style.display === 'none' ? 'flex' : 'none';
+    } else if (e.key === 'Escape') {
+      overlay.style.display = 'none';
+    }
+  });
+</script>
+
+</body>
+</html>
