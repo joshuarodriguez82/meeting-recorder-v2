@@ -5051,11 +5051,51 @@ async def startup():
         except Exception as e:
             logger.exception(f"Crash recovery pass failed: {e}")
 
+    def _audit_ghost_sessions():
+        """Scan every session JSON in recordings_dir and flag the ones
+        whose referenced audio_path doesn't exist on disk. Phantom
+        sessions accumulated during v2.9.0's orphan-process incident —
+        a session.json was written but the recording aborted before the
+        WAV was finalized. The next process_full call fails with a
+        cryptic 'no transcript' error. Better to surface these at
+        startup so the user can clean them up."""
+        try:
+            if svc.settings is None or svc.session_svc is None:
+                return
+            ghosts: list[str] = []
+            from pathlib import Path as _P
+            rec_dir = _P(svc.settings.recordings_dir)
+            if not rec_dir.exists():
+                return
+            for json_path in rec_dir.glob("session_*.json"):
+                # Skip the structured-extraction sidecars and similar
+                if json_path.stem.count(".") > 0:
+                    continue
+                try:
+                    import json as _j
+                    data = _j.loads(json_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                audio_path = data.get("audio_path") or ""
+                if audio_path and not _P(audio_path).exists():
+                    ghosts.append(json_path.stem)
+            if ghosts:
+                logger.warning(
+                    f"GHOST_SESSIONS: {len(ghosts)} session(s) have a "
+                    f"session.json but no audio file on disk: "
+                    f"{', '.join(ghosts[:10])}"
+                    f"{' …' if len(ghosts) > 10 else ''}. "
+                    f"These will fail to process. Delete them from the "
+                    f"Sessions list or via the filesystem.")
+        except Exception as e:
+            logger.exception(f"Ghost session audit failed: {e}")
+
     # Pre-warm the slow stuff in background threads so the first frontend
     # request doesn't pay the latency. These populate module-level caches.
     import threading as _t
 
     _t.Thread(target=_recover_orphans, daemon=True).start()
+    _t.Thread(target=_audit_ghost_sessions, daemon=True).start()
 
     def _prewarm_audio():
         try:

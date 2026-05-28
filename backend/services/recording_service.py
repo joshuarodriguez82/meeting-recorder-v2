@@ -142,6 +142,14 @@ class RecordingService:
         # Rate-limit the per-tick watchdog diagnostic log so it doesn't
         # drown out the rest of backend.log (status polls fire at 1 Hz).
         self._watchdog_last_log_at: Optional[datetime] = None
+        # Wall-clock time of the most recent audio chunk write. Used by
+        # the capture-stall detector in watchdog_tick — if no chunks
+        # arrive for >30s during an active recording, something has
+        # silently broken the capture path (device unplugged, OS audio
+        # session killed, OneDrive locking the file). The user should
+        # know IMMEDIATELY rather than discovering 30 min of silence
+        # after the meeting.
+        self._last_chunk_at: Optional[datetime] = None
 
     @property
     def current_session(self) -> Optional[Session]:
@@ -229,6 +237,7 @@ class RecordingService:
 
         self._recording = True
         self._chunk_count = 0
+        self._last_chunk_at = None
         self._loopback_level_ema = 0.0
         recordings_dir = Path(self._settings.recordings_dir)
         recordings_dir.mkdir(parents=True, exist_ok=True)
@@ -396,6 +405,60 @@ class RecordingService:
                     f"Audio saved to {final_path} ({duration_s:.1f}s)")
                 logger.info(
                     f"[stop] finalize done in {_t.monotonic()-t:.1f}s")
+
+                # AUDIO INTEGRITY CHECK — compare the actual WAV
+                # duration (returned by finalize_recording_streaming)
+                # to the wall-clock duration the recording was running.
+                # Silent partial-audio loss has happened in v2.9.0 and
+                # earlier (multiple processes contending for the same
+                # mic, OneDrive truncating mid-write, etc.) — without
+                # this check, a recording with the last 30 minutes of
+                # a 1-hour meeting saves with metadata claiming 1 hour
+                # and the user only discovers the loss when listening
+                # back. Now we tag the session so the UI can warn.
+                #
+                # Tolerance is 10% — small differences are normal
+                # (final-write buffering, sample-rate rounding); 30+%
+                # is the failure mode we're guarding against.
+                self._session.audio_actual_duration_s = float(duration_s)
+                expected_s = (
+                    self._session.ended_at - self._session.started_at
+                ).total_seconds() if self._session.started_at else 0.0
+                self._session.audio_expected_duration_s = float(expected_s)
+                if expected_s > 30.0:
+                    # Only check when the recording was substantial
+                    # (>30s); short test recordings have too much
+                    # noise in the buffer math to be reliable.
+                    deficit_ratio = (
+                        (expected_s - duration_s) / expected_s
+                        if expected_s > 0 else 0.0
+                    )
+                    if deficit_ratio > 0.10:
+                        actual_min = duration_s / 60.0
+                        expected_min = expected_s / 60.0
+                        lost_min = (expected_s - duration_s) / 60.0
+                        msg = (
+                            f"Audio is shorter than the recording window. "
+                            f"You got {actual_min:.0f} min of audio in a "
+                            f"{expected_min:.0f}-min recording — about "
+                            f"{lost_min:.0f} min appears to be missing."
+                        )
+                        self._session.audio_integrity_warning = msg
+                        logger.critical(
+                            f"AUDIO_INTEGRITY: session "
+                            f"{self._session.session_id}: actual="
+                            f"{duration_s:.1f}s expected={expected_s:.1f}s "
+                            f"deficit={deficit_ratio*100:.0f}%")
+                    elif duration_s > expected_s * 1.10:
+                        # Actual longer than expected — also suspicious
+                        # (a stale wav got concatenated maybe). Log but
+                        # don't warn user; this case is rarer.
+                        logger.warning(
+                            f"AUDIO_INTEGRITY: session "
+                            f"{self._session.session_id} wav is longer "
+                            f"than wall-clock — actual={duration_s:.1f}s "
+                            f"expected={expected_s:.1f}s (possible stale "
+                            f"file concat).")
             except Exception as e:
                 logger.exception(
                     f"[stop] finalize failed after {_t.monotonic()-t:.1f}s")
@@ -620,6 +683,33 @@ class RecordingService:
                     f"ABSOLUTE_CAP fired at {elapsed_h:.2f}h — "
                     f"stopping recording regardless of user settings")
 
+        # Capture-stall detector: how long since ANY audio chunk reached
+        # the WAV writer? Distinct from dead-air (which is "no SPEECH
+        # detected"). This catches the failure mode where the capture
+        # device went away, the WAV file got locked, OneDrive flipped
+        # the file cloud-only, or any other silent break in the path.
+        # Chunks arrive at ~10 Hz during normal capture; 30s with no
+        # chunks at all means something is wrong.
+        if self._last_chunk_at is not None and started_at:
+            chunk_silence_s = int(
+                (now - self._last_chunk_at).total_seconds())
+            elapsed_recording_s = (now - started_at).total_seconds()
+            # Grace period for the first ~5s after start_recording —
+            # capture spin-up can take a moment.
+            if elapsed_recording_s > 5 and chunk_silence_s >= 30:
+                warnings.append({
+                    "code": "capture_stalled",
+                    "message": (
+                        f"No audio captured for {chunk_silence_s}s. "
+                        f"Recording is RUNNING but data is NOT reaching "
+                        f"the file. Check your microphone, then stop and "
+                        f"restart the recording."),
+                    "since_seconds": chunk_silence_s,
+                })
+                logger.critical(
+                    f"CAPTURE_STALLED: no audio chunks for "
+                    f"{chunk_silence_s}s during active recording")
+
         # Dead-air: how long since the last chunk above the silence floor.
         if self._last_speech_at:
             silence_s = int((now - self._last_speech_at).total_seconds())
@@ -722,6 +812,7 @@ class RecordingService:
                 # faster-whisper's input is hardcoded to 16 kHz.
                 self._wav_writer.write(mono)
                 self._chunk_count += 1
+                self._last_chunk_at = datetime.now()
         # Auto-stop watchdog input: track the most recent moment we heard
         # speech-level audio on the MIC. The loopback path
         # (_on_loopback_chunk) feeds the same _last_speech_at so the
