@@ -980,6 +980,20 @@ const SECTIONS: Section[] = [
           in the summary — Ollama text models are text-only and the app
           silently drops images for OpenAI-compatible providers.
         </p>
+        <Tip>
+          <strong>If ticks go quiet partway through a long call</strong>,
+          your local model is likely responding slower than the tick
+          timeout (common as the conversation grows or the machine gets
+          busy). The Co-Pilot panel now <em>tells</em> you when this
+          happens (&ldquo;model is responding too slowly&rdquo; /
+          &ldquo;can&apos;t reach its model&rdquo;) instead of going
+          blank. The app already feeds each tick only the last ~4-5
+          minutes of conversation and gives local models a longer timeout
+          than cloud, so this is rare — but if it persists, a smaller/
+          faster model (<code className="text-[11px]">llama3.2:3b</code>),
+          freeing up GPU/CPU, or pointing the live model at Anthropic
+          Haiku will keep it snappy.
+        </Tip>
       </>
     ),
   },

@@ -510,6 +510,7 @@ class Summarizer:
         meeting_type_name: str = "",
         meeting_type_prompt: str = "",
         hot: bool = False,
+        timeout_s: Optional[float] = None,
     ) -> dict:
         """In-call coaching tick. Given the last few minutes of live
         transcript segments, produce three short bullet lists:
@@ -621,18 +622,39 @@ class Summarizer:
         try:
             # Hot ticks have a tighter budget — narrower window, more
             # frequent firing, much higher chance the answer is empty.
-            # Wide ticks keep the original 512/20s budget.
+            # Wide ticks keep the original 512-token budget.
             tokens = 256 if hot else 512
-            timeout_s = 10.0 if hot else 20.0
+            # Timeout: caller may pass an interval-aware value (kept under
+            # the poll cadence so ticks never overlap). Falls back to a
+            # provider-aware default — local models (Ollama) are slower
+            # than cloud, so give non-Anthropic providers more room before
+            # we call it a timeout.
+            if timeout_s is None:
+                if self._provider == "anthropic":
+                    timeout_s = 10.0 if hot else 20.0
+                else:
+                    timeout_s = 15.0 if hot else 35.0
             raw = await self._chat(prompt, max_tokens=tokens, timeout=timeout_s)
         except Exception as e:
             # Include the exception type because some exceptions
             # (asyncio.TimeoutError in particular) have an empty __str__,
             # which made earlier logs look like "coach_tick chat call
             # failed:" with nothing after the colon. Useless for support.
-            logger.warning(
-                f"coach_tick chat call failed: {type(e).__name__}: {e}")
-            return {"clarifying_questions": [], "risks": [], "follow_ups": []}
+            kind = type(e).__name__
+            logger.warning(f"coach_tick chat call failed: {kind}: {e}")
+            # Surface the failure so the panel can show WHY it went quiet
+            # instead of looking like the meeting simply had nothing worth
+            # flagging. The frontend maps these codes to a friendly line.
+            if "Timeout" in kind:
+                err = "timeout"
+            elif "Connection" in kind or "APIConnection" in kind:
+                err = "unreachable"
+            else:
+                err = "error"
+            return {
+                "clarifying_questions": [], "risks": [], "follow_ups": [],
+                "error": err, "error_detail": f"{kind}: {e}"[:200],
+            }
 
         parsed = _coerce_json(raw) or {}
 
