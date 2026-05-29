@@ -5,6 +5,36 @@ import { Card, CardContent } from "@/components/ui/card";
 
 type Section = { id: string; title: string; content: React.ReactNode };
 
+// The example daily-briefing prompt the user pastes into M365 Copilot.
+// Module constant (declared before SECTIONS, which references it) so the
+// PromptBlock copy button hands over the exact text verbatim.
+const BRIEFING_PROMPT = `☀️ DAILY MORNING BRIEFING
+Act as my chief of staff. Prepare a briefing I can read in 5 minutes that tells me what I'd otherwise miss. Be direct, skip filler, and surface tensions or risks I should know about.
+
+📬 INBOX — since my last sign-off
+Review emails received since yesterday evening. For each item, decide: does this need me, today?
+
+Needs my response today: list sender, subject, the specific ask (quote the sentence), suggested response angle, and deadline if stated.
+Decisions awaiting me: anything where someone is blocked on my input. Name what they need and by when.
+FYI but important: changes in scope, status, or stakeholder sentiment on projects I own — even if no action is requested.
+Threads that escalated overnight: conversations where tone shifted, new people were added, or leadership was looped in.
+Skip newsletters, calendar invites, automated alerts, and anything I'm only CC'd on unless it changes a project I lead.
+
+📅 TODAY'S AGENDA
+For each accepted meeting on my calendar today, in chronological order:
+
+Meeting + time + attendees (flag if anyone senior or external is new to the recurring meeting).
+Why this meeting exists: the actual decision or outcome it's meant to produce — not the agenda title.
+My role: am I driving, contributing, or listening? If unclear from prior threads, say so.
+Pre-read: the 1–2 most relevant recent docs, emails, or chat threads I should review beforehand.
+What's changed since we last met (for recurring meetings): new commitments, blockers, or status shifts I should walk in knowing.
+Open questions or risks I should raise.
+
+Also flag: any back-to-back stretches with no prep buffer, and any meeting where I haven't responded to a pre-read request.
+
+🎯 TOP PRIORITY TODAY
+Based on deadlines, stakeholder pressure, and what's blocking others, what is the single most important thing I should move forward today? Justify it in 2–3 sentences referencing specific signals from my inbox or calendar — not generic productivity advice. If there's a credible second candidate, name it and explain the tradeoff.`;
+
 const SECTIONS: Section[] = [
   {
     id: "getting-started",
@@ -119,15 +149,42 @@ const SECTIONS: Section[] = [
           on the Today tab → paste → Parse. Claude reshapes the free-form briefing into the
           structured view.
         </p>
+
+        <h4 className="mt-5 mb-1 font-semibold">Step 1 — set up the scheduled prompt in M365 Copilot (one-time)</h4>
+        <p>
+          This is what generates the briefing every morning. You only do this once; Copilot then
+          runs it on a schedule and drops the result in your Copilot chat each day.
+        </p>
         <ol className="list-decimal pl-5 mt-2 space-y-1">
-          <li>Enable the tab in <strong>Settings → Today / Daily Briefing tab</strong> (one-time).</li>
-          <li>Run your scheduled prompt in M365 Copilot, copy the output.</li>
-          <li>Open Meeting Recorder → Today tab → <strong>Import briefing</strong>.</li>
+          <li>Open <strong>Microsoft 365 Copilot</strong> (the chat at <code>m365.cloud.microsoft</code> or the Copilot app).</li>
+          <li>Paste the briefing prompt below into the chat and run it once to confirm the output looks right.</li>
+          <li>Under the prompt response, click <strong>Schedule prompt</strong>.</li>
+          <li>Set the schedule: <strong>every weekday morning</strong> at whatever time you start your day
+            (e.g. 7:00 AM). This is the &quot;time period&quot; the prompt&apos;s &quot;since my last sign-off&quot; /
+            &quot;today&apos;s agenda&quot; language keys off of.</li>
+          <li>Save. Copilot will now post a fresh briefing in your Copilot chat each scheduled morning.</li>
+        </ol>
+
+        <h4 className="mt-5 mb-1 font-semibold">The briefing prompt</h4>
+        <p>
+          Copy this verbatim into Copilot. It&apos;s written so the output maps cleanly onto the
+          Today view&apos;s sections (Inbox → &quot;Needs your response&quot;, Agenda → &quot;Today&apos;s
+          agenda&quot;, Top Priority → the hero card).
+        </p>
+        <PromptBlock text={BRIEFING_PROMPT} />
+
+        <h4 className="mt-5 mb-1 font-semibold">Step 2 — every morning, import it</h4>
+        <ol className="list-decimal pl-5 mt-2 space-y-1">
+          <li>Enable the tab once in <strong>Settings → Today / Daily Briefing tab</strong> (if you haven&apos;t).</li>
+          <li>Open your scheduled briefing in M365 Copilot and <strong>copy the whole response</strong>.</li>
+          <li>In Meeting Recorder, go to the <strong>Today</strong> tab → <strong>Import briefing</strong>.</li>
           <li>Paste the briefing (Ctrl+V) into the dialog.</li>
-          <li>Click <strong>Parse and import</strong>. Today renders the structured briefing.</li>
+          <li>Click <strong>Parse and import</strong>. Today renders the structured briefing —
+            top priority, agenda with meeting-type tags, action items, FYI.</li>
           <li>Check off action items as you complete them. Re-importing the same day preserves
             what you&apos;ve already checked.</li>
         </ol>
+
         <Tip>
           The <strong>Right Now</strong> tile on the Today page reflects the current recording
           state — when you&apos;re mid-meeting, it shows the live recording and a link to the
@@ -136,6 +193,12 @@ const SECTIONS: Section[] = [
         <Tip>
           Re-import as many times as you want during the day; the parser stores one briefing
           per calendar date.
+        </Tip>
+        <Tip>
+          Make the prompt yours. The example is a starting point — tweak the Inbox filters, add
+          a section for a specific project, or change the &quot;chief of staff&quot; framing. As long as
+          the output still has recognizable inbox / agenda / priority sections, the parser will
+          map it onto the Today view.
         </Tip>
       </>
     ),
@@ -220,6 +283,15 @@ const SECTIONS: Section[] = [
           Details load on demand to keep the list fast.
         </Tip>
         <Tip>
+          <strong>Auto pre-meeting briefs.</strong> Turn on
+          <strong> Settings → Auto pre-meeting brief</strong> and the app
+          will generate a prep brief from your prior sessions a few minutes
+          before each calendar meeting (configurable lead time) and fire a
+          notification when it&apos;s ready. Runs on a backend timer, so it
+          works even if the app isn&apos;t focused. Off by default — it
+          costs one LLM call per meeting.
+        </Tip>
+        <Tip>
           <strong>Add context to a Brief.</strong> The Brief modal on
           each upcoming meeting now has a context box at the top —
           drop in things the invite & meeting history can&apos;t see
@@ -270,12 +342,17 @@ const SECTIONS: Section[] = [
           <li><strong>Requirements</strong> — FR/NFR tables.</li>
         </ul>
         <Tip>
-          <strong>Auto-process is on by default.</strong> When you Stop a
-          recording the full pipeline (transcribe → speakers → summary →
-          actions → decisions → requirements → commitments) now runs
+          <strong>Auto-process is on by default.</strong> When a recording
+          stops the full pipeline (transcribe → speakers → summary →
+          actions → decisions → requirements → commitments) runs
           automatically — no need to open each session and click Process.
-          Toggle it under Settings → &quot;Auto-process after recording
-          stops&quot; if you&apos;d rather do it manually.
+          This now fires no matter HOW the recording stopped: the Record
+          view Stop button, the sidebar recording-pill Stop, or an
+          automatic stop (silence / overrun / hard cap on an auto-recorded
+          meeting). Processing runs in the background; the session fills in
+          its AI tabs on its own when it finishes. Toggle it under
+          Settings → &quot;Auto-process after recording stops&quot; if
+          you&apos;d rather do it manually.
         </Tip>
         <Tip>
           Tabs are disabled if their content hasn&apos;t been generated yet. Go to the Overview tab and
@@ -1284,6 +1361,19 @@ Copy-Item -Path "$source\\*" -Destination $target -Recurse -Force`}</code></pre>
           Models are downloaded on first use into <code>%USERPROFILE%\.cache\huggingface</code>,
           which is one-time per model. Switching models is just a Settings change + app restart.
         </p>
+        <Tip>
+          <strong>Domain terminology fixes the jargon problem.</strong> Whisper
+          mangles dense terms — &quot;Genesys&quot; → &quot;Genesis&quot;,
+          &quot;UCCX&quot; → &quot;you see ex&quot;, &quot;CCaaS&quot; →
+          &quot;see-cass&quot; — and every mistranscription poisons the
+          downstream summary and extractions. <strong>Settings → Domain
+          terminology</strong> ships seeded with a curated Solutions Architect
+          / CCaaS / cloud / sales vocabulary that biases the transcriber
+          toward the right spelling, plus a list of specific mis-hears it
+          corrects after the fact. Edit the lists to add your clients&apos;
+          names and your own acronyms. Applies to the next recording you
+          process — no model change or restart needed.
+        </Tip>
       </>
     ),
   },
@@ -1427,13 +1517,21 @@ open "/Applications/Meeting Recorder.app"
   },
 ];
 
-export function UsageGuideView() {
+export function UsageGuideView({ onLaunchSetup }: { onLaunchSetup?: () => void } = {}) {
   const [active, setActive] = useState(SECTIONS[0].id);
   const section = SECTIONS.find((s) => s.id === active) || SECTIONS[0];
 
   return (
     <div className="mx-auto max-w-6xl grid grid-cols-1 md:grid-cols-[220px_1fr] gap-6">
       <nav className="space-y-0.5">
+        {onLaunchSetup && (
+          <button
+            onClick={onLaunchSetup}
+            className="flex w-full items-center gap-1.5 rounded-md px-2.5 py-2 mb-2 text-sm text-left bg-primary/10 text-primary hover:bg-primary/20 transition-colors font-medium"
+          >
+            ▶ Launch setup guide
+          </button>
+        )}
         <div className="mb-2 px-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
           Topics
         </div>
@@ -1477,6 +1575,36 @@ function Warn({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
+
+// A monospace, scrollable, copy-to-clipboard block for showing a long
+// example prompt the user can lift verbatim into M365 Copilot.
+function PromptBlock({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    navigator.clipboard?.writeText(text).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      },
+      () => { /* clipboard blocked — user can still select+copy manually */ },
+    );
+  };
+  return (
+    <div className="relative my-3 rounded-md border bg-muted/40">
+      <button
+        type="button"
+        onClick={copy}
+        className="absolute right-2 top-2 z-10 rounded border bg-background px-2 py-1 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+      >
+        {copied ? "Copied ✓" : "Copy prompt"}
+      </button>
+      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words px-4 py-3 pr-24 text-[12px] leading-relaxed font-mono">
+        {text}
+      </pre>
+    </div>
+  );
+}
+
 
 function BtnDesc({ emoji, name, desc }: { emoji: string; name: string; desc: string }) {
   return (

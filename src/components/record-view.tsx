@@ -587,46 +587,27 @@ export function RecordView({
       setSession(s);
       onSessionsChanged();
 
-      // Auto-process hook: if the user enabled "Auto-process after stop" in
-      // Settings, run the full pipeline now (transcribe → diarize → summary
-      // → action items → decisions → requirements). Fire-and-forget from
-      // the UI thread — the toast updates when each stage lands.
+      // Auto-process is now BACKEND-OWNED. The /recording/stop endpoint
+      // (and every other stop path — sidebar pill, watchdog auto-stop)
+      // kicks off the full pipeline server-side when AUTO_PROCESS_AFTER_STOP
+      // is on. We used to trigger processFull from here, which meant any
+      // stop that didn't go through this handler (auto-stop, sidebar)
+      // silently skipped processing. So we no longer call processFull —
+      // we just tell the user it's running and let the existing
+      // sessions/unprocessed pollers refresh the UI when it finishes.
       try {
         const settings = await api.getSettings();
         if (settings.auto_process_after_stop) {
-          const toastId = toast.loading("Auto-processing…", {
-            description: "Transcribing + extracting (can take several minutes)",
+          toast.info("Auto-processing started", {
+            description:
+              "Transcribing + extracting in the background. The session " +
+              "updates automatically when it finishes (can take several minutes).",
           });
-          api.processFull(res.session_id, {
-            template,
-            follow_up_drafts: settings.auto_follow_up_email,
-          })
-            .then((r) => {
-              const stageLines = Object.entries(r.stages)
-                .map(([k, v]) => `${k}: ${v}`)
-                .join(" · ");
-              toast.success("Auto-processing complete", {
-                id: toastId,
-                description: stageLines || "All stages finished",
-              });
-              onSessionsChanged();
-              // Reload this session's data so the UI shows freshly extracted
-              // summary / action items / decisions without the user having
-              // to re-open the dialog.
-              api.getSessionFull(res.session_id)
-                .then(setSession)
-                .catch(() => {});
-            })
-            .catch((err) => {
-              toast.error("Auto-processing failed", {
-                id: toastId,
-                description: err instanceof Error ? err.message : String(err),
-              });
-            });
         }
       } catch {
-        // Couldn't read settings — skip auto-process silently. The user
-        // can still click Process manually from the session dialog.
+        // Couldn't read settings — nothing to announce. Backend still
+        // auto-processes if the setting is on; the user can also click
+        // Process manually from the session dialog.
       }
     } catch (e) {
       toast.error(`Stop failed: ${e instanceof Error ? e.message : e}`);
