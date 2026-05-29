@@ -228,6 +228,12 @@ class Settings:
     # output in; that's a power-user setup not everyone has. Opt-in from
     # Settings; persists across restarts like every other toggle.
     today_view_enabled: bool
+    # When True, a backend loop auto-generates a pre-meeting brief shortly
+    # before each calendar meeting and fires a notification when it's
+    # ready. OFF by default — it costs an LLM call per meeting. Lead time
+    # is how many minutes before the meeting to generate it.
+    auto_prep_brief_enabled: bool
+    auto_prep_brief_lead_min: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -348,6 +354,8 @@ class Settings:
             copilot_custom_context=_get(
                 "COPILOT_CUSTOM_CONTEXT", "").replace("\\n", "\n"),
             today_view_enabled=_get_bool("TODAY_VIEW_ENABLED", False),
+            auto_prep_brief_enabled=_get_bool("AUTO_PREP_BRIEF_ENABLED", False),
+            auto_prep_brief_lead_min=_get_int("AUTO_PREP_BRIEF_LEAD_MIN", 10),
         )
 
     @property
@@ -422,6 +430,8 @@ class Settings:
         live_copilot_hot_interval_sec: int = 0,
         copilot_custom_context: str = "",
         today_view_enabled: bool = False,
+        auto_prep_brief_enabled: bool = False,
+        auto_prep_brief_lead_min: int = 10,
     ) -> None:
         """Write settings back to the .env file.
 
@@ -487,6 +497,8 @@ class Settings:
             # cleanly through dotenv. from_env unescapes on read.
             f"COPILOT_CUSTOM_CONTEXT={(copilot_custom_context or '').replace(chr(10), '\\n').replace(chr(13), '')}\n"
             f"TODAY_VIEW_ENABLED={'true' if today_view_enabled else 'false'}\n"
+            f"AUTO_PREP_BRIEF_ENABLED={'true' if auto_prep_brief_enabled else 'false'}\n"
+            f"AUTO_PREP_BRIEF_LEAD_MIN={auto_prep_brief_lead_min}\n"
         )
         # Write to the canonical LOCALAPPDATA location first. In rare cases
         # a Tauri-spawned Python child cannot open files under LOCALAPPDATA
