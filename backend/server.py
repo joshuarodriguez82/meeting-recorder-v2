@@ -2411,6 +2411,18 @@ def _stop_recording_sync():
 _auto_processed_sessions: set[str] = set()
 
 
+# Serializes the transcribe/diarize stage, which mutates shared state on
+# the RecordingService (`_session`) and on `svc.current_session`. Without
+# this, two overlapping processings — e.g. a backend auto-process and a
+# manual re-process of a different session — race on that shared session
+# object and CROSS-CONTAMINATE: one session's transcript ends up driving
+# another's summary. This actually happened (a Nashville call's summary
+# came out as a different meeting's content) once auto-process started
+# running jobs in the background. Processing was never concurrency-safe
+# and there's one model anyway, so serializing is correct, not just safe.
+_PROCESSING_LOCK = asyncio.Lock()
+
+
 # Retry schedule for backend auto-processing. Most failures are
 # transient — Claude 429s, a brief Ollama hiccup, a OneDrive file lock on
 # the WAV mid-finalize. Backoff gives them time to clear. Delays in
@@ -3481,10 +3493,14 @@ async def process_session(session_id: str):
     session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    svc.recording_svc.set_session(session)
-    svc.current_session = session
+    # Serialize the shared-state transcribe/diarize stage — see
+    # _PROCESSING_LOCK. Without this, a manual re-process here racing a
+    # background auto-process cross-contaminates session transcripts.
     try:
-        result = await svc.recording_svc.process_session()
+        async with _PROCESSING_LOCK:
+            svc.recording_svc.set_session(session)
+            svc.current_session = session
+            result = await svc.recording_svc.process_session()
         # Auto-name speakers from explicit introductions / direct-address
         # hand-offs and persist their voiceprints to the known-speakers
         # store so the next meeting auto-matches them. Best-effort — a
@@ -3833,25 +3849,37 @@ async def process_full(session_id: str, req: ProcessFullRequest):
 
     stages: dict[str, str] = {}
 
-    # 1. Transcribe + diarize (only if not already done)
+    # 1. Transcribe + diarize (only if not already done). Serialized
+    # under _PROCESSING_LOCK because this stage mutates the shared
+    # RecordingService._session / svc.current_session — two overlapping
+    # processings would otherwise cross-contaminate each other's
+    # transcripts. Double-checked: re-load inside the lock so we don't
+    # re-transcribe a session another job just finished while we waited.
     session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     if not session.segments:
-        svc.recording_svc.set_session(session)
-        svc.current_session = session
-        try:
-            session = await svc.recording_svc.process_session()
-            try:
-                await _auto_identify_and_save_speakers(session)
-            except Exception as e:
-                logger.warning(f"auto speaker identification skipped: {e}")
-            await asyncio.to_thread(svc.session_svc.save, session)
-            stages["transcribe_diarize"] = "ok"
-        except Exception as e:
-            logger.exception("process_full: transcribe/diarize failed")
-            stages["transcribe_diarize"] = f"failed: {e}"
-            return {"ok": False, "stages": stages}
+        async with _PROCESSING_LOCK:
+            session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Session not found")
+            if not session.segments:
+                svc.recording_svc.set_session(session)
+                svc.current_session = session
+                try:
+                    session = await svc.recording_svc.process_session()
+                    try:
+                        await _auto_identify_and_save_speakers(session)
+                    except Exception as e:
+                        logger.warning(f"auto speaker identification skipped: {e}")
+                    await asyncio.to_thread(svc.session_svc.save, session)
+                    stages["transcribe_diarize"] = "ok"
+                except Exception as e:
+                    logger.exception("process_full: transcribe/diarize failed")
+                    stages["transcribe_diarize"] = f"failed: {e}"
+                    return {"ok": False, "stages": stages}
+            else:
+                stages["transcribe_diarize"] = "skipped (already processed)"
     else:
         stages["transcribe_diarize"] = "skipped (already processed)"
 
