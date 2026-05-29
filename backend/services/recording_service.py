@@ -29,6 +29,70 @@ logger = get_logger(__name__)
 
 SESSION_LOG_FMT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
+# Windows file attributes signalling a cloud-on-demand placeholder whose
+# bytes aren't local yet (OneDrive Files-On-Demand, etc.).
+_FILE_ATTRIBUTE_OFFLINE = 0x1000
+_FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000
+_FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x40000
+
+
+def _ensure_audio_available(path: str) -> None:
+    """Guarantee the WAV is readable from local disk before the
+    transcribe/diarize pipeline opens it.
+
+    Recordings dirs that live in OneDrive (the common case) get older
+    files evicted to cloud-only placeholders: the file reports its full
+    size but the content isn't on disk. pyannote's soundfile reader then
+    raises an opaque 'invalid audio file' error mid-pipeline. Reading the
+    bytes through once forces the cloud provider to hydrate the file
+    locally.
+
+    Raises RuntimeError with a clear, user-facing message when the file
+    is missing, empty, or unreadable — far better than the raw pyannote
+    docstring the user would otherwise see.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise RuntimeError(
+            "The audio file for this recording is missing — it may have "
+            "been moved, deleted, or not yet synced down from the cloud.")
+    try:
+        st = p.stat()
+    except OSError as e:
+        raise RuntimeError(
+            f"The audio file couldn't be accessed: {e}") from e
+    if st.st_size < 1024:
+        raise RuntimeError(
+            "The audio file is empty or truncated — this recording didn't "
+            "capture usable audio and can't be processed.")
+
+    # Only pay the full-read cost when the file looks like a cloud
+    # placeholder; a normal local file skips straight through.
+    attrs = getattr(st, "st_file_attributes", 0) or 0
+    is_placeholder = bool(attrs & (
+        _FILE_ATTRIBUTE_OFFLINE
+        | _FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+        | _FILE_ATTRIBUTE_RECALL_ON_OPEN
+    ))
+    if not is_placeholder:
+        return
+
+    logger.info(
+        f"Audio file is a cloud placeholder ({p.name}); hydrating "
+        f"{st.st_size/1024/1024:.1f} MB to local disk before processing.")
+    try:
+        with open(p, "rb") as f:
+            while True:
+                chunk = f.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+    except OSError as e:
+        raise RuntimeError(
+            "The audio file couldn't be loaded — it may still be syncing "
+            "from OneDrive. Wait a moment and process the session again."
+        ) from e
+    logger.info(f"Audio file hydrated: {p.name}")
+
 TARGET_SR = 16000
 
 # Mic duck gate (live transcription only). When far-end audio (loopback)
@@ -503,6 +567,19 @@ class RecordingService:
             raise RuntimeError(
                 "AI models not loaded. Add API keys in File > Settings "
                 "and restart the app to enable transcription and diarization.")
+
+        # Force the WAV local before the pipeline touches it. When the
+        # recordings dir lives in OneDrive (or any Files-On-Demand cloud
+        # provider), older recordings get evicted to cloud-only
+        # placeholders — the file reports its full size but the bytes
+        # aren't on disk. pyannote's soundfile reader then fails with an
+        # opaque "invalid audio file" error mid-pipeline (Whisper's ffmpeg
+        # reader tolerates the placeholder differently, so it can pass
+        # while diarization dies). Reading the file through once pulls it
+        # local. Raises a clear, actionable error if it genuinely can't
+        # be read.
+        await asyncio.to_thread(
+            _ensure_audio_available, self._session.audio_path)
 
         self._on_status("__stage:transcribe:active__")
         # Bias Whisper toward the user's domain vocabulary when a glossary
