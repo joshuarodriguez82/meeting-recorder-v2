@@ -282,6 +282,15 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
                         </span>
                       </div>
                     )}
+                    {s.sync_warning && (
+                      <div
+                        className="text-[11px] text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/40 rounded px-2 py-1 mt-1.5 flex items-start gap-1.5"
+                        title="Capture sync measurement — the audio/transcript may be slightly misaligned. Informational; no audio was altered."
+                      >
+                        <span aria-hidden className="leading-none mt-0.5">ⓘ</span>
+                        <span className="flex-1">{s.sync_warning}</span>
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-1 flex-wrap justify-end">
                     <StatusIcons session={s} />

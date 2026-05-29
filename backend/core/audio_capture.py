@@ -362,6 +362,32 @@ class AudioCapture:
         # mix uses true cross-stream timing instead of a heuristic.
         self.mic_start_monotonic: Optional[float] = None
         self.loopback_start_monotonic: Optional[float] = None
+        # Read-only capture telemetry for the sync-integrity check at stop.
+        # We count samples actually delivered per stream and how many times
+        # the driver flagged an overflow (frames dropped before the
+        # callback ran). Comparing delivered-samples to wall-clock-elapsed
+        # tells us if a stream fell behind real time (dropped frames /
+        # clock drift) — the data the dev's "measure first" plan needs,
+        # without touching the audio write path.
+        self._mic_samples: int = 0
+        self._loopback_samples: int = 0
+        self._mic_overflows: int = 0
+        self._loopback_overflows: int = 0
+
+    def get_capture_stats(self) -> dict:
+        """Per-stream sample counts + overflow counts + sample rates.
+        Read at stop_recording to compute sync-integrity metrics. Pure
+        read of counters incremented in the callbacks — no side effects."""
+        return {
+            "mic_samples": self._mic_samples,
+            "loopback_samples": self._loopback_samples,
+            "mic_overflows": self._mic_overflows,
+            "loopback_overflows": self._loopback_overflows,
+            "mic_sr": int(getattr(self, "actual_sr", SAMPLE_RATE) or SAMPLE_RATE),
+            "loopback_sr": int(self._loopback_sr or SAMPLE_RATE),
+            "mic_start_monotonic": self.mic_start_monotonic,
+            "loopback_start_monotonic": self.loopback_start_monotonic,
+        }
 
     @property
     def loopback_sr(self) -> int:
@@ -705,7 +731,12 @@ class AudioCapture:
         try:
             if status:
                 logger.warning(f"Mic stream status: {status}")
+                # input_overflow = the driver dropped frames before this
+                # callback. Count it for the sync-integrity report.
+                if getattr(status, "input_overflow", False):
+                    self._mic_overflows += 1
             chunk = indata.mean(axis=1) if indata.ndim > 1 else indata[:, 0].copy()
+            self._mic_samples += int(len(chunk))
             if self.mic_start_monotonic is None:
                 # Record the wallclock at FIRST audio frame arrival, not at
                 # stream-open time — there can be hundreds of ms between
@@ -743,6 +774,7 @@ class AudioCapture:
                     audio = audio.reshape(BLOCK_SIZE, channels).mean(axis=1)
                 if self.loopback_start_monotonic is None:
                     self.loopback_start_monotonic = time.monotonic()
+                self._loopback_samples += int(audio.size)
                 writer.write(audio)
                 # Tee to the live-transcription consumer if there is one.
                 # The callback is in the recording_service thread, NOT
@@ -775,9 +807,12 @@ class AudioCapture:
         try:
             if status:
                 logger.warning(f"Loopback stream status: {status}")
+                if getattr(status, "input_overflow", False):
+                    self._loopback_overflows += 1
             block = indata.mean(axis=1) if indata.ndim > 1 else indata[:, 0]
             if self.loopback_start_monotonic is None:
                 self.loopback_start_monotonic = time.monotonic()
+            self._loopback_samples += int(len(block))
             self._loopback_q_putter(np.copy(block))
         except Exception as e:
             logger.error(f"Error in loopback callback: {e}")
