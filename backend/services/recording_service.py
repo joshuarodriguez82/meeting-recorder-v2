@@ -415,6 +415,14 @@ class RecordingService:
             loopback_start_offset_s = max(0.0, lb_start - mic_start)
         else:
             loopback_start_offset_s = None
+        # Grab read-only capture telemetry before we tear the capture down,
+        # for the sync-integrity report computed after finalize.
+        try:
+            capture_stats = (
+                self._capture.get_capture_stats() if self._capture else None)
+        except Exception as e:
+            logger.warning(f"[stop] get_capture_stats failed: {e}")
+            capture_stats = None
         logger.info("[stop] capture.stop() …")
         t = _t.monotonic()
         try:
@@ -529,6 +537,59 @@ class RecordingService:
                             f"than wall-clock — actual={duration_s:.1f}s "
                             f"expected={expected_s:.1f}s (possible stale "
                             f"file concat).")
+
+                # SYNC-INTEGRITY (read-only measurement). Compares each
+                # stream's delivered sample count to wall-clock elapsed: a
+                # stream that delivered fewer samples than real time fell
+                # behind (dropped frames or clock drift), and divergence
+                # between the two streams is what knocks diarization out of
+                # alignment. We only MEASURE + log/flag — no audio is
+                # altered. This is the "measure first" data that tells us
+                # whether the heavier timestamp-anchoring correction is
+                # actually warranted, and whether echo (if any) is physical
+                # bleed vs. a sync artifact.
+                try:
+                    if capture_stats and expected_s > 30.0:
+                        msr = max(1, int(capture_stats.get("mic_sr") or 1))
+                        lsr = max(1, int(capture_stats.get("loopback_sr") or 1))
+                        mic_secs = capture_stats.get("mic_samples", 0) / msr
+                        lb_samples = capture_stats.get("loopback_samples", 0)
+                        lb_secs = (lb_samples / lsr) if lb_samples else None
+                        mic_gap = expected_s - mic_secs
+                        mic_ovf = capture_stats.get("mic_overflows", 0)
+                        lb_ovf = capture_stats.get("loopback_overflows", 0)
+                        offset = loopback_start_offset_s or 0.0
+                        drift = (abs(mic_secs - (lb_secs + offset))
+                                 if lb_secs is not None else None)
+                        logger.info(
+                            f"SYNC_INTEGRITY: session {self._session.session_id} "
+                            f"mic={mic_secs:.1f}s "
+                            f"lb={('%.1fs' % lb_secs) if lb_secs is not None else 'n/a'} "
+                            f"window={expected_s:.1f}s mic_gap={mic_gap:.1f}s "
+                            f"drift={('%.1fs' % drift) if drift is not None else 'n/a'} "
+                            f"overflows(mic/lb)={mic_ovf}/{lb_ovf}")
+                        bits = []
+                        if mic_gap > max(2.0, expected_s * 0.02):
+                            bits.append(
+                                f"mic captured {mic_secs/60:.0f} min of a "
+                                f"{expected_s/60:.0f}-min window "
+                                f"(~{mic_gap:.0f}s behind real time)")
+                        if drift is not None and drift > 2.0:
+                            bits.append(
+                                f"mic and system-audio tracks drifted "
+                                f"~{drift:.0f}s apart")
+                        if mic_ovf + lb_ovf > 0:
+                            bits.append(
+                                f"{mic_ovf + lb_ovf} buffer overflow(s) during capture")
+                        if bits:
+                            self._session.sync_warning = (
+                                "Sync integrity: " + "; ".join(bits) + ".")
+                            logger.warning(
+                                f"SYNC_INTEGRITY WARNING: session "
+                                f"{self._session.session_id}: "
+                                f"{self._session.sync_warning}")
+                except Exception as e:
+                    logger.warning(f"sync-integrity measurement failed: {e}")
             except Exception as e:
                 logger.exception(
                     f"[stop] finalize failed after {_t.monotonic()-t:.1f}s")
@@ -615,6 +676,15 @@ class RecordingService:
         self._on_status("__stage:diarize:done____stage:speakers:active__")
         attributed = DiarizationEngine.assign_speakers(raw_segments, diarization_turns)
 
+        # REPLACE, don't append. process_session must be idempotent: re-
+        # transcribing a session (recovery, re-process) has to produce a
+        # transcript for THIS audio only, not concatenate onto whatever
+        # was there before. Appending is what let two meetings merge into
+        # one session (the wrong transcript got tacked onto the right one,
+        # then summarized as a blend). Clear segments + speakers first so
+        # the result reflects exactly this diarization pass.
+        self._session.segments = []
+        self._session.speakers = {}
         for raw in attributed:
             speaker = self._session.get_or_create_speaker(raw["speaker_id"])
             segment = Segment(

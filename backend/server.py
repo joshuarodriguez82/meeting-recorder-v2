@@ -3883,27 +3883,83 @@ async def process_full(session_id: str, req: ProcessFullRequest):
     else:
         stages["transcribe_diarize"] = "skipped (already processed)"
 
-    # 2-5. Run the four Claude extractions in parallel — independent failures.
-    async def _safe(coro, label):
-        try:
-            await coro
-            stages[label] = "ok"
-        except Exception as e:
-            logger.exception(f"process_full: {label} failed")
-            stages[label] = f"failed: {e}"
+    # 2-6. Run the Claude extractions against ONE loaded session, then
+    # save ONCE.
+    #
+    # The previous version ran five extractions via asyncio.gather where
+    # each one independently did load_full -> setattr(one field) ->
+    # save(whole session). Because they all loaded the same base
+    # concurrently and each saved the entire object back, they CLOBBERED
+    # each other — the last writer won and silently nulled the other
+    # fields. Observed in the wild: summary/action_items/decisions/
+    # requirements all came back null while only the structured records
+    # survived (it saved last). Now the extractions only COMPUTE; we
+    # apply every result to a single session object and write it once.
+    from models.extraction import STRUCTURED_FIELDS, stamp_records
 
-    await asyncio.gather(
-        _safe(_extract_and_save(
-            session_id, "summarize", "summary",
-            template=req.template), "summary"),
-        _safe(_extract_and_save(
-            session_id, "extract_action_items", "action_items"), "action_items"),
-        _safe(_extract_and_save(
-            session_id, "extract_decisions", "decisions"), "decisions"),
-        _safe(_extract_and_save(
-            session_id, "extract_requirements", "requirements"), "requirements"),
-        _safe(_extract_structured_and_save(session_id), "structured"),
+    session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+    if not session or not session.segments:
+        # No transcript to extract from (transcribe failed/empty).
+        return {"ok": False, "stages": stages}
+    transcript = session.full_transcript()
+    notes = session.notes or ""
+    images = list(session.screenshots or [])
+
+    async def _do_summary():
+        prompt_text = await asyncio.to_thread(
+            svc.template_svc.get_prompt, req.template)
+        return await _llm_call_with_retry(
+            lambda: svc.summarizer.summarize(
+                transcript, prompt=prompt_text, notes=notes,
+                template_name=req.template, image_paths=images,
+                copilot_observations=_copilot_observations_blob(session)),
+            "summarize")
+
+    async def _do_markdown(method_name):
+        method = getattr(svc.summarizer, method_name)
+        return await _llm_call_with_retry(
+            lambda: method(transcript, notes=notes, image_paths=images),
+            method_name)
+
+    async def _do_structured():
+        parsed = await svc.summarizer.extract_structured(
+            transcript, notes=notes, image_paths=images)
+        created_at = session.started_at.isoformat() if session.started_at else ""
+        return stamp_records(parsed, session.session_id, created_at)
+
+    summary_r, ai_r, dec_r, req_r, struct_r = await asyncio.gather(
+        _do_summary(),
+        _do_markdown("extract_action_items"),
+        _do_markdown("extract_decisions"),
+        _do_markdown("extract_requirements"),
+        _do_structured(),
+        return_exceptions=True,
     )
+
+    def _apply(field: str, value, label: str):
+        if isinstance(value, Exception):
+            logger.warning(f"process_full: {label} failed: {value}")
+            stages[label] = f"failed: {value}"
+        else:
+            setattr(session, field, value)
+            stages[label] = "ok"
+
+    _apply("summary", summary_r, "summary")
+    if not isinstance(summary_r, Exception):
+        session.template = req.template
+    _apply("action_items", ai_r, "action_items")
+    _apply("decisions", dec_r, "decisions")
+    _apply("requirements", req_r, "requirements")
+    if isinstance(struct_r, Exception):
+        logger.warning(f"process_full: structured failed: {struct_r}")
+        stages["structured"] = f"failed: {struct_r}"
+    else:
+        for key, (_cls, attr) in STRUCTURED_FIELDS.items():
+            setattr(session, attr, struct_r.get(key, []))
+        stages["structured"] = "ok"
+
+    # Single write with every successful field applied.
+    await asyncio.to_thread(svc.session_svc.save, session)
 
     # 6. Optional follow-up email drafts — only when requested explicitly.
     if req.follow_up_drafts:
