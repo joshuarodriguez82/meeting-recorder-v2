@@ -80,6 +80,13 @@ class Session:
         # retries", "Ollama unreachable", ...). Cleared on any successful
         # process. None = no failure recorded.
         self.processing_error: Optional[str] = None
+        # Read-only sync-integrity finding from stop_recording: set when a
+        # capture stream fell meaningfully behind wall-clock (dropped
+        # frames / clock drift) or the mic + system-audio tracks diverged.
+        # Measurement only — no audio is altered. Surfaced as a Sessions
+        # chip so drift is visible; informs whether the heavier timestamp-
+        # anchoring correction is worth building. None = clean.
+        self.sync_warning: Optional[str] = None
 
     def get_or_create_speaker(self, speaker_id: str) -> Speaker:
         if speaker_id not in self.speakers:
@@ -131,6 +138,7 @@ class Session:
             "audio_actual_duration_s": self.audio_actual_duration_s,
             "audio_expected_duration_s": self.audio_expected_duration_s,
             "processing_error": self.processing_error,
+            "sync_warning": self.sync_warning,
         }
 
     @classmethod
@@ -179,6 +187,7 @@ class Session:
         session.audio_actual_duration_s = data.get("audio_actual_duration_s")
         session.audio_expected_duration_s = data.get("audio_expected_duration_s")
         session.processing_error = data.get("processing_error") or None
+        session.sync_warning = data.get("sync_warning") or None
 
         # Rebuild speakers
         speakers_data = data.get("speakers") or {}
