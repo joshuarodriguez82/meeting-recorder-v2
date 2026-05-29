@@ -5,6 +5,36 @@ import { Card, CardContent } from "@/components/ui/card";
 
 type Section = { id: string; title: string; content: React.ReactNode };
 
+// The example daily-briefing prompt the user pastes into M365 Copilot.
+// Module constant (declared before SECTIONS, which references it) so the
+// PromptBlock copy button hands over the exact text verbatim.
+const BRIEFING_PROMPT = `☀️ DAILY MORNING BRIEFING
+Act as my chief of staff. Prepare a briefing I can read in 5 minutes that tells me what I'd otherwise miss. Be direct, skip filler, and surface tensions or risks I should know about.
+
+📬 INBOX — since my last sign-off
+Review emails received since yesterday evening. For each item, decide: does this need me, today?
+
+Needs my response today: list sender, subject, the specific ask (quote the sentence), suggested response angle, and deadline if stated.
+Decisions awaiting me: anything where someone is blocked on my input. Name what they need and by when.
+FYI but important: changes in scope, status, or stakeholder sentiment on projects I own — even if no action is requested.
+Threads that escalated overnight: conversations where tone shifted, new people were added, or leadership was looped in.
+Skip newsletters, calendar invites, automated alerts, and anything I'm only CC'd on unless it changes a project I lead.
+
+📅 TODAY'S AGENDA
+For each accepted meeting on my calendar today, in chronological order:
+
+Meeting + time + attendees (flag if anyone senior or external is new to the recurring meeting).
+Why this meeting exists: the actual decision or outcome it's meant to produce — not the agenda title.
+My role: am I driving, contributing, or listening? If unclear from prior threads, say so.
+Pre-read: the 1–2 most relevant recent docs, emails, or chat threads I should review beforehand.
+What's changed since we last met (for recurring meetings): new commitments, blockers, or status shifts I should walk in knowing.
+Open questions or risks I should raise.
+
+Also flag: any back-to-back stretches with no prep buffer, and any meeting where I haven't responded to a pre-read request.
+
+🎯 TOP PRIORITY TODAY
+Based on deadlines, stakeholder pressure, and what's blocking others, what is the single most important thing I should move forward today? Justify it in 2–3 sentences referencing specific signals from my inbox or calendar — not generic productivity advice. If there's a credible second candidate, name it and explain the tradeoff.`;
+
 const SECTIONS: Section[] = [
   {
     id: "getting-started",
@@ -119,15 +149,42 @@ const SECTIONS: Section[] = [
           on the Today tab → paste → Parse. Claude reshapes the free-form briefing into the
           structured view.
         </p>
+
+        <h4 className="mt-5 mb-1 font-semibold">Step 1 — set up the scheduled prompt in M365 Copilot (one-time)</h4>
+        <p>
+          This is what generates the briefing every morning. You only do this once; Copilot then
+          runs it on a schedule and drops the result in your Copilot chat each day.
+        </p>
         <ol className="list-decimal pl-5 mt-2 space-y-1">
-          <li>Enable the tab in <strong>Settings → Today / Daily Briefing tab</strong> (one-time).</li>
-          <li>Run your scheduled prompt in M365 Copilot, copy the output.</li>
-          <li>Open Meeting Recorder → Today tab → <strong>Import briefing</strong>.</li>
+          <li>Open <strong>Microsoft 365 Copilot</strong> (the chat at <code>m365.cloud.microsoft</code> or the Copilot app).</li>
+          <li>Paste the briefing prompt below into the chat and run it once to confirm the output looks right.</li>
+          <li>Under the prompt response, click <strong>Schedule prompt</strong>.</li>
+          <li>Set the schedule: <strong>every weekday morning</strong> at whatever time you start your day
+            (e.g. 7:00 AM). This is the &quot;time period&quot; the prompt&apos;s &quot;since my last sign-off&quot; /
+            &quot;today&apos;s agenda&quot; language keys off of.</li>
+          <li>Save. Copilot will now post a fresh briefing in your Copilot chat each scheduled morning.</li>
+        </ol>
+
+        <h4 className="mt-5 mb-1 font-semibold">The briefing prompt</h4>
+        <p>
+          Copy this verbatim into Copilot. It&apos;s written so the output maps cleanly onto the
+          Today view&apos;s sections (Inbox → &quot;Needs your response&quot;, Agenda → &quot;Today&apos;s
+          agenda&quot;, Top Priority → the hero card).
+        </p>
+        <PromptBlock text={BRIEFING_PROMPT} />
+
+        <h4 className="mt-5 mb-1 font-semibold">Step 2 — every morning, import it</h4>
+        <ol className="list-decimal pl-5 mt-2 space-y-1">
+          <li>Enable the tab once in <strong>Settings → Today / Daily Briefing tab</strong> (if you haven&apos;t).</li>
+          <li>Open your scheduled briefing in M365 Copilot and <strong>copy the whole response</strong>.</li>
+          <li>In Meeting Recorder, go to the <strong>Today</strong> tab → <strong>Import briefing</strong>.</li>
           <li>Paste the briefing (Ctrl+V) into the dialog.</li>
-          <li>Click <strong>Parse and import</strong>. Today renders the structured briefing.</li>
+          <li>Click <strong>Parse and import</strong>. Today renders the structured briefing —
+            top priority, agenda with meeting-type tags, action items, FYI.</li>
           <li>Check off action items as you complete them. Re-importing the same day preserves
             what you&apos;ve already checked.</li>
         </ol>
+
         <Tip>
           The <strong>Right Now</strong> tile on the Today page reflects the current recording
           state — when you&apos;re mid-meeting, it shows the live recording and a link to the
@@ -136,6 +193,12 @@ const SECTIONS: Section[] = [
         <Tip>
           Re-import as many times as you want during the day; the parser stores one briefing
           per calendar date.
+        </Tip>
+        <Tip>
+          Make the prompt yours. The example is a starting point — tweak the Inbox filters, add
+          a section for a specific project, or change the &quot;chief of staff&quot; framing. As long as
+          the output still has recognizable inbox / agenda / priority sections, the parser will
+          map it onto the Today view.
         </Tip>
       </>
     ),
@@ -1512,6 +1575,36 @@ function Warn({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
+
+// A monospace, scrollable, copy-to-clipboard block for showing a long
+// example prompt the user can lift verbatim into M365 Copilot.
+function PromptBlock({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    navigator.clipboard?.writeText(text).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      },
+      () => { /* clipboard blocked — user can still select+copy manually */ },
+    );
+  };
+  return (
+    <div className="relative my-3 rounded-md border bg-muted/40">
+      <button
+        type="button"
+        onClick={copy}
+        className="absolute right-2 top-2 z-10 rounded border bg-background px-2 py-1 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+      >
+        {copied ? "Copied ✓" : "Copy prompt"}
+      </button>
+      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words px-4 py-3 pr-24 text-[12px] leading-relaxed font-mono">
+        {text}
+      </pre>
+    </div>
+  );
+}
+
 
 function BtnDesc({ emoji, name, desc }: { emoji: string; name: string; desc: string }) {
   return (
