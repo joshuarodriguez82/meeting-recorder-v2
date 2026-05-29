@@ -220,6 +220,10 @@ export interface SessionSummary {
   // session so a processing failure is visible instead of the session
   // silently sitting unprocessed. Cleared on a successful (re)process.
   processing_error?: string | null;
+  // Read-only sync-integrity finding: mic/system-audio drift or dropped
+  // frames vs wall-clock, measured at stop. Informational (no audio
+  // altered). null = clean.
+  sync_warning?: string | null;
 }
 
 /**
@@ -341,6 +345,7 @@ export interface SessionFull {
   audio_actual_duration_s?: number | null;
   audio_expected_duration_s?: number | null;
   processing_error?: string | null;
+  sync_warning?: string | null;
 }
 
 export interface Speaker {

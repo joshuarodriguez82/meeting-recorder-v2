@@ -199,6 +199,9 @@ class SessionService:
                 # Sessions list badge a failed session so it doesn't sit
                 # silently unprocessed.
                 "processing_error": data.get("processing_error"),
+                # Read-only sync-integrity finding (mic/loopback drift or
+                # dropped frames vs wall-clock). Surfaced as an info chip.
+                "sync_warning": data.get("sync_warning"),
                 "json_path": str(path),
             })
 
