@@ -615,6 +615,15 @@ class RecordingService:
         self._on_status("__stage:diarize:done____stage:speakers:active__")
         attributed = DiarizationEngine.assign_speakers(raw_segments, diarization_turns)
 
+        # REPLACE, don't append. process_session must be idempotent: re-
+        # transcribing a session (recovery, re-process) has to produce a
+        # transcript for THIS audio only, not concatenate onto whatever
+        # was there before. Appending is what let two meetings merge into
+        # one session (the wrong transcript got tacked onto the right one,
+        # then summarized as a blend). Clear segments + speakers first so
+        # the result reflects exactly this diarization pass.
+        self._session.segments = []
+        self._session.speakers = {}
         for raw in attributed:
             speaker = self._session.get_or_create_speaker(raw["speaker_id"])
             segment = Segment(
