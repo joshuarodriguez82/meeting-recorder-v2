@@ -2053,7 +2053,13 @@ async def copilot_tick():
             detail="Summarizer not ready — check provider/API key in Settings.",
         )
 
-    segments = transcriber.recent_segments(last_seconds=600.0)
+    # Window: feed only the recent conversation, not the whole call. A
+    # 10-min window made local-model (Ollama) inference slower and slower
+    # as a meeting ran long — eventually every tick exceeded the timeout
+    # and the panel went silently blank. ~4.5 min keeps inference roughly
+    # constant regardless of call length while still giving the model
+    # enough context to coach on.
+    segments = transcriber.recent_segments(last_seconds=270.0)
     meeting_name = ""
     sess = svc.recording_svc.current_session
     if sess is not None:
@@ -2083,16 +2089,28 @@ async def copilot_tick():
         svc.copilot_meeting_type_svc.get_prompt(type_name)
         if svc.copilot_meeting_type_svc else ""
     )
+    # Interval-aware timeout: keep it safely under the poll cadence so
+    # ticks never overlap/pile up, but give slow local models room.
+    # Anthropic is fast (cloud); Ollama/OpenRouter get more headroom.
+    interval = max(15, int(getattr(s, "live_copilot_wide_interval_sec", 45) or 45))
+    provider = getattr(coach, "_provider", "anthropic")
+    base = 20.0 if provider == "anthropic" else 35.0
+    tick_timeout = max(8.0, min(base, float(interval) - 5.0))
     result = await coach.coach_tick(
         segments=segments, meeting_name=meeting_name,
         custom_context=custom_context, prior_ticks=prior_ticks,
         mode_name=mode_name, mode_prompt=mode_prompt,
         meeting_type_name=type_name, meeting_type_prompt=type_prompt,
+        timeout_s=tick_timeout,
     )
     payload = {
         "clarifying_questions": result.get("clarifying_questions", []),
         "risks": result.get("risks", []),
         "follow_ups": result.get("follow_ups", []),
+        # Surface a model failure (timeout / unreachable) so the panel can
+        # explain the quiet instead of looking like an empty meeting.
+        "error": result.get("error"),
+        "error_detail": result.get("error_detail"),
         "segment_count": len(segments),
         "generated_at": datetime.now().isoformat(),
     }
@@ -2165,17 +2183,25 @@ async def copilot_hot_tick():
         svc.copilot_meeting_type_svc.get_prompt(type_name)
         if svc.copilot_meeting_type_svc else ""
     )
+    # Interval-aware timeout for the hot poll (default 0 = off; when on,
+    # min 5s). Local models get more headroom than cloud.
+    hot_interval = max(5, int(getattr(s, "live_copilot_hot_interval_sec", 0) or 15))
+    provider = getattr(coach, "_provider", "anthropic")
+    base = 10.0 if provider == "anthropic" else 15.0
+    hot_timeout = max(6.0, min(base, float(hot_interval) - 3.0))
     result = await coach.coach_tick(
         segments=segments, meeting_name=meeting_name,
         custom_context=custom_context, prior_ticks=prior_ticks,
         mode_name=mode_name, mode_prompt=mode_prompt,
         meeting_type_name=type_name, meeting_type_prompt=type_prompt,
-        hot=True,
+        hot=True, timeout_s=hot_timeout,
     )
     payload = {
         "clarifying_questions": result.get("clarifying_questions", []),
         "risks": result.get("risks", []),
         "follow_ups": result.get("follow_ups", []),
+        "error": result.get("error"),
+        "error_detail": result.get("error_detail"),
         "segment_count": len(segments),
         "generated_at": datetime.now().isoformat(),
         "hot": True,
