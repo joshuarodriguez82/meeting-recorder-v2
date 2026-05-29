@@ -271,6 +271,17 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
                         <span className="flex-1">{s.audio_integrity_warning}</span>
                       </div>
                     )}
+                    {s.processing_error && (
+                      <div
+                        className="text-[11px] text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900/40 rounded px-2 py-1 mt-1.5 flex items-start gap-1.5"
+                        title="Auto-processing failed after retries. Open the session and click Process to retry."
+                      >
+                        <span aria-hidden className="font-bold leading-none mt-0.5">⚠</span>
+                        <span className="flex-1">
+                          {s.processing_error} — open the session and click Process to retry.
+                        </span>
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-1 flex-wrap justify-end">
                     <StatusIcons session={s} />

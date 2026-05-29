@@ -490,6 +490,33 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
             onChange={(v) => update("today_view_enabled", v)}
           />
           <Toggle
+            label="Auto pre-meeting brief"
+            description="A few minutes before each calendar meeting, automatically generate a prep brief from your prior sessions with that client and fire a notification when it's ready. Runs on a backend timer (works even if the app isn't focused). Costs one LLM call per meeting."
+            checked={settings.auto_prep_brief_enabled}
+            onChange={(v) => update("auto_prep_brief_enabled", v)}
+          />
+          {settings.auto_prep_brief_enabled && (
+            <div className="flex items-center gap-2 pl-1 -mt-1">
+              <Label htmlFor="prep-lead" className="text-sm text-muted-foreground">
+                Generate
+              </Label>
+              <Input
+                id="prep-lead"
+                type="number"
+                min={1}
+                max={120}
+                value={settings.auto_prep_brief_lead_min}
+                onChange={(e) =>
+                  update("auto_prep_brief_lead_min",
+                    Math.max(1, Math.min(120, Number(e.target.value) || 10)))}
+                className="h-8 w-20"
+              />
+              <span className="text-sm text-muted-foreground">
+                minutes before the meeting starts
+              </span>
+            </div>
+          )}
+          <Toggle
             label="Auto-draft follow-up email"
             description={isMac()
               ? "Creates a Mail.app (or Outlook for Mac) draft to attendees after processing"
@@ -664,6 +691,12 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
 
       {/* GPU acceleration */}
       <GpuAccelerationCard />
+
+      {/* Diagnostics — health checks + log tail */}
+      <DiagnosticsCard />
+
+      {/* Domain terminology — biases transcription + fixes mis-hears */}
+      <TerminologyCard />
 
       {/* Known speakers (cross-session voice fingerprints) */}
       <KnownSpeakersSection />
@@ -2072,6 +2105,255 @@ function CoPilotCadenceCard({
             </p>
           </div>
         </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// System health panel. Surfaces the signals we kept having to dig out of
+// backend.log by hand — live-model reachability (the silent Ollama
+// failure), provider config, mic/loopback, recordings-dir writability —
+// plus a log tail so the user never needs PowerShell.
+function DiagnosticsCard() {
+  const [diag, setDiag] = useState<import("@/lib/api").Diagnostics | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [showLog, setShowLog] = useState(false);
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      setDiag(await api.getDiagnostics());
+    } catch (e) {
+      toast.error(`Diagnostics failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { refresh(); }, []);
+
+  const dot = (status: string) => {
+    const cls =
+      status === "ok" ? "bg-green-500"
+        : status === "warn" ? "bg-amber-500"
+          : status === "error" ? "bg-red-500"
+            : "bg-zinc-400";
+    return <span className={`inline-block h-2.5 w-2.5 rounded-full ${cls} shrink-0`} />;
+  };
+
+  const copyLog = () => {
+    if (!diag?.log_tail) return;
+    navigator.clipboard?.writeText(diag.log_tail).then(
+      () => toast.success("Log tail copied"),
+      () => toast.error("Couldn't copy"),
+    );
+  };
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between">
+        <CardTitle className="text-base">Diagnostics</CardTitle>
+        <Button size="sm" variant="outline" onClick={refresh} disabled={loading}>
+          {loading
+            ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+            : <RotateCcw className="h-4 w-4 mr-1.5" />}
+          Refresh
+        </Button>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <p className="text-sm text-muted-foreground">
+          Live health of the things that fail quietly — your Live Co-Pilot
+          model (is Ollama running?), AI provider config, microphone +
+          system-audio devices, and whether the recordings folder is
+          writable.
+        </p>
+
+        {diag && (
+          <div className="space-y-1.5">
+            {diag.checks.map((c) => (
+              <div key={c.id} className="flex items-start gap-2.5 text-sm">
+                <span className="mt-1.5">{dot(c.status)}</span>
+                <div className="min-w-0">
+                  <span className="font-medium text-foreground">{c.label}</span>
+                  {c.detail && (
+                    <span className="text-muted-foreground"> — {c.detail}</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {diag && (
+          <div className="space-y-2 pt-1">
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setShowLog((v) => !v)}
+              >
+                {showLog ? "Hide" : "Show"} recent backend log
+              </Button>
+              {showLog && (
+                <Button size="sm" variant="ghost" onClick={copyLog}>
+                  Copy log
+                </Button>
+              )}
+            </div>
+            {showLog && (
+              <pre className="max-h-80 overflow-auto rounded-md border bg-muted/40 p-3 text-[11px] leading-relaxed font-mono whitespace-pre-wrap break-words">
+                {diag.log_tail || "(log empty)"}
+              </pre>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// Domain terminology editor. Two plain-text editors (terms one-per-line;
+// corrections as "wrong = canonical" per line) kept deliberately simple
+// — the value is in the seeded vocabulary, not a fancy UI. Biases Whisper
+// transcription toward the user's jargon and corrects known mis-hears.
+function TerminologyCard() {
+  const [termsText, setTermsText] = useState("");
+  const [corrText, setCorrText] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  const hydrate = (t: import("@/lib/api").Terminology) => {
+    setTermsText((t.terms || []).join("\n"));
+    setCorrText(
+      Object.entries(t.corrections || {})
+        .map(([wrong, canon]) => `${wrong} = ${canon}`)
+        .join("\n"),
+    );
+  };
+
+  useEffect(() => {
+    api.getTerminology()
+      .then(hydrate)
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  const parseCorrections = (text: string): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const line of text.split("\n")) {
+      const idx = line.indexOf("=");
+      if (idx < 0) continue;
+      const wrong = line.slice(0, idx).trim().toLowerCase();
+      const canon = line.slice(idx + 1).trim();
+      if (wrong && canon) out[wrong] = canon;
+    }
+    return out;
+  };
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const terms = termsText
+        .split("\n").map((s) => s.trim()).filter(Boolean);
+      const corrections = parseCorrections(corrText);
+      const saved = await api.putTerminology({ terms, corrections });
+      hydrate(saved);
+      toast.success("Terminology saved", {
+        description: "Applies to your next recording's transcription.",
+      });
+    } catch (e) {
+      toast.error(`Save failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const reset = async () => {
+    const ok = await confirmDialog(
+      "Replace your terms and corrections with the built-in SA / CCaaS / cloud / sales vocabulary? This can't be undone.",
+      { title: "Reset terminology to defaults?" },
+    );
+    if (!ok) return;
+    setSaving(true);
+    try {
+      const r = await api.resetTerminology();
+      hydrate(r);
+      toast.success("Terminology reset to defaults");
+    } catch (e) {
+      toast.error(`Reset failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Domain terminology</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <p className="text-sm text-muted-foreground">
+          Biases transcription toward your jargon and fixes known mis-hears.
+          Whisper otherwise mangles dense terms — &quot;Genesys&quot; →
+          &quot;Genesis&quot;, &quot;UCCX&quot; → &quot;you see ex&quot;,
+          &quot;CCaaS&quot; → &quot;see-cass&quot; — which then poisons every
+          summary and extraction. Seeded with a curated Solutions Architect /
+          CCaaS / cloud / sales vocabulary; edit freely. Applies to the next
+          recording you process.
+        </p>
+
+        {loading ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading glossary…
+          </div>
+        ) : (
+          <>
+            <div className="space-y-1.5">
+              <Label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                Terms (one per line)
+              </Label>
+              <p className="text-[11px] text-muted-foreground">
+                Proper nouns + acronyms the transcriber should recognize.
+                These bias Whisper toward the right spelling.
+              </p>
+              <Textarea
+                value={termsText}
+                onChange={(e) => setTermsText(e.target.value)}
+                className="min-h-[160px] max-h-[320px] font-mono text-xs"
+                placeholder="Amazon Connect&#10;Genesys Cloud&#10;CCaaS&#10;MEDDIC"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                Corrections (one per line: wrong = canonical)
+              </Label>
+              <p className="text-[11px] text-muted-foreground">
+                Specific mis-hears to fix after transcription. Left side is
+                matched case-insensitively; right side is the replacement.
+              </p>
+              <Textarea
+                value={corrText}
+                onChange={(e) => setCorrText(e.target.value)}
+                className="min-h-[140px] max-h-[320px] font-mono text-xs"
+                placeholder="genesis = Genesys&#10;you see ex = UCCX&#10;see-cass = CCaaS"
+              />
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Button onClick={save} disabled={saving} size="sm">
+                {saving
+                  ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                  : <Save className="h-4 w-4 mr-1.5" />}
+                Save terminology
+              </Button>
+              <Button onClick={reset} disabled={saving} size="sm" variant="outline">
+                <RotateCcw className="h-4 w-4 mr-1.5" />
+                Reset to defaults
+              </Button>
+            </div>
+          </>
+        )}
       </CardContent>
     </Card>
   );

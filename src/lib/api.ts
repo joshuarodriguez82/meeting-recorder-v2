@@ -131,6 +131,10 @@ export interface Settings {
   // pasting its output in. When false the Today nav item is hidden and
   // the app lands on Record instead.
   today_view_enabled: boolean;
+  // Auto pre-meeting brief: generate + notify before each meeting.
+  // OFF by default (one LLM call/meeting). Lead = minutes before start.
+  auto_prep_brief_enabled: boolean;
+  auto_prep_brief_lead_min: number;
 }
 
 // A single co-pilot mode (persona) or meeting-type (modifier). Shape
@@ -205,6 +209,10 @@ export interface SessionSummary {
   audio_integrity_warning?: string | null;
   audio_actual_duration_s?: number | null;
   audio_expected_duration_s?: number | null;
+  // Set when backend auto-processing exhausted its retries. UI badges the
+  // session so a processing failure is visible instead of the session
+  // silently sitting unprocessed. Cleared on a successful (re)process.
+  processing_error?: string | null;
 }
 
 /**
@@ -325,6 +333,7 @@ export interface SessionFull {
   audio_integrity_warning?: string | null;
   audio_actual_duration_s?: number | null;
   audio_expected_duration_s?: number | null;
+  processing_error?: string | null;
 }
 
 export interface Speaker {
@@ -1314,7 +1323,63 @@ export const api = {
     request<DailyBriefing>(
       `/briefing/${encodeURIComponent(date)}/actions/${encodeURIComponent(actionId)}`,
       { method: "PATCH", body: JSON.stringify({ done }) }),
+
+  // Domain terminology glossary — biases transcription toward the user's
+  // jargon and corrects known mis-hears. Seeded server-side with a
+  // curated SA / CCaaS / cloud / sales vocabulary.
+  getTerminology: () => request<Terminology>("/terminology"),
+  putTerminology: (t: Terminology) =>
+    request<Terminology>("/terminology", {
+      method: "PUT",
+      body: JSON.stringify(t),
+    }),
+  resetTerminology: () =>
+    request<Terminology>("/terminology/reset", { method: "POST" }),
+
+  // Diagnostics — system health checks + a backend.log tail. Powers
+  // Settings → Diagnostics so failures (Ollama down, dir not writable,
+  // no mic) are visible without reading logs by hand.
+  getDiagnostics: () => request<Diagnostics>("/diagnostics"),
+
+  // Auto pre-meeting briefs — generated backend-side before meetings.
+  getAutoPrepBriefs: () => request<AutoPrepBrief[]>("/prep-brief/auto"),
+  getPendingAutoPrepBriefs: () =>
+    request<AutoPrepBrief[]>("/prep-brief/auto/pending"),
+  markAutoPrepBriefNotified: (key: string) =>
+    request<{ ok: boolean }>(
+      `/prep-brief/auto/${encodeURIComponent(key)}/notified`,
+      { method: "POST" }),
 };
+
+export interface AutoPrepBrief {
+  key: string;
+  subject: string;
+  start_iso: string;
+  markdown: string;
+  related_count?: number;
+  minutes_before?: number;
+  generated_at?: string;
+  notified?: boolean;
+}
+
+export interface DiagnosticCheck {
+  id: string;
+  label: string;
+  status: "ok" | "warn" | "error" | "info";
+  detail: string;
+}
+export interface Diagnostics {
+  checks: DiagnosticCheck[];
+  log_tail: string;
+}
+
+export interface Terminology {
+  // Canonical terms fed into Whisper's initial_prompt to bias decoding.
+  terms: string[];
+  // Known mis-hears → canonical replacement (applied post-transcription,
+  // case-insensitive, word-boundary). Keys are lowercased server-side.
+  corrections: Record<string, string>;
+}
 
 // --- Daily Briefing types ---
 export interface BriefingTopPriority {
