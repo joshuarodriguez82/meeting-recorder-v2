@@ -1454,13 +1454,21 @@ open "/Applications/Meeting Recorder.app"
   },
 ];
 
-export function UsageGuideView() {
+export function UsageGuideView({ onLaunchSetup }: { onLaunchSetup?: () => void } = {}) {
   const [active, setActive] = useState(SECTIONS[0].id);
   const section = SECTIONS.find((s) => s.id === active) || SECTIONS[0];
 
   return (
     <div className="mx-auto max-w-6xl grid grid-cols-1 md:grid-cols-[220px_1fr] gap-6">
       <nav className="space-y-0.5">
+        {onLaunchSetup && (
+          <button
+            onClick={onLaunchSetup}
+            className="flex w-full items-center gap-1.5 rounded-md px-2.5 py-2 mb-2 text-sm text-left bg-primary/10 text-primary hover:bg-primary/20 transition-colors font-medium"
+          >
+            ▶ Launch setup guide
+          </button>
+        )}
         <div className="mb-2 px-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
           Topics
         </div>

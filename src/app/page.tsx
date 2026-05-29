@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { InsightsView } from "@/components/insights-view";
 import { TodayView } from "@/components/today-view";
+import { OnboardingTour, onboardingDismissed } from "@/components/onboarding-tour";
 import { RecordView } from "@/components/record-view";
 import { SettingsView } from "@/components/settings-view";
 import { SessionsView } from "@/components/sessions-view";
@@ -54,6 +55,11 @@ export default function Home() {
   // periodic settings refresh on window focus doesn't yank the user back
   // to Today after they've navigated elsewhere.
   const didInitialLandRef = useRef(false);
+  // First-run guided tour. Opens automatically on a true first run (no
+  // usable AI key AND no sessions) unless previously dismissed; also
+  // re-openable from the Help tab.
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const onboardingCheckedRef = useRef(false);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   // Configured clients (from client_configs.json). Merged into
   // existingClients so the Sessions detail dialog's client picker also
@@ -363,6 +369,17 @@ export default function Home() {
           setNav("today");
         }
         didInitialLandRef.current = true;
+
+        // First-run detection: no usable AI key AND no recordings yet →
+        // this is a fresh install. Auto-open the guided tour once (unless
+        // the user already dismissed it). Checked a single time per launch.
+        if (!onboardingCheckedRef.current) {
+          onboardingCheckedRef.current = true;
+          const noKey = !settings.is_configured;
+          if (noKey && s.length === 0 && !onboardingDismissed()) {
+            setOnboardingOpen(true);
+          }
+        }
       }
     } catch (e) {
       console.error(e);
@@ -799,7 +816,7 @@ export default function Home() {
           )}
           {nav === "prep-brief" && <PrepBriefView sessions={sessions} meetings={meetings} />}
           {nav === "settings" && <SettingsView onSaved={reloadSessions} />}
-          {nav === "help" && <UsageGuideView />}
+          {nav === "help" && <UsageGuideView onLaunchSetup={() => setOnboardingOpen(true)} />}
         </div>
       </main>
 
@@ -811,6 +828,12 @@ export default function Home() {
         initialTab={detailInitialTab}
         existingClients={existingClients}
         projectsByClient={projectsByClient}
+      />
+
+      <OnboardingTour
+        open={onboardingOpen}
+        onClose={() => setOnboardingOpen(false)}
+        onNavigate={(id) => { setOnboardingOpen(false); setNav(id); }}
       />
     </div>
   );
