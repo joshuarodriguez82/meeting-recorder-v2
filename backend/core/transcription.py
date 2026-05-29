@@ -64,15 +64,23 @@ class TranscriptionEngine:
     def device(self) -> str:
         return self._device
 
-    async def transcribe(self, audio_path):
+    async def transcribe(self, audio_path, initial_prompt: str = ""):
+        """Transcribe an audio file.
+
+        `initial_prompt` biases the decoder toward domain vocabulary
+        (built from TerminologyService). Empty string → identical
+        behavior to before, so users who clear their glossary lose
+        nothing."""
         if not Path(audio_path).exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
         loop = asyncio.get_event_loop()
+        prompt = (initial_prompt or "").strip() or None
         try:
             segments, info = await loop.run_in_executor(
                 None,
                 lambda: self._model.transcribe(
-                    audio_path, language="en", vad_filter=True),
+                    audio_path, language="en", vad_filter=True,
+                    initial_prompt=prompt),
             )
             segment_list = await loop.run_in_executor(
                 None,

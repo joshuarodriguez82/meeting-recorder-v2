@@ -13,7 +13,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict
 
 # Set CWD to this file's directory so relative paths (like "recordings/")
 # resolve consistently regardless of how the server was launched.
@@ -306,6 +306,10 @@ from services.engagement_overlay_service import (
     EngagementOverlayService, KNOWN_STATUSES,
 )
 from services.daily_briefing_service import DailyBriefingService
+from services.terminology_service import TerminologyService
+from services.prep_brief_cache_service import (
+    PrepBriefCacheService, meeting_key as _prep_meeting_key,
+)
 from models.session import Session
 from services.calendar_service import (
     get_todays_meetings, get_upcoming_meetings, is_outlook_available,
@@ -479,6 +483,8 @@ class Services:
         self.copilot_meeting_type_svc: Optional[CoPilotMeetingTypeService] = None
         self.engagement_overlay_svc: Optional[EngagementOverlayService] = None
         self.daily_briefing_svc: Optional[DailyBriefingService] = None
+        self.terminology_svc: Optional[TerminologyService] = None
+        self.prep_brief_cache_svc: Optional[PrepBriefCacheService] = None
         self.recording_svc: Optional[RecordingService] = None
         self.speaker_profile_svc: Optional[SpeakerProfileService] = None
         self.auto_record_blocklist_svc: Optional[AutoRecordBlocklistService] = None
@@ -595,6 +601,14 @@ class Services:
             # per calendar date, populated by user pasting M365 Copilot
             # scheduled-prompt output into the Today tab's Import dialog.
             self.daily_briefing_svc = DailyBriefingService(_recordings_dir)
+            # Domain terminology glossary (Whisper bias + mis-hear
+            # corrections). Seeds a curated SA/CCaaS/cloud/sales vocab on
+            # first launch; user-editable from Settings.
+            self.terminology_svc = TerminologyService(_recordings_dir)
+            # Auto pre-meeting brief cache — backend loop fills it before
+            # meetings; frontend reads it for the "ready" notification +
+            # instant brief view.
+            self.prep_brief_cache_svc = PrepBriefCacheService(_recordings_dir)
             # Speaker profiles stay per-machine: voice fingerprints are
             # mic-hardware-dependent, syncing them across devices with
             # different mics risks false positives.
@@ -622,6 +636,11 @@ class Services:
                 profile_service=self.speaker_profile_svc,
                 on_status=self._record_status,
             )
+            # Wire the domain glossary into the recorder so transcription
+            # biases toward the user's vocabulary (Whisper initial_prompt)
+            # and corrects known mis-hears afterward. Set after construction
+            # so the RecordingService signature stays unchanged.
+            self.recording_svc.terminology = self.terminology_svc
             # The summarizer is constructed whenever an LLM is configured
             # — either Anthropic (anthropic_api_key) or an OpenAI-compatible
             # endpoint (openai_base_url / openai_api_key, or a local Ollama
@@ -805,6 +824,10 @@ class SettingsDTO(BaseModel):
     # pasting its output in. Persisted; gates the nav item + default
     # landing view on the frontend.
     today_view_enabled: bool = False
+    # Auto pre-meeting brief: generate a brief shortly before each calendar
+    # meeting and notify when ready. OFF by default (one LLM call/meeting).
+    auto_prep_brief_enabled: bool = False
+    auto_prep_brief_lead_min: int = 10
 
 
 class StartRecordingRequest(BaseModel):
@@ -987,6 +1010,8 @@ async def get_settings():
         live_copilot_hot_interval_sec=s.live_copilot_hot_interval_sec,
         copilot_custom_context=s.copilot_custom_context,
         today_view_enabled=s.today_view_enabled,
+        auto_prep_brief_enabled=s.auto_prep_brief_enabled,
+        auto_prep_brief_lead_min=s.auto_prep_brief_lead_min,
     )
 
 
@@ -1062,6 +1087,8 @@ async def save_settings(payload: SettingsDTO):
         live_copilot_hot_interval_sec=max(0, min(60, payload.live_copilot_hot_interval_sec or 0)),
         copilot_custom_context=(payload.copilot_custom_context or "").strip(),
         today_view_enabled=bool(payload.today_view_enabled),
+        auto_prep_brief_enabled=bool(payload.auto_prep_brief_enabled),
+        auto_prep_brief_lead_min=max(1, min(120, payload.auto_prep_brief_lead_min or 10)),
     )
     # If the recordings folder changed, migrate client + template state
     # from the previous folder to the new one. Copy, not move, so the
@@ -1529,7 +1556,12 @@ async def recording_status():
                 # the audio file finalises cleanly. Off-loop because
                 # stop_recording does I/O.
                 try:
-                    await asyncio.to_thread(_stop_recording_sync)
+                    session = await asyncio.to_thread(_stop_recording_sync)
+                    # Same backend-owned auto-process as every other stop
+                    # path. Idempotent per session, so if the timer-driven
+                    # watchdog already fired for this session this is a
+                    # no-op.
+                    _maybe_auto_process(session)
                 except Exception as e:
                     logger.exception(
                         f"Watchdog auto-stop raised: {e}")
@@ -2207,6 +2239,8 @@ async def set_live_copilot_enabled(payload: dict):
         live_copilot_hot_interval_sec=s.live_copilot_hot_interval_sec,
         copilot_custom_context=s.copilot_custom_context,
         today_view_enabled=s.today_view_enabled,
+        auto_prep_brief_enabled=s.auto_prep_brief_enabled,
+        auto_prep_brief_lead_min=s.auto_prep_brief_lead_min,
     )
     # Update the cached Settings in-place so the change is visible
     # immediately, without going through load_settings() which would
@@ -2327,6 +2361,137 @@ def _stop_recording_sync():
     return session
 
 
+# ── Backend-driven auto-process after stop ──────────────────────────
+#
+# CRITICAL: auto-processing used to be triggered ONLY by the Record
+# view's frontend stop() handler — it called processFull after stopping.
+# That meant any stop path that DIDN'T go through that handler finalized
+# the WAV but never processed it:
+#   - the watchdog auto-stop (silence / overrun / hard cap), which calls
+#     _stop_recording_sync directly on a backend timer
+#   - the sidebar recording-pill Stop button, which calls /recording/stop
+#     without the frontend processFull hook
+# An auto-recorded + auto-stopped meeting therefore saved audio with zero
+# AI output, even with AUTO_PROCESS_AFTER_STOP=true. Same class of bug as
+# the watchdog-was-frontend-polled issue (v2.9.3): a critical step was
+# UI-driven, so it silently didn't happen when the UI wasn't the thing
+# driving the stop.
+#
+# Fix: the backend owns auto-process now. Every stop path calls
+# _maybe_auto_process(session); it fires the full pipeline as a
+# fire-and-forget task when the setting is on. Idempotent per session so
+# overlapping triggers (e.g. endpoint + a racing watchdog tick) can't
+# double-process. The frontend no longer triggers processing itself.
+_auto_processed_sessions: set[str] = set()
+
+
+# Retry schedule for backend auto-processing. Most failures are
+# transient — Claude 429s, a brief Ollama hiccup, a OneDrive file lock on
+# the WAV mid-finalize. Backoff gives them time to clear. Delays in
+# seconds; the list length is the attempt count.
+_AUTO_PROCESS_RETRY_DELAYS = [30, 120, 300]  # 30s, 2min, 5min
+
+
+def _stamp_processing_error(session_id: str, message: Optional[str]) -> None:
+    """Persist (or clear) a session's processing_error so the Sessions
+    list can badge a failed auto-process. message=None clears it."""
+    try:
+        session = svc.session_svc.load_full(session_id)
+        if not session:
+            return
+        session.processing_error = message
+        svc.session_svc.save(session)
+    except Exception as e:
+        logger.warning(
+            f"[auto-process] could not stamp error on {session_id}: {e}")
+
+
+async def _auto_process_session(session_id: str, template: str,
+                                follow_up: bool) -> None:
+    """Run the full extraction pipeline for a just-stopped session in the
+    background, with retry + backoff. Reuses the manual process_full code
+    path. On final failure, stamps session.processing_error so the failure
+    is VISIBLE in the Sessions list instead of the session silently
+    sitting unprocessed (the exact silent-failure class behind the ASM
+    no-AI-output incident).
+
+    'Failure' = process_full raised, or returned ok:False (the critical
+    transcribe/diarize stage died). Per-extraction failures (a single 429
+    on, say, decisions) leave ok:True with a transcript + partial output —
+    not worth retrying the whole pipeline for, and the user can re-run a
+    single extraction from the session dialog."""
+    req = ProcessFullRequest(
+        template=template or "General", follow_up_drafts=follow_up)
+    attempts = len(_AUTO_PROCESS_RETRY_DELAYS) + 1
+    last_reason = ""
+    try:
+        for attempt in range(1, attempts + 1):
+            try:
+                result = await process_full(session_id, req)
+                ok = result.get("ok", False) if isinstance(result, dict) else False
+                if ok:
+                    logger.info(
+                        f"[auto-process] session {session_id} complete "
+                        f"(attempt {attempt}): "
+                        f"{result.get('stages')}")
+                    _stamp_processing_error(session_id, None)  # clear any prior
+                    return
+                # ok:False → critical stage failed; capture reason + retry.
+                stages = result.get("stages", {}) if isinstance(result, dict) else {}
+                last_reason = next(
+                    (v for v in stages.values()
+                     if isinstance(v, str) and v.startswith("failed")),
+                    "processing failed")
+            except HTTPException as e:
+                # Not-configured / not-found: no point retrying.
+                logger.warning(
+                    f"[auto-process] session {session_id} skipped: {e.detail}")
+                _stamp_processing_error(session_id, str(e.detail))
+                return
+            except Exception as e:
+                last_reason = f"{type(e).__name__}: {e}"
+                logger.warning(
+                    f"[auto-process] session {session_id} attempt {attempt} "
+                    f"raised: {last_reason}")
+
+            if attempt <= len(_AUTO_PROCESS_RETRY_DELAYS):
+                delay = _AUTO_PROCESS_RETRY_DELAYS[attempt - 1]
+                logger.info(
+                    f"[auto-process] retrying session {session_id} in {delay}s "
+                    f"(attempt {attempt + 1}/{attempts})")
+                await asyncio.sleep(delay)
+
+        # Exhausted all attempts — make the failure visible.
+        msg = f"Auto-processing failed after {attempts} attempts: {last_reason}"
+        logger.error(f"[auto-process] session {session_id}: {msg}")
+        _stamp_processing_error(session_id, msg)
+    finally:
+        _auto_processed_sessions.discard(session_id)
+
+
+def _maybe_auto_process(session) -> None:
+    """Kick off backend auto-processing for a freshly-finalized session
+    when AUTO_PROCESS_AFTER_STOP is on. Safe to call from every stop path
+    — idempotent per session. Must be called on the event loop (uses
+    asyncio.create_task), i.e. after the to_thread(_stop_recording_sync)
+    returns, not inside it."""
+    if session is None:
+        return
+    s = svc.settings
+    if not s or not getattr(s, "auto_process_after_stop", False):
+        return
+    sid = getattr(session, "session_id", "") or ""
+    if not sid or sid in _auto_processed_sessions:
+        return
+    _auto_processed_sessions.add(sid)
+    template = getattr(session, "template", "") or "General"
+    follow_up = bool(getattr(s, "auto_follow_up_email", False))
+    logger.info(
+        f"[auto-process] kicking off for session {sid} "
+        f"(template={template}, follow_up={follow_up})")
+    asyncio.create_task(_auto_process_session(sid, template, follow_up))
+
+
 @app.post("/recording/stop")
 async def stop_recording():
     svc.load_settings()
@@ -2341,6 +2506,10 @@ async def stop_recording():
         svc.auto_record_subject = None  # recording is ending; clear the auto label
         session = await asyncio.to_thread(_stop_recording_sync)
         if session:
+            # Backend-owned auto-process: fires for ANY stop that reaches
+            # this endpoint (Record view button, sidebar pill). The
+            # frontend no longer triggers processing itself.
+            _maybe_auto_process(session)
             return {"session_id": session.session_id, "audio_path": session.audio_path}
         raise HTTPException(status_code=500, detail="Stop returned no session")
     except Exception as e:
@@ -3730,6 +3899,16 @@ async def process_full(session_id: str, req: ProcessFullRequest):
                 logger.exception(f"process_full register refresh failed: {e}")
         asyncio.create_task(_do_register())
 
+    # Clear any prior auto-process failure badge — a successful run (manual
+    # or auto retry) means the session is no longer in a failed state.
+    try:
+        fresh = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+        if fresh and fresh.processing_error:
+            fresh.processing_error = None
+            await asyncio.to_thread(svc.session_svc.save, fresh)
+    except Exception as e:
+        logger.warning(f"could not clear processing_error on {session_id}: {e}")
+
     return {"ok": True, "stages": stages}
 
 
@@ -4875,6 +5054,8 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         live_copilot_hot_interval_sec=s.live_copilot_hot_interval_sec,
         copilot_custom_context=s.copilot_custom_context,
         today_view_enabled=s.today_view_enabled,
+        auto_prep_brief_enabled=s.auto_prep_brief_enabled,
+        auto_prep_brief_lead_min=s.auto_prep_brief_lead_min,
     )
     svc.settings = dataclasses.replace(
         s, live_copilot_mode=new_mode, live_copilot_meeting_type=new_type)
@@ -4981,6 +5162,210 @@ async def patch_briefing_action(date: str, action_id: str,
     return updated
 
 
+# ── Domain terminology glossary ─────────────────────────────────────
+#
+# Biases Whisper toward the user's jargon (initial_prompt) and corrects
+# known mis-hears post-transcription. Seeded with a curated SA / CCaaS /
+# cloud / sales vocabulary; fully user-editable.
+
+class TerminologyUpdateRequest(BaseModel):
+    terms: List[str] = []
+    corrections: Dict[str, str] = {}
+
+
+@app.get("/terminology")
+async def get_terminology():
+    svc.load_settings()
+    if not svc.terminology_svc:
+        return {"terms": [], "corrections": {}}
+    return await asyncio.to_thread(svc.terminology_svc.get_all)
+
+
+@app.put("/terminology")
+async def put_terminology(req: TerminologyUpdateRequest):
+    svc.load_settings()
+    if not svc.terminology_svc:
+        raise HTTPException(status_code=503, detail="Terminology service not initialized")
+    return await asyncio.to_thread(
+        svc.terminology_svc.set_all, req.terms, req.corrections)
+
+
+@app.post("/terminology/reset")
+async def reset_terminology():
+    svc.load_settings()
+    if not svc.terminology_svc:
+        raise HTTPException(status_code=503, detail="Terminology service not initialized")
+    return await asyncio.to_thread(svc.terminology_svc.reset)
+
+
+# ── Diagnostics ─────────────────────────────────────────────────────
+#
+# One endpoint that surfaces the health signals we've repeatedly had to
+# dig out of backend.log by hand: is the live co-pilot's model reachable,
+# is the main AI provider configured, are mic + loopback visible, is the
+# recordings dir writable, and a tail of the log itself. Powers the
+# Settings → Diagnostics panel so support questions don't require
+# PowerShell archaeology.
+
+def _probe_http(url: str, timeout: float = 3.0) -> tuple[bool, str]:
+    """Best-effort GET to check an HTTP endpoint is alive. Returns
+    (reachable, detail). Uses stdlib urllib so there's no dependency on
+    the LLM SDK's HTTP client being importable here."""
+    import urllib.request
+    import urllib.error
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return True, f"HTTP {resp.status}"
+    except urllib.error.HTTPError as e:
+        # A 4xx still means something is listening — endpoint is up.
+        return True, f"HTTP {e.code}"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _gather_diagnostics() -> dict:
+    checks: list[dict] = []
+
+    def add(cid: str, label: str, status: str, detail: str = ""):
+        checks.append({"id": cid, "label": label,
+                       "status": status, "detail": detail})
+
+    s = svc.settings
+
+    # 1. Recordings dir — exists + writable (OneDrive KFM bites here).
+    try:
+        from pathlib import Path as _P
+        rd = _P(s.recordings_dir) if s and s.recordings_dir else None
+        if not rd:
+            add("recordings_dir", "Recordings folder", "error", "Not configured")
+        elif not rd.exists():
+            add("recordings_dir", "Recordings folder", "error",
+                f"Does not exist: {rd}")
+        else:
+            probe = rd / ".write_test.tmp"
+            try:
+                probe.write_text("ok", encoding="utf-8")
+                probe.unlink()
+                add("recordings_dir", "Recordings folder", "ok", str(rd))
+            except Exception as e:
+                add("recordings_dir", "Recordings folder", "error",
+                    f"Not writable ({type(e).__name__}): {rd}")
+    except Exception as e:
+        add("recordings_dir", "Recordings folder", "error", str(e))
+
+    # 2. Main AI provider configured.
+    try:
+        if s and s.is_configured:
+            provider = (s.ai_provider or "anthropic")
+            model = s.claude_model if provider != "openai" else (s.openai_base_url or "openai-compatible")
+            add("main_provider", "AI provider (summaries/extractions)",
+                "ok", f"{provider} · {model}")
+        else:
+            add("main_provider", "AI provider (summaries/extractions)",
+                "error", "Not configured — set keys in Settings")
+    except Exception as e:
+        add("main_provider", "AI provider", "error", str(e))
+
+    # 3. Live Co-Pilot model reachability — THE one that silently failed
+    #    the webinar (Ollama wasn't running).
+    try:
+        if not s or not s.live_copilot_enabled:
+            add("copilot_model", "Live Co-Pilot model", "info",
+                "Live Co-Pilot disabled")
+        else:
+            provider = (s.live_ai_provider or "").strip().lower()
+            if provider and provider != "anthropic":
+                base = (s.live_openai_base_url or "").strip().rstrip("/")
+                model = (s.live_claude_model or "").strip()
+                if not base:
+                    add("copilot_model", "Live Co-Pilot model", "warn",
+                        "OpenAI-compatible provider with no base URL set")
+                else:
+                    # OpenAI-compatible servers (incl. Ollama) expose /models.
+                    ok, detail = _probe_http(f"{base}/models")
+                    if ok:
+                        add("copilot_model", "Live Co-Pilot model", "ok",
+                            f"{model or 'model'} reachable at {base}")
+                    else:
+                        add("copilot_model", "Live Co-Pilot model", "error",
+                            f"Can't reach {base} ({detail}). "
+                            f"If this is Ollama, is it running?")
+            else:
+                # Anthropic path — can't cheaply ping; just confirm a key.
+                key = (s.live_anthropic_api_key or s.anthropic_api_key or "").strip()
+                add("copilot_model", "Live Co-Pilot model",
+                    "ok" if key else "error",
+                    f"Anthropic · {s.live_claude_model or s.claude_model}"
+                    if key else "No Anthropic key configured")
+    except Exception as e:
+        add("copilot_model", "Live Co-Pilot model", "error", str(e))
+
+    # 4. Audio devices.
+    try:
+        ins = list_input_devices()
+        outs = list_output_devices()
+        if ins:
+            add("mic", "Microphone input", "ok",
+                f"{len(ins)} input device(s) available")
+        else:
+            add("mic", "Microphone input", "error", "No input devices found")
+        # Loopback = output device used for system-audio capture.
+        if outs:
+            add("loopback", "System-audio (loopback)", "ok",
+                f"{len(outs)} output device(s) available")
+        else:
+            add("loopback", "System-audio (loopback)", "warn",
+                "No output devices found for loopback")
+    except Exception as e:
+        add("mic", "Audio devices", "error", str(e))
+
+    # 5. Models loaded.
+    try:
+        loaded = bool(svc.recording_svc and svc.recording_svc.can_process)
+        add("models", "Transcription + diarization models",
+            "ok" if loaded else "warn",
+            "Loaded" if loaded
+            else "Not loaded yet (load on first Process, ~200MB one-time)")
+    except Exception as e:
+        add("models", "Models", "warn", str(e))
+
+    # 6. Recording state.
+    try:
+        rec = bool(svc.recording_svc and svc.recording_svc.is_recording)
+        add("recording", "Recording state", "info",
+            "Recording in progress" if rec else "Idle")
+    except Exception:
+        pass
+
+    # Log tail — last lines of backend.log so the user never has to open
+    # PowerShell to read it.
+    log_tail = ""
+    try:
+        from config.settings import USER_DATA_DIR
+        log_path = USER_DATA_DIR / "backend.log"
+        if log_path.exists():
+            # Read the tail without slurping a 40MB file into memory.
+            with open(log_path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                back = min(size, 64 * 1024)  # last 64KB is plenty for ~150 lines
+                f.seek(size - back)
+                chunk = f.read().decode("utf-8", errors="replace")
+            lines = chunk.splitlines()[-150:]
+            log_tail = "\n".join(lines)
+    except Exception as e:
+        log_tail = f"(could not read backend.log: {e})"
+
+    return {"checks": checks, "log_tail": log_tail}
+
+
+@app.get("/diagnostics")
+async def get_diagnostics():
+    svc.load_settings()
+    return await asyncio.to_thread(_gather_diagnostics)
+
+
 # ── Backend-driven watchdog tick ────────────────────────────────────
 #
 # CRITICAL: previously the watchdog only ticked when the frontend
@@ -5008,12 +5393,129 @@ async def _watchdog_loop():
                     f"Watchdog (timer-driven) auto-stopping recording: "
                     f"{reason}")
                 try:
-                    await asyncio.to_thread(_stop_recording_sync)
+                    session = await asyncio.to_thread(_stop_recording_sync)
+                    # Auto-process the watchdog-stopped session too — this
+                    # is the path that silently skipped processing before
+                    # (auto-recorded meeting that auto-stops on silence /
+                    # overrun never went through the frontend stop hook).
+                    _maybe_auto_process(session)
                 except Exception as e:
                     logger.exception(
                         f"Watchdog auto-stop raised: {e}")
         except Exception as e:
             logger.warning(f"Watchdog tick failed: {e}")
+
+
+# ── Auto pre-meeting brief loop ─────────────────────────────────────
+#
+# Generates a prep brief shortly before each calendar meeting so it's
+# ready when the user needs it. Backend-driven (not gated on the Record
+# view being open) per the lesson from the auto-process bug. The brief is
+# cached; the frontend polls /prep-brief/auto/pending to fire the native
+# "ready" notification.
+async def _auto_prep_brief_loop():
+    # First tick after a short delay so the app finishes booting.
+    await asyncio.sleep(20.0)
+    while True:
+        try:
+            await asyncio.sleep(60.0)
+            s = svc.settings
+            if not s or not getattr(s, "auto_prep_brief_enabled", False):
+                continue
+            if not svc.summarizer or not svc.prep_brief_cache_svc:
+                continue
+            lead = max(1, int(getattr(s, "auto_prep_brief_lead_min", 10) or 10))
+
+            # Upcoming meetings in the next few hours (cache-friendly).
+            try:
+                meetings = await asyncio.to_thread(
+                    get_upcoming_meetings, 24, False)
+            except Exception as e:
+                logger.warning(f"[auto-brief] calendar fetch failed: {e}")
+                continue
+
+            now = datetime.now()
+            for m in meetings or []:
+                try:
+                    subject = (m.get("subject") or "").strip()
+                    start_iso = m.get("start") or ""
+                    if not subject or not start_iso:
+                        continue
+                    try:
+                        start_dt = datetime.fromisoformat(start_iso)
+                    except ValueError:
+                        continue
+                    mins_until = (start_dt - now).total_seconds() / 60.0
+                    # In the lead window and not already started.
+                    if mins_until <= 0 or mins_until > lead:
+                        continue
+                    key = _prep_meeting_key(subject, start_iso)
+                    if svc.prep_brief_cache_svc.has(key):
+                        continue  # already briefed this occurrence
+
+                    logger.info(
+                        f"[auto-brief] generating brief for '{subject}' "
+                        f"(~{int(mins_until)} min out)")
+                    req = PrepBriefFromMeetingRequest(
+                        subject=subject,
+                        attendees=list(m.get("attendees") or []),
+                        scheduled_start_iso=start_iso,
+                        scheduled_end_iso=m.get("end") or "",
+                        client="",
+                        project="",
+                        body="",
+                        user_context="",
+                    )
+                    try:
+                        result = await prep_brief_from_meeting(req)
+                    except Exception as e:
+                        logger.warning(
+                            f"[auto-brief] generation failed for "
+                            f"'{subject}': {e}")
+                        continue
+                    await asyncio.to_thread(
+                        svc.prep_brief_cache_svc.put,
+                        {
+                            "key": key,
+                            "subject": subject,
+                            "start_iso": start_iso,
+                            "markdown": result.get("markdown", ""),
+                            "related_count": result.get("related_count", 0),
+                            "minutes_before": int(mins_until),
+                        },
+                    )
+                    # One generation per tick keeps LLM load gentle; the
+                    # next tick (60s) picks up any other in-window meeting.
+                    break
+                except Exception as e:
+                    logger.warning(f"[auto-brief] per-meeting error: {e}")
+        except Exception as e:
+            logger.warning(f"[auto-brief] loop tick failed: {e}")
+
+
+@app.get("/prep-brief/auto")
+async def get_auto_prep_briefs():
+    svc.load_settings()
+    if not svc.prep_brief_cache_svc:
+        return []
+    return await asyncio.to_thread(svc.prep_brief_cache_svc.list_today)
+
+
+@app.get("/prep-brief/auto/pending")
+async def get_pending_auto_prep_briefs():
+    svc.load_settings()
+    if not svc.prep_brief_cache_svc:
+        return []
+    return await asyncio.to_thread(svc.prep_brief_cache_svc.pending_notifications)
+
+
+@app.post("/prep-brief/auto/{key}/notified")
+async def mark_auto_prep_brief_notified(key: str):
+    svc.load_settings()
+    if not svc.prep_brief_cache_svc:
+        raise HTTPException(status_code=503, detail="Prep-brief cache not initialized")
+    await asyncio.to_thread(svc.prep_brief_cache_svc.mark_notified, key)
+    return {"ok": True}
 
 
 # ── Parent-PID deadman switch ───────────────────────────────────────
@@ -5144,6 +5646,14 @@ async def startup():
         asyncio.create_task(_retention_loop())
     except Exception as e:
         logger.warning(f"Auto-retention bootstrap failed: {e}")
+
+    # Auto pre-meeting brief generator. Backend timer (not frontend-poll
+    # driven) so briefs are ready even if the Record view isn't open.
+    # No-ops while the setting is off.
+    try:
+        asyncio.create_task(_auto_prep_brief_loop())
+    except Exception as e:
+        logger.warning(f"Auto prep-brief bootstrap failed: {e}")
 
     # Crash recovery: if a previous run died mid-`/recording/stop`, merge
     # the orphan `_recording_*.wav` / `_loopback_*.wav` temp files into

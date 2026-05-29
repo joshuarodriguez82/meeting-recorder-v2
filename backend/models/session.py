@@ -73,6 +73,13 @@ class Session:
         self.audio_integrity_warning: Optional[str] = None
         self.audio_actual_duration_s: Optional[float] = None
         self.audio_expected_duration_s: Optional[float] = None
+        # Auto-process outcome. Set when backend auto-processing exhausts
+        # its retries so the failure is VISIBLE (the Sessions list badges
+        # it) instead of the session silently sitting unprocessed. Holds a
+        # short human-readable reason ("Claude rate-limited after 3
+        # retries", "Ollama unreachable", ...). Cleared on any successful
+        # process. None = no failure recorded.
+        self.processing_error: Optional[str] = None
 
     def get_or_create_speaker(self, speaker_id: str) -> Speaker:
         if speaker_id not in self.speakers:
@@ -123,6 +130,7 @@ class Session:
             "audio_integrity_warning": self.audio_integrity_warning,
             "audio_actual_duration_s": self.audio_actual_duration_s,
             "audio_expected_duration_s": self.audio_expected_duration_s,
+            "processing_error": self.processing_error,
         }
 
     @classmethod
@@ -170,6 +178,7 @@ class Session:
         session.audio_integrity_warning = data.get("audio_integrity_warning") or None
         session.audio_actual_duration_s = data.get("audio_actual_duration_s")
         session.audio_expected_duration_s = data.get("audio_expected_duration_s")
+        session.processing_error = data.get("processing_error") or None
 
         # Rebuild speakers
         speakers_data = data.get("speakers") or {}
