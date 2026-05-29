@@ -13,7 +13,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict
 
 # Set CWD to this file's directory so relative paths (like "recordings/")
 # resolve consistently regardless of how the server was launched.
