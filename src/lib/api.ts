@@ -153,6 +153,13 @@ export interface CoPilotTickResponse {
   follow_ups: string[];
   segment_count: number;
   generated_at: string;
+  // Set when the model call failed (so the panel can explain the quiet
+  // instead of looking like an empty meeting). "timeout" = model too
+  // slow (often a local model under load), "unreachable" = can't connect
+  // (e.g. Ollama not running), "error" = other. Absent on success.
+  error?: "timeout" | "unreachable" | "error" | null;
+  error_detail?: string | null;
+  hot?: boolean;
 }
 
 export interface AudioDevice {

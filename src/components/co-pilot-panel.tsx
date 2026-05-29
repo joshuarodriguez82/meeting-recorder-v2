@@ -186,12 +186,31 @@ export function CoPilotPanel({ recording, enabled }: Props) {
       if (!isEmpty) {
         setTicks((prev) => [r, ...prev]);
         setRefreshNote(null);
-      } else if (manual) {
-        // User clicked Refresh and got nothing — say so, otherwise it
-        // looks like the button is broken.
-        setRefreshNote("No new coaching content since the last tick.");
+        setLastError(null);
+      } else if (r.error) {
+        // Model call failed (returned empty WITH a reason). Surface it so
+        // the panel explains the silence instead of looking like the
+        // meeting simply had nothing worth flagging.
+        if (r.error === "timeout") {
+          setLastError(
+            "Co-Pilot model is responding too slowly (timed out). If you're " +
+            "on a local model like Ollama, it may be overloaded — coaching " +
+            "will resume when it catches up.");
+        } else if (r.error === "unreachable") {
+          setLastError(
+            "Co-Pilot can't reach its model. If you're using Ollama, make " +
+            "sure it's running; check Settings → Diagnostics.");
+        } else {
+          setLastError("Co-Pilot model call failed — it'll retry next tick.");
+        }
+      } else {
+        setLastError(null);
+        if (manual) {
+          // User clicked Refresh and got nothing (and no error) — say so,
+          // otherwise it looks like the button is broken.
+          setRefreshNote("No new coaching content since the last tick.");
+        }
       }
-      setLastError(null);
     } catch (e) {
       if (e instanceof ApiError && (e.status === 403 || e.status === 409)) {
         // Feature disabled or no active recording — stop trying, the
