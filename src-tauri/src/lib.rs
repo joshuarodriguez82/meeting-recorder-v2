@@ -696,19 +696,50 @@ fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBu
             let p = venv_python_candidates(&venv).into_iter()
                 .find(|p| p.exists())
                 .ok_or_else(|| format!("venv python missing after create under {}", venv.display()))?;
-
-            // Step 2: upgrade pip — only on first create. On the upgrade
-            // path we trust whatever pip is already in the venv.
-            rlog("Bootstrap: upgrading pip");
-            let (out, err) = open_log()?;
-            let mut c = Command::new(&p);
-            c.args(["-m", "pip", "install", "--upgrade", "pip"])
-                .stdout(Stdio::from(out)).stderr(Stdio::from(err));
-            no_window(&mut c);
-            let _ = c.status();
             p
         }
     };
+
+    // Step 2: enforce a pip version range the project was actually
+    // tested against. Idempotent — if pip is already inside the range
+    // this is a sub-second no-op; if it's too new it gets downgraded.
+    //
+    // Why a cap at all: the bootstrap used to do `pip install --upgrade
+    // pip` unconditionally on first create. Every new pip release ships
+    // resolver and metadata-validation changes (24.1 added strict
+    // metadata, 25/26 tightened it further), and they routinely break
+    // requirement sets that were green on the previous pip. v2.10.4 in
+    // the field hit exactly this: a fresh venv self-upgraded to pip
+    // 26.1.2, which then refused the pyannote.audio → omegaconf →
+    // antlr4-python3-runtime chain ("ResolutionImpossible … no matching
+    // distributions available for your environment: antlr4-python3-runtime"),
+    // and the watchdog respawned the backend five times into the same
+    // failure before giving up.
+    //
+    // Capping pip below 25 pins the resolver to the version the wheel
+    // pinset in requirements-cpu.txt was last validated against. When
+    // we eventually move to a lockfile + `--no-deps` install, the
+    // resolver stops mattering and this cap can go.
+    //
+    // Runs on BOTH the fresh-create path AND the "venv exists but
+    // requirements changed" path so an already-broken venv from an
+    // earlier launch self-heals on next start instead of needing the
+    // user to delete %LOCALAPPDATA%\MeetingRecorder\.venv manually.
+    rlog("Bootstrap: enforcing pip>=24,<25");
+    {
+        let (out, err) = open_log()?;
+        let mut c = Command::new(&venv_py);
+        c.args(["-m", "pip", "install", "--upgrade", "pip>=24,<25"])
+            .stdout(Stdio::from(out)).stderr(Stdio::from(err));
+        no_window(&mut c);
+        if let Err(e) = c.status() {
+            // Non-fatal: continue to the install step. If the install
+            // then trips on the same resolver bug we already log a
+            // pointed error; better than refusing to start because the
+            // pip pin couldn't be enforced.
+            rlog(&format!("Warning: pip pin step failed: {} — continuing", e));
+        }
+    }
 
     // Step 3: pip install -r requirements. Idempotent: pip skips packages
     // that are already at the right version, only installs deltas. On a
