@@ -3182,12 +3182,15 @@ class SuggestTaggingRequest(BaseModel):
 @app.post("/clients/suggest-tagging")
 async def suggest_tagging(req: SuggestTaggingRequest):
     """
-    Use Claude to suggest which untagged sessions likely belong to a client.
-    Returns [{session_id, display_name, confidence, reason}].
+    Use the configured LLM to suggest which untagged sessions likely belong
+    to a client. Returns [{session_id, display_name, confidence, reason}].
     """
     svc.load_settings()
     if not svc.summarizer:
-        raise HTTPException(status_code=400, detail="Anthropic API key required")
+        raise HTTPException(
+            status_code=400,
+            detail="LLM not configured — set an Anthropic key, or pick an "
+                   "OpenAI-compatible provider (Ollama / OpenRouter / etc.) in Settings.")
 
     all_sessions = svc.session_svc.list_sessions()
     # Candidates: sessions without the target client/project tag
@@ -3221,15 +3224,14 @@ async def suggest_tagging(req: SuggestTaggingRequest):
     )
 
     try:
-        import anthropic, json
-        client_anthropic = anthropic.AsyncAnthropic(
-            api_key=svc.settings.anthropic_api_key)
-        msg = await client_anthropic.messages.create(
-            model=svc.settings.claude_model,
-            max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = msg.content[0].text.strip()
+        import json
+        # Route through the shared summarizer so this endpoint honours the
+        # ai_provider setting (anthropic vs OpenAI-compat / Ollama / etc.).
+        # The previous code built its own AsyncAnthropic and shipped the
+        # request straight to api.anthropic.com regardless of provider —
+        # which 404'd for any Ollama / OpenRouter user the moment they
+        # clicked AI Suggest, because Anthropic doesn't host their model.
+        text = (await svc.summarizer._chat(prompt, max_tokens=2048)).strip()
         # Strip code fences if any
         if text.startswith("```"):
             text = "\n".join(line for line in text.split("\n")
