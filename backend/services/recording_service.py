@@ -5,6 +5,7 @@ Orchestrates the full recording lifecycle.
 import asyncio
 import logging
 import os
+import tempfile
 import threading
 import uuid
 from datetime import datetime
@@ -24,6 +25,22 @@ from models.session import Session
 from services.speaker_profile_service import SpeakerProfileService
 from utils.audio_utils import finalize_recording_streaming
 from utils.logger import get_logger
+
+
+def _local_capture_dir() -> Path:
+    """Local-only scratch directory for the WAV streams that the capture
+    thread writes to during an active recording.
+
+    ``recordings_dir`` is often pointed at OneDrive / iCloud / Dropbox
+    for cross-device sync, but writing the live capture through a cloud
+    filter driver causes contention severe enough to drop audio
+    wholesale on long meetings. Use the OS temp dir (``%TEMP%`` on
+    Windows, ``/tmp`` family elsewhere) — guaranteed local, fast, and
+    cleaned up by the OS even if we miss a deletion on crash.
+    """
+    d = Path(tempfile.gettempdir()) / "meeting_recorder_capture"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 logger = get_logger(__name__)
 
@@ -311,8 +328,20 @@ class RecordingService:
         self._loopback_level_ema = 0.0
         recordings_dir = Path(self._settings.recordings_dir)
         recordings_dir.mkdir(parents=True, exist_ok=True)
+        # Active-capture temp WAVs go to a LOCAL-only dir, never under
+        # recordings_dir. When recordings_dir is on OneDrive / iCloud /
+        # Dropbox, the cloud sync engine's filter driver fights the
+        # capture thread for file-lock + write bandwidth: every audio
+        # sample queues, the ring buffer overflows, samples are dropped
+        # silently, and the result is exactly the field repro on the
+        # Initech 2h25m call — "you got 28 min of audio in a 149-min
+        # recording — about 121 min appears to be missing", with
+        # mic↔loopback drift of multiple thousand seconds. The final
+        # merged WAV still writes to recordings_dir on stop (one-shot
+        # write, OneDrive can absorb that fine).
+        capture_dir = _local_capture_dir()
         self._loopback_temp_path = str(
-            recordings_dir / f"_loopback_{session_id}.wav"
+            capture_dir / f"_loopback_{session_id}.wav"
         ) if output_device_index is not None else None
         self._capture = AudioCapture(
             mic_device_index=mic_device_index,
@@ -338,12 +367,14 @@ class RecordingService:
             self._capture = None
             raise RuntimeError(f"Failed to start audio capture: {e}") from e
 
-        # Open a temp WAV file to stream audio to disk during recording
+        # Open a temp WAV file to stream audio to disk during recording.
+        # MUST be the local-only capture dir, NOT recordings_dir — see
+        # the longer comment at the loopback-temp assignment above for
+        # the OneDrive contention story.
         try:
-            recordings_dir = Path(self._settings.recordings_dir)
-            recordings_dir.mkdir(parents=True, exist_ok=True)
+            capture_dir = _local_capture_dir()
             self._wav_temp_path = str(
-                recordings_dir / f"_recording_{session_id}.wav"
+                capture_dir / f"_recording_{session_id}.wav"
             )
             self._wav_writer = sf.SoundFile(
                 self._wav_temp_path,
