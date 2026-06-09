@@ -2566,6 +2566,36 @@ async def list_sessions():
     return await asyncio.to_thread(_do)
 
 
+# IMPORTANT: declare this BEFORE @app.get("/sessions/{session_id}").
+# FastAPI matches routes in registration order; the dynamic {session_id}
+# pattern matches literal segments too, so a later /sessions/unprocessed
+# declaration is dead — every request falls into the catch-all, which
+# tries to load session_unprocessed.json and returns 404. Keeps the
+# "X sessions awaiting processing" badge + the unprocessed-toast working.
+@app.get("/sessions/unprocessed")
+async def unprocessed_sessions():
+    """
+    Return sessions that have audio on disk but no transcript yet. Frontend
+    polls this to show an "X sessions awaiting processing" badge + a Windows
+    toast notification when the count goes up.
+    """
+    def _do():
+        svc.load_settings()
+        results = []
+        for s in svc.session_svc.list_sessions():
+            if s.get("audio_exists") and not s.get("has_transcript"):
+                results.append({
+                    "session_id": s["session_id"],
+                    "display_name": s["display_name"],
+                    "started_at": s.get("started_at"),
+                    "duration_s": s.get("duration_s", 0),
+                    "client": s.get("client", ""),
+                    "project": s.get("project", ""),
+                })
+        return results
+    return await asyncio.to_thread(_do)
+
+
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str):
     def _do():
@@ -3152,12 +3182,15 @@ class SuggestTaggingRequest(BaseModel):
 @app.post("/clients/suggest-tagging")
 async def suggest_tagging(req: SuggestTaggingRequest):
     """
-    Use Claude to suggest which untagged sessions likely belong to a client.
-    Returns [{session_id, display_name, confidence, reason}].
+    Use the configured LLM to suggest which untagged sessions likely belong
+    to a client. Returns [{session_id, display_name, confidence, reason}].
     """
     svc.load_settings()
     if not svc.summarizer:
-        raise HTTPException(status_code=400, detail="Anthropic API key required")
+        raise HTTPException(
+            status_code=400,
+            detail="LLM not configured — set an Anthropic key, or pick an "
+                   "OpenAI-compatible provider (Ollama / OpenRouter / etc.) in Settings.")
 
     all_sessions = svc.session_svc.list_sessions()
     # Candidates: sessions without the target client/project tag
@@ -3191,15 +3224,14 @@ async def suggest_tagging(req: SuggestTaggingRequest):
     )
 
     try:
-        import anthropic, json
-        client_anthropic = anthropic.AsyncAnthropic(
-            api_key=svc.settings.anthropic_api_key)
-        msg = await client_anthropic.messages.create(
-            model=svc.settings.claude_model,
-            max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = msg.content[0].text.strip()
+        import json
+        # Route through the shared summarizer so this endpoint honours the
+        # ai_provider setting (anthropic vs OpenAI-compat / Ollama / etc.).
+        # The previous code built its own AsyncAnthropic and shipped the
+        # request straight to api.anthropic.com regardless of provider —
+        # which 404'd for any Ollama / OpenRouter user the moment they
+        # clicked AI Suggest, because Anthropic doesn't host their model.
+        text = (await svc.summarizer._chat(prompt, max_tokens=2048)).strip()
         # Strip code fences if any
         if text.startswith("```"):
             text = "\n".join(line for line in text.split("\n")
@@ -4094,30 +4126,6 @@ async def _extract_structured_and_save(session_id: str) -> dict:
         counts[key] = len(recs)
     await asyncio.to_thread(svc.session_svc.save, session)
     return counts
-
-
-@app.get("/sessions/unprocessed")
-async def unprocessed_sessions():
-    """
-    Return sessions that have audio on disk but no transcript yet. Frontend
-    polls this to show an "X sessions awaiting processing" badge + a Windows
-    toast notification when the count goes up.
-    """
-    def _do():
-        svc.load_settings()
-        results = []
-        for s in svc.session_svc.list_sessions():
-            if s.get("audio_exists") and not s.get("has_transcript"):
-                results.append({
-                    "session_id": s["session_id"],
-                    "display_name": s["display_name"],
-                    "started_at": s.get("started_at"),
-                    "duration_s": s.get("duration_s", 0),
-                    "client": s.get("client", ""),
-                    "project": s.get("project", ""),
-                })
-        return results
-    return await asyncio.to_thread(_do)
 
 
 class FollowUpDraftsRequest(BaseModel):
@@ -5536,10 +5544,16 @@ async def _auto_prep_brief_loop():
                 continue
             lead = max(1, int(getattr(s, "auto_prep_brief_lead_min", 10) or 10))
 
-            # Upcoming meetings in the next few hours (cache-friendly).
+            # Upcoming meetings in the next 24 hours. The signature was
+            # briefly extended to (hours, include_resource_calendars) on
+            # a branch, but the underlying calendar_service.get_upcoming_meetings
+            # still takes just `hours_ahead`. Passing two args silently
+            # broke auto-brief on every tick ("takes from 0 to 1 positional
+            # arguments but 2 were given"). Resource-calendar filtering
+            # already happens inside the calendar backend.
             try:
                 meetings = await asyncio.to_thread(
-                    get_upcoming_meetings, 24, False)
+                    get_upcoming_meetings, 24)
             except Exception as e:
                 logger.warning(f"[auto-brief] calendar fetch failed: {e}")
                 continue
