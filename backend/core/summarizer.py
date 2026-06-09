@@ -388,13 +388,23 @@ class Summarizer:
             return msg.content[0].text
         # OpenAI-compatible (OpenRouter / Ollama / LM Studio / ...).
         # Text-only — see docstring.
+        #
+        # Timeout: caller-supplied values (60–90s) were chosen for cloud
+        # LLMs that return in <10s. Local inference on Ollama / LM Studio
+        # has two costs the cloud doesn't: a 30–60s cold-load when the
+        # model isn't already in VRAM, and 1–60 tok/sec generation that
+        # scales with prompt length. A 12B model on a long meeting
+        # transcript routinely needs minutes. Floor the timeout at 600s
+        # (10 min) for local providers so a real generation isn't killed
+        # mid-flight; still bounded so a genuine hang eventually fails.
+        local_timeout = max(timeout, 600.0)
         resp = await asyncio.wait_for(
             self._openai_client.chat.completions.create(
                 model=self._model,
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
             ),
-            timeout=timeout,
+            timeout=local_timeout,
         )
         return resp.choices[0].message.content or ""
 
