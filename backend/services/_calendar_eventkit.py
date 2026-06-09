@@ -473,8 +473,12 @@ def get_upcoming_meetings(hours_ahead: int = 168) -> List[dict]:
         now = datetime.datetime.now()
         end = now + datetime.timedelta(hours=hours_ahead)
         results = _fetch_events(now, end)
-        # Drop already-started events (Outlook backend does the same).
-        results = [m for m in results if m["start"] >= now]
+        # Drop already-ENDED events (not already-started). Keeping
+        # in-progress meetings visible matters during an auto-record —
+        # otherwise the Upcoming panel collapses the moment a meeting
+        # starts. AutoRecordService applies its own `start > now`
+        # filter for the "next event" hint.
+        results = [m for m in results if m["end"] >= now]
         _cache_put(cache_key, results)
         for m in results:
             logger.info(f"  UPCOMING: {m['subject']} @ {m['start']}")

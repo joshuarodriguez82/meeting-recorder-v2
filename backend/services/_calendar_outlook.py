@@ -648,7 +648,18 @@ def get_upcoming_meetings(hours_ahead: int = 168) -> List[dict]:
         def consume(folder):
             nonlocal dropped_past, dropped_future
             for m in _read_appointments_range(folder, start_date, end_date):
-                if m["start"] < now:
+                # Drop meetings whose END is in the past, not whose
+                # START is in the past. The old "start < now" filter
+                # made an in-progress meeting invisible the moment it
+                # started, which collapsed the Upcoming Meetings panel
+                # to empty while auto-record was actively capturing
+                # that meeting — the user saw "recording in progress"
+                # at the top with no entry in the panel below.
+                # AutoRecordService applies its own `start > now`
+                # filter for the "next event" hint, so keeping
+                # in-progress meetings here doesn't double-trigger
+                # anything.
+                if m["end"] < now:
                     dropped_past += 1
                     if len(dropped_samples) < 5:
                         dropped_samples.append(
