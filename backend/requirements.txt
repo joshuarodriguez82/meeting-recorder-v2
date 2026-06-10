@@ -32,6 +32,10 @@ transformers<5
 # Windows-only: COM bridges + WASAPI loopback.
 pywin32; sys_platform == "win32"
 pyaudiowpatch; sys_platform == "win32"
+# pycaw reads each audio endpoint's shared-mode mix format via WASAPI's
+# IAudioClient::GetMixFormat — used by core.audio_format_inspector for
+# the Record-view sync-risk banner.
+pycaw>=20240210; sys_platform == "win32"
 
 # macOS-only: EventKit (Calendar) bridges. The follow-up email path uses
 # AppleScript via subprocess and needs no Python binding.
