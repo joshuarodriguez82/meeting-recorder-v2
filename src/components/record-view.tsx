@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, openExternal, type AudioDevice, type Meeting, type RecordingStatus, type SessionFull, type SessionSummary } from "@/lib/api";
+import { api, openExternal, openSystemSettings, type AudioDevice, type AudioSyncRisk, type Meeting, type RecordingStatus, type SessionFull, type SessionSummary } from "@/lib/api";
 import { toast } from "sonner";
 import {
   Calendar as CalendarIcon,
@@ -416,6 +416,27 @@ export function RecordView({
   // Look up the currently selected device objects for display.
   const selectedMic = inputDevices.find((d) => d.index === micIdx);
   const selectedOut = outputDevices.find((d) => d.index === outIdx);
+
+  // Detect mic↔loopback shared-mode mix-format mismatch. The Windows
+  // audio engine resamples each side independently; if the two
+  // devices' default formats differ (sample rate or bit depth), the
+  // streams drift apart over long recordings — the v2.10.5 field
+  // report was 16-bit mic + 24-bit speakers producing ~31 s of drift
+  // on a 49-min session. Hidden during recording (too late to fix)
+  // and in conference room mode (loopback isn't captured then).
+  const [audioSyncRisk, setAudioSyncRisk] = useState<AudioSyncRisk | null>(null);
+  useEffect(() => {
+    if (recording || conferenceRoomMode) return;
+    if (!selectedMic || !selectedOut) {
+      setAudioSyncRisk(null);
+      return;
+    }
+    let cancelled = false;
+    api.getAudioSyncRisk(selectedMic.name, selectedOut.name)
+      .then((r) => { if (!cancelled) setAudioSyncRisk(r); })
+      .catch(() => { if (!cancelled) setAudioSyncRisk(null); });
+    return () => { cancelled = true; };
+  }, [recording, conferenceRoomMode, selectedMic, selectedOut]);
 
   // Live-patch the active session when the user edits meeting name /
   // client / project mid-recording. Debounced so we don't fire on
@@ -1050,6 +1071,31 @@ export function RecordView({
               </p>
             </div>
           </div>
+          {audioSyncRisk?.level === "warn" && !recording && !conferenceRoomMode && (
+            <div className="md:col-span-2 rounded-lg border border-amber-400/60 bg-amber-50 dark:bg-amber-950/30 p-3 text-sm">
+              <p className="font-medium text-amber-900 dark:text-amber-200">
+                Audio format mismatch — long recordings will drift
+              </p>
+              <p className="mt-1 text-xs text-amber-900/80 dark:text-amber-200/80">
+                {audioSyncRisk.reason}
+              </p>
+              {audioSyncRisk.fix_hint && (
+                <p className="mt-1 text-xs text-amber-900/80 dark:text-amber-200/80">
+                  {audioSyncRisk.fix_hint}
+                </p>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  openSystemSettings("sound").catch((e) =>
+                    toast.error(`Could not open Sound settings: ${e instanceof Error ? e.message : e}`));
+                }}
+                className="mt-2 inline-flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700"
+              >
+                Open Sound Control Panel
+              </button>
+            </div>
+          )}
         </CardContent>
         {!recording && (
           <div className="px-6 pb-5 pt-1 flex justify-end border-t border-border/50 pt-4 mt-2">

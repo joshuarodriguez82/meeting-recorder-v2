@@ -41,6 +41,19 @@ export async function openExternal(url: string): Promise<void> {
   }
 }
 
+/**
+ * Open an OS Settings / Control Panel applet by short tag. Only known
+ * panels listed in the Rust allowlist (currently just "sound") are
+ * honoured — there's no path-passing API surface so the WebView can't
+ * shellexec anything. Used by the Record-view audio-sync-risk banner
+ * to deep-link the user into Sound Control Panel (Windows) / Sound
+ * preferences (macOS) to fix a default-format mismatch.
+ */
+export async function openSystemSettings(panel: "sound"): Promise<void> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("open_system_settings", { panel });
+}
+
 export interface TemplateEntry {
   name: string;
   prompt: string;
@@ -169,6 +182,25 @@ export interface AudioDevice {
   max_output_channels?: number;
   channels?: number;
   default_samplerate: number;
+}
+
+export interface AudioFormat {
+  sample_rate: number;
+  bits_per_sample: number;
+  channels: number;
+}
+
+export interface AudioSyncRisk {
+  // ok=false implies level="warn" and the banner renders.
+  ok: boolean;
+  // "ok" — both devices use the same shared-mode mix format.
+  // "warn" — mismatch detected; drift on long recordings expected.
+  // "unknown" — non-Windows or pycaw missing; banner stays hidden.
+  level: "ok" | "warn" | "unknown";
+  reason: string | null;
+  mic_format: AudioFormat | null;
+  loopback_format: AudioFormat | null;
+  fix_hint: string | null;
 }
 
 export interface Meeting {
@@ -1148,6 +1180,15 @@ export const api = {
   // Audio devices
   getAudioDevices: () =>
     request<{ input: AudioDevice[]; output: AudioDevice[] }>("/audio/devices"),
+
+  // Mic↔loopback format mismatch check. Backed by WASAPI on Windows
+  // (pycaw); returns level="unknown" on macOS / Linux where the OS
+  // handles format conversion transparently. The Record-view banner
+  // only renders when level === "warn".
+  getAudioSyncRisk: (mic: string, loopback: string) =>
+    request<AudioSyncRisk>(
+      "/audio/sync-risk?mic=" + encodeURIComponent(mic) +
+      "&loopback=" + encodeURIComponent(loopback)),
 
   // GPU acceleration
   getGpuStatus: () => request<{
