@@ -872,7 +872,8 @@ pub fn run() {
             get_backend_port,
             capture_screenshot,
             download_and_run_update,
-            open_external
+            open_external,
+            open_system_settings
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -1254,6 +1255,75 @@ fn open_external(url: String) -> Result<(), String> {
         }
         Err(e) => Err(format!("Could not open browser: {}", e)),
     }
+}
+
+/// Open a specific OS system-settings panel. Allowlist-only — the JS
+/// side passes a short tag, never an arbitrary path, so this can't be
+/// abused to launch shellexec on anything the WebView feeds us.
+///
+/// Currently the only supported panel is "sound" (the audio devices
+/// dialog), used by the Record view to deep-link users into fixing a
+/// mic↔system-audio default-format mismatch. Add more panel keys here
+/// as new flows need them; never accept a free-form path.
+#[tauri::command]
+fn open_system_settings(panel: String) -> Result<(), String> {
+    let key = panel.trim().to_ascii_lowercase();
+    match key.as_str() {
+        "sound" => open_sound_panel(),
+        other => Err(format!("Unknown settings panel: {}", other)),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn open_sound_panel() -> Result<(), String> {
+    // mmsys.cpl is the classic Sound applet (Recording / Playback /
+    // Sounds / Communications tabs) — exactly where the user needs to
+    // go to match the mic and speakers default formats. control.exe
+    // launches it via the standard Control Panel surface.
+    Command::new("control.exe")
+        .arg("mmsys.cpl")
+        .spawn()
+        .map(|_| { rlog("Opened Sound Control Panel (mmsys.cpl)"); })
+        .map_err(|e| format!("Could not open Sound Control Panel: {}", e))
+}
+
+#[cfg(target_os = "macos")]
+fn open_sound_panel() -> Result<(), String> {
+    // System Settings.app on macOS 13+ ; System Preferences.app on
+    // earlier versions. `open -b` resolves either by bundle id, then
+    // the `x-apple.systempreferences:` URL deep-links into the Sound
+    // pane. Falls back to opening the pref pane file directly when the
+    // URL scheme isn't honoured (very old macOS).
+    let res = Command::new("open")
+        .args(["-b", "com.apple.systempreferences",
+               "x-apple.systempreferences:com.apple.preference.sound"])
+        .spawn();
+    if res.is_ok() {
+        rlog("Opened macOS Sound preferences");
+        return Ok(());
+    }
+    Command::new("open")
+        .arg("/System/Library/PreferencePanes/Sound.prefPane")
+        .spawn()
+        .map(|_| { rlog("Opened Sound.prefPane fallback"); })
+        .map_err(|e| format!("Could not open Sound preferences: {}", e))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_sound_panel() -> Result<(), String> {
+    // Best effort on Linux — desktop environments differ wildly. Try
+    // pavucontrol (PulseAudio mixer) first since it's the most common
+    // sound-format adjustment UI; fall back to gnome-control-center.
+    for (cmd, args) in [
+        ("pavucontrol", vec![]),
+        ("gnome-control-center", vec!["sound"]),
+    ] {
+        if Command::new(cmd).args(&args).spawn().is_ok() {
+            rlog(&format!("Opened {} for sound settings", cmd));
+            return Ok(());
+        }
+    }
+    Err("No supported sound-settings launcher found on this system".to_string())
 }
 
 fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {

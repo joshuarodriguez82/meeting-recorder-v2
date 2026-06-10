@@ -1113,15 +1113,43 @@ class RecordingService:
 
     def _start_session_log(self, session_id: str) -> None:
         try:
-            recordings_dir = Path(self._settings.recordings_dir)
-            recordings_dir.mkdir(parents=True, exist_ok=True)
-            log_path = recordings_dir / f"session_{session_id}.log"
-            handler = logging.FileHandler(str(log_path), encoding="utf-8")
+            # The session log writes to a LOCAL-only temp dir during the
+            # capture, then gets copied to recordings_dir on stop. v2.10.5
+            # moved the WAV temps off cloud-synced recordings_dir to fix
+            # the catastrophic drift bug; we missed this FileHandler.
+            #
+            # The handler is attached to the ROOT logger at DEBUG level,
+            # so every logger.info / logger.debug from ANY thread —
+            # including the sounddevice audio-capture callback — writes
+            # synchronously through this handler. When recordings_dir is
+            # on OneDrive / Google Drive / iCloud, each write blocks on
+            # the cloud sync driver (50–500 ms vs ~50 μs to local NTFS).
+            # The audio ring buffer overflows under the resulting micro-
+            # stalls and samples are dropped on whichever capture thread
+            # logged. Field repro on 2.10.5: 55-min Demo Discussion
+            # Emily session, mic↔loopback drift ~1215 s (≈22 s per min)
+            # — the WAVs were on local temp, but the session log was
+            # still on G:\My Drive\Recordings\.
+            #
+            # Capture path goes to %TEMP%\meeting_recorder_capture\ ;
+            # _stop_session_log copies the finished log to
+            # recordings_dir as a one-shot write that the cloud sync can
+            # absorb without contention.
+            capture_dir = _local_capture_dir()
+            self._session_log_temp = str(
+                capture_dir / f"session_{session_id}.log")
+            self._session_log_final = str(
+                Path(self._settings.recordings_dir).resolve()
+                / f"session_{session_id}.log")
+            handler = logging.FileHandler(
+                self._session_log_temp, encoding="utf-8")
             handler.setLevel(logging.DEBUG)
             handler.setFormatter(logging.Formatter(SESSION_LOG_FMT))
             logging.getLogger().addHandler(handler)
             self._session_log_handler = handler
-            logger.info(f"Session log started: {log_path}")
+            logger.info(
+                f"Session log started: {self._session_log_temp} "
+                f"(will copy to {self._session_log_final} on stop)")
         except Exception as e:
             logger.warning(f"Could not create session log file: {e}")
 
@@ -1131,6 +1159,29 @@ class RecordingService:
             logging.getLogger().removeHandler(self._session_log_handler)
             self._session_log_handler.close()
             self._session_log_handler = None
+            # Copy the local-only temp log into recordings_dir so it
+            # rides cloud sync alongside the WAV and JSON. One-shot
+            # copy, no contention with an active capture thread.
+            src = getattr(self, "_session_log_temp", None)
+            dst = getattr(self, "_session_log_final", None)
+            if src and dst:
+                try:
+                    Path(dst).parent.mkdir(parents=True, exist_ok=True)
+                    import shutil
+                    shutil.copy2(src, dst)
+                    try:
+                        Path(src).unlink()
+                    except OSError:
+                        pass
+                    logger.info(f"Session log copied to {dst}")
+                except Exception as e:
+                    # Non-fatal — the log still exists in the temp dir
+                    # for local debugging; user-visible session content
+                    # (WAV, JSON) is unaffected.
+                    logger.warning(
+                        f"Could not copy session log to {dst}: {e}")
+            self._session_log_temp = None
+            self._session_log_final = None
 
     def _build_audio_path(self, session_id: str) -> str:
         recordings_dir = Path(self._settings.recordings_dir)
