@@ -1433,6 +1433,43 @@ async def get_audio_devices():
     return await asyncio.to_thread(_list_both)
 
 
+@app.get("/audio/sync-risk")
+async def get_audio_sync_risk(mic: str = "", loopback: str = ""):
+    """
+    Compare the Windows shared-mode mix format of the mic vs. the
+    selected System Audio loopback device. The Record-view banner uses
+    this to warn the user about default-format mismatches that cause
+    mic↔loopback drift on long recordings (v2.10.5 field repro: 16-bit
+    mic + 24-bit speakers = ~31 s drift over a 49-min meeting).
+
+    Returns a dict with `ok / level / reason / mic_format /
+    loopback_format / fix_hint`. The frontend renders a banner whenever
+    level != "ok". On non-Windows (or when pycaw is unavailable) we
+    return level="unknown" and the UI hides the banner — the warning
+    can't be authoritative on macOS / Linux where the OS audio stack
+    handles format conversion differently.
+
+    Both query params are optional. When empty (e.g. the user hasn't
+    selected a device yet) we short-circuit to "unknown" so the
+    endpoint stays cheap to poll.
+    """
+    if not mic or not loopback:
+        return {
+            "ok": True, "level": "unknown",
+            "reason": None,
+            "mic_format": None, "loopback_format": None, "fix_hint": None,
+        }
+
+    def _do():
+        from core.audio_format_inspector import (
+            compare_formats, get_device_mix_format,
+        )
+        mic_fmt = get_device_mix_format(mic, "input")
+        loop_fmt = get_device_mix_format(loopback, "output")
+        return compare_formats(mic_fmt, loop_fmt)
+    return await asyncio.to_thread(_do)
+
+
 # ── Calendar ─────────────────────────────────────────────────────────
 def _serialize_meetings(meetings):
     return [{

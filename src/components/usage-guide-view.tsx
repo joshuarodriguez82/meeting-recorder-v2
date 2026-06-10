@@ -250,6 +250,22 @@ const SECTIONS: Section[] = [
           If System Audio is &quot;Skip&quot;, only your voice is captured — not the other participants.
           Enable Stereo Mix in Windows Sound settings or install VB-Cable.
         </Warn>
+        <Warn>
+          <strong>Match the audio formats on long recordings (Windows).</strong>
+          Open <code>mmsys.cpl</code> (or click <em>Open Sound Control Panel</em>
+          in the Record view banner when the app flags a mismatch). On the
+          Recording tab, right-click your mic → Properties → Advanced → set
+          <em>Default Format</em>. On the Playback tab, do the same for your
+          speakers. <strong>Both devices must use the same sample rate AND bit
+          depth</strong> (e.g. both <em>2 channel, 16 bit, 48000 Hz</em>). When
+          they differ — say a 16-bit mic and a 24-bit speaker — the Windows
+          audio engine resamples each side independently, and the mic and
+          system-audio tracks drift apart over the course of a long recording
+          (~30 s on a 50-min meeting, enough to mis-attribute speakers near
+          the end). v2.10.6 detects this automatically and warns above the
+          device pickers, but the underlying setting lives in Sound Control
+          Panel — fix it once per device and it sticks.
+        </Warn>
         <Tip>
           <strong>Auto-record from calendar</strong> (toggle in the Upcoming Meetings card
           header). When on, the app watches your calendar and starts a recording automatically
