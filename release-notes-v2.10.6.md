@@ -1,6 +1,7 @@
-# v2.10.6 — Session log no longer fights the cloud-sync driver during capture, audio-format mismatch warning
+# v2.10.6 — Session log no longer fights the cloud-sync driver during capture, audio-format mismatch warning, bootstrap survives Python 3.13 + tokenizers wheel gap
 
-Two fixes:
+Four fixes (two were rolled into this release after the first
+v2.10.6 ZIP shipped — re-download to get them):
 
 1. **Critical, real-time** — the session log file was still being
    written into `recordings_dir` during active capture even after the
@@ -18,6 +19,24 @@ Two fixes:
    device pickers with the exact mismatch + an **Open Sound Control
    Panel** button. Catches the v2.10.5 follow-on bug that needed two
    round-trips of field repro to diagnose.
+3. **Critical, install-blocker** — the pinned `huggingface_hub==0.23.0`
+   forced pip's resolver to backtrack into `transformers 4.41.x` →
+   `tokenizers 0.19.1`, which has no Python 3.13 wheel and whose sdist
+   fails to build (`pyo3 0.21.2` references
+   `PyUnicode_FromKindAndData` / `PyUnicode_4BYTE_KIND`, both removed
+   from the Python C API in 3.13). Field repro: the first v2.10.6 ZIP
+   wouldn't start on a clean Windows 11 install — the bootstrap died
+   at "no matching distribution found for tokenizers". The pin is now
+   `>=0.23,<1.0`; the `<1.0` upper bound preserves pyannote.audio's
+   `use_auth_token=` requirement.
+4. **Defense-in-depth** — bootstrap's `pip install -r` pass is now
+   best-effort on the upgrade path. If pip trips on an existing venv
+   but the critical modules (`fastapi`, `sounddevice`,
+   `faster_whisper`, `pyannote.audio`, `torch`, `huggingface_hub`)
+   import cleanly, the backend now starts with the existing wheel set
+   and logs the pip warning instead of refusing to launch. Marker
+   stays unwritten so the next launch retries. Fresh venvs still fail
+   hard — nothing to fall back to.
 
 ## Install (macOS)
 
@@ -106,6 +125,53 @@ stays out of the way.
 The Usage Guide gains a new **Warn** block under "Audio routing"
 documenting the matching requirement, in case the runtime detection
 ever fails to fire.
+
+### 3. `huggingface_hub` pin loosened across all three requirements files
+
+`backend/requirements.txt`, `backend/requirements-cpu.txt`, and
+`backend/requirements-mac.txt` now carry:
+
+```
+huggingface_hub>=0.23,<1.0
+```
+
+instead of `==0.23.0`. The upper bound still satisfies pyannote.audio
+3.3.2's `use_auth_token=` requirement (that keyword was removed in
+hf_hub 1.0). The lower bound matches what was already tested. The pip
+resolver is no longer cornered into an unbuildable transformers /
+tokenizers combination on Python 3.13.
+
+Why the strict pin existed in the first place: an earlier release wanted
+to keep the test matrix narrow when pyannote's hf_hub compatibility
+window was unclear. Now that we know the lower bound for
+`use_auth_token=` and the upper bound for hf_hub 1.0 specifically, the
+range pin is both more permissive AND tighter on the actual breakage.
+
+### 4. Bootstrap doesn't fail closed when the existing venv is healthy
+
+`src-tauri/src/lib.rs::bootstrap_app_venv` previously returned an error
+the moment `pip install -r` exited non-zero. For a fresh venv that's
+correct — there are no Python modules installed yet, so a pip failure
+genuinely means the backend can't start. For an UPGRADE from a working
+prior version, however, the existing venv often has every module the
+backend needs at startup, and a pip reverify failure (because the new
+requirements file ran into a resolver quirk on the current pip / Python
+combination) shouldn't be fatal.
+
+The new behavior:
+
+- **Fresh venv + pip install fails** → fatal, as before.
+- **Existing venv + pip install fails + critical modules import** →
+  logged warning, backend starts using the existing wheel set. The
+  marker file is NOT updated, so the install retries on the next
+  launch.
+- **Existing venv + pip install fails + critical modules missing** →
+  fatal, as before. The user gets the same actionable error they'd
+  have gotten on the first v2.10.6 build.
+
+The probe runs `python -c "import fastapi, pydantic, sounddevice,
+soundfile, faster_whisper, pyannote.audio, torch, huggingface_hub"`
+and considers the venv runnable iff every import succeeds.
 
 ## New backend dependency
 
