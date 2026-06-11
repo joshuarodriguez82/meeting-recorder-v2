@@ -31,7 +31,16 @@ sounddevice
 soundfile
 scipy
 faster-whisper
-huggingface_hub==0.23.0
+# Pyannote.audio 3.3.2 needs huggingface_hub <1 for the `use_auth_token=`
+# keyword (removed in 1.0). The previous pin of ==0.23.0 was too strict:
+# Python 3.13 has no wheel for tokenizers 0.19.x, which is what older
+# transformers versions require (and pip backtracks to those when
+# hf_hub is held at exactly 0.23.0 — pyo3 0.21.2 in the tokenizers sdist
+# references PyUnicode_FromKindAndData / PyUnicode_4BYTE_KIND which were
+# removed in 3.13, so the build fails). Allow the full 0.x line so pip
+# can pick a newer hf_hub that ships py313 wheels for everything
+# downstream.
+huggingface_hub>=0.23,<1.0
 torch==2.6.0
 torchaudio==2.6.0
 pyannote.audio==3.3.2
