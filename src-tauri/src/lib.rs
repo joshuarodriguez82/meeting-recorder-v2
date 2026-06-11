@@ -746,6 +746,18 @@ fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBu
     // fresh venv this is the slow part (3–5 min, ~1.5 GB of wheels). On
     // an upgrade where one package was added (e.g. sentence-transformers)
     // it's tens of seconds.
+    //
+    // FAILURE POLICY: A pip install failure is FATAL on a fresh venv (no
+    // Python modules installed yet — there's nothing to fall back to) but
+    // SOFT on an upgrade where an older venv already had working
+    // dependencies. The v2.10.6 install failure (huggingface_hub==0.23.0
+    // forcing pip to backtrack into Python-3.13-unbuildable tokenizers
+    // 0.19.1) bricked the bootstrap end-to-end even on machines whose
+    // existing venv from v2.10.5 was perfectly capable of running the
+    // backend. We now ask Python directly whether the critical modules
+    // import; if they do, the pip install miss becomes a logged warning
+    // instead of a hard refusal to start.
+    let was_fresh_venv = venv_py_existing.is_none();
     rlog(&format!("Bootstrap: pip install -r {} (see bootstrap.log)", req_name));
     let (out, err) = open_log()?;
     let t0 = std::time::Instant::now();
@@ -766,9 +778,29 @@ fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBu
     no_window(&mut c);
     let status = c.status().map_err(|e| format!("pip install cmd failed: {}", e))?;
     if !status.success() {
+        let elapsed = t0.elapsed().as_secs_f32();
+        if was_fresh_venv {
+            return Err(format!(
+                "pip install exited with {} after {:.0}s (see bootstrap.log)",
+                status, elapsed));
+        }
+        // Upgrade path: the existing venv may still be runnable. Probe
+        // the critical imports before declaring the backend dead.
+        rlog(&format!(
+            "Bootstrap: pip install exited with {} after {:.0}s on an \
+             existing venv — probing whether the venv can still run the \
+             backend before failing closed", status, elapsed));
+        if critical_modules_import(&venv_py) {
+            rlog("Bootstrap: critical modules import OK — continuing \
+                  with the existing venv (pip-install failure logged but \
+                  not fatal). The marker file is NOT updated, so the \
+                  next launch will retry the install.");
+            return Ok(venv);
+        }
         return Err(format!(
-            "pip install exited with {} after {:.0}s (see bootstrap.log)",
-            status, t0.elapsed().as_secs_f32()));
+            "pip install exited with {} after {:.0}s and the existing \
+             venv is missing critical modules (see bootstrap.log)",
+            status, elapsed));
     }
     rlog(&format!("Bootstrap: pip install completed in {:.0}s",
         t0.elapsed().as_secs_f32()));
@@ -781,6 +813,50 @@ fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBu
     }
 
     Ok(venv)
+}
+
+/// Ask the venv's Python whether the modules the backend hard-requires
+/// at startup are importable. Used by `bootstrap_app_venv` to decide
+/// whether a pip-install failure on an existing venv is recoverable
+/// (the venv can still serve the backend) or terminal (the backend
+/// would crash anyway, so surface the pip error instead).
+///
+/// The list mirrors the imports that fail loudest in `backend/server.py`
+/// and `backend/services/recording_service.py` — fastapi for the HTTP
+/// surface, pyannote for diarization, faster_whisper for transcription,
+/// sounddevice + soundfile for capture, torch for the ML stack. If any
+/// of these is missing we let the original pip error stand.
+fn critical_modules_import(venv_py: &std::path::Path) -> bool {
+    let probe = "\
+import importlib, sys\n\
+mods = ['fastapi', 'pydantic', 'sounddevice', 'soundfile', \
+'faster_whisper', 'pyannote.audio', 'torch', 'huggingface_hub']\n\
+missing = []\n\
+for m in mods:\n\
+    try:\n\
+        importlib.import_module(m)\n\
+    except Exception as e:\n\
+        missing.append(f'{m}: {e!r}')\n\
+if missing:\n\
+    sys.stderr.write('\\n'.join(missing) + '\\n')\n\
+    sys.exit(1)\n";
+    let mut c = Command::new(venv_py);
+    c.args(["-c", probe]);
+    // Pipe stderr into bootstrap.log so a partial import failure leaves
+    // breadcrumbs for the next session to follow.
+    if let Ok(f) = OpenOptions::new().create(true).append(true).open(log_dir().join("bootstrap.log")) {
+        if let Ok(f2) = f.try_clone() {
+            c.stdout(Stdio::from(f)).stderr(Stdio::from(f2));
+        }
+    }
+    no_window(&mut c);
+    match c.status() {
+        Ok(s) => s.success(),
+        Err(e) => {
+            rlog(&format!("critical_modules_import: launching probe failed: {}", e));
+            false
+        }
+    }
 }
 
 /// Get the log directory. Same as data_root_dir on every platform —
