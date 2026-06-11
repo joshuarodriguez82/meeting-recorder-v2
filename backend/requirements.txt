@@ -18,15 +18,21 @@ soundfile
 scipy
 matplotlib
 faster-whisper
-huggingface_hub==0.23.0
+# Pyannote.audio 3.3.2 needs huggingface_hub <1 for the `use_auth_token=`
+# keyword (removed in 1.0). The previous pin of ==0.23.0 was too strict:
+# Python 3.13 has no wheel for tokenizers 0.19.x, which is what older
+# transformers versions require (and pip backtracks to those when
+# hf_hub is held at exactly 0.23.0). Allow the full 0.x line so pip can
+# pick a newer hf_hub that ships py313 wheels for everything downstream.
+huggingface_hub>=0.23,<1.0
 pyannote.audio==3.3.2
 numpy==2.1.3
 sentence-transformers>=2.7.0,<3
-# Constraint pin: pyannote.audio 3.3.2 calls hf_hub_download with the
-# pre-1.0 `use_auth_token=` keyword. huggingface_hub 1.x renamed it to
-# `token=` and breaks pyannote at import. sentence-transformers 3.x+
-# transitively requires huggingface_hub>=1.5, which is incompatible.
-# Stay in the 2.x line until pyannote ships a fix.
+# pyannote.audio 3.3.2 calls hf_hub_download with the pre-1.0
+# `use_auth_token=` keyword. huggingface_hub 1.x renamed it to `token=`
+# and breaks pyannote at import. sentence-transformers 3.x+ transitively
+# requires huggingface_hub>=1.5, which is incompatible. Stay in the 0.x
+# line until pyannote ships a fix.
 transformers<5
 
 # Windows-only: COM bridges + WASAPI loopback.
