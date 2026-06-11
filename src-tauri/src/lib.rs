@@ -671,6 +671,11 @@ fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBu
         Ok((f, f2))
     };
 
+    // Capture whether we're about to create a fresh venv BEFORE the
+    // match below moves `venv_py_existing` out — used downstream by the
+    // pip-install failure policy (fresh → fatal, upgrade → best-effort).
+    let was_fresh_venv = venv_py_existing.is_none();
+
     let venv_py = match venv_py_existing {
         Some(p) => p,
         None => {
@@ -757,7 +762,6 @@ fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBu
     // backend. We now ask Python directly whether the critical modules
     // import; if they do, the pip install miss becomes a logged warning
     // instead of a hard refusal to start.
-    let was_fresh_venv = venv_py_existing.is_none();
     rlog(&format!("Bootstrap: pip install -r {} (see bootstrap.log)", req_name));
     let (out, err) = open_log()?;
     let t0 = std::time::Instant::now();
