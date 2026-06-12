@@ -64,15 +64,25 @@ jobs:
           NEXT_TELEMETRY_DISABLED: "1"
 
   backend:
-    name: Backend (compile)
+    name: Backend (compile · test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
       - name: Byte-compile backend
         run: python -m compileall -q backend
+      # The data-loss suite: audio finalization, crash recovery, session
+      # persistence (backend/tests). Deliberately needs only numpy /
+      # scipy / soundfile — no torch, no whisper, no pyannote — so it
+      # installs and runs in well under a minute. Heavier integration
+      # tests belong in a separate, optional job when they exist.
+      - name: Install test dependencies
+        run: pip install numpy scipy soundfile pytest
+      - name: Run backend tests
+        run: python -m pytest backend/tests -q
 
   rust:
     name: Rust (${{ matrix.platform }})
