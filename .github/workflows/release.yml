@@ -46,8 +46,47 @@ permissions:
   contents: write
 
 jobs:
+  # Fail-fast gate for the v2.7.5/2.7.6/2.7.7 class of bug: three
+  # releases in a row tagged the same stale commit, so every artifact
+  # was built from old code while the release page claimed a new
+  # version. The tag-driven workflow trusted the tag blindly. This job
+  # verifies the tagged TREE actually carries the version the tag
+  # claims — if tauri.conf.json.version != the tag (leading `v`
+  # stripped), nothing builds and the mismatch is named in the log.
+  # Runs in seconds on the cheapest runner; the build matrix only
+  # starts after it passes.
+  verify-version:
+    name: Verify tag matches tauri.conf.json
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Compare tag to tauri.conf.json version
+        shell: bash
+        env:
+          # Tag pushes: github.ref_name is the tag. Manual dispatch:
+          # use the `tag` input; when it's blank (dry-run of whatever
+          # ref was checked out) the check is skipped — there's no tag
+          # to be inconsistent with.
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+        run: |
+          if [ -z "$TAG" ]; then
+            echo "No tag in play (manual dispatch without a tag input) — skipping."
+            exit 0
+          fi
+          CONF_VERSION=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          TAG_VERSION="${TAG#v}"
+          echo "tag=$TAG → expected version=$TAG_VERSION"
+          echo "tauri.conf.json version=$CONF_VERSION (at $GITHUB_SHA)"
+          if [ "$CONF_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error file=src-tauri/tauri.conf.json::Tag $TAG points at a tree whose tauri.conf.json says $CONF_VERSION. The tag was almost certainly pushed against a stale commit (the 2.7.5–2.7.7 failure mode). Re-tag the right SHA: git tag -f $TAG <sha> && git push -f origin $TAG"
+            exit 1
+          fi
+          echo "Version gate passed."
+
   build:
     name: Build (${{ matrix.label }})
+    needs: verify-version
     strategy:
       fail-fast: false
       matrix:
