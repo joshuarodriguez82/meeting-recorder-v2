@@ -48,11 +48,52 @@ fn backend_port() -> u16 {
     *BACKEND_PORT.get_or_init(pick_free_port)
 }
 
+/// Per-launch shared secret between the three trusted parties: this
+/// shell, the Python sidecar, and the WebView frontend. The sidecar
+/// binds 127.0.0.1 only, but localhost is not an auth boundary — any
+/// webpage in any browser on the machine can fetch http://127.0.0.1:*
+/// and, before this token existed, read transcripts or start
+/// recordings. The token closes that: Python rejects any request that
+/// doesn't present it, and only the two channels below ever carry it
+/// (env var to the child process, Tauri IPC to the frontend) — neither
+/// is reachable from a foreign web page.
+///
+/// Regenerated on every app launch; never persisted to disk.
+static BACKEND_TOKEN: OnceLock<String> = OnceLock::new();
+
+fn generate_backend_token() -> String {
+    // 32 bytes from the OS CSPRNG, hex-encoded (64 chars). getrandom is
+    // the same primitive `rand` sits on top of — no need for the bigger
+    // crate just to fill one buffer.
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .expect("OS CSPRNG unavailable — cannot generate backend auth token");
+    let mut token = String::with_capacity(64);
+    for b in bytes {
+        token.push_str(&format!("{:02x}", b));
+    }
+    token
+}
+
+fn backend_token() -> &'static str {
+    BACKEND_TOKEN.get_or_init(generate_backend_token)
+}
+
 /// Tauri command surfaced to the frontend. Called once on app start
 /// (see api.ts → getBaseUrl) so the JS knows where the backend lives.
 #[tauri::command]
 fn get_backend_port() -> u16 {
     backend_port()
+}
+
+/// Tauri command surfaced to the frontend. Called once on app start
+/// (see api.ts → getAuthToken); every backend request must carry this
+/// value, either as `Authorization: Bearer <token>` or — for the
+/// header-less consumers (EventSource, <audio>/<img> src) — as a
+/// `?token=` query parameter.
+#[tauri::command]
+fn get_backend_token() -> String {
+    backend_token().to_string()
 }
 
 /// Set while bootstrap_app_venv is running (can take several minutes on
@@ -950,6 +991,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             restart_backend,
             get_backend_port,
+            get_backend_token,
             capture_screenshot,
             download_and_run_update,
             open_external,
@@ -1499,6 +1541,9 @@ fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
        // MEETING_RECORDER_PORT and falls back to 17645 only if it's
        // unset (e.g. running standalone for debugging).
        .env("MEETING_RECORDER_PORT", port.to_string())
+       // Per-launch shared secret — the sidecar refuses any request
+       // that doesn't present it. See BACKEND_TOKEN docs above.
+       .env("MEETING_RECORDER_TOKEN", backend_token())
        // Pass our (Tauri shell) PID so the Python backend can watch
        // for our death. If the shell exits without cleanly killing
        // the backend (force-quit, crash, BSOD), the backend's

@@ -27,6 +27,48 @@ function getBaseUrl(): Promise<string> {
 }
 
 /**
+ * Per-launch shared secret between the Tauri shell, the Python sidecar,
+ * and this frontend (lib.rs::generate_backend_token). 127.0.0.1 is not
+ * an auth boundary — any browser tab on the machine can reach the
+ * sidecar's port — so every request must present this token. Resolved
+ * once and cached, same lifecycle as the port. Empty string outside
+ * Tauri (plain `npm run dev`), where the manually-started backend has
+ * no MEETING_RECORDER_TOKEN env var and runs with auth disabled.
+ */
+let _authTokenPromise: Promise<string> | null = null;
+
+function getAuthToken(): Promise<string> {
+  if (_authTokenPromise) return _authTokenPromise;
+  _authTokenPromise = (async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      return await invoke<string>("get_backend_token");
+    } catch {
+      return "";
+    }
+  })();
+  return _authTokenPromise;
+}
+
+/**
+ * `?token=...` (or `&token=...`) suffix for endpoints consumed without
+ * request headers: EventSource and <audio>/<img> `src` URLs. Everything
+ * that goes through fetch should use the Authorization header instead —
+ * query strings end up in uvicorn's access log on the user's machine.
+ */
+async function authQuery(hasQuery = false): Promise<string> {
+  const token = await getAuthToken();
+  if (!token) return "";
+  return `${hasQuery ? "&" : "?"}token=${encodeURIComponent(token)}`;
+}
+
+/** Authorization header for the fetch paths (request + the SSE POSTs). */
+async function authHeaders(): Promise<Record<string, string>> {
+  const token = await getAuthToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+/**
  * Open an http(s) URL in the user's real browser. A plain
  * <a target="_blank"> does nothing in the Tauri webview, so the
  * "Join meeting" link (and any external link) needs this. Falls back
@@ -293,8 +335,12 @@ export class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const baseUrl = await getBaseUrl();
   const res = await fetch(`${baseUrl}${path}`, {
-    headers: { "Content-Type": "application/json" },
     ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(await authHeaders()),
+      ...(init?.headers ?? {}),
+    },
   });
   if (!res.ok) {
     const ct = res.headers.get("content-type") || "";
@@ -533,6 +579,9 @@ export const api = {
   // callers that need the URL directly — most notably the live
   // transcript SSE EventSource, which can't go through `request`.
   getBaseUrl,
+  // Auth-token suffix for header-less consumers (EventSource, <audio>/
+  // <img> src). Pass hasQuery=true when the path already contains `?`.
+  authQuery,
   health: () => request<{ status: string; version: string }>("/health"),
   // Templates
   getTemplates: () => request<TemplateEntry[]>("/templates"),
@@ -895,7 +944,10 @@ export const api = {
       try {
         const res = await fetch(`${await getBaseUrl()}/qa/stream`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(await authHeaders()),
+          },
           body: JSON.stringify(body),
           signal: controller.signal,
         });
@@ -972,7 +1024,10 @@ export const api = {
       try {
         const res = await fetch(`${await getBaseUrl()}/qa/inline-stream`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(await authHeaders()),
+          },
           body: JSON.stringify(body),
           signal: controller.signal,
         });
