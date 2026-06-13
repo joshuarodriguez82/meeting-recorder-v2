@@ -347,13 +347,91 @@ logger = get_logger(__name__)
 
 app = FastAPI(title="Meeting Recorder Backend", version="2.0.0")
 
+# Only the Tauri WebView (and the Next dev server during `npm run dev`)
+# are legitimate browsers for this API. The old `allow_origins=["*"]`
+# meant any webpage the user visited could read responses from
+# 127.0.0.1 — combined with no auth, that was a drive-by exfiltration
+# surface. CORS is the first layer; the token middleware below is the
+# real boundary (CORS doesn't stop non-browser clients or no-cors
+# state-changing requests).
+_ALLOWED_ORIGINS = [
+    "http://tauri.localhost",    # Tauri v2 WebView origin on Windows
+    "https://tauri.localhost",
+    "tauri://localhost",         # Tauri v2 WebView origin on macOS/Linux
+    "http://localhost:3000",     # `npm run dev` against a manual backend
+    "http://127.0.0.1:3000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Sidecar auth ─────────────────────────────────────────────────────
+#
+# Binding to 127.0.0.1 keeps remote hosts out but NOT other local
+# processes or webpages — any browser tab can fetch http://127.0.0.1:*.
+# The Tauri shell generates a per-launch random token
+# (lib.rs::generate_backend_token), hands it to us via the
+# MEETING_RECORDER_TOKEN env var and to the frontend via the
+# get_backend_token IPC command. Every request must present it:
+#
+#   - Authorization: Bearer <token>   (the api.ts request wrapper)
+#   - ?token=<token>                  (EventSource and <audio>/<img>
+#                                      src URLs, which can't set headers)
+#
+# When the env var is absent (manual `python server.py` for debugging,
+# same convention as MEETING_RECORDER_PORT) auth is disabled with a
+# loud warning rather than locking the developer out.
+#
+# /health stays open: it's the liveness probe and carries nothing
+# sensitive — same reasoning as exposing a dial-tone test number.
+
+_AUTH_TOKEN = os.environ.get("MEETING_RECORDER_TOKEN", "").strip()
+_AUTH_EXEMPT_PATHS = frozenset({"/health"})
+
+if not _AUTH_TOKEN:
+    logger.warning(
+        "MEETING_RECORDER_TOKEN is not set — API auth is DISABLED. "
+        "Expected only when running server.py standalone for debugging; "
+        "the packaged app always injects the token.")
+
+
+def _request_presents_token(request: Request) -> bool:
+    """True if the request carries the shared token in either channel."""
+    import secrets as _secrets
+
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        presented = auth_header[len("Bearer "):].strip()
+        if presented and _secrets.compare_digest(presented, _AUTH_TOKEN):
+            return True
+    query_token = request.query_params.get("token", "")
+    return bool(query_token) and _secrets.compare_digest(query_token, _AUTH_TOKEN)
+
+
+@app.middleware("http")
+async def require_backend_token(request: Request, call_next):
+    if not _AUTH_TOKEN or request.method == "OPTIONS" \
+            or request.url.path in _AUTH_EXEMPT_PATHS \
+            or _request_presents_token(request):
+        return await call_next(request)
+    # RFC 7807 body, matching every other error path in this file.
+    return JSONResponse(
+        status_code=401,
+        media_type="application/problem+json",
+        content={
+            "type": "tag:meeting-recorder/errors/unauthorized",
+            "title": "Unauthorized",
+            "status": 401,
+            "detail": "Missing or invalid backend auth token.",
+            "instance": str(request.url.path),
+        },
+    )
 
 
 # ── RFC 7807 Problem Details ────────────────────────────────────────

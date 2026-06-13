@@ -140,8 +140,10 @@ export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
       // resolve it dynamically — the old hardcoded 17645 only worked
       // by accident on pre-dynamic-port builds.
       const baseUrl = await api.getBaseUrl();
+      // EventSource can't set headers — token goes via query param.
+      const authQ = await api.authQuery();
       if (cancelled) return;
-      es = new EventSource(`${baseUrl}/recording/transcript/stream`);
+      es = new EventSource(`${baseUrl}/recording/transcript/stream${authQ}`);
 
       es.onopen = () => {
         attempt = 0;
