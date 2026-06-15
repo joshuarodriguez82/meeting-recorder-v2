@@ -21,6 +21,12 @@
     "dialog:allow-open",
     "dialog:allow-ask",
     "dialog:allow-confirm",
-    "dialog:allow-message"
+    "dialog:allow-message",
+    {
+      "identifier": "http:default",
+      "allow": [
+        { "url": "https://api.github.com/*" }
+      ]
+    }
   ]
 }
