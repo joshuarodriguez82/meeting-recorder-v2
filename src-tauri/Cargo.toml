@@ -25,6 +25,9 @@ tauri = { version = "2.10.3", features = ["devtools"] }
 tauri-plugin-log = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
+# OS CSPRNG for the per-launch backend auth token (lib.rs::generate_backend_token).
+# Lowest-level primitive available — already in the dependency tree via Tauri.
+getrandom = "0.2"
 
 # macOS-only deps for the EventKit calendar bridge. Python's pyobjc
 # can't access EventKit reliably because the venv'd Python at
