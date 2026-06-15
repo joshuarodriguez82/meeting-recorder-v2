@@ -3,7 +3,8 @@
 # Triggered by pushing a tag matching v*.*.* (e.g. `git tag v2.1.0 &&
 # git push --tags`). Each matrix entry builds a native installer and
 # uploads to the GitHub Release named after the tag. Body is sourced
-# from release-notes-vX.Y.Z.md if present; otherwise GitHub's auto-
+# from docs/release-notes/release-notes-vX.Y.Z.md if present;
+# otherwise GitHub's auto-
 # generated notes win.
 #
 # Platforms:
@@ -263,10 +264,11 @@ jobs:
         # workflow_dispatch produces artifacts but doesn't publish.
         if: startsWith(github.ref, 'refs/tags/v')
         with:
-          # release-notes-vX.Y.Z.md is the canonical body source per
+          # docs/release-notes/release-notes-vX.Y.Z.md is the canonical
+          # body source per
           # this repo's convention. If the file is missing the action
           # falls back to GitHub's auto-generated notes.
-          body_path: release-notes-${{ github.ref_name }}.md
+          body_path: docs/release-notes/release-notes-${{ github.ref_name }}.md
           fail_on_unmatched_files: false
           files: artifacts/*
           # Auto-publish on tag push. Pipeline has been steady and the
