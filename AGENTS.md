@@ -6,7 +6,7 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 # Release notes must always include macOS install commands
 
-Every `release-notes-vX.Y.Z.md` file MUST contain the Mac Gatekeeper-bypass instructions in a callout block near the top. The build is unsigned, so users hit "damaged and can't be opened" on first launch and need explicit guidance.
+Release notes live at `docs/release-notes/release-notes-vX.Y.Z.md` (moved out of the repo root in June 2026 — 47 of them were the first thing anyone saw cloning the repo; release.yml's body_path points at the new location). Every release-notes file MUST contain the Mac Gatekeeper-bypass instructions in a callout block near the top. The build is unsigned, so users hit "damaged and can't be opened" on first launch and need explicit guidance.
 
 We ship the macOS app as a **ditto-zipped `.app`** (`Meeting.Recorder_X.Y.Z_universal.zip`), not a `.dmg`. Tauri's `bundle_dmg.sh` is chronically broken on the macos-14 GitHub Actions runner — its AppleScript-against-Finder layout step gives up silently in the headless CI environment. The workflow builds with `--bundles app` and `ditto`-zips the bundle. Apple recommends ditto for un-notarized distribution because it preserves extended attributes and (future) code signatures.
 
