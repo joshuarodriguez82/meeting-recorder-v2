@@ -3645,9 +3645,20 @@ async def process_session(session_id: str):
     # background auto-process cross-contaminates session transcripts.
     try:
         async with _PROCESSING_LOCK:
-            svc.recording_svc.set_session(session)
+            # DATA-LOSS FIX (2026-06-15): pass session EXPLICITLY into
+            # process_session(). The old `set_session(...)` + parameter-
+            # less process_session() pair mutated the shared
+            # recording_svc._session reference, which a concurrent
+            # start_recording would then reassign — and the in-flight
+            # process_session would write segments onto the WRONG
+            # session object. set_session() still exists for legitimate
+            # external-session callers (recovery), but the processing
+            # path doesn't need it now that process_session takes the
+            # session as a parameter. svc.current_session also stays —
+            # it's used by status / live-transcript endpoints that
+            # genuinely want "the actively-recording session".
             svc.current_session = session
-            result = await svc.recording_svc.process_session()
+            result = await svc.recording_svc.process_session(session)
         # Auto-name speakers from explicit introductions / direct-address
         # hand-offs and persist their voiceprints to the known-speakers
         # store so the next meeting auto-matches them. Best-effort — a
@@ -4011,10 +4022,13 @@ async def process_full(session_id: str, req: ProcessFullRequest):
             if not session:
                 raise HTTPException(status_code=404, detail="Session not found")
             if not session.segments:
-                svc.recording_svc.set_session(session)
+                # DATA-LOSS FIX (2026-06-15): see the long-form comment in
+                # the manual /sessions/{id}/process handler. Pass session
+                # by parameter so a concurrent start_recording cannot
+                # alias recording_svc._session out from under us.
                 svc.current_session = session
                 try:
-                    session = await svc.recording_svc.process_session()
+                    session = await svc.recording_svc.process_session(session)
                     try:
                         await _auto_identify_and_save_speakers(session)
                     except Exception as e:

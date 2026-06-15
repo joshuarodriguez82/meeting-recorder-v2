@@ -434,6 +434,23 @@ class RecordingService:
         stop_t0 = _t.monotonic()
         logger.info("[stop] begin")
 
+        # DATA-LOSS FIX (field repro 2026-06-15): snapshot `self._session`
+        # into a LOCAL variable at the top of stop_recording. The prior
+        # implementation read `self._session` ~25 times across the stop
+        # path (audio_path assignment, ended_at, sync-integrity stamping,
+        # final-path computation). If a concurrent processing path called
+        # `set_session(other)` while stop_recording was running (the
+        # exact race that fired on 2026-06-15 when VDL's auto-process
+        # called set_session(VDL) mid-Hooli-recording), every later
+        # `self._session` read would resolve to the WRONG session — and
+        # `_build_audio_path(self._session.session_id)` then wrote
+        # Hooli's audio to VDL's WAV path, while `self._session.ended_at
+        # = ...` stamped VDL's JSON with Hooli's stop time. Both halves
+        # of the visible bug came from this single shared-mutable-state
+        # read. Capture `_session` exactly once here; the local survives
+        # any concurrent reassignment.
+        session = self._session
+
         self._recording = False
         # Grab the per-stream wallclock anchors before tearing the capture
         # down. If both arrived (mic always does; loopback only when system
@@ -489,13 +506,13 @@ class RecordingService:
                 self._wav_writer = None
         logger.info(f"[stop] close mic WAV done in {_t.monotonic()-t:.1f}s")
 
-        if self._session and self._chunk_count > 0 and self._wav_temp_path:
+        if session and self._chunk_count > 0 and self._wav_temp_path:
             # Stream-merge mic + loopback into final WAV with bounded memory.
             # Earlier versions sf.read() both files fully into RAM before
             # mixing — a 36-minute 48kHz session allocates ~2-3 GB and can
             # trigger a native STATUS_ACCESS_VIOLATION on stop (lost session).
             loopback_path = getattr(self, '_loopback_temp_path', None)
-            final_path = self._build_audio_path(self._session.session_id)
+            final_path = self._build_audio_path(session.session_id)
             logger.info(
                 f"[stop] finalize_recording_streaming → {final_path} …")
             t = _t.monotonic()
@@ -507,8 +524,8 @@ class RecordingService:
                     target_sr=TARGET_SR,
                     loopback_start_offset_s=loopback_start_offset_s,
                 )
-                self._session.audio_path = final_path
-                self._session.ended_at = datetime.now()
+                session.audio_path = final_path
+                session.ended_at = datetime.now()
                 self._on_status("Recording saved. Ready to process.")
                 logger.info(
                     f"Audio saved to {final_path} ({duration_s:.1f}s)")
@@ -529,11 +546,11 @@ class RecordingService:
                 # Tolerance is 10% — small differences are normal
                 # (final-write buffering, sample-rate rounding); 30+%
                 # is the failure mode we're guarding against.
-                self._session.audio_actual_duration_s = float(duration_s)
+                session.audio_actual_duration_s = float(duration_s)
                 expected_s = (
-                    self._session.ended_at - self._session.started_at
-                ).total_seconds() if self._session.started_at else 0.0
-                self._session.audio_expected_duration_s = float(expected_s)
+                    session.ended_at - session.started_at
+                ).total_seconds() if session.started_at else 0.0
+                session.audio_expected_duration_s = float(expected_s)
                 if expected_s > 30.0:
                     # Only check when the recording was substantial
                     # (>30s); short test recordings have too much
@@ -552,10 +569,10 @@ class RecordingService:
                             f"{expected_min:.0f}-min recording — about "
                             f"{lost_min:.0f} min appears to be missing."
                         )
-                        self._session.audio_integrity_warning = msg
+                        session.audio_integrity_warning = msg
                         logger.critical(
                             f"AUDIO_INTEGRITY: session "
-                            f"{self._session.session_id}: actual="
+                            f"{session.session_id}: actual="
                             f"{duration_s:.1f}s expected={expected_s:.1f}s "
                             f"deficit={deficit_ratio*100:.0f}%")
                     elif duration_s > expected_s * 1.10:
@@ -564,7 +581,7 @@ class RecordingService:
                         # don't warn user; this case is rarer.
                         logger.warning(
                             f"AUDIO_INTEGRITY: session "
-                            f"{self._session.session_id} wav is longer "
+                            f"{session.session_id} wav is longer "
                             f"than wall-clock — actual={duration_s:.1f}s "
                             f"expected={expected_s:.1f}s (possible stale "
                             f"file concat).")
@@ -593,7 +610,7 @@ class RecordingService:
                         drift = (abs(mic_secs - (lb_secs + offset))
                                  if lb_secs is not None else None)
                         logger.info(
-                            f"SYNC_INTEGRITY: session {self._session.session_id} "
+                            f"SYNC_INTEGRITY: session {session.session_id} "
                             f"mic={mic_secs:.1f}s "
                             f"lb={('%.1fs' % lb_secs) if lb_secs is not None else 'n/a'} "
                             f"window={expected_s:.1f}s mic_gap={mic_gap:.1f}s "
@@ -613,12 +630,12 @@ class RecordingService:
                             bits.append(
                                 f"{mic_ovf + lb_ovf} buffer overflow(s) during capture")
                         if bits:
-                            self._session.sync_warning = (
+                            session.sync_warning = (
                                 "Sync integrity: " + "; ".join(bits) + ".")
                             logger.warning(
                                 f"SYNC_INTEGRITY WARNING: session "
-                                f"{self._session.session_id}: "
-                                f"{self._session.sync_warning}")
+                                f"{session.session_id}: "
+                                f"{session.sync_warning}")
                 except Exception as e:
                     logger.warning(f"sync-integrity measurement failed: {e}")
             except Exception as e:
@@ -631,7 +648,7 @@ class RecordingService:
                 # KEEP_AUDIO_TEMPS=1 preserves them for offline AEC validation
                 # via backend/scripts/measure_aec.py.
                 keep_temps = os.environ.get("KEEP_AUDIO_TEMPS") == "1"
-                if self._session.audio_path and not keep_temps:
+                if session.audio_path and not keep_temps:
                     for temp in (self._wav_temp_path, loopback_path):
                         if temp and Path(temp).exists():
                             try:
@@ -642,7 +659,7 @@ class RecordingService:
                     logger.info(
                         "[stop] KEEP_AUDIO_TEMPS=1 set — preserving "
                         f"{self._wav_temp_path} + {loopback_path}")
-        elif self._session and self._chunk_count == 0:
+        elif session and self._chunk_count == 0:
             logger.warning("Recording stopped with no audio chunks captured.")
             self._on_status("No audio was captured. Try again.")
 
@@ -650,10 +667,34 @@ class RecordingService:
         self._stop_session_log()
         logger.info(
             f"[stop] complete in {_t.monotonic()-stop_t0:.1f}s")
-        return self._session
+        return session
 
-    async def process_session(self) -> Session:
-        if not self._session or not self._session.audio_path:
+    async def process_session(self, session: Optional[Session] = None) -> Session:
+        # DATA-LOSS FIX (field repro 2026-06-15): every reference inside
+        # this method used to read `self._session`. If a NEW recording
+        # started while this process_session() was awaiting transcribe /
+        # diarize, start_recording would do `self._session = Session(new)`
+        # and the in-flight pipeline would silently switch to operating
+        # on the WRONG session — the new recording's session object got
+        # the previous meeting's transcript, and the original meeting's
+        # WAV got overwritten by the new meeting's audio when stop_
+        # recording later finalized through the now-aliased reference.
+        # Field repro on 2026-06-15: VDL Training (56105413) had its
+        # session_56105413.wav overwritten by the next meeting's 32-min
+        # audio, and the Hooli session ended up with VDL's transcript +
+        # summary attached. Hooli's session log carries the smoking gun:
+        #   [stop] finalize_recording_streaming → ...\session_56105413.wav
+        # written from inside Hooli's stop, because Hooli's `_session`
+        # had been reassigned to VDL by the auto-process path that ran
+        # while Hooli was still recording.
+        #
+        # The fix is to never read `self._session` here — the caller
+        # passes the exact session to process. The optional default
+        # keeps backwards compatibility for any direct call site, but
+        # both call sites in server.py now pass the session explicitly.
+        if session is None:
+            session = self._session
+        if not session or not session.audio_path:
             raise RuntimeError("No recorded session to process.")
         if not self.can_process:
             raise RuntimeError(
@@ -671,7 +712,7 @@ class RecordingService:
         # local. Raises a clear, actionable error if it genuinely can't
         # be read.
         await asyncio.to_thread(
-            _ensure_audio_available, self._session.audio_path)
+            _ensure_audio_available, session.audio_path)
 
         self._on_status("__stage:transcribe:active__")
         # Bias Whisper toward the user's domain vocabulary when a glossary
@@ -684,11 +725,11 @@ class RecordingService:
             except Exception as e:
                 logger.warning(f"terminology initial_prompt build failed: {e}")
         raw_segments = await self._transcription.transcribe(
-            self._session.audio_path, initial_prompt=initial_prompt)
+            session.audio_path, initial_prompt=initial_prompt)
 
         if not raw_segments:
             self._on_status("Transcription produced no output. Check audio quality.")
-            return self._session
+            return session
 
         # Post-transcription correction of known mis-hears (Genesys,
         # CCaaS, UCCX, MEDDIC, ...) so the canonical spelling propagates
@@ -702,7 +743,7 @@ class RecordingService:
                 logger.warning(f"terminology correction pass failed: {e}")
 
         self._on_status("__stage:transcribe:done____stage:diarize:active__")
-        diarization_turns = await self._diarization.diarize(self._session.audio_path)
+        diarization_turns = await self._diarization.diarize(session.audio_path)
 
         self._on_status("__stage:diarize:done____stage:speakers:active__")
         attributed = DiarizationEngine.assign_speakers(raw_segments, diarization_turns)
@@ -714,17 +755,17 @@ class RecordingService:
         # one session (the wrong transcript got tacked onto the right one,
         # then summarized as a blend). Clear segments + speakers first so
         # the result reflects exactly this diarization pass.
-        self._session.segments = []
-        self._session.speakers = {}
+        session.segments = []
+        session.speakers = {}
         for raw in attributed:
-            speaker = self._session.get_or_create_speaker(raw["speaker_id"])
+            speaker = session.get_or_create_speaker(raw["speaker_id"])
             segment = Segment(
                 speaker_id=speaker.speaker_id,
                 start=raw["start"],
                 end=raw["end"],
                 text=raw["text"],
             )
-            self._session.segments.append(segment)
+            session.segments.append(segment)
 
         # Speaker fingerprinting: compute per-speaker centroid embeddings
         # from the diarization turns, then look up matches in the
@@ -732,25 +773,34 @@ class RecordingService:
         # logged and the session is still saved with bare SPEAKER_XX
         # labels (i.e. v1 behaviour).
         try:
-            self._fingerprint_speakers(diarization_turns)
+            self._fingerprint_speakers(diarization_turns, session)
         except Exception as e:
             logger.exception(f"Speaker fingerprinting failed: {e}")
 
         self._on_status("Processing complete.")
-        logger.info(f"Session {self._session.session_id} processing complete.")
-        return self._session
+        logger.info(f"Session {session.session_id} processing complete.")
+        return session
 
-    def _fingerprint_speakers(self, diarization_turns: List[dict]) -> None:
+    def _fingerprint_speakers(
+        self, diarization_turns: List[dict],
+        session: Optional[Session] = None,
+    ) -> None:
         """Extract per-speaker centroids from the audio + diarization
         turns, attach them to each Speaker object, and apply any matches
         from the persistent profile store as auto-renames awaiting user
         confirmation.
 
         Called from process_session() after segments + speakers are
-        populated. Safe to call when self._profile_service is None
-        (skips matching, still computes + stores embeddings so a future
-        session can match them later if profiling gets enabled)."""
-        if not self._session or not self._session.audio_path:
+        populated. Takes the session as an explicit parameter — same
+        data-loss-bug rationale as process_session above; never read
+        self._session here, that race is exactly how the 2026-06-15
+        VDL/Hooli meeting overwrite happened. Safe to call when
+        self._profile_service is None (skips matching, still computes +
+        stores embeddings so a future session can match them later if
+        profiling gets enabled)."""
+        if session is None:
+            session = self._session
+        if not session or not session.audio_path:
             return
 
         # Lazy import — avoids paying the speechbrain import cost on
@@ -772,13 +822,13 @@ class RecordingService:
             )
 
         centroids = extract_speaker_centroids(
-            self._session.audio_path, turns_by_speaker,
+            session.audio_path, turns_by_speaker,
         )
         if not centroids:
             return
 
         for speaker_id, centroid in centroids.items():
-            speaker = self._session.speakers.get(speaker_id)
+            speaker = session.speakers.get(speaker_id)
             if speaker is None:
                 continue
             speaker.embedding = [float(x) for x in centroid.tolist()]
