@@ -987,6 +987,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        // HTTP plugin for the GitHub Releases updater. WebView fetch()
+        // from origin http://tauri.localhost gets CORS-blocked even
+        // when the upstream sends Access-Control-Allow-Origin: * (the
+        // WebView's preflight has different semantics from curl). The
+        // plugin proxies the request through Rust where CORS doesn't
+        // apply. Scope in capabilities/default.json restricts which
+        // hosts the WebView can ask the plugin to reach.
+        .plugin(tauri_plugin_http::init())
         .manage(backend)
         .invoke_handler(tauri::generate_handler![
             restart_backend,
