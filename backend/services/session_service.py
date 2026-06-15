@@ -78,13 +78,23 @@ class SessionService:
         return str(final_path)
 
     def load(self, session_id: str) -> Optional[dict]:
-        """Load a session JSON by ID. Returns raw dict."""
+        """Load a session JSON by ID. Returns raw dict.
+
+        Reads with ``utf-8-sig`` so a leading UTF-8 BOM (which PowerShell's
+        ``Set-Content -Encoding UTF8`` emits by default, and which external
+        recovery scripts therefore tend to inadvertently produce) doesn't
+        cause a silent skip in ``list_sessions()``. Field repro
+        2026-06-15: a recovered session was invisible in the UI because
+        the recovery script wrote the JSON with a BOM, and the previous
+        ``open(... encoding='utf-8')`` here raised JSONDecodeError on the
+        BOM byte. ``utf-8-sig`` is a strict superset — files without a
+        BOM still decode identically."""
         path = self._recordings_dir / f"session_{session_id}.json"
         if not path.exists():
             logger.warning(f"Session file not found: {path}")
             return None
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8-sig") as f:
                 return json.load(f)
         except json.JSONDecodeError as e:
             raise ValueError(f"Corrupt session file {path}: {e}") from e
