@@ -1,22 +1,36 @@
-# v2.11.0 — Backend auth + WebView CSP + updater CORS fix + CI release gate
+# v2.11.0 — Meeting-overwrite data loss fixed + backend auth + WebView CSP + updater CORS fix + CI release gate
 
-Security-first minor release. Four user-visible changes plus a CI
-hardening that pays back the v2.7.5/v2.10.5 botched-tag class of bug.
+> **If you are on v2.10.6 or earlier, install this build before your
+> next back-to-back meeting day.** v2.10.6 has a confirmed data-loss
+> bug where stopping one recording and starting another while the
+> first one's auto-process is still running causes the second
+> recording's audio to overwrite the first recording's WAV — and the
+> first recording's transcript to be attached to the second session.
+> v2.11.0 closes the race that causes this.
 
-1. **Critical security** — backend sidecar is now authenticated with a
-   per-launch random token. Closes a real drive-by exfiltration hole
-   on any machine where the user visits an attacker-controlled webpage
-   while Meeting Recorder is running.
-2. **Defense-in-depth** — Content Security Policy on the WebView,
+Five user-visible changes:
+
+1. **CRITICAL — meeting-overwrite data loss fixed.** When a new
+   recording started while the previous session's auto-process was
+   still running, `self._session` got reassigned mid-flight and the
+   active recording's stop path wrote audio to the wrong WAV file
+   while stamping the wrong session's JSON. Field repro on
+   2026-06-15 destroyed a 56-minute customer call's audio. Root
+   cause + fix detail below.
+2. **Critical security** — backend sidecar is now authenticated with
+   a per-launch random token. Closes a real drive-by exfiltration
+   hole on any machine where the user visits an attacker-controlled
+   webpage while Meeting Recorder is running.
+3. **Defense-in-depth** — Content Security Policy on the WebView,
    replacing Tauri's `csp: null` default.
-3. **Update check fix** — `Settings → App Updates → Check Now` works
+4. **Update check fix** — `Settings → App Updates → Check Now` works
    again. The v2.10.6 build was hitting a CORS wall against GitHub
    from the WebView; the new build routes the call through Rust where
    CORS doesn't apply.
-4. **CI release gate** — a new `verify-version` job aborts any release
-   whose tag doesn't match `tauri.conf.json.version`. The 2.7.5–2.7.7
-   class of "release page says X, artifacts built from Y" is closed
-   mechanically.
+5. **CI release gate** — a new `verify-version` job aborts any
+   release whose tag doesn't match `tauri.conf.json.version`. The
+   2.7.5–2.7.7 class of "release page says X, artifacts built from Y"
+   is closed mechanically.
 
 ## Install (macOS)
 
@@ -48,7 +62,88 @@ hardening that pays back the v2.7.5/v2.10.5 botched-tag class of bug.
 
 ## What's new
 
-### 1. Per-launch backend auth token
+### 1. Meeting-overwrite data loss — root cause + fix
+
+**Field repro (2026-06-15):** user recorded a 56-minute customer call
+("VDL Training"), stopped it, immediately started a second meeting
+("Hooli Go Forward Sync"), and after both finished:
+
+- The 56-min VDL recording's WAV had been overwritten with the
+  Hooli meeting's 32-min audio.
+- VDL's session JSON now showed `ended_at` equal to Hooli's stop
+  time + audio_duration fields stamped from Hooli's recording, so
+  the UI displayed *"You got 32 min of audio in a 93-min recording
+  — about 61 min appears to be missing"*.
+- Hooli's session JSON had VDL's transcript and AI summary attached.
+
+The smoking gun is in Hooli's per-session log:
+
+```
+10:02:36  Session 3E15357E recording started.
+…
+10:34:56  [stop] begin
+10:34:56  [stop] finalize_recording_streaming → …\session_56105413.wav
+10:35:02  Audio saved to …\session_56105413.wav (1937.5s)
+10:35:02  SYNC_INTEGRITY: session 56105413 mic=1937.6s …
+```
+
+Hooli's stop ran with `self._session.session_id = 56105413` —
+VDL's session id — so finalize wrote Hooli's 32-min audio to VDL's
+final WAV path and the sync-integrity stamping landed on VDL.
+
+**Root cause.** `self._session` on the recording service was a
+single shared-mutable variable that two paths both wrote to:
+
+1. `start_recording()` — assigns when a new recording begins.
+2. `set_session()` — called by the processing path before
+   `process_session()` to bind the session being transcribed.
+
+The v2.10.3 `_PROCESSING_LOCK` serialized two concurrent processings
+but did NOT cover the recording-vs-processing race. While VDL's
+auto-process was still running in the background, the user started
+the Hooli meeting. VDL's auto-process's `set_session(VDL)` had
+aliased `_session` to VDL. The subsequent Hooli `stop_recording()`
+read the aliased `_session` and wrote everything to VDL. In
+parallel, VDL's `process_session()` body kept reading `self._session`
+across its `await` points — by then `_session` had been reassigned
+to Hooli by the user starting the next meeting, so VDL's transcript
+ended up appended to Hooli's session object.
+
+**Fix.** Pass the session by parameter through the entire processing
+path, and snapshot it into a local in `stop_recording()` on entry.
+After v2.11.0:
+
+- `process_session(session)` takes the session as an explicit
+  parameter and never reads `self._session`. Both call sites in
+  `server.py` (manual `/sessions/{id}/process` and the auto-process
+  path) load the session by id and pass it through.
+- `_fingerprint_speakers(diarization_turns, session)` takes the
+  same explicit session argument.
+- `stop_recording()` snapshots `self._session` into a local
+  `session` variable on entry and uses the local for all subsequent
+  reads — the final-path computation, audio_path / ended_at /
+  audio_actual_duration_s / audio_expected_duration_s / sync-warning
+  stamping, and temp-file cleanup. If any future code path adds
+  another assignment to `self._session`, the in-flight stop is no
+  longer aliased.
+
+`_PROCESSING_LOCK` stays in place as defense-in-depth — but the
+primary defense is now "the path can't be aliased to a different
+session, because there's no shared variable to alias."
+
+#### If you were hit by this on v2.10.6
+
+The audio is unrecoverable — the WAV was overwritten on disk. But
+the transcript and AI summary in the SECOND session (the one that
+should contain the second meeting) are actually the FIRST meeting's
+content. You can rename the second session to the first meeting's
+name, copy its transcript / summary / commitments off, and delete
+the corrupted first session. The second meeting itself was never
+processed — only the audio file at the first meeting's path
+contains its captured audio, and the JSON entry referring to it is
+the corrupted one.
+
+### 2. Per-launch backend auth token
 
 The Python sidecar binds to `127.0.0.1`, but **localhost is not an
 auth boundary**. Any browser tab the user opens (`example.com`,
@@ -81,7 +176,7 @@ After upgrading, opening `https://example.com` in your normal browser
 and running `fetch('http://127.0.0.1:17645/sessions')` from the
 console returns `401 Unauthorized` instead of your session list.
 
-### 2. WebView Content Security Policy
+### 3. WebView Content Security Policy
 
 `csp: null` (Tauri's default) means any XSS in the frontend — say, a
 compromised dependency tomorrow — has free rein to read whatever the
@@ -104,7 +199,7 @@ Dev variant keeps Next HMR alive (`ws://localhost:3000`,
 `'unsafe-eval'`, `'unsafe-inline'` for `script-src`). Production
 never carries those.
 
-### 3. Update check no longer fails with "Failed to fetch"
+### 4. Update check no longer fails with "Failed to fetch"
 
 Field repro on v2.10.6: `Settings → App Updates → Check Now`
 returned *"Network error: Failed to fetch."* DevTools console
@@ -131,7 +226,7 @@ WebView can't ask it to reach arbitrary URLs.
 
 This was the wrong layer for the call all along. Now fixed.
 
-### 4. Release gate — tag and version must match
+### 5. Release gate — tag and version must match
 
 A new `verify-version` job runs before the build matrix and fails
 fast if the pushed tag (e.g. `v2.11.0`) doesn't match
