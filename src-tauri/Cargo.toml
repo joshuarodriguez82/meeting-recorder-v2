@@ -25,6 +25,15 @@ tauri = { version = "2.10.3", features = ["devtools"] }
 tauri-plugin-log = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
+# HTTP client that runs in Rust, bypassing the WebView's CORS policy.
+# Used by src/lib/updater.ts: api.github.com refuses the WebView's
+# preflight from origin http://tauri.localhost even though it returns
+# Access-Control-Allow-Origin: * on a plain `curl` GET. Rust's reqwest
+# (which is what this plugin wraps) doesn't go through the WebView and
+# doesn't care about CORS at all. The capability scope below restricts
+# this to the one host the updater needs — the plugin won't proxy
+# arbitrary URLs the WebView asks for.
+tauri-plugin-http = "2"
 # OS CSPRNG for the per-launch backend auth token (lib.rs::generate_backend_token).
 # Lowest-level primitive available — already in the dependency tree via Tauri.
 getrandom = "0.2"
