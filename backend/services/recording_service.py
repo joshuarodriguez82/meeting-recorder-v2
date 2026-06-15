@@ -3,6 +3,7 @@ Orchestrates the full recording lifecycle.
 """
 
 import asyncio
+import json
 import logging
 import os
 import tempfile
@@ -318,6 +319,12 @@ class RecordingService:
 
         session_id = uuid.uuid4().hex[:8].upper()
         self._session = Session(session_id=session_id)
+        # Stamp the planned final audio path NOW so the JSON stub we
+        # write next has a recovery target even if finalize never runs.
+        # The file itself doesn't exist yet — it will after stop. See
+        # _write_session_stub() for the survives-crash rationale.
+        self._session.audio_path = self._build_audio_path(session_id)
+        self._write_session_stub(self._session)
 
         # Start per-session log file
         self._start_session_log(session_id)
@@ -513,6 +520,12 @@ class RecordingService:
             # trigger a native STATUS_ACCESS_VIOLATION on stop (lost session).
             loopback_path = getattr(self, '_loopback_temp_path', None)
             final_path = self._build_audio_path(session.session_id)
+            # Re-write the stub session JSON with started_at + planned
+            # audio_path BEFORE finalize. If finalize segfaults the
+            # process (the 8B88C1C3 case), the JSON is already on disk
+            # and the session appears in the list with the temp WAVs
+            # ready for recovery, instead of the meeting vanishing.
+            self._write_session_stub(session)
             logger.info(
                 f"[stop] finalize_recording_streaming → {final_path} …")
             t = _t.monotonic()
@@ -1237,3 +1250,62 @@ class RecordingService:
         recordings_dir = Path(self._settings.recordings_dir)
         recordings_dir.mkdir(parents=True, exist_ok=True)
         return str(recordings_dir / f"session_{session_id}.wav")
+
+    def _build_session_json_path(self, session_id: str) -> Path:
+        recordings_dir = Path(self._settings.recordings_dir)
+        recordings_dir.mkdir(parents=True, exist_ok=True)
+        return recordings_dir / f"session_{session_id}.json"
+
+    def _write_session_stub(self, session: "Session") -> None:
+        """Atomically write the session's current state to its session
+        JSON.
+
+        SURVIVES-CRASH DESIGN (v2.11.1, field repro 2026-06-15): historically
+        the session JSON was only written AFTER ``finalize_recording_streaming``
+        completed in ``stop_recording``. A native segfault in scipy /
+        libsndfile during finalize (the 8B88C1C3 case) killed the backend
+        before the JSON was ever written — the meeting silently vanished
+        from the Sessions list as if it had never been recorded, even
+        though the temp WAVs were sitting on disk.
+
+        We now write the JSON twice per recording:
+
+        1. On ``start_recording`` — minimal stub with ``session_id``,
+           ``started_at``, and the planned ``audio_path``. ``ended_at``
+           stays ``None``. If anything crashes mid-recording the user
+           still sees a "Recording in progress (recovery available)"
+           row pointing at the right temp WAVs.
+        2. On ``stop_recording`` — re-saved with ``ended_at``,
+           ``audio_actual_duration_s``, sync-integrity fields, etc.
+           AFTER finalize completes. If finalize itself segfaults the
+           stub from step 1 stays on disk.
+
+        Uses the same atomic temp-file + rename pattern as SessionService
+        (a half-written JSON would be worse than no JSON). Failures are
+        logged but not raised — capture must not be blocked by a JSON-
+        write hiccup."""
+        try:
+            json_path = self._build_session_json_path(session.session_id)
+            data = json.dumps(session.to_dict(), indent=2, ensure_ascii=False)
+            fd, tmp_path = tempfile.mkstemp(
+                dir=json_path.parent, suffix=".json.tmp",
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(data)
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except OSError:
+                        pass
+                os.replace(tmp_path, json_path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        except Exception as e:
+            logger.warning(
+                f"Could not write session stub for "
+                f"{session.session_id}: {e}")
