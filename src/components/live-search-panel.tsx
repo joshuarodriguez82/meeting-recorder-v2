@@ -64,8 +64,11 @@ export function LiveSearchPanel({ recording }: { recording: boolean }) {
       // panel received zero live segments and "This call" search
       // always came back empty even though the transcript was visible.
       const baseUrl = await api.getBaseUrl();
+      // EventSource can't set headers, so the auth token rides as a
+      // query param — the one sanctioned exception to header auth.
+      const authQ = await api.authQuery();
       if (cancelled) return;
-      es = new EventSource(`${baseUrl}/recording/transcript/stream`);
+      es = new EventSource(`${baseUrl}/recording/transcript/stream${authQ}`);
       es.onmessage = (e) => {
         try {
           const seg: Segment = JSON.parse(e.data);
