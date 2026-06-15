@@ -69,8 +69,11 @@ export function SessionDetailDialog({
   // OS-picked at app startup, so any hardcoded 127.0.0.1:17645 points
   // at a dead port in the packaged app.
   const [baseUrl, setBaseUrl] = useState("");
+  // <audio src> can't carry headers — token rides as a query suffix.
+  const [authQ, setAuthQ] = useState("");
   useEffect(() => {
     api.getBaseUrl().then(setBaseUrl).catch(() => {});
+    api.authQuery().then(setAuthQ).catch(() => {});
   }, []);
 
   // While an async backend job is running (process / summarize / extract),
@@ -352,7 +355,7 @@ export function SessionDetailDialog({
                         controls
                         preload="metadata"
                         className="w-full"
-                        src={`${baseUrl}/sessions/${sessionId}/audio`}
+                        src={`${baseUrl}/sessions/${sessionId}/audio${authQ}`}
                       >
                         Your browser doesn&apos;t support audio playback.
                       </audio>
@@ -545,6 +548,8 @@ export function SessionDetailDialog({
 function ScreenshotsView({ session }: { session: SessionFull }) {
   const shots = session.screenshots ?? [];
   const [baseUrl, setBaseUrl] = useState<string>("");
+  // <img src> can't carry headers — token rides as a query suffix.
+  const [authQ, setAuthQ] = useState("");
   // Index of the screenshot shown full-size in the lightbox; null = grid.
   const [zoomed, setZoomed] = useState<number | null>(null);
 
@@ -553,6 +558,7 @@ function ScreenshotsView({ session }: { session: SessionFull }) {
     // approach as the audio player — never read local file paths from
     // the webview.
     api.getBaseUrl().then(setBaseUrl).catch(() => {});
+    api.authQuery().then(setAuthQ).catch(() => {});
   }, []);
 
   if (shots.length === 0) {
@@ -564,7 +570,7 @@ function ScreenshotsView({ session }: { session: SessionFull }) {
   }
 
   const srcFor = (i: number) =>
-    `${baseUrl}/sessions/${session.session_id}/screenshots/${i}`;
+    `${baseUrl}/sessions/${session.session_id}/screenshots/${i}${authQ}`;
 
   return (
     <div className="space-y-3">
