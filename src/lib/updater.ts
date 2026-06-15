@@ -72,6 +72,26 @@ async function getCurrentVersion(): Promise<string> {
   }
 }
 
+// CORS workaround: the WebView's native fetch() from origin
+// http://tauri.localhost gets blocked by GitHub's preflight handling
+// even though api.github.com returns Access-Control-Allow-Origin: *
+// for plain GETs (confirmed via curl). @tauri-apps/plugin-http proxies
+// the request through Rust where CORS doesn't apply. The plugin scope
+// in src-tauri/capabilities/default.json restricts it to api.github
+// .com/* so the WebView can't ask the plugin to reach arbitrary URLs.
+// Outside Tauri (`npm run dev`, no shell) the import resolves to a
+// browser shim that just calls native fetch — fine in dev because
+// the page runs from localhost:3000 with no CORS issue.
+type FetchFn = (input: string, init?: RequestInit) => Promise<Response>;
+async function loadPluginFetch(): Promise<FetchFn | null> {
+  try {
+    const mod = await import("@tauri-apps/plugin-http");
+    return mod.fetch as unknown as FetchFn;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Hit the GitHub Releases API and compare against the running version.
  * Failures (no network, rate-limited, deleted repo) return "unknown"
@@ -81,7 +101,9 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
   const currentVersion = await getCurrentVersion();
   let res: Response;
   try {
-    res = await fetch(GITHUB_API_URL, {
+    const pluginFetch = await loadPluginFetch();
+    const fetchFn: FetchFn = pluginFetch ?? (fetch as unknown as FetchFn);
+    res = await fetchFn(GITHUB_API_URL, {
       headers: { Accept: "application/vnd.github+json" },
     });
   } catch (e) {
