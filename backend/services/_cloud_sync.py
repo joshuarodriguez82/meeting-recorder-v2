@@ -56,7 +56,7 @@ def read_text_hydrated(
     *,
     retries: int = 4,
     delay: float = 0.5,
-    encoding: str = "utf-8",
+    encoding: str = "utf-8-sig",
 ) -> str:
     """Read a text file, tolerating cloud-placeholder fault-in latency.
 

@@ -1,5 +1,6 @@
 """Audio file helpers: WAV writing, resampling, mixing."""
 
+import tempfile
 from math import gcd
 from pathlib import Path
 from typing import Optional, Tuple
@@ -19,6 +20,29 @@ TARGET_SAMPLE_RATE = 16000
 # regardless of recording length.
 #   10 s @ 192 kHz float32 ≈ 7.7 MB per block.
 STREAM_BLOCK_SECONDS = 10.0
+
+
+def _scratch_temp_dir() -> Path:
+    """Local-only scratch dir for finalize intermediates (`_lb16k_*.tmp.wav`).
+
+    DATA-LOSS FIX (field repro 2026-06-15): the 58-min 8B88C1C3 session
+    segfaulted at native level during finalize. Backend exited with
+    STATUS_ACCESS_VIOLATION (0xC0000005) and never wrote a session JSON,
+    so the meeting just vanished from the Sessions list. Root cause: this
+    function's intermediate loopback-resample file used to land at
+    ``out_path.parent / '_lb16k_<id>.tmp.wav'`` — which on a user with
+    ``recordings_dir`` on Google Drive Stream put the 100+ MB temp write
+    on the cloud-synced volume. The cloud sync filter driver contends
+    with libsndfile's write path; on a long recording the contention
+    pushes scipy/sf into a state that triggers a native crash.
+
+    Mirrors the v2.10.5/v2.10.6 fix that moved the capture-time WAV
+    streams to ``%TEMP%\\meeting_recorder_capture\\``. Same dir name so
+    recovery sees both kinds of temps in one place. Created on demand,
+    never deleted by anything other than the finalize cleanup."""
+    d = Path(tempfile.gettempdir()) / "meeting_recorder_capture"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def save_wav(path: str, audio: np.ndarray, samplerate: int) -> None:
@@ -189,10 +213,20 @@ def finalize_recording_streaming(
     # Pass 1: pre-resample loopback to target_sr into a temp file. This lets
     # pass 2 do simple frame-aligned mixing without bundling a streaming
     # resampler for two sources at once.
+    #
+    # CRITICAL: the temp file lands in `_scratch_temp_dir()` (a local-only
+    # %TEMP% subdir), NOT in `out_path.parent`. When the user's
+    # `recordings_dir` is on Google Drive Stream / OneDrive / iCloud, a
+    # 100+ MB temp write on the cloud-synced mount races with the sync
+    # filter driver and can crash libsndfile at native level during the
+    # subsequent merge — see _scratch_temp_dir() for the full
+    # 2026-06-15 8B88C1C3 field-repro write-up.
     lb_path_16k: Optional[str] = None
     lb_total_out = 0
     if have_lb:
-        lb_path_16k = str(out_path.parent / f"_lb16k_{out_path.stem}.tmp.wav")
+        lb_path_16k = str(
+            _scratch_temp_dir() / f"_lb16k_{out_path.stem}.tmp.wav"
+        )
         try:
             lb_total_out = _stream_resample_to_file(
                 str(loopback_wav_path), lb_path_16k, lb_sr, target_sr,
