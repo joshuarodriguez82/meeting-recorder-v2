@@ -3,13 +3,20 @@ Startup crash-recovery for interrupted recordings.
 
 If the backend was killed (OS crash, power loss, STATUS_ACCESS_VIOLATION,
 force-quit) during stop_recording, temp files `_recording_<ID>.wav` and
-`_loopback_<ID>.wav` are left behind with no `session_<ID>.wav` / `.json`
-to back them. Without recovery, users lose the session entirely.
+`_loopback_<ID>.wav` are left behind with no `session_<ID>.wav` to back
+them. Without recovery, users lose the session entirely.
 
-On each backend startup we scan the recordings dir for such orphans, merge
-them with the same streaming path used by stop_recording, and write a
-stub session JSON so the recording appears in the Session Browser ready
-to be transcribed.
+On each backend startup we scan TWO locations for orphan temps:
+
+  1. The user's ``recordings_dir`` — legacy location where v2.10.4 and
+     earlier wrote streaming-capture temps.
+  2. ``%TEMP%\\meeting_recorder_capture\\`` — current location (v2.10.5+)
+     for the streaming-capture temps, moved off cloud-synced volumes
+     because the filter driver was stalling the audio thread.
+
+Each orphan gets merged with the same streaming path used by
+stop_recording. A stub session JSON is written so the recording appears
+in the Session Browser ready to be transcribed.
 """
 
 import datetime
@@ -17,7 +24,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from models.session import Session
 from services.session_service import SessionService
@@ -27,39 +34,69 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-def scan_orphans(recordings_dir: str) -> List[Dict[str, str]]:
-    """Return a list of orphan recordings as {session_id, mic, loopback}."""
-    path = Path(recordings_dir)
-    if not path.exists():
-        return []
-    orphans: List[Dict[str, str]] = []
-    for mic_temp in path.glob("_recording_*.wav"):
-        sid = mic_temp.stem.replace("_recording_", "")
-        final_wav = path / f"session_{sid}.wav"
-        final_json = path / f"session_{sid}.json"
-        lb_temp = path / f"_loopback_{sid}.wav"
-        if final_wav.exists() and final_json.exists():
-            # Fully finalized — just stray temps. Will be cleaned below.
-            orphans.append({
+def _local_capture_dir() -> Path:
+    """Same dir name as ``services.recording_service._local_capture_dir``
+    — kept in sync by convention. Duplicated here so this module has no
+    circular dep on recording_service (which depends on Session +
+    diarization + transcription engines, all heavy)."""
+    return Path(tempfile.gettempdir()) / "meeting_recorder_capture"
+
+
+def scan_orphans(
+    recordings_dir: str,
+    *,
+    capture_dir: Optional[str] = None,
+) -> List[Dict[str, str]]:
+    """Return a list of orphan recordings as {session_id, mic, loopback,
+    already_finalized}.
+
+    Scans both ``recordings_dir`` (legacy) and the local capture temp
+    dir (current, since v2.10.5). De-dupes on session_id — if the same
+    session has temps in both locations (shouldn't happen but cheap to
+    guard) the local-capture-dir copy wins because that's where active
+    recordings write.
+
+    ``capture_dir`` is the local-only capture temp dir. Defaults to the
+    production location (``%TEMP%\\meeting_recorder_capture\\``). Tests
+    pass a tmp-path to isolate from any stale files left there by real
+    recordings on the dev box."""
+    orphans_by_sid: Dict[str, Dict[str, str]] = {}
+
+    def _add_from(scan_dir: Path) -> None:
+        if not scan_dir.exists():
+            return
+        recs_path = Path(recordings_dir)
+        for mic_temp in scan_dir.glob("_recording_*.wav"):
+            sid = mic_temp.stem.replace("_recording_", "")
+            final_wav = recs_path / f"session_{sid}.wav"
+            final_json = recs_path / f"session_{sid}.json"
+            lb_temp = scan_dir / f"_loopback_{sid}.wav"
+            # "Already finalized" means the merged session WAV exists
+            # AND a non-stub session JSON is present. A stub JSON
+            # (audio_path set but the WAV file doesn't exist yet) means
+            # finalize never completed — recovery still needs to run.
+            audio_complete = final_wav.exists()
+            json_complete = (
+                final_json.exists() and audio_complete
+            )
+            orphans_by_sid[sid] = {
                 "session_id": sid,
                 "mic": str(mic_temp),
                 "loopback": str(lb_temp) if lb_temp.exists() else "",
-                "already_finalized": True,
-            })
-            continue
-        orphans.append({
-            "session_id": sid,
-            "mic": str(mic_temp),
-            "loopback": str(lb_temp) if lb_temp.exists() else "",
-            "already_finalized": False,
-        })
-    return orphans
+                "already_finalized": bool(audio_complete and json_complete),
+            }
+
+    _add_from(Path(recordings_dir))
+    _add_from(Path(capture_dir) if capture_dir else _local_capture_dir())
+    return list(orphans_by_sid.values())
 
 
 def recover_orphans(
     recordings_dir: str,
     session_svc: SessionService,
     target_sr: int = 16000,
+    *,
+    capture_dir: Optional[str] = None,
 ) -> List[Dict[str, str]]:
     """
     Merge orphan temp WAVs into real sessions and write a stub JSON so each
@@ -74,7 +111,7 @@ def recover_orphans(
     if not recs_path.exists():
         return results
 
-    for orphan in scan_orphans(recordings_dir):
+    for orphan in scan_orphans(recordings_dir, capture_dir=capture_dir):
         sid = orphan["session_id"]
         mic = orphan["mic"]
         lb = orphan["loopback"] or None
@@ -134,9 +171,18 @@ def recover_orphans(
         ended_at = mic_mtime
         started_at = mic_mtime - datetime.timedelta(seconds=duration_s)
 
-        session = Session(session_id=sid)
-        session.display_name = f"Recovered Session {sid}"
-        session.started_at = started_at
+        # If a stub JSON already exists from v2.11.1's "JSON-first"
+        # writes (set on start_recording / before finalize), preserve the
+        # user-visible fields the user/UI may have already populated
+        # (display_name, client, project, notes, attendees, template,
+        # speaker renames). Without this, every crashed-then-recovered
+        # session would be renamed back to "Recovered Session <id>" and
+        # lose any pre-stop labelling the user did.
+        session: Session = session_svc.load_full(sid) or Session(session_id=sid)
+        if not getattr(session, "display_name", "") or session.display_name.strip() == "":
+            session.display_name = f"Recovered Session {sid}"
+        if not getattr(session, "started_at", None):
+            session.started_at = started_at
         session.ended_at = ended_at
         session.audio_path = final_wav
         try:
@@ -168,9 +214,15 @@ def recover_orphans(
         })
 
     # Also clean up ancient orphan `_lb16k_*.tmp.wav` files from aborted
-    # pre-resample passes — they're always disposable.
-    for leftover in recs_path.glob("_lb16k_*.tmp.wav"):
-        _safe_unlink(str(leftover))
+    # pre-resample passes — they're always disposable. Scan both
+    # legacy (recordings_dir) and current (%TEMP%) locations; the temp
+    # moved to %TEMP% in v2.11.1 alongside the segfault fix.
+    cap_path = Path(capture_dir) if capture_dir else _local_capture_dir()
+    for parent in (recs_path, cap_path):
+        if not parent.exists():
+            continue
+        for leftover in parent.glob("_lb16k_*.tmp.wav"):
+            _safe_unlink(str(leftover))
 
     return results
 
