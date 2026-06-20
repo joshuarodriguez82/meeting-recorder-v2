@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import uuid
@@ -530,7 +532,16 @@ class RecordingService:
                 f"[stop] finalize_recording_streaming → {final_path} …")
             t = _t.monotonic()
             try:
-                duration_s, _ = finalize_recording_streaming(
+                # SUBPROCESS-ISOLATED FINALIZE (v2.12): the WAV merge
+                # runs in a child process so a native crash here can't
+                # take the backend down. The child reports duration +
+                # loopback-mixed status via stdout; the parent parses
+                # it and proceeds as before on success. On crash /
+                # non-zero exit the helper raises RuntimeError, the
+                # except block below stamps the session "Error saving
+                # audio" and we LEAVE the temp WAVs on disk for the
+                # next-launch recovery flow to pick up.
+                duration_s, _ = self._run_finalize_subprocess(
                     mic_wav_path=self._wav_temp_path,
                     loopback_wav_path=loopback_path,
                     output_wav_path=final_path,
@@ -656,12 +667,26 @@ class RecordingService:
                     f"[stop] finalize failed after {_t.monotonic()-t:.1f}s")
                 self._on_status(f"Error saving audio: {e}")
             finally:
-                # Clean up temps whether or not merge succeeded; any failure
-                # leaves them on disk for startup recovery to retry.
-                # KEEP_AUDIO_TEMPS=1 preserves them for offline AEC validation
-                # via backend/scripts/measure_aec.py.
+                # Clean up temps ONLY when the merge actually produced a
+                # final WAV at the expected path. Pre-v2.11.1 we
+                # gated on ``session.audio_path`` being truthy, but
+                # v2.11.1's "JSON-first" change pre-sets audio_path at
+                # start_recording so the post-crash recovery flow has
+                # a target — that means truthy-audio_path now means
+                # "planned location," not "merge succeeded." Gating on
+                # actual file existence at the final path correctly
+                # distinguishes the two, AND it preserves temps on the
+                # v2.12 subprocess-finalize crash path (parent raised
+                # RuntimeError → except branch logged the error → we
+                # arrive here with no file at session.audio_path →
+                # temps STAY, recovery on next launch picks them up).
+                # KEEP_AUDIO_TEMPS=1 preserves them either way for
+                # offline AEC validation via measure_aec.py.
                 keep_temps = os.environ.get("KEEP_AUDIO_TEMPS") == "1"
-                if session.audio_path and not keep_temps:
+                merge_succeeded = bool(
+                    session.audio_path and Path(session.audio_path).exists()
+                )
+                if merge_succeeded and not keep_temps:
                     for temp in (self._wav_temp_path, loopback_path):
                         if temp and Path(temp).exists():
                             try:
@@ -671,6 +696,11 @@ class RecordingService:
                 elif keep_temps:
                     logger.info(
                         "[stop] KEEP_AUDIO_TEMPS=1 set — preserving "
+                        f"{self._wav_temp_path} + {loopback_path}")
+                elif not merge_succeeded:
+                    logger.warning(
+                        f"[stop] merge did not produce {session.audio_path} "
+                        f"— preserving temps for recovery: "
                         f"{self._wav_temp_path} + {loopback_path}")
         elif session and self._chunk_count == 0:
             logger.warning("Recording stopped with no audio chunks captured.")
@@ -1309,3 +1339,110 @@ class RecordingService:
             logger.warning(
                 f"Could not write session stub for "
                 f"{session.session_id}: {e}")
+
+    @staticmethod
+    def _run_finalize_subprocess(
+        mic_wav_path: str,
+        loopback_wav_path: Optional[str],
+        output_wav_path: str,
+        target_sr: int,
+        loopback_start_offset_s: Optional[float],
+    ) -> tuple[float, bool]:
+        """Run the WAV merge in a subprocess instead of in-process.
+
+        SURVIVES-NATIVE-CRASH DESIGN (v2.12): finalize reads two big
+        WAVs, resamples one with scipy, and streams a mixed PCM_16
+        output — every step is a C extension. A native crash in any
+        of them used to take the entire Python backend down (the
+        2026-06-15 8B88C1C3 STATUS_ACCESS_VIOLATION). v2.11.1 fixed
+        the SPECIFIC cause we observed (Google Drive contention on
+        the intermediate temp), but the broader single-point-of-
+        failure remained.
+
+        Running finalize as a child process makes any future native
+        crash here ISOLATED: the parent observes a non-zero exit
+        code, logs the cause, leaves the temp WAVs on disk, raises
+        ``RuntimeError`` — and the backend keeps running. The session
+        stub written by ``_write_session_stub`` ensures the row stays
+        in the Sessions list with one-click recovery.
+
+        Spawned with the same Python that runs the parent backend
+        (``sys.executable``), so we get exactly the same numpy /
+        scipy / soundfile / cffi build — no version skew.
+
+        Returns ``(duration_s, loopback_mixed)`` on success.
+        Raises ``RuntimeError`` on any failure, including subprocess
+        crash — the message includes the exit code (negative numbers
+        on POSIX = signal; large positive on Windows = NTSTATUS like
+        0xC0000005 for STATUS_ACCESS_VIOLATION) and a tail of stderr.
+        """
+        script_path = (
+            Path(__file__).resolve().parents[1] / "scripts" / "finalize_audio.py"
+        )
+        argv = [
+            sys.executable,
+            str(script_path),
+            "--mic", mic_wav_path,
+            "--loopback", loopback_wav_path or "",
+            "--output", output_wav_path,
+            "--target-sr", str(target_sr),
+            "--offset",
+            "" if loopback_start_offset_s is None
+                else f"{loopback_start_offset_s:.6f}",
+        ]
+        logger.info(
+            f"[finalize-subprocess] spawn {' '.join(argv[1:])}"
+        )
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                check=False,
+                # No timeout — long meetings legitimately take minutes
+                # to merge. The watchdog has its own per-step
+                # instrumentation; a hung subprocess would surface
+                # via the [stop] timing log.
+            )
+        except OSError as e:
+            raise RuntimeError(
+                f"could not spawn finalize subprocess: {e}"
+            ) from e
+
+        if proc.stderr:
+            # Mirror child stderr into backend.log so its diagnostics
+            # are visible at the same level the inline call's logs
+            # used to land at. Trim to keep huge tracebacks bounded.
+            tail = proc.stderr[-4000:]
+            logger.info(f"[finalize-subprocess] stderr:\n{tail}")
+
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"finalize subprocess exited with code {proc.returncode} "
+                f"(stderr tail: {proc.stderr[-400:]!r})"
+            )
+
+        # Parse "RESULT duration_s=X loopback_mixed=Y" from stdout.
+        duration_s = 0.0
+        loopback_mixed = False
+        for line in (proc.stdout or "").splitlines():
+            line = line.strip()
+            if not line.startswith("RESULT "):
+                continue
+            kv = dict(
+                part.split("=", 1) for part in line.split()[1:]
+                if "=" in part
+            )
+            try:
+                duration_s = float(kv.get("duration_s", "0"))
+            except ValueError:
+                duration_s = 0.0
+            loopback_mixed = kv.get("loopback_mixed", "false") == "true"
+            break
+        else:
+            raise RuntimeError(
+                f"finalize subprocess exited 0 but emitted no RESULT line "
+                f"(stdout tail: {proc.stdout[-200:]!r})"
+            )
+
+        return duration_s, loopback_mixed
