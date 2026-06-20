@@ -9,7 +9,7 @@ ROOT = Path(__file__).parent
 BACKEND = ROOT / "backend"
 OUT = ROOT / "backend-bundle.zip"
 
-INCLUDE_DIRS = ["config", "core", "meeting_recorder", "models", "services", "utils"]
+INCLUDE_DIRS = ["config", "core", "meeting_recorder", "models", "scripts", "services", "utils"]
 # Both requirements files ship in the bundle so the Rust shell can pick the
 # right one for the host platform at first-launch venv bootstrap time.
 INCLUDE_FILES = ["server.py", "requirements-cpu.txt", "requirements-mac.txt"]
