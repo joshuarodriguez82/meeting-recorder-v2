@@ -136,6 +136,11 @@ export interface Settings {
   // When false the live panel doesn't render and the backend doesn't
   // spin up the LiveTranscriber thread (saves CPU).
   live_transcription_enabled: boolean;
+  // Auto-screenshot cadence during recording. 0 = off (manual button
+  // only). When > 0 the record view fires capture_screenshot on a
+  // setInterval while a session is active so summaries include
+  // periodic visual context without the user remembering to click.
+  auto_screenshot_interval_minutes: number;
   // Auto-stop watchdog. All in minutes except hard_cap_hours; 0 disables
   // each individual trigger. The hard cap is the always-on safety net
   // — defaults to 4 hours so users who forget the recording is running
@@ -1321,6 +1326,30 @@ export const api = {
     }>(
       `/retention/cleanup?processed_days=${processed_days}&unprocessed_days=${unprocessed_days}`,
       { method: "POST" }
+    ),
+
+  // Ghost sessions: session_*.json files whose audio_path target doesn't
+  // exist on disk. Accumulate when the backend crashes mid-recording or
+  // mid-finalize — v2.11.1's JSON-first writes leave the stub behind, but
+  // the WAV never landed. Backend auto-purges stubs older than 14 days at
+  // startup; the UI cleanup button removes whatever's left.
+  listGhostSessions: () =>
+    request<{
+      count: number;
+      auto_purge_age_days: number;
+      items: {
+        session_id: string;
+        display_name: string;
+        json_path: string;
+        json_mtime_iso: string;
+        age_days: number;
+        audio_path: string;
+      }[];
+    }>("/ghost-sessions"),
+  deleteGhostSessions: (body: { session_ids?: string[]; min_age_days?: number }) =>
+    request<{ deleted: string[]; errors: { session_id: string; error: string }[] }>(
+      "/ghost-sessions",
+      { method: "DELETE", body: JSON.stringify(body) }
     ),
 
   // Filesystem helpers

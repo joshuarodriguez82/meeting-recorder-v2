@@ -161,6 +161,13 @@ class Settings:
     # which saves CPU on long calls. The canonical post-stop transcript
     # always runs regardless.
     live_transcription_enabled: bool
+    # Auto-screenshot cadence during active recording. 0 = off (manual
+    # button only — pre-v2.12.1 behavior). When > 0 the frontend fires a
+    # screenshot capture every N minutes while a recording is active.
+    # Field repro 2026-06-26: user expected auto-capture and got 1
+    # screenshot per 28-min meeting (manual click count). Default stays
+    # 0 to avoid surprising existing users; recommended value is 3 min.
+    auto_screenshot_interval_minutes: int
     # ── Auto-stop watchdog ────────────────────────────────────────
     # Warn (and optionally auto-stop) when a recording has been silent
     # for too long, run past its scheduled end time, or exceeded the
@@ -325,6 +332,8 @@ class Settings:
             # the live preview. Explicit "false" in config.env disables.
             live_transcription_enabled=_get_bool(
                 "LIVE_TRANSCRIPTION_ENABLED", True),
+            auto_screenshot_interval_minutes=_get_int(
+                "AUTO_SCREENSHOT_INTERVAL_MINUTES", 0),
             # Auto-stop defaults: warnings on, auto-stops opt-in, 4h hard cap.
             # The user reported real "I forgot the recording was still going
             # for hours" pain — these defaults catch the common case while
@@ -412,6 +421,7 @@ class Settings:
         openai_api_key: str = "",
         openai_base_url: str = "",
         live_transcription_enabled: bool = True,
+        auto_screenshot_interval_minutes: int = 0,
         silence_warn_min: int = 5,
         silence_stop_min: int = 0,
         overrun_warn_min: int = 5,
@@ -476,6 +486,7 @@ class Settings:
             f"OPENAI_API_KEY={env_openai}\n"
             f"OPENAI_BASE_URL={openai_base_url}\n"
             f"LIVE_TRANSCRIPTION_ENABLED={'true' if live_transcription_enabled else 'false'}\n"
+            f"AUTO_SCREENSHOT_INTERVAL_MINUTES={int(auto_screenshot_interval_minutes)}\n"
             f"SILENCE_WARN_MIN={silence_warn_min}\n"
             f"SILENCE_STOP_MIN={silence_stop_min}\n"
             f"OVERRUN_WARN_MIN={overrun_warn_min}\n"
