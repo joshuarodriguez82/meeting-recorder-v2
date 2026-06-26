@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import uuid
@@ -110,6 +112,18 @@ def _ensure_audio_available(path: str) -> None:
             "from OneDrive. Wait a moment and process the session again."
         ) from e
     logger.info(f"Audio file hydrated: {p.name}")
+
+
+# The local-copy + purge helpers (formerly defined here) moved to
+# ``utils.audio_utils`` so they can be tested in isolation without
+# pulling in ``config.settings`` (which has a 3.11/3.12 f-string
+# compatibility bump pending). Re-exported under the old private names
+# so any existing reference inside this module keeps working.
+from utils.audio_utils import (
+    copy_audio_to_local_for_processing as _copy_audio_to_local_for_processing,
+    purge_processing_temp as _purge_processing_temp,
+    _processing_temp_dir,
+)
 
 TARGET_SR = 16000
 
@@ -530,7 +544,16 @@ class RecordingService:
                 f"[stop] finalize_recording_streaming → {final_path} …")
             t = _t.monotonic()
             try:
-                duration_s, _ = finalize_recording_streaming(
+                # SUBPROCESS-ISOLATED FINALIZE (v2.12): the WAV merge
+                # runs in a child process so a native crash here can't
+                # take the backend down. The child reports duration +
+                # loopback-mixed status via stdout; the parent parses
+                # it and proceeds as before on success. On crash /
+                # non-zero exit the helper raises RuntimeError, the
+                # except block below stamps the session "Error saving
+                # audio" and we LEAVE the temp WAVs on disk for the
+                # next-launch recovery flow to pick up.
+                duration_s, _ = self._run_finalize_subprocess(
                     mic_wav_path=self._wav_temp_path,
                     loopback_wav_path=loopback_path,
                     output_wav_path=final_path,
@@ -656,12 +679,26 @@ class RecordingService:
                     f"[stop] finalize failed after {_t.monotonic()-t:.1f}s")
                 self._on_status(f"Error saving audio: {e}")
             finally:
-                # Clean up temps whether or not merge succeeded; any failure
-                # leaves them on disk for startup recovery to retry.
-                # KEEP_AUDIO_TEMPS=1 preserves them for offline AEC validation
-                # via backend/scripts/measure_aec.py.
+                # Clean up temps ONLY when the merge actually produced a
+                # final WAV at the expected path. Pre-v2.11.1 we
+                # gated on ``session.audio_path`` being truthy, but
+                # v2.11.1's "JSON-first" change pre-sets audio_path at
+                # start_recording so the post-crash recovery flow has
+                # a target — that means truthy-audio_path now means
+                # "planned location," not "merge succeeded." Gating on
+                # actual file existence at the final path correctly
+                # distinguishes the two, AND it preserves temps on the
+                # v2.12 subprocess-finalize crash path (parent raised
+                # RuntimeError → except branch logged the error → we
+                # arrive here with no file at session.audio_path →
+                # temps STAY, recovery on next launch picks them up).
+                # KEEP_AUDIO_TEMPS=1 preserves them either way for
+                # offline AEC validation via measure_aec.py.
                 keep_temps = os.environ.get("KEEP_AUDIO_TEMPS") == "1"
-                if session.audio_path and not keep_temps:
+                merge_succeeded = bool(
+                    session.audio_path and Path(session.audio_path).exists()
+                )
+                if merge_succeeded and not keep_temps:
                     for temp in (self._wav_temp_path, loopback_path):
                         if temp and Path(temp).exists():
                             try:
@@ -671,6 +708,11 @@ class RecordingService:
                 elif keep_temps:
                     logger.info(
                         "[stop] KEEP_AUDIO_TEMPS=1 set — preserving "
+                        f"{self._wav_temp_path} + {loopback_path}")
+                elif not merge_succeeded:
+                    logger.warning(
+                        f"[stop] merge did not produce {session.audio_path} "
+                        f"— preserving temps for recovery: "
                         f"{self._wav_temp_path} + {loopback_path}")
         elif session and self._chunk_count == 0:
             logger.warning("Recording stopped with no audio chunks captured.")
@@ -714,89 +756,103 @@ class RecordingService:
                 "AI models not loaded. Add API keys in File > Settings "
                 "and restart the app to enable transcription and diarization.")
 
-        # Force the WAV local before the pipeline touches it. When the
-        # recordings dir lives in OneDrive (or any Files-On-Demand cloud
-        # provider), older recordings get evicted to cloud-only
-        # placeholders — the file reports its full size but the bytes
-        # aren't on disk. pyannote's soundfile reader then fails with an
-        # opaque "invalid audio file" error mid-pipeline (Whisper's ffmpeg
-        # reader tolerates the placeholder differently, so it can pass
-        # while diarization dies). Reading the file through once pulls it
-        # local. Raises a clear, actionable error if it genuinely can't
-        # be read.
-        await asyncio.to_thread(
-            _ensure_audio_available, session.audio_path)
-
-        self._on_status("__stage:transcribe:active__")
-        # Bias Whisper toward the user's domain vocabulary when a glossary
-        # is configured. Best-effort — any failure building the prompt
-        # falls back to plain transcription.
-        initial_prompt = ""
-        if self.terminology is not None:
-            try:
-                initial_prompt = self.terminology.build_initial_prompt()
-            except Exception as e:
-                logger.warning(f"terminology initial_prompt build failed: {e}")
-        raw_segments = await self._transcription.transcribe(
-            session.audio_path, initial_prompt=initial_prompt)
-
-        if not raw_segments:
-            self._on_status("Transcription produced no output. Check audio quality.")
-            return session
-
-        # Post-transcription correction of known mis-hears (Genesys,
-        # CCaaS, UCCX, MEDDIC, ...) so the canonical spelling propagates
-        # into every downstream extraction. Best-effort per segment.
-        if self.terminology is not None:
-            try:
-                for raw in raw_segments:
-                    raw["text"] = self.terminology.apply_corrections(
-                        raw.get("text", ""))
-            except Exception as e:
-                logger.warning(f"terminology correction pass failed: {e}")
-
-        self._on_status("__stage:transcribe:done____stage:diarize:active__")
-        diarization_turns = await self._diarization.diarize(session.audio_path)
-
-        self._on_status("__stage:diarize:done____stage:speakers:active__")
-        attributed = DiarizationEngine.assign_speakers(raw_segments, diarization_turns)
-
-        # REPLACE, don't append. process_session must be idempotent: re-
-        # transcribing a session (recovery, re-process) has to produce a
-        # transcript for THIS audio only, not concatenate onto whatever
-        # was there before. Appending is what let two meetings merge into
-        # one session (the wrong transcript got tacked onto the right one,
-        # then summarized as a blend). Clear segments + speakers first so
-        # the result reflects exactly this diarization pass.
-        session.segments = []
-        session.speakers = {}
-        for raw in attributed:
-            speaker = session.get_or_create_speaker(raw["speaker_id"])
-            segment = Segment(
-                speaker_id=speaker.speaker_id,
-                start=raw["start"],
-                end=raw["end"],
-                text=raw["text"],
-            )
-            session.segments.append(segment)
-
-        # Speaker fingerprinting: compute per-speaker centroid embeddings
-        # from the diarization turns, then look up matches in the
-        # persistent profile store. Best-effort — any failure here is
-        # logged and the session is still saved with bare SPEAKER_XX
-        # labels (i.e. v1 behaviour).
+        # READ-SIDE CLOUD-CONTENTION FIX (v2.12.0, field repro 2026-06-26):
+        # Stream-copy the WAV to a LOCAL-only scratch path before any ML
+        # read touches it. ``_ensure_audio_available`` (kept for callers
+        # that don't need the full copy) does a single hydration read;
+        # that wasn't enough — two backend segfaults today crashed in
+        # the read side after hydration "succeeded," because the cloud
+        # sync filter driver intermittently returns ENOENT or partial
+        # reads while it negotiates the file's state. Working from a
+        # local copy makes the entire ML pipeline immune to that
+        # contention class. The local copy is purged in the ``finally``
+        # below so disk doesn't grow over time.
+        local_audio_path = await asyncio.to_thread(
+            _copy_audio_to_local_for_processing,
+            session.audio_path, session.session_id,
+        )
         try:
-            self._fingerprint_speakers(diarization_turns, session)
-        except Exception as e:
-            logger.exception(f"Speaker fingerprinting failed: {e}")
+            self._on_status("__stage:transcribe:active__")
+            # Bias Whisper toward the user's domain vocabulary when a glossary
+            # is configured. Best-effort — any failure building the prompt
+            # falls back to plain transcription.
+            initial_prompt = ""
+            if self.terminology is not None:
+                try:
+                    initial_prompt = self.terminology.build_initial_prompt()
+                except Exception as e:
+                    logger.warning(f"terminology initial_prompt build failed: {e}")
+            raw_segments = await self._transcription.transcribe(
+                local_audio_path, initial_prompt=initial_prompt)
 
-        self._on_status("Processing complete.")
-        logger.info(f"Session {session.session_id} processing complete.")
-        return session
+            if not raw_segments:
+                self._on_status("Transcription produced no output. Check audio quality.")
+                return session
+
+            # Post-transcription correction of known mis-hears (Genesys,
+            # CCaaS, UCCX, MEDDIC, ...) so the canonical spelling propagates
+            # into every downstream extraction. Best-effort per segment.
+            if self.terminology is not None:
+                try:
+                    for raw in raw_segments:
+                        raw["text"] = self.terminology.apply_corrections(
+                            raw.get("text", ""))
+                except Exception as e:
+                    logger.warning(f"terminology correction pass failed: {e}")
+
+            self._on_status("__stage:transcribe:done____stage:diarize:active__")
+            diarization_turns = await self._diarization.diarize(local_audio_path)
+
+            self._on_status("__stage:diarize:done____stage:speakers:active__")
+            attributed = DiarizationEngine.assign_speakers(raw_segments, diarization_turns)
+
+            # REPLACE, don't append. process_session must be idempotent: re-
+            # transcribing a session (recovery, re-process) has to produce a
+            # transcript for THIS audio only, not concatenate onto whatever
+            # was there before. Appending is what let two meetings merge into
+            # one session (the wrong transcript got tacked onto the right one,
+            # then summarized as a blend). Clear segments + speakers first so
+            # the result reflects exactly this diarization pass.
+            session.segments = []
+            session.speakers = {}
+            for raw in attributed:
+                speaker = session.get_or_create_speaker(raw["speaker_id"])
+                segment = Segment(
+                    speaker_id=speaker.speaker_id,
+                    start=raw["start"],
+                    end=raw["end"],
+                    text=raw["text"],
+                )
+                session.segments.append(segment)
+
+            # Speaker fingerprinting: compute per-speaker centroid embeddings
+            # from the diarization turns, then look up matches in the
+            # persistent profile store. Best-effort — any failure here is
+            # logged and the session is still saved with bare SPEAKER_XX
+            # labels (i.e. v1 behaviour). Reads through ``local_audio_path``
+            # so it gets the same cloud-contention immunity.
+            try:
+                self._fingerprint_speakers(
+                    diarization_turns, session,
+                    audio_path_override=local_audio_path,
+                )
+            except Exception as e:
+                logger.exception(f"Speaker fingerprinting failed: {e}")
+
+            self._on_status("Processing complete.")
+            logger.info(f"Session {session.session_id} processing complete.")
+            return session
+        finally:
+            # Always clean up the local working copy. A future re-process
+            # re-copies from the canonical (cloud-side) audio_path, so
+            # leaving the scratch on disk would just bloat %TEMP%.
+            await asyncio.to_thread(
+                _purge_processing_temp, session.session_id)
 
     def _fingerprint_speakers(
         self, diarization_turns: List[dict],
         session: Optional[Session] = None,
+        audio_path_override: Optional[str] = None,
     ) -> None:
         """Extract per-speaker centroids from the audio + diarization
         turns, attach them to each Speaker object, and apply any matches
@@ -810,7 +866,13 @@ class RecordingService:
         VDL/Hooli meeting overwrite happened. Safe to call when
         self._profile_service is None (skips matching, still computes +
         stores embeddings so a future session can match them later if
-        profiling gets enabled)."""
+        profiling gets enabled).
+
+        ``audio_path_override`` lets the caller pin the actual file
+        path the centroid extractor reads from — process_session passes
+        the local-scratch working copy here so fingerprinting reads
+        through the same cloud-contention-immune path as transcribe +
+        diarize."""
         if session is None:
             session = self._session
         if not session or not session.audio_path:
@@ -834,8 +896,9 @@ class RecordingService:
                 (float(turn["start"]), float(turn["end"]))
             )
 
+        audio_for_centroids = audio_path_override or session.audio_path
         centroids = extract_speaker_centroids(
-            session.audio_path, turns_by_speaker,
+            audio_for_centroids, turns_by_speaker,
         )
         if not centroids:
             return
@@ -1309,3 +1372,110 @@ class RecordingService:
             logger.warning(
                 f"Could not write session stub for "
                 f"{session.session_id}: {e}")
+
+    @staticmethod
+    def _run_finalize_subprocess(
+        mic_wav_path: str,
+        loopback_wav_path: Optional[str],
+        output_wav_path: str,
+        target_sr: int,
+        loopback_start_offset_s: Optional[float],
+    ) -> tuple[float, bool]:
+        """Run the WAV merge in a subprocess instead of in-process.
+
+        SURVIVES-NATIVE-CRASH DESIGN (v2.12): finalize reads two big
+        WAVs, resamples one with scipy, and streams a mixed PCM_16
+        output — every step is a C extension. A native crash in any
+        of them used to take the entire Python backend down (the
+        2026-06-15 8B88C1C3 STATUS_ACCESS_VIOLATION). v2.11.1 fixed
+        the SPECIFIC cause we observed (Google Drive contention on
+        the intermediate temp), but the broader single-point-of-
+        failure remained.
+
+        Running finalize as a child process makes any future native
+        crash here ISOLATED: the parent observes a non-zero exit
+        code, logs the cause, leaves the temp WAVs on disk, raises
+        ``RuntimeError`` — and the backend keeps running. The session
+        stub written by ``_write_session_stub`` ensures the row stays
+        in the Sessions list with one-click recovery.
+
+        Spawned with the same Python that runs the parent backend
+        (``sys.executable``), so we get exactly the same numpy /
+        scipy / soundfile / cffi build — no version skew.
+
+        Returns ``(duration_s, loopback_mixed)`` on success.
+        Raises ``RuntimeError`` on any failure, including subprocess
+        crash — the message includes the exit code (negative numbers
+        on POSIX = signal; large positive on Windows = NTSTATUS like
+        0xC0000005 for STATUS_ACCESS_VIOLATION) and a tail of stderr.
+        """
+        script_path = (
+            Path(__file__).resolve().parents[1] / "scripts" / "finalize_audio.py"
+        )
+        argv = [
+            sys.executable,
+            str(script_path),
+            "--mic", mic_wav_path,
+            "--loopback", loopback_wav_path or "",
+            "--output", output_wav_path,
+            "--target-sr", str(target_sr),
+            "--offset",
+            "" if loopback_start_offset_s is None
+                else f"{loopback_start_offset_s:.6f}",
+        ]
+        logger.info(
+            f"[finalize-subprocess] spawn {' '.join(argv[1:])}"
+        )
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                check=False,
+                # No timeout — long meetings legitimately take minutes
+                # to merge. The watchdog has its own per-step
+                # instrumentation; a hung subprocess would surface
+                # via the [stop] timing log.
+            )
+        except OSError as e:
+            raise RuntimeError(
+                f"could not spawn finalize subprocess: {e}"
+            ) from e
+
+        if proc.stderr:
+            # Mirror child stderr into backend.log so its diagnostics
+            # are visible at the same level the inline call's logs
+            # used to land at. Trim to keep huge tracebacks bounded.
+            tail = proc.stderr[-4000:]
+            logger.info(f"[finalize-subprocess] stderr:\n{tail}")
+
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"finalize subprocess exited with code {proc.returncode} "
+                f"(stderr tail: {proc.stderr[-400:]!r})"
+            )
+
+        # Parse "RESULT duration_s=X loopback_mixed=Y" from stdout.
+        duration_s = 0.0
+        loopback_mixed = False
+        for line in (proc.stdout or "").splitlines():
+            line = line.strip()
+            if not line.startswith("RESULT "):
+                continue
+            kv = dict(
+                part.split("=", 1) for part in line.split()[1:]
+                if "=" in part
+            )
+            try:
+                duration_s = float(kv.get("duration_s", "0"))
+            except ValueError:
+                duration_s = 0.0
+            loopback_mixed = kv.get("loopback_mixed", "false") == "true"
+            break
+        else:
+            raise RuntimeError(
+                f"finalize subprocess exited 0 but emitted no RESULT line "
+                f"(stdout tail: {proc.stdout[-200:]!r})"
+            )
+
+        return duration_s, loopback_mixed
