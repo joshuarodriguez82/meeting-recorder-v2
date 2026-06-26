@@ -859,6 +859,10 @@ class SettingsDTO(BaseModel):
     # finds the live preview noisy / inaccurate (the canonical
     # post-stop transcript runs regardless).
     live_transcription_enabled: bool = True
+    # Auto-screenshot cadence during recording. 0 = off (manual button
+    # only). The frontend's record-view fires the screenshot capture
+    # on a setInterval while a session is active.
+    auto_screenshot_interval_minutes: int = 0
     # Auto-stop watchdog. Defaults match Settings.from_env: warnings on,
     # auto-stops opt-in, 4h hard cap. 0 disables a given trigger.
     silence_warn_min: int = 5
@@ -1070,6 +1074,7 @@ async def get_settings():
         openai_api_key=s.openai_api_key,
         openai_base_url=s.openai_base_url,
         live_transcription_enabled=s.live_transcription_enabled,
+        auto_screenshot_interval_minutes=s.auto_screenshot_interval_minutes,
         silence_warn_min=s.silence_warn_min,
         silence_stop_min=s.silence_stop_min,
         overrun_warn_min=s.overrun_warn_min,
@@ -1147,6 +1152,7 @@ async def save_settings(payload: SettingsDTO):
         openai_api_key=payload.openai_api_key,
         openai_base_url=payload.openai_base_url,
         live_transcription_enabled=payload.live_transcription_enabled,
+        auto_screenshot_interval_minutes=payload.auto_screenshot_interval_minutes,
         silence_warn_min=max(0, payload.silence_warn_min),
         silence_stop_min=max(0, payload.silence_stop_min),
         overrun_warn_min=max(0, payload.overrun_warn_min),
@@ -2362,6 +2368,7 @@ async def set_live_copilot_enabled(payload: dict):
         openai_api_key=s.openai_api_key,
         openai_base_url=s.openai_base_url,
         live_transcription_enabled=s.live_transcription_enabled,
+        auto_screenshot_interval_minutes=s.auto_screenshot_interval_minutes,
         silence_warn_min=s.silence_warn_min,
         silence_stop_min=s.silence_stop_min,
         overrun_warn_min=s.overrun_warn_min,
@@ -5001,6 +5008,154 @@ async def retention_cleanup(processed_days: int = 7, unprocessed_days: int = 30)
     )
 
 
+def _scan_ghost_sessions(recordings_dir: str) -> list[dict]:
+    """Enumerate session_*.json files whose audio_path target doesn't
+    exist on disk.
+
+    "Ghost sessions" are JSON stubs that v2.11.1's start-of-recording
+    write left behind when the backend crashed mid-recording or
+    mid-finalize. Each one shows up in the Sessions list and will fail
+    to process (no WAV to transcribe). Field repro 2026-06-26: 69 of
+    them accumulated on one machine over a few weeks.
+
+    Returns ``[{session_id, display_name, json_path, json_mtime_iso,
+    age_days, audio_path}]`` sorted oldest-first so a UI cleanup picker
+    can show the worst offenders at the top."""
+    from pathlib import Path as _P
+    rec_dir = _P(recordings_dir)
+    if not rec_dir.exists():
+        return []
+    now = datetime.now()
+    out: list[dict] = []
+    for json_path in rec_dir.glob("session_*.json"):
+        # Sidecars (session_<id>.commitments.json etc.) share the glob;
+        # the dotted stem distinguishes them.
+        if json_path.stem.count(".") > 0:
+            continue
+        try:
+            data = json.loads(json_path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            # Unreadable JSON is its own problem; skip — retention
+            # cleanup handles those separately.
+            continue
+        audio_path = data.get("audio_path") or ""
+        # A populated audio_path that doesn't exist on disk is the
+        # ghost-session signature. (An empty audio_path means the
+        # session was created but never paired with a WAV — also a
+        # ghost, but the recover_orphans path handles those.)
+        if not audio_path or _P(audio_path).exists():
+            continue
+        try:
+            mtime = datetime.fromtimestamp(json_path.stat().st_mtime)
+        except OSError:
+            mtime = now
+        out.append({
+            "session_id": data.get("session_id") or
+                          json_path.stem.replace("session_", ""),
+            "display_name": data.get("display_name") or "",
+            "json_path": str(json_path),
+            "json_mtime_iso": mtime.isoformat(),
+            "age_days": (now - mtime).days,
+            "audio_path": audio_path,
+        })
+    out.sort(key=lambda r: r["age_days"], reverse=True)
+    return out
+
+
+# Stubs older than this auto-purge at backend startup. 14 days picks a
+# point well past any plausible "OneDrive is still syncing this back"
+# window without surprising a user who paused syncing for a long
+# vacation. Tunable via settings if needed; default matches the
+# retention story (processed_days=7 → kept; ghost stubs → kept 2x as
+# long since they're cheap to clean up if we're wrong).
+_GHOST_AUTO_PURGE_AGE_DAYS = 14
+
+
+@app.get("/ghost-sessions")
+async def list_ghost_sessions():
+    """List session JSONs whose audio file is missing on disk. Returned
+    list is sorted oldest first so the UI can show "delete the worst
+    offenders" without sorting. See ``_scan_ghost_sessions``."""
+    s = svc.load_settings()
+    items = await asyncio.to_thread(
+        _scan_ghost_sessions, s.recordings_dir)
+    return {
+        "count": len(items),
+        "auto_purge_age_days": _GHOST_AUTO_PURGE_AGE_DAYS,
+        "items": items,
+    }
+
+
+class GhostSessionDeleteRequest(BaseModel):
+    # Either: explicit list of session_ids the UI picked,
+    # OR: a min_age_days threshold (everything older than this).
+    session_ids: Optional[list[str]] = None
+    min_age_days: Optional[int] = None
+
+
+@app.delete("/ghost-sessions")
+async def delete_ghost_sessions(req: GhostSessionDeleteRequest):
+    """Bulk-delete ghost session JSONs (and their sidecar files).
+    Refuses to touch a session JSON whose audio_path EXISTS on disk —
+    that would be deleting a real recording, not a ghost.
+
+    Accepts either an explicit ``session_ids`` list (what the UI picker
+    sends) or a ``min_age_days`` cutoff (the auto-purge path uses 14)."""
+    s = svc.load_settings()
+    candidates = await asyncio.to_thread(
+        _scan_ghost_sessions, s.recordings_dir)
+
+    if req.session_ids:
+        wanted = set(req.session_ids)
+        candidates = [c for c in candidates if c["session_id"] in wanted]
+    elif req.min_age_days is not None:
+        candidates = [
+            c for c in candidates if c["age_days"] >= int(req.min_age_days)
+        ]
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide either session_ids or min_age_days",
+        )
+
+    from pathlib import Path as _P
+    deleted: list[str] = []
+    errors: list[dict] = []
+    for c in candidates:
+        json_path = _P(c["json_path"])
+        sid = c["session_id"]
+        # Defence in depth: re-check audio_path doesn't exist now (the
+        # scan was on a worker thread; a parallel sync could have
+        # hydrated it). Refuse the delete if the WAV actually exists.
+        audio = c.get("audio_path") or ""
+        if audio and _P(audio).exists():
+            errors.append({
+                "session_id": sid,
+                "error": "audio file exists now — not deleting",
+            })
+            continue
+        # Delete the JSON + every sidecar (session_<id>.commitments.json,
+        # session_<id>.item_status.json, etc.)
+        stem = f"session_{sid}"
+        try:
+            for sidecar in json_path.parent.glob(f"{stem}.*"):
+                try:
+                    sidecar.unlink()
+                except OSError as e:
+                    errors.append({
+                        "session_id": sid,
+                        "error": f"sidecar {sidecar.name}: {e}",
+                    })
+            deleted.append(sid)
+        except Exception as e:
+            errors.append({"session_id": sid, "error": str(e)})
+
+    logger.info(
+        f"Deleted {len(deleted)} ghost session(s); "
+        f"{len(errors)} error(s)")
+    return {"deleted": deleted, "errors": errors}
+
+
 def _client_export_dirs() -> list[str]:
     """Configured per-client Designated Folders, so retention can sweep
     untracked recorder copies that orphaned in them."""
@@ -5283,6 +5438,7 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         openai_api_key=s.openai_api_key,
         openai_base_url=s.openai_base_url,
         live_transcription_enabled=s.live_transcription_enabled,
+        auto_screenshot_interval_minutes=s.auto_screenshot_interval_minutes,
         silence_warn_min=s.silence_warn_min,
         silence_stop_min=s.silence_stop_min,
         overrun_warn_min=s.overrun_warn_min,
@@ -5935,36 +6091,56 @@ async def startup():
         sessions accumulated during v2.9.0's orphan-process incident —
         a session.json was written but the recording aborted before the
         WAV was finalized. The next process_full call fails with a
-        cryptic 'no transcript' error. Better to surface these at
-        startup so the user can clean them up."""
+        cryptic 'no transcript' error.
+
+        v2.12.0 extends this to AUTO-PURGE ghost stubs older than
+        ``_GHOST_AUTO_PURGE_AGE_DAYS`` (14 days). Field repro 2026-06-26:
+        69 ghosts accumulated on one machine — v2.11.1's JSON-first
+        writes add one every time the backend crashes mid-recording or
+        mid-finalize. Auto-purge keeps the list bounded; younger ghosts
+        stay until the next user-driven cleanup (the new
+        DELETE /ghost-sessions endpoint surfaces them in the UI)."""
         try:
             if svc.settings is None or svc.session_svc is None:
                 return
-            ghosts: list[str] = []
-            from pathlib import Path as _P
-            rec_dir = _P(svc.settings.recordings_dir)
-            if not rec_dir.exists():
+            items = _scan_ghost_sessions(svc.settings.recordings_dir)
+            if not items:
                 return
-            for json_path in rec_dir.glob("session_*.json"):
-                # Skip the structured-extraction sidecars and similar
-                if json_path.stem.count(".") > 0:
-                    continue
+
+            # Auto-purge the elderly. Each entry has age_days computed
+            # against now by _scan_ghost_sessions.
+            from pathlib import Path as _P
+            old = [c for c in items if c["age_days"] >= _GHOST_AUTO_PURGE_AGE_DAYS]
+            purged: list[str] = []
+            for c in old:
+                stem = f"session_{c['session_id']}"
+                base = _P(c["json_path"]).parent
                 try:
-                    import json as _j
-                    data = _j.loads(json_path.read_text(encoding="utf-8"))
+                    for sidecar in base.glob(f"{stem}.*"):
+                        try:
+                            sidecar.unlink()
+                        except OSError:
+                            pass
+                    purged.append(c["session_id"])
                 except Exception:
-                    continue
-                audio_path = data.get("audio_path") or ""
-                if audio_path and not _P(audio_path).exists():
-                    ghosts.append(json_path.stem)
-            if ghosts:
+                    pass
+            if purged:
+                logger.info(
+                    f"GHOST_SESSIONS: auto-purged {len(purged)} stub(s) "
+                    f"older than {_GHOST_AUTO_PURGE_AGE_DAYS} days: "
+                    f"{', '.join(purged[:10])}"
+                    f"{' …' if len(purged) > 10 else ''}")
+
+            still_present = [c for c in items if c["session_id"] not in set(purged)]
+            if still_present:
+                ids = [c["session_id"] for c in still_present]
                 logger.warning(
-                    f"GHOST_SESSIONS: {len(ghosts)} session(s) have a "
+                    f"GHOST_SESSIONS: {len(still_present)} session(s) have a "
                     f"session.json but no audio file on disk: "
-                    f"{', '.join(ghosts[:10])}"
-                    f"{' …' if len(ghosts) > 10 else ''}. "
-                    f"These will fail to process. Delete them from the "
-                    f"Sessions list or via the filesystem.")
+                    f"{', '.join(ids[:10])}"
+                    f"{' …' if len(still_present) > 10 else ''}. "
+                    f"These will fail to process. Visit Settings → "
+                    f"Cleanup or call DELETE /ghost-sessions to remove.")
         except Exception as e:
             logger.exception(f"Ghost session audit failed: {e}")
 

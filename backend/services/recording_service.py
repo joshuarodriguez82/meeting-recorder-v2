@@ -113,6 +113,18 @@ def _ensure_audio_available(path: str) -> None:
         ) from e
     logger.info(f"Audio file hydrated: {p.name}")
 
+
+# The local-copy + purge helpers (formerly defined here) moved to
+# ``utils.audio_utils`` so they can be tested in isolation without
+# pulling in ``config.settings`` (which has a 3.11/3.12 f-string
+# compatibility bump pending). Re-exported under the old private names
+# so any existing reference inside this module keeps working.
+from utils.audio_utils import (
+    copy_audio_to_local_for_processing as _copy_audio_to_local_for_processing,
+    purge_processing_temp as _purge_processing_temp,
+    _processing_temp_dir,
+)
+
 TARGET_SR = 16000
 
 # Mic duck gate (live transcription only). When far-end audio (loopback)
@@ -744,89 +756,103 @@ class RecordingService:
                 "AI models not loaded. Add API keys in File > Settings "
                 "and restart the app to enable transcription and diarization.")
 
-        # Force the WAV local before the pipeline touches it. When the
-        # recordings dir lives in OneDrive (or any Files-On-Demand cloud
-        # provider), older recordings get evicted to cloud-only
-        # placeholders — the file reports its full size but the bytes
-        # aren't on disk. pyannote's soundfile reader then fails with an
-        # opaque "invalid audio file" error mid-pipeline (Whisper's ffmpeg
-        # reader tolerates the placeholder differently, so it can pass
-        # while diarization dies). Reading the file through once pulls it
-        # local. Raises a clear, actionable error if it genuinely can't
-        # be read.
-        await asyncio.to_thread(
-            _ensure_audio_available, session.audio_path)
-
-        self._on_status("__stage:transcribe:active__")
-        # Bias Whisper toward the user's domain vocabulary when a glossary
-        # is configured. Best-effort — any failure building the prompt
-        # falls back to plain transcription.
-        initial_prompt = ""
-        if self.terminology is not None:
-            try:
-                initial_prompt = self.terminology.build_initial_prompt()
-            except Exception as e:
-                logger.warning(f"terminology initial_prompt build failed: {e}")
-        raw_segments = await self._transcription.transcribe(
-            session.audio_path, initial_prompt=initial_prompt)
-
-        if not raw_segments:
-            self._on_status("Transcription produced no output. Check audio quality.")
-            return session
-
-        # Post-transcription correction of known mis-hears (Genesys,
-        # CCaaS, UCCX, MEDDIC, ...) so the canonical spelling propagates
-        # into every downstream extraction. Best-effort per segment.
-        if self.terminology is not None:
-            try:
-                for raw in raw_segments:
-                    raw["text"] = self.terminology.apply_corrections(
-                        raw.get("text", ""))
-            except Exception as e:
-                logger.warning(f"terminology correction pass failed: {e}")
-
-        self._on_status("__stage:transcribe:done____stage:diarize:active__")
-        diarization_turns = await self._diarization.diarize(session.audio_path)
-
-        self._on_status("__stage:diarize:done____stage:speakers:active__")
-        attributed = DiarizationEngine.assign_speakers(raw_segments, diarization_turns)
-
-        # REPLACE, don't append. process_session must be idempotent: re-
-        # transcribing a session (recovery, re-process) has to produce a
-        # transcript for THIS audio only, not concatenate onto whatever
-        # was there before. Appending is what let two meetings merge into
-        # one session (the wrong transcript got tacked onto the right one,
-        # then summarized as a blend). Clear segments + speakers first so
-        # the result reflects exactly this diarization pass.
-        session.segments = []
-        session.speakers = {}
-        for raw in attributed:
-            speaker = session.get_or_create_speaker(raw["speaker_id"])
-            segment = Segment(
-                speaker_id=speaker.speaker_id,
-                start=raw["start"],
-                end=raw["end"],
-                text=raw["text"],
-            )
-            session.segments.append(segment)
-
-        # Speaker fingerprinting: compute per-speaker centroid embeddings
-        # from the diarization turns, then look up matches in the
-        # persistent profile store. Best-effort — any failure here is
-        # logged and the session is still saved with bare SPEAKER_XX
-        # labels (i.e. v1 behaviour).
+        # READ-SIDE CLOUD-CONTENTION FIX (v2.12.0, field repro 2026-06-26):
+        # Stream-copy the WAV to a LOCAL-only scratch path before any ML
+        # read touches it. ``_ensure_audio_available`` (kept for callers
+        # that don't need the full copy) does a single hydration read;
+        # that wasn't enough — two backend segfaults today crashed in
+        # the read side after hydration "succeeded," because the cloud
+        # sync filter driver intermittently returns ENOENT or partial
+        # reads while it negotiates the file's state. Working from a
+        # local copy makes the entire ML pipeline immune to that
+        # contention class. The local copy is purged in the ``finally``
+        # below so disk doesn't grow over time.
+        local_audio_path = await asyncio.to_thread(
+            _copy_audio_to_local_for_processing,
+            session.audio_path, session.session_id,
+        )
         try:
-            self._fingerprint_speakers(diarization_turns, session)
-        except Exception as e:
-            logger.exception(f"Speaker fingerprinting failed: {e}")
+            self._on_status("__stage:transcribe:active__")
+            # Bias Whisper toward the user's domain vocabulary when a glossary
+            # is configured. Best-effort — any failure building the prompt
+            # falls back to plain transcription.
+            initial_prompt = ""
+            if self.terminology is not None:
+                try:
+                    initial_prompt = self.terminology.build_initial_prompt()
+                except Exception as e:
+                    logger.warning(f"terminology initial_prompt build failed: {e}")
+            raw_segments = await self._transcription.transcribe(
+                local_audio_path, initial_prompt=initial_prompt)
 
-        self._on_status("Processing complete.")
-        logger.info(f"Session {session.session_id} processing complete.")
-        return session
+            if not raw_segments:
+                self._on_status("Transcription produced no output. Check audio quality.")
+                return session
+
+            # Post-transcription correction of known mis-hears (Genesys,
+            # CCaaS, UCCX, MEDDIC, ...) so the canonical spelling propagates
+            # into every downstream extraction. Best-effort per segment.
+            if self.terminology is not None:
+                try:
+                    for raw in raw_segments:
+                        raw["text"] = self.terminology.apply_corrections(
+                            raw.get("text", ""))
+                except Exception as e:
+                    logger.warning(f"terminology correction pass failed: {e}")
+
+            self._on_status("__stage:transcribe:done____stage:diarize:active__")
+            diarization_turns = await self._diarization.diarize(local_audio_path)
+
+            self._on_status("__stage:diarize:done____stage:speakers:active__")
+            attributed = DiarizationEngine.assign_speakers(raw_segments, diarization_turns)
+
+            # REPLACE, don't append. process_session must be idempotent: re-
+            # transcribing a session (recovery, re-process) has to produce a
+            # transcript for THIS audio only, not concatenate onto whatever
+            # was there before. Appending is what let two meetings merge into
+            # one session (the wrong transcript got tacked onto the right one,
+            # then summarized as a blend). Clear segments + speakers first so
+            # the result reflects exactly this diarization pass.
+            session.segments = []
+            session.speakers = {}
+            for raw in attributed:
+                speaker = session.get_or_create_speaker(raw["speaker_id"])
+                segment = Segment(
+                    speaker_id=speaker.speaker_id,
+                    start=raw["start"],
+                    end=raw["end"],
+                    text=raw["text"],
+                )
+                session.segments.append(segment)
+
+            # Speaker fingerprinting: compute per-speaker centroid embeddings
+            # from the diarization turns, then look up matches in the
+            # persistent profile store. Best-effort — any failure here is
+            # logged and the session is still saved with bare SPEAKER_XX
+            # labels (i.e. v1 behaviour). Reads through ``local_audio_path``
+            # so it gets the same cloud-contention immunity.
+            try:
+                self._fingerprint_speakers(
+                    diarization_turns, session,
+                    audio_path_override=local_audio_path,
+                )
+            except Exception as e:
+                logger.exception(f"Speaker fingerprinting failed: {e}")
+
+            self._on_status("Processing complete.")
+            logger.info(f"Session {session.session_id} processing complete.")
+            return session
+        finally:
+            # Always clean up the local working copy. A future re-process
+            # re-copies from the canonical (cloud-side) audio_path, so
+            # leaving the scratch on disk would just bloat %TEMP%.
+            await asyncio.to_thread(
+                _purge_processing_temp, session.session_id)
 
     def _fingerprint_speakers(
         self, diarization_turns: List[dict],
         session: Optional[Session] = None,
+        audio_path_override: Optional[str] = None,
     ) -> None:
         """Extract per-speaker centroids from the audio + diarization
         turns, attach them to each Speaker object, and apply any matches
@@ -840,7 +866,13 @@ class RecordingService:
         VDL/Hooli meeting overwrite happened. Safe to call when
         self._profile_service is None (skips matching, still computes +
         stores embeddings so a future session can match them later if
-        profiling gets enabled)."""
+        profiling gets enabled).
+
+        ``audio_path_override`` lets the caller pin the actual file
+        path the centroid extractor reads from — process_session passes
+        the local-scratch working copy here so fingerprinting reads
+        through the same cloud-contention-immune path as transcribe +
+        diarize."""
         if session is None:
             session = self._session
         if not session or not session.audio_path:
@@ -864,8 +896,9 @@ class RecordingService:
                 (float(turn["start"]), float(turn["end"]))
             )
 
+        audio_for_centroids = audio_path_override or session.audio_path
         centroids = extract_speaker_centroids(
-            session.audio_path, turns_by_speaker,
+            audio_for_centroids, turns_by_speaker,
         )
         if not centroids:
             return

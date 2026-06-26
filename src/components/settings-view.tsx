@@ -141,16 +141,20 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
   } | null>(null);
   const [saving, setSaving] = useState(false);
   const [cleaning, setCleaning] = useState(false);
+  const [ghostCount, setGhostCount] = useState<number | null>(null);
+  const [purging, setPurging] = useState(false);
 
   useEffect(() => {
     (async () => {
       try {
-        const [s, stats] = await Promise.all([
+        const [s, stats, ghosts] = await Promise.all([
           api.getSettings(),
           api.getRetentionStats().catch(() => null),
+          api.listGhostSessions().catch(() => null),
         ]);
         setSettings(s);
         setStorage(stats);
+        setGhostCount(ghosts?.count ?? null);
       } catch (e) {
         toast.error(`Could not load settings: ${e instanceof Error ? e.message : e}`);
       }
@@ -208,6 +212,43 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
       toast.error(`Cleanup failed: ${e instanceof Error ? e.message : e}`);
     } finally {
       setCleaning(false);
+    }
+  };
+
+  const purgeGhosts = async () => {
+    // Confirm before deleting so a misclick doesn't nuke the row a
+    // recovery flow might still produce a WAV for (e.g. OneDrive still
+    // syncing it back from another machine). The 14-day auto-purge
+    // covers the don't-care case; this button is for "I know there's
+    // never coming a WAV for these."
+    if (ghostCount == null || ghostCount === 0) return;
+    if (!confirm(
+      `Delete ${ghostCount} session row(s) that have no audio file on disk?\n\n` +
+      "Their transcripts + summaries (if any) will be removed too. " +
+      "Recordings whose audio is still syncing down from the cloud will be SKIPPED automatically."
+    )) return;
+    setPurging(true);
+    try {
+      // Pass min_age_days: 0 so the endpoint deletes everything the
+      // scan returns. The audio-exists defence-in-depth check inside
+      // the endpoint still protects against deleting a row whose WAV
+      // synced down between the scan and the delete.
+      const res = await api.deleteGhostSessions({ min_age_days: 0 });
+      const ok = res.deleted.length;
+      const errs = res.errors.length;
+      if (errs > 0) {
+        toast.warning(
+          `Deleted ${ok} ghost session(s); ${errs} skipped (see backend log).`
+        );
+      } else {
+        toast.success(`Deleted ${ok} ghost session(s).`);
+      }
+      const fresh = await api.listGhostSessions().catch(() => null);
+      setGhostCount(fresh?.count ?? 0);
+    } catch (e) {
+      toast.error(`Could not purge ghost sessions: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setPurging(false);
     }
   };
 
@@ -477,6 +518,35 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
             checked={settings.live_transcription_enabled}
             onChange={(v) => update("live_transcription_enabled", v)}
           />
+          <div className="space-y-1">
+            <Label htmlFor="auto-screenshot-int">Auto-screenshot during recording</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="auto-screenshot-int"
+                type="number"
+                min={0}
+                max={60}
+                className="w-24"
+                value={settings.auto_screenshot_interval_minutes}
+                onChange={(e) =>
+                  update(
+                    "auto_screenshot_interval_minutes",
+                    Math.max(0, Math.min(60, parseInt(e.target.value) || 0))
+                  )
+                }
+              />
+              <span className="text-sm text-muted-foreground">
+                minutes between captures (0 = off — use the Screenshot
+                button manually). Suggested: 3.
+              </span>
+            </div>
+            <div className="text-xs text-muted-foreground">
+              Captures a full-screen PNG and attaches it to the session
+              so the summarizer gets visual context. Capture is
+              opportunistic — if your screen is locked the capture is
+              skipped silently.
+            </div>
+          </div>
           <Toggle
             label="Live Co-Pilot (beta)"
             description="Every ~45s during a recording, asks the configured LLM for three short bullet lists (clarifying questions, risks, suggested follow-ups) based on the last few minutes of conversation. Requires Live transcription to also be on. Costs an LLM call per tick — about $0.10–$0.20 per hour on Anthropic Haiku."
@@ -753,6 +823,38 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
             {cleaning ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Trash2 className="h-4 w-4 mr-2" />}
             Clean up now
           </Button>
+
+          {/* Ghost sessions: session_*.json with no matching WAV on disk.
+              Accumulate after a backend crash mid-recording / mid-finalize
+              (v2.11.1's JSON-first writes leave the stub behind). Auto-
+              purged at 14 days; this button surfaces the manual cleanup. */}
+          {ghostCount != null && ghostCount > 0 && (
+            <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm dark:border-amber-900 dark:bg-amber-950/40">
+              <div className="font-medium">
+                {ghostCount} session{ghostCount === 1 ? "" : "s"} with no audio file
+              </div>
+              <div className="mt-1 text-muted-foreground">
+                These show up in the Sessions list but have no WAV on disk —
+                they'll fail to process. Usually left over from a backend
+                crash mid-recording. Stubs older than 14 days are
+                auto-purged at startup.
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                onClick={purgeGhosts}
+                disabled={purging}
+              >
+                {purging ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Trash2 className="h-4 w-4 mr-2" />
+                )}
+                Delete {ghostCount} ghost session{ghostCount === 1 ? "" : "s"}
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
 
