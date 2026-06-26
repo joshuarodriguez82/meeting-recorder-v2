@@ -705,6 +705,65 @@ export function RecordView({
     }
   };
 
+  // Auto-screenshot timer. When `recording` flips to true and the
+  // `auto_screenshot_interval_minutes` setting is > 0, fire a
+  // captureMonitor() against the primary display every N minutes.
+  // Captures use the primary monitor only (no picker UI) — the user
+  // already chose multi-display behaviour via the manual button when
+  // it matters. Skips silently on capture failure (screen locked, etc.)
+  // so the recording isn't interrupted.
+  useEffect(() => {
+    if (!recording) return;
+    let cancelled = false;
+    let intervalHandle: ReturnType<typeof setInterval> | null = null;
+    (async () => {
+      let intervalMin = 0;
+      try {
+        const s = await api.getSettings();
+        intervalMin = Math.max(0, Math.min(60, s.auto_screenshot_interval_minutes || 0));
+      } catch {
+        return;
+      }
+      if (intervalMin <= 0 || cancelled) return;
+      const fire = async () => {
+        if (cancelled) return;
+        try {
+          const { dir } = await api.getScreenshotDir();
+          const win = await import("@tauri-apps/api/window");
+          let primary: ScreenMonitor | null = null;
+          try {
+            const list = await win.availableMonitors();
+            if (list.length > 0) {
+              const mon = list[0];
+              primary = {
+                name: mon.name ?? null,
+                x: mon.position.x,
+                y: mon.position.y,
+                width: mon.size.width,
+                height: mon.size.height,
+                scale: mon.scaleFactor,
+              };
+            }
+          } catch {
+            primary = null;
+          }
+          await captureMonitor(dir, primary);
+        } catch {
+          // Auto-screenshot is best-effort. A failed capture (screen
+          // locked, permission revoked, Tauri restarting) shouldn't
+          // surface a toast every N minutes for the user. The manual
+          // button still gives the explicit-error UX.
+        }
+      };
+      intervalHandle = setInterval(fire, intervalMin * 60 * 1000);
+    })();
+    return () => {
+      cancelled = true;
+      if (intervalHandle != null) clearInterval(intervalHandle);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recording]);
+
   // Exact-match block: the user flagged THIS specific subject via the
   // tile's "No auto" toggle. Removable per-meeting.
   const isExactBlocked = (subject: string) =>
