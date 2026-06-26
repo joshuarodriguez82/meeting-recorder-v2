@@ -22,6 +22,136 @@ TARGET_SAMPLE_RATE = 16000
 STREAM_BLOCK_SECONDS = 10.0
 
 
+def _processing_temp_dir() -> Path:
+    """Local-only scratch dir for the WAV the ML pipeline reads from.
+
+    READ-SIDE CLOUD-CONTENTION FIX (v2.12.0, field repro 2026-06-26):
+    the recorded WAV lives in ``recordings_dir`` which is often on
+    Google Drive Stream / OneDrive / iCloud. Even AFTER the
+    ``_ensure_audio_available`` hydrate-by-read pass, the cloud sync
+    filter driver can intermittently return ENOENT or partial reads
+    while it negotiates the file's state — enough to crash libsndfile
+    / faster-whisper at the native level on a long recording. Two
+    backend segfaults today (rust.log 20:01:39 + 20:33:45) hit exactly
+    this; same shape as the v2.11.1 finalize fix, just on the read
+    side now.
+
+    Copying the WAV ONCE to a local-only path and then reading from
+    THAT for transcribe + diarize + speaker embeddings closes the
+    contention class. The local copy is a working scratch file — its
+    presence does not affect the canonical session WAV at
+    ``audio_path``. ``_purge_processing_temp`` deletes the scratch on
+    every exit so disk doesn't grow over time."""
+    d = Path(tempfile.gettempdir()) / "meeting_recorder_processing"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def copy_audio_to_local_for_processing(audio_path: str, session_id: str) -> str:
+    """Stream-copy the session WAV to ``%TEMP%/meeting_recorder_
+    processing/<session_id>.wav``. Returns the local path.
+
+    Idempotent: if ``audio_path`` is ALREADY in
+    ``_processing_temp_dir()``, returns it unchanged.
+
+    Uses 8 MB chunks with per-chunk retries (3 attempts, 0.5s
+    backoff) so a transient sync-filter stall on one read doesn't
+    fail the whole copy. A genuine missing-file / corrupt-WAV
+    condition raises RuntimeError with a user-facing message."""
+    import time as _t
+    src = Path(audio_path)
+    if not src.exists():
+        raise RuntimeError(
+            "The audio file for this recording is missing — it may have "
+            "been moved, deleted, or not yet synced down from the cloud.")
+    try:
+        size = src.stat().st_size
+    except OSError as e:
+        raise RuntimeError(
+            f"The audio file couldn't be accessed: {e}") from e
+    if size < 1024:
+        raise RuntimeError(
+            "The audio file is empty or truncated — this recording didn't "
+            "capture usable audio and can't be processed.")
+
+    # Idempotency check: if the source is already under the processing
+    # temp dir, return as-is. is_relative_to is 3.9+; on older Pythons
+    # or non-relative paths the comparison just falls through.
+    try:
+        if src.resolve().is_relative_to(_processing_temp_dir().resolve()):
+            return str(src.resolve())
+    except (AttributeError, ValueError):
+        pass
+
+    dst = _processing_temp_dir() / f"{session_id}.wav"
+    if dst.exists():
+        try:
+            dst.unlink()
+        except OSError as e:
+            logger.warning(f"could not remove stale {dst}: {e}")
+
+    logger.info(
+        f"Copying {src.name} ({size/1024/1024:.1f} MB) to local processing "
+        f"scratch at {dst}")
+    chunk = 8 * 1024 * 1024
+    copied = 0
+    try:
+        with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+            while True:
+                last_err: Optional[OSError] = None
+                for attempt in range(3):
+                    try:
+                        buf = fsrc.read(chunk)
+                        break
+                    except OSError as e:
+                        last_err = e
+                        if attempt == 2:
+                            raise
+                        _t.sleep(0.5 * (attempt + 1))
+                else:  # pragma: no cover
+                    raise last_err  # type: ignore[misc]
+                if not buf:
+                    break
+                fdst.write(buf)
+                copied += len(buf)
+    except OSError as e:
+        try:
+            if dst.exists():
+                dst.unlink()
+        except OSError:
+            pass
+        raise RuntimeError(
+            "The audio file couldn't be copied to local scratch — it may "
+            "still be syncing from the cloud. Wait a moment and process "
+            "the session again."
+        ) from e
+
+    if copied != size:
+        try:
+            dst.unlink()
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"Copy was truncated ({copied}/{size} bytes); cloud sync may "
+            f"be still mid-flight. Wait a moment and process again.")
+
+    logger.info(
+        f"Working copy ready: {dst} ({copied/1024/1024:.1f} MB)")
+    return str(dst)
+
+
+def purge_processing_temp(session_id: str) -> None:
+    """Delete the session's local working WAV. Called from
+    process_session's finally so a re-process starts from a fresh
+    copy and %TEMP% doesn't accumulate scratch files."""
+    p = _processing_temp_dir() / f"{session_id}.wav"
+    if p.exists():
+        try:
+            p.unlink()
+        except OSError as e:
+            logger.info(f"could not purge {p}: {e}")
+
+
 def _scratch_temp_dir() -> Path:
     """Local-only scratch dir for finalize intermediates (`_lb16k_*.tmp.wav`).
 

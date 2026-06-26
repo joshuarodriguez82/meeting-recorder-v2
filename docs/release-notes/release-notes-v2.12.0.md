@@ -1,19 +1,33 @@
-# v2.12.0 — Subprocess-isolated finalize: a native crash here can't take the backend down
+# v2.12.0 — Read-side cloud-contention fix, subprocess-isolated finalize, ghost-session cleanup, auto-screenshot
 
-> **What this fixes that v2.11.1 didn't.** v2.11.1 fixed the *specific*
-> native crash we observed on 2026-06-15 (the loopback resample temp
-> file contending with Google Drive Stream's filter driver). v2.12.0
-> closes the broader *class* of native crashes in the same code path:
-> the WAV merge now runs in a child process, so a crash in scipy /
-> libsndfile / numpy can no longer kill the backend. The session row
-> stays, the temp WAVs stay, and recovery is one click.
+> **What this release fixes, in priority order:**
+>
+> 1. **Read-side cloud-contention crashes.** v2.11.1 fixed the *finalize*
+>    side; this fixes the *transcribe + diarize* side. The ML pipeline
+>    now reads from a local-only working copy of the WAV instead of
+>    directly from `recordings_dir`, so cloud sync filter driver
+>    contention on Google Drive Stream / OneDrive can no longer crash
+>    the backend mid-processing. Two backend segfaults on 2026-06-26
+>    hit exactly this; v2.12.0 closes it.
+> 2. **Subprocess-isolated finalize.** A native crash in scipy /
+>    libsndfile during the WAV merge can no longer take the backend
+>    down — finalize runs in a child process now.
+> 3. **Ghost-session cleanup.** Stub session JSONs accumulate when the
+>    backend crashes mid-recording (v2.11.1's JSON-first writes leave
+>    them behind). Field repro 2026-06-26: 69 ghosts on one machine.
+>    Stubs older than 14 days auto-purge at startup; younger ones get
+>    a "Delete N ghost sessions" button in **Settings → Storage**.
+> 4. **Auto-screenshot during recording.** New setting:
+>    **Settings → Recording → Auto-screenshot during recording**.
+>    Set to 3 minutes (or whatever) and the recorder captures a
+>    screenshot on that cadence automatically — no more clicking the
+>    button. Defaults to 0 (off) so existing users aren't surprised.
 
-This is structural defense-in-depth. The same merge logic runs;
-where it runs is different. On a healthy machine you won't notice
-v2.12.0 — finalize completes in 2-3 seconds for a 20-min recording
-like before. On a machine where finalize would have crashed in
-v2.11.1, you now get a clear "Recovery available" row instead of a
-silent backend respawn.
+This is the structural defense pass for the recording pipeline. After
+v2.12.0 a native crash in the ML stack, the WAV merge, OR cloud sync
+contention during processing can no longer kill the backend OR lose a
+session. The session row always survives; recovery is always one
+click.
 
 ## Install (macOS)
 
@@ -45,7 +59,43 @@ silent backend respawn.
 
 ## What's new
 
-### 1. Subprocess-isolated WAV finalize
+### 1. Read-side cloud-contention fix (the headline)
+
+Field repro 2026-06-26: a v2.11.1 install on Google Drive Stream
+crashed the backend twice in one day. v2.11.1 had moved the *finalize*
+intermediate temp off the cloud volume — that fix held; finalize
+completed in 4 seconds. But the SUBSEQUENT auto-process step (read
+the saved WAV → transcribe → diarize) crashed both times. Backend
+exited with `STATUS_ACCESS_VIOLATION 0xC0000005`. Same shape as the
+v2.11.1 finalize crash, just on the READ side now: faster-whisper /
+pyannote reading from Google Drive Stream's local cache hit the
+same intermittent cloud-sync-filter-driver contention.
+
+The fix: at the start of `process_session`, stream-copy the WAV
+ONCE from `recordings_dir` (cloud-side) to
+`%TEMP%/meeting_recorder_processing/<session_id>.wav` (local-only),
+then route transcribe + diarize + speaker-embedding extraction
+through the local copy. The cloud volume is touched exactly once;
+the heavy ML pipeline never sees it. Cleanup is automatic in
+`finally`. A failed re-process re-copies; disk doesn't grow.
+
+The same backend.log that showed today's crashes:
+
+```
+[ERROR] process_full: transcribe/diarize failed
+  File "services/recording_service.py", line 727, in process_session
+    await asyncio.to_thread(_ensure_audio_available, session.audio_path)
+  File "services/recording_service.py", line 74, in _ensure_audio_available
+    raise RuntimeError(
+        "The audio file for this recording is missing — it may have "
+        "been moved, deleted, or not yet synced down from the cloud.")
+```
+
+After v2.12.0, the same flow copies the WAV to a local-only path
+before that error path is even reachable. Re-processing the same
+session is a no-op copy because the helper is idempotent.
+
+### 2. Subprocess-isolated WAV finalize
 
 The recording stop path used to call `finalize_recording_streaming`
 inline — reading two big WAVs, resampling one with scipy, streaming a
@@ -79,7 +129,7 @@ classes for clear diagnostics:
 Stderr from the child is mirrored into backend.log so diagnostics
 are visible at the same level they used to land at.
 
-### 2. Temp cleanup gate fixed
+### 3. Temp cleanup gate fixed
 
 v2.11.1 introduced a JSON-stub-at-start-of-recording write so a
 crashed finalize wouldn't lose the session row. That change pre-set
@@ -96,7 +146,7 @@ subprocess-finalize crash path explicitly relies on this — when the
 child segfaults, the parent's `except` arrives in `finally` with no
 file at `session.audio_path` and the temps are preserved.
 
-### 3. Recovery loop tightens for v2.12 sessions
+### 4. Recovery loop tightens for v2.12 sessions
 
 A subprocess crash now produces *exactly* the orphan-temp shape
 that v2.11.1's recovery flow was designed to handle: a session JSON
@@ -107,6 +157,49 @@ service finds the orphans, merges them (out-of-process again, via
 the same script), and stamps the existing session JSON with the
 final fields. The user sees "Recovery available" for ~3 seconds,
 clicks it, the merged WAV lands, processing kicks off.
+
+### 5. Ghost-session cleanup
+
+v2.11.1's "JSON-first write" change was designed to ensure a backend
+crash mid-recording / mid-finalize never lost the Sessions-list row
+— the stub gets written to disk on Start, so even a complete
+process death leaves a recoverable entry. Working as intended, but
+over time the stubs accumulate. Field repro 2026-06-26: **69
+session JSONs with no WAV on disk** on one machine. Each one shows
+up in the Sessions list, fails to process when clicked, and confuses
+the user.
+
+v2.12.0 adds two complementary cleanups:
+
+- **Auto-purge at backend startup.** Stubs older than 14 days that
+  STILL have no WAV at their `audio_path` get deleted (JSON +
+  sidecars) automatically. The 14-day window is well past any
+  plausible "OneDrive is still syncing this back from another
+  machine" recovery scenario. Younger stubs are kept so the
+  recover-from-temps path can still find them.
+- **Manual button in Settings → Storage.** New endpoint
+  `GET/DELETE /ghost-sessions` returns / removes the list. An
+  amber banner appears in Settings → Storage when ghosts exist:
+  "X session(s) with no audio file — Delete X ghost session(s)."
+  Defense in depth: the delete handler re-checks each row's
+  `audio_path` at delete time and skips any that materialized
+  (Drive synced back) between the scan and the click.
+
+### 6. Auto-screenshot during recording
+
+Field gap 2026-06-26: a 28-minute meeting captured 1 screenshot
+because screenshots are manual (Screenshot button on the Record
+view). Users expecting "the app screenshots periodically" got one
+per click and didn't realize. v2.12.0 adds a settings field —
+**Settings → Recording → Auto-screenshot during recording** — that
+takes a minutes interval (0 = off, default; recommended 3). When
+set > 0 and a recording is active, the Record view fires
+`capture_screenshot` on a `setInterval` of that cadence against
+the primary monitor; captures are best-effort and silent on
+failure (locked screen, revoked permission), so the screen
+flickering or a toast every 3 min doesn't interrupt the meeting.
+Captures attach to the session's `screenshots[]` and feed the
+summarizer the same way manual ones do.
 
 ## Bundle changes
 
