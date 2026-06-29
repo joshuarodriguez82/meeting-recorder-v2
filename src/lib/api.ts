@@ -1376,6 +1376,27 @@ export const api = {
     request<{ models: { value: string; label: string }[] }>(
       `/models/free?provider=${encodeURIComponent(provider)}`),
 
+  // Live model list for the configured (or query-overridden) AI
+  // provider. Polls the provider's own /v1/models (or native
+  // equivalent) so new model releases appear in the Settings dropdown
+  // without an app update. The UI uses this on Settings open; falls
+  // back to its hardcoded GEMINI_MODELS / GROQ_MODELS / etc. lists
+  // when source !== "live". Cached server-side for 5 min so opening
+  // settings repeatedly doesn't pound the provider.
+  getAvailableModels: (provider?: string, baseUrl?: string) => {
+    const params = new URLSearchParams();
+    if (provider) params.set("provider", provider);
+    if (baseUrl) params.set("base_url", baseUrl);
+    const qs = params.toString();
+    return request<{
+      models: { value: string; label: string }[];
+      source: "live" | "cache" | "empty";
+      provider: string;
+      error?: string;
+      age_seconds?: number;
+    }>(`/providers/available-models${qs ? `?${qs}` : ""}`);
+  },
+
   // Per-client configs (designated export folders, etc.)
   getClientConfigs: () =>
     request<Record<string, { export_folder: string; display_name?: string }>>(

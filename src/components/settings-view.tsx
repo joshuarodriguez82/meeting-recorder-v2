@@ -1037,6 +1037,59 @@ function AIProviderSection({
       ? liveOpenrouter
       : OPENROUTER_MODELS;
 
+  // Live-fetch the model list for any provider that exposes one
+  // (Anthropic, Gemini, Groq, Ollama, generic OpenAI-compat). New
+  // model releases (Gemini 2.5 Flash, Claude Haiku 4.5, etc.) appear
+  // in the dropdown automatically — no app update needed. Per-preset
+  // hardcoded lists (GEMINI_MODELS, GROQ_MODELS, …) survive as
+  // fallbacks for offline / bad-key cases.
+  //
+  // Re-runs when the user switches preset OR edits the base URL (so
+  // pointing Ollama at a different host re-discovers locally
+  // installed models). Saving the API key doesn't trigger a refetch
+  // because the user might be mid-edit; refetch happens on next
+  // settings open / preset change.
+  const [liveProviderModels, setLiveProviderModels] = useState<
+    { value: string; label: string }[] | null
+  >(null);
+  useEffect(() => {
+    if (preset === "openrouter") {
+      // OpenRouter has its own live fetch above; don't double-fire.
+      setLiveProviderModels(null);
+      return;
+    }
+    if (preset === "custom") {
+      // Custom URLs may be anything; only fetch when the user has
+      // actually pasted a URL.
+      if (!settings.openai_base_url) {
+        setLiveProviderModels(null);
+        return;
+      }
+    }
+    let cancelled = false;
+    api
+      .getAvailableModels(
+        settings.ai_provider || "anthropic",
+        settings.openai_base_url || undefined,
+      )
+      .then((r) => {
+        if (cancelled) return;
+        if (r.models && r.models.length) {
+          setLiveProviderModels(r.models);
+        } else {
+          // Empty list means the live fetch failed (no key, network
+          // down, etc.). Keep null so the hardcoded fallback wins.
+          setLiveProviderModels(null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLiveProviderModels(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [preset, settings.ai_provider, settings.openai_base_url]);
+
   // Apply a preset: sets ai_provider, openai_base_url, and (when a
   // sensible default exists) claude_model. Touching the API-key field
   // is avoided — users may already have one pasted for a different
@@ -1077,13 +1130,22 @@ function AIProviderSection({
     }
   };
 
-  // Which preset list (if any) this provider uses. Custom gets no list —
-  // the user types a model id directly.
-  const presetModels = preset === "anthropic" ? ANTHROPIC_MODELS
+  // Which preset list (if any) this provider uses. The hardcoded
+  // ANTHROPIC_MODELS / OLLAMA_MODELS / etc. are FALLBACKS — the live
+  // fetch above wins when it returns a non-empty list, so new model
+  // releases appear without an app update. OpenRouter keeps its own
+  // dedicated path (already merges live + passthrough above). Custom
+  // gets no list — the user types a model id directly.
+  const liveOrFallback = (
+    fallback: { value: string; label: string }[]
+  ) => (liveProviderModels && liveProviderModels.length
+    ? liveProviderModels
+    : fallback);
+  const presetModels = preset === "anthropic" ? liveOrFallback(ANTHROPIC_MODELS)
     : preset === "openrouter" ? openrouterModels
-    : preset === "ollama" ? OLLAMA_MODELS
-    : preset === "groq" ? GROQ_MODELS
-    : preset === "gemini" ? GEMINI_MODELS
+    : preset === "ollama" ? liveOrFallback(OLLAMA_MODELS)
+    : preset === "groq" ? liveOrFallback(GROQ_MODELS)
+    : preset === "gemini" ? liveOrFallback(GEMINI_MODELS)
     : null;
   const modelIsPreset = presetModels
     ? presetModels.some((m) => m.value === settings.claude_model)
