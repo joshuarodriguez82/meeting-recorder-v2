@@ -1050,6 +1050,217 @@ async def get_free_models(provider: str = "openrouter"):
     return {"models": models}
 
 
+# ── Live provider-model discovery ────────────────────────────────────
+#
+# Every OpenAI-compatible provider (Anthropic, Gemini, Groq, OpenRouter,
+# LM Studio, vLLM, …) exposes a "list available models" endpoint. The
+# Settings page used to ship a HARDCODED dropdown per provider, which
+# meant every new model release (Gemini 2.5 Flash, Claude Haiku 4.5,
+# etc.) required an app update before the user could pick it. Now the
+# dropdown pulls live from the provider on Settings open; the hardcoded
+# list survives as a fallback only.
+#
+# All fetches are stdlib-only (no httpx assumption — matches the
+# _fetch_openrouter_free pattern above) and time out at 8s so a flaky
+# provider can't hang the settings page indefinitely. Results are
+# cached per (provider, base_url) for 5 minutes so opening Settings,
+# saving, and reopening doesn't pound the provider's API.
+
+_PROVIDER_MODELS_CACHE: dict[tuple[str, str], dict] = {}
+_PROVIDER_MODELS_TTL = 300  # 5 minutes
+
+
+def _stdlib_get_json(
+    url: str, headers: Optional[dict] = None, timeout: float = 8.0,
+) -> dict:
+    """One-shot GET → JSON. Raises urllib.error.URLError / JSONDecodeError
+    on failure; caller logs + returns []."""
+    import json as _json
+    import urllib.request as _urlreq
+
+    req = _urlreq.Request(
+        url, headers=headers or {"User-Agent": "MeetingRecorder/2"},
+    )
+    with _urlreq.urlopen(req, timeout=timeout) as resp:
+        return _json.loads(resp.read().decode("utf-8"))
+
+
+def _fetch_anthropic_models(api_key: str) -> list[dict]:
+    """Anthropic's native /v1/models. Requires the API key in
+    x-api-key (NOT Bearer — different from OpenAI). Schema is
+    ``{ data: [{ id, display_name, type, created_at }] }``. We surface
+    only models with type=="model" and a non-empty display_name so the
+    UI doesn't pollute with deprecated aliases."""
+    if not api_key:
+        return []
+    data = _stdlib_get_json(
+        "https://api.anthropic.com/v1/models",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "User-Agent": "MeetingRecorder/2",
+        },
+    )
+    out: list[dict] = []
+    for m in data.get("data", []):
+        mid = m.get("id") or ""
+        if not mid:
+            continue
+        if m.get("type") and m.get("type") != "model":
+            continue
+        label = m.get("display_name") or mid
+        out.append({"value": mid, "label": label})
+    out.sort(key=lambda x: x["label"])
+    return out
+
+
+def _fetch_openai_compat_models(
+    base_url: str, api_key: str,
+) -> list[dict]:
+    """Standard ``GET {base_url}/models`` shape used by OpenAI, Groq,
+    LM Studio, vLLM, and Gemini's OpenAI-compat endpoint. Bearer auth.
+    Schema: ``{ data: [{ id, object, owned_by, created }] }``.
+
+    Some providers (Ollama via OpenAI shim, certain LM Studio configs)
+    return models with no metadata; we just surface ``id`` as the label
+    in that case rather than dropping the entry."""
+    if not base_url:
+        return []
+    url = base_url.rstrip("/") + "/models"
+    headers = {"User-Agent": "MeetingRecorder/2"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    data = _stdlib_get_json(url, headers=headers)
+    out: list[dict] = []
+    for m in data.get("data", []):
+        mid = m.get("id") or ""
+        if not mid:
+            continue
+        owned = m.get("owned_by") or ""
+        label = f"{mid} · {owned}" if owned else mid
+        out.append({"value": mid, "label": label})
+    out.sort(key=lambda x: x["value"])
+    return out
+
+
+def _fetch_gemini_models(api_key: str) -> list[dict]:
+    """Gemini's native /v1beta/models endpoint (NOT the OpenAI-compat
+    one — the native one returns more useful metadata including
+    supported generation methods, so we filter to chat-capable models
+    only). Auth via ``?key=`` query param, not Authorization header."""
+    if not api_key:
+        return []
+    data = _stdlib_get_json(
+        f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
+    )
+    out: list[dict] = []
+    for m in data.get("models", []):
+        name = m.get("name") or ""
+        # Gemini returns "models/gemini-2.5-flash"; we want just the id.
+        mid = name.rsplit("/", 1)[-1] if name else ""
+        if not mid:
+            continue
+        # Only models that support generateContent (the chat surface).
+        methods = m.get("supportedGenerationMethods") or []
+        if methods and "generateContent" not in methods:
+            continue
+        display = m.get("displayName") or mid
+        out.append({"value": mid, "label": display})
+    out.sort(key=lambda x: x["label"])
+    return out
+
+
+def _fetch_ollama_local_models(base_url: str) -> list[dict]:
+    """Ollama's native /api/tags lists LOCALLY INSTALLED models (what
+    the user has pulled). The OpenAI-compat /v1/models endpoint also
+    works but returns the same set with less metadata. We use /api/tags
+    here for the size + modified-at fields, which let us show the user
+    which models are big / old."""
+    if not base_url:
+        return []
+    # Ollama's API root is `/`; the OpenAI compat path is `/v1/`. The
+    # user's base_url could point at either; normalize to the host.
+    from urllib.parse import urlparse
+    parsed = urlparse(base_url)
+    root = f"{parsed.scheme}://{parsed.netloc}"
+    data = _stdlib_get_json(f"{root}/api/tags")
+    out: list[dict] = []
+    for m in data.get("models", []):
+        name = m.get("name") or ""
+        if not name:
+            continue
+        size_b = m.get("size") or 0
+        size_gb = size_b / (1024 ** 3) if size_b else 0
+        label = f"{name} · {size_gb:.1f} GB" if size_gb else name
+        out.append({"value": name, "label": label})
+    out.sort(key=lambda x: x["value"])
+    return out
+
+
+@app.get("/providers/available-models")
+async def get_provider_available_models(
+    provider: Optional[str] = None,
+    base_url: Optional[str] = None,
+):
+    """Live model roster for the configured (or query-overridden) AI
+    provider. The UI calls this on Settings open; the hardcoded
+    GEMINI_MODELS / GROQ_MODELS / OLLAMA_MODELS lists are kept as
+    fallbacks for offline / bad-key cases.
+
+    Query params let the UI test a candidate provider+url BEFORE saving
+    — same shape as the test-connection endpoint. When omitted, reads
+    the currently-saved settings."""
+    s = svc.load_settings()
+    prov = (provider or s.ai_provider or "anthropic").lower()
+    base = (base_url or s.openai_base_url or "").strip()
+    cache_key = (prov, base)
+    now = time.time()
+    cached = _PROVIDER_MODELS_CACHE.get(cache_key)
+    if cached and (now - cached["at"]) < _PROVIDER_MODELS_TTL:
+        return {"models": cached["models"], "source": "cache",
+                "provider": prov, "age_seconds": int(now - cached["at"])}
+
+    models: list[dict] = []
+    err: Optional[str] = None
+    try:
+        if prov == "anthropic":
+            models = await asyncio.to_thread(
+                _fetch_anthropic_models, s.anthropic_api_key)
+        elif prov == "openai":
+            base_lower = base.lower()
+            if "generativelanguage.googleapis" in base_lower:
+                # Use Gemini's NATIVE endpoint (richer metadata) even
+                # though the user's base_url points at /v1beta/openai/.
+                # We have the key either way.
+                models = await asyncio.to_thread(
+                    _fetch_gemini_models, s.openai_api_key)
+            elif ("ollama" in base_lower or
+                  ":11434" in base_lower or
+                  "localhost:11434" in base_lower):
+                models = await asyncio.to_thread(
+                    _fetch_ollama_local_models, base)
+            else:
+                models = await asyncio.to_thread(
+                    _fetch_openai_compat_models, base, s.openai_api_key)
+        else:
+            err = f"Unknown provider: {prov!r}"
+    except Exception as e:
+        # Network failure, bad key, 4xx/5xx — surface the error message
+        # but DON'T raise. UI catches the empty list + error string and
+        # falls back to its hardcoded roster.
+        err = f"{type(e).__name__}: {e}"
+        logger.info(f"available-models fetch failed for {prov} {base!r}: {err}")
+
+    if models:
+        _PROVIDER_MODELS_CACHE[cache_key] = {"at": now, "models": models}
+    return {
+        "models": models,
+        "source": "live" if models else "empty",
+        "provider": prov,
+        "error": err,
+    }
+
+
 # ── Settings ─────────────────────────────────────────────────────────
 @app.get("/settings", response_model=SettingsDTO)
 async def get_settings():
@@ -5767,6 +5978,85 @@ def _gather_diagnostics() -> dict:
 async def get_diagnostics():
     svc.load_settings()
     return await asyncio.to_thread(_gather_diagnostics)
+
+
+@app.post("/diagnostics/llm-test")
+async def diagnose_llm_connection():
+    """Fire a tiny chat completion against the configured AI provider so
+    the UI can give the user actionable "is my key / base URL / model
+    actually reachable" feedback BEFORE the next summary fails.
+
+    Common failure modes this surfaces directly:
+      - Wrong base_url (Ollama 11434 not running, Gemini compat URL
+        misspelled, etc.) → connection-refused / 404 / DNS error.
+      - Bad API key → 401/403 from the provider.
+      - Wrong model id → 404 from the provider with a clear message.
+      - Provider reachable but returning unexpected payloads → caught
+        and surfaced as "responded but didn't return a chat
+        completion."
+
+    Doesn't touch settings — purely a read against whatever's currently
+    configured. ~1 token in/out so it's nearly free against any
+    rate-limited backend. ~10s timeout so a stuck endpoint can't hang
+    the diagnostics page indefinitely."""
+    s = svc.load_settings()
+    if not svc.summarizer:
+        return {
+            "ok": False,
+            "provider": s.ai_provider or "anthropic",
+            "model": s.claude_model or "",
+            "latency_ms": 0,
+            "error": (
+                "Summarizer not initialized — set up an AI provider in "
+                "Settings, save, then try again."
+            ),
+        }
+    import time as _t
+    t0 = _t.monotonic()
+    try:
+        # Single-message chat completion. The summarizer wrapper handles
+        # both Anthropic and OpenAI-compat surfaces, so this exercises
+        # the same code path summary/extract uses without needing two
+        # bespoke probes.
+        reply = await asyncio.wait_for(
+            svc.summarizer._chat(
+                "Reply with the single word OK.",
+                max_tokens=8,
+            ),
+            timeout=10.0,
+        )
+        latency_ms = int((_t.monotonic() - t0) * 1000)
+        return {
+            "ok": True,
+            "provider": s.ai_provider or "anthropic",
+            "model": s.claude_model or "",
+            "latency_ms": latency_ms,
+            "reply": (reply or "").strip()[:80],
+        }
+    except asyncio.TimeoutError:
+        return {
+            "ok": False,
+            "provider": s.ai_provider or "anthropic",
+            "model": s.claude_model or "",
+            "latency_ms": int((_t.monotonic() - t0) * 1000),
+            "error": (
+                "Provider didn't respond within 10s. The endpoint may "
+                "be unreachable, the model may be cold-loading (Ollama), "
+                "or the URL may be wrong."
+            ),
+        }
+    except Exception as e:
+        # Anthropic/OpenAI client exceptions stringify into useful
+        # diagnostics ("401 Unauthorized", "404 model not found",
+        # "Connection refused"). Surface the raw message verbatim — it's
+        # what an operator would want to see.
+        return {
+            "ok": False,
+            "provider": s.ai_provider or "anthropic",
+            "model": s.claude_model or "",
+            "latency_ms": int((_t.monotonic() - t0) * 1000),
+            "error": f"{type(e).__name__}: {e}",
+        }
 
 
 # ── Backend-driven watchdog tick ────────────────────────────────────
