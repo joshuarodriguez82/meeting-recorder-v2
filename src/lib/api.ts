@@ -1477,6 +1477,20 @@ export const api = {
   // Settings → Diagnostics so failures (Ollama down, dir not writable,
   // no mic) are visible without reading logs by hand.
   getDiagnostics: () => request<Diagnostics>("/diagnostics"),
+  // Fires a 1-token chat completion against the configured AI provider
+  // so the user can validate the key + base URL + model BEFORE the
+  // next summarize/extract fails opaquely. Returns ok + latency on
+  // success, or ok=false with a verbatim error string. ~10s timeout
+  // server-side so a stuck endpoint can't hang the UI.
+  testLLMConnection: () =>
+    request<{
+      ok: boolean;
+      provider: string;
+      model: string;
+      latency_ms: number;
+      reply?: string;
+      error?: string;
+    }>("/diagnostics/llm-test", { method: "POST" }),
 
   // Auto pre-meeting briefs — generated backend-side before meetings.
   getAutoPrepBriefs: () => request<AutoPrepBrief[]>("/prep-brief/auto"),

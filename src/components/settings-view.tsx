@@ -74,12 +74,18 @@ const GROQ_MODELS = [
   { value: "gemma2-9b-it", label: "Gemma 2 9B (free)" },
 ];
 
-// Google Gemini — free tier via the OpenAI-compatible compat endpoint.
-// Same model id format as Google's native API.
+// Google Gemini — free tier via the OpenAI-compatible compat endpoint
+// (https://generativelanguage.googleapis.com/v1beta/openai/). Same model
+// ids as Google's native API. The 2.5 line is the current generation;
+// 2.0 / 1.5 entries kept for users who picked them before this update
+// — they still work, just slower / lower quality.
 const GEMINI_MODELS = [
-  { value: "gemini-2.0-flash", label: "Gemini 2.0 Flash (free)" },
-  { value: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash-Lite (free, faster)" },
-  { value: "gemini-1.5-flash", label: "Gemini 1.5 Flash (free)" },
+  { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash (recommended)" },
+  { value: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite (faster, cheaper)" },
+  { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro (highest quality, slower)" },
+  { value: "gemini-2.0-flash", label: "Gemini 2.0 Flash (legacy)" },
+  { value: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash-Lite (legacy)" },
+  { value: "gemini-1.5-flash", label: "Gemini 1.5 Flash (legacy)" },
 ];
 
 type ProviderPreset =
@@ -949,6 +955,56 @@ function AIProviderSection({
 }) {
   const preset = presetFromSettings(settings);
 
+  // "Test connection" probe. Fires a 1-token chat completion against
+  // whatever's currently configured (whether it's saved or just edited
+  // in-memory — but the BACKEND test only sees saved values, so the
+  // toast nudges the user to Save first if dirty). Result lives in
+  // local component state, not the settings draft, so it doesn't
+  // disappear on re-render and doesn't dirty the form.
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<
+    | { ok: true; latency_ms: number; reply: string; provider: string; model: string }
+    | { ok: false; error: string; latency_ms: number; provider: string; model: string }
+    | null
+  >(null);
+  const runConnectionTest = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await api.testLLMConnection();
+      if (res.ok) {
+        setTestResult({
+          ok: true,
+          latency_ms: res.latency_ms,
+          reply: res.reply || "",
+          provider: res.provider,
+          model: res.model,
+        });
+      } else {
+        setTestResult({
+          ok: false,
+          latency_ms: res.latency_ms,
+          error: res.error || "Unknown error",
+          provider: res.provider,
+          model: res.model,
+        });
+      }
+    } catch (e) {
+      // Network-level failure (backend down, auth, etc.) — distinct
+      // from a provider-level failure that the endpoint itself
+      // returns. Surface the message verbatim.
+      setTestResult({
+        ok: false,
+        latency_ms: 0,
+        error: e instanceof Error ? e.message : String(e),
+        provider: settings.ai_provider,
+        model: settings.claude_model,
+      });
+    } finally {
+      setTesting(false);
+    }
+  };
+
   // OpenRouter's free roster rotates constantly — fetch it live so the
   // dropdown never goes stale (the bundled OPENROUTER_MODELS is only a
   // no-network fallback). Stable non-":free" entries (paid pass-through)
@@ -1179,6 +1235,52 @@ function AIProviderSection({
               </button>
             )}
           </>
+        )}
+      </div>
+
+      {/* Test connection — sanity check the configured provider BEFORE
+          the next summarize/extract fails with an opaque error toast.
+          Only tests SAVED settings — the backend reads its loaded
+          config, so a dirty draft would test stale values. */}
+      <div className="mt-2 space-y-2">
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={runConnectionTest}
+            disabled={testing}
+          >
+            {testing ? (
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+            ) : null}
+            Test connection
+          </Button>
+          <span className="text-xs text-muted-foreground">
+            Fires a 1-token chat completion against the saved provider.
+            Save settings first if you just edited them.
+          </span>
+        </div>
+        {testResult && testResult.ok && (
+          <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm dark:border-emerald-900 dark:bg-emerald-950/40">
+            <div className="font-medium">
+              ✓ Connected · {testResult.latency_ms} ms
+            </div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              {testResult.provider} / {testResult.model}
+              {testResult.reply ? ` — replied "${testResult.reply}"` : ""}
+            </div>
+          </div>
+        )}
+        {testResult && !testResult.ok && (
+          <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm dark:border-red-900 dark:bg-red-950/40">
+            <div className="font-medium">
+              ✗ Could not reach {testResult.provider} / {testResult.model}
+            </div>
+            <div className="mt-1 break-words text-xs">
+              {testResult.error}
+            </div>
+          </div>
         )}
       </div>
     </div>

@@ -5769,6 +5769,85 @@ async def get_diagnostics():
     return await asyncio.to_thread(_gather_diagnostics)
 
 
+@app.post("/diagnostics/llm-test")
+async def diagnose_llm_connection():
+    """Fire a tiny chat completion against the configured AI provider so
+    the UI can give the user actionable "is my key / base URL / model
+    actually reachable" feedback BEFORE the next summary fails.
+
+    Common failure modes this surfaces directly:
+      - Wrong base_url (Ollama 11434 not running, Gemini compat URL
+        misspelled, etc.) → connection-refused / 404 / DNS error.
+      - Bad API key → 401/403 from the provider.
+      - Wrong model id → 404 from the provider with a clear message.
+      - Provider reachable but returning unexpected payloads → caught
+        and surfaced as "responded but didn't return a chat
+        completion."
+
+    Doesn't touch settings — purely a read against whatever's currently
+    configured. ~1 token in/out so it's nearly free against any
+    rate-limited backend. ~10s timeout so a stuck endpoint can't hang
+    the diagnostics page indefinitely."""
+    s = svc.load_settings()
+    if not svc.summarizer:
+        return {
+            "ok": False,
+            "provider": s.ai_provider or "anthropic",
+            "model": s.claude_model or "",
+            "latency_ms": 0,
+            "error": (
+                "Summarizer not initialized — set up an AI provider in "
+                "Settings, save, then try again."
+            ),
+        }
+    import time as _t
+    t0 = _t.monotonic()
+    try:
+        # Single-message chat completion. The summarizer wrapper handles
+        # both Anthropic and OpenAI-compat surfaces, so this exercises
+        # the same code path summary/extract uses without needing two
+        # bespoke probes.
+        reply = await asyncio.wait_for(
+            svc.summarizer._chat(
+                "Reply with the single word OK.",
+                max_tokens=8,
+            ),
+            timeout=10.0,
+        )
+        latency_ms = int((_t.monotonic() - t0) * 1000)
+        return {
+            "ok": True,
+            "provider": s.ai_provider or "anthropic",
+            "model": s.claude_model or "",
+            "latency_ms": latency_ms,
+            "reply": (reply or "").strip()[:80],
+        }
+    except asyncio.TimeoutError:
+        return {
+            "ok": False,
+            "provider": s.ai_provider or "anthropic",
+            "model": s.claude_model or "",
+            "latency_ms": int((_t.monotonic() - t0) * 1000),
+            "error": (
+                "Provider didn't respond within 10s. The endpoint may "
+                "be unreachable, the model may be cold-loading (Ollama), "
+                "or the URL may be wrong."
+            ),
+        }
+    except Exception as e:
+        # Anthropic/OpenAI client exceptions stringify into useful
+        # diagnostics ("401 Unauthorized", "404 model not found",
+        # "Connection refused"). Surface the raw message verbatim — it's
+        # what an operator would want to see.
+        return {
+            "ok": False,
+            "provider": s.ai_provider or "anthropic",
+            "model": s.claude_model or "",
+            "latency_ms": int((_t.monotonic() - t0) * 1000),
+            "error": f"{type(e).__name__}: {e}",
+        }
+
+
 # ── Backend-driven watchdog tick ────────────────────────────────────
 #
 # CRITICAL: previously the watchdog only ticked when the frontend
