@@ -1,0 +1,111 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Meeting Recorder — Extension Settings</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      max-width: 640px;
+      margin: 40px auto;
+      padding: 0 20px;
+      color: #1a1a1a;
+      line-height: 1.5;
+    }
+    h1 { font-size: 20px; margin: 0 0 8px; }
+    p.subtitle { color: #666; margin: 0 0 24px; }
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      margin-top: 16px;
+      margin-bottom: 6px;
+    }
+    input[type="text"], input[type="password"] {
+      width: 100%;
+      padding: 8px 10px;
+      font-size: 13px;
+      font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      box-sizing: border-box;
+    }
+    .help {
+      font-size: 11px;
+      color: #666;
+      margin-top: 4px;
+    }
+    button {
+      margin-top: 20px;
+      padding: 10px 16px;
+      background: #2563eb;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: white;
+      color: #2563eb;
+      border: 1px solid #2563eb;
+      margin-left: 8px;
+    }
+    button:hover { filter: brightness(0.95); }
+    #status {
+      margin-top: 12px;
+      font-size: 13px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      display: none;
+    }
+    #status.ok { background: #d1fae5; color: #065f46; display: block; }
+    #status.error { background: #fee2e2; color: #991b1b; display: block; }
+    .card {
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 16px;
+      margin-top: 24px;
+    }
+    .card h2 { font-size: 14px; margin: 0 0 8px; }
+    .card p { font-size: 13px; margin: 4px 0; }
+    code {
+      background: #e5e7eb;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Meeting Recorder — Extension Settings</h1>
+  <p class="subtitle">Configure where to send captured OWA + Teams content.</p>
+
+  <label for="backendUrl">Meeting Recorder backend URL</label>
+  <input type="text" id="backendUrl" placeholder="http://127.0.0.1:52469">
+  <p class="help">From Meeting Recorder → Settings → Chrome Extension. The port changes each launch; if captures stop working after a restart, refresh this value.</p>
+
+  <label for="token">Auth token</label>
+  <input type="password" id="token" placeholder="paste the per-launch token here">
+  <p class="help">From the same screen. New token on every recorder launch.</p>
+
+  <button id="saveBtn">Save</button>
+  <button id="testBtn" class="secondary">Test connection</button>
+
+  <div id="status"></div>
+
+  <div class="card">
+    <h2>How it works</h2>
+    <p>1. You stay signed in to Outlook + Teams in this Chrome (your normal browsing session).</p>
+    <p>2. Click the extension's toolbar icon → <strong>Capture &amp; Send</strong>.</p>
+    <p>3. The extension opens <code>outlook.office.com/calendar/view/day</code> + <code>teams.microsoft.com/.../activity</code> in tabs, waits ~10 seconds for each to render fully, reads the <code>[role="main"]</code> inner text, closes them.</p>
+    <p>4. Content is POSTed to your local Meeting Recorder backend; the LLM parses it into a daily briefing exactly like the existing <strong>Import briefing</strong> flow does.</p>
+    <p>5. Because the scrape runs in YOUR Chrome (no Playwright, no automation flags), Microsoft's bot detection doesn't fire and your real session cookies work.</p>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

@@ -367,9 +367,22 @@ _ALLOWED_ORIGINS = [
     "http://127.0.0.1:3000",
 ]
 
+# Chrome extensions originate from chrome-extension://<id>/. We can't
+# enumerate the user's installed extension ID at startup (the ID is
+# derived from the unpacked extension's path on disk), so we match
+# the whole scheme via allow_origin_regex. Safe because:
+#   - The backend still requires a per-launch Bearer token on EVERY
+#     mutation request (see token middleware below). CORS without the
+#     token gets you nothing.
+#   - The extension is user-installed; allowing chrome-extension://
+#     doesn't open up arbitrary websites — they have a different
+#     origin scheme entirely.
+_ALLOWED_ORIGIN_REGEX = r"^chrome-extension://[a-z0-9]+/?$"
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_ALLOWED_ORIGINS,
+    allow_origin_regex=_ALLOWED_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -5765,6 +5778,92 @@ async def import_daily_briefing(req: BriefingImportRequest):
 
     stored = await asyncio.to_thread(
         svc.daily_briefing_svc.save_parsed, parsed, text, req.date)
+    return stored
+
+
+# ── Chrome-extension import (replaces the doomed Playwright path).
+#
+# Background: the Playwright-driven OWA scrape (services/outlook_web_
+# scraper.py) ran headed Chrome via a persistent profile and hit
+# Microsoft's enterprise-tenant automation detection every time. No
+# combination of stealth flags or off-screen positioning worked —
+# Microsoft binds session tokens to the original browser identity, and
+# Playwright's Chrome is a different identity from the user's normal
+# Chrome regardless of any flag we pass. Result: every Sync attempt
+# bounced to login.microsoftonline.com and produced an empty brief.
+#
+# The fix: a small Chrome extension running in the USER'S real Chrome
+# (chrome-extension/ at repo root). The user clicks the extension's
+# toolbar icon, the extension opens OWA + Teams tabs in that same
+# Chrome (Microsoft trusts it because it IS the user's real browser),
+# extracts the [role=main] inner text, POSTs the result here.
+#
+# We then run the SAME LLM-parser pipeline the manual paste-import
+# uses. Same storage shape, same Today-tab rendering, same action-
+# item toggling — only the data path changes.
+
+class ExtensionImportRequest(BaseModel):
+    owa_text: Optional[str] = ""
+    teams_text: Optional[str] = ""
+    date: Optional[str] = None  # YYYY-MM-DD; defaults to today
+
+
+@app.post("/briefing/extension-import")
+async def import_briefing_from_extension(req: ExtensionImportRequest):
+    """Receives scraped OWA + Teams text from the Chrome extension,
+    runs it through the same parse_daily_briefing pipeline /briefing/
+    import uses, stores as today's briefing.
+
+    The extension scrapes in the user's REAL Chrome — Microsoft's
+    automation detection doesn't fire there — so the request lands
+    with real, populated content. If both blobs are empty we 400; if
+    only Teams is empty we publish an OWA-only brief (same fallback
+    shape the v2.15.x Playwright path used)."""
+    svc.load_settings()
+    if not svc.daily_briefing_svc:
+        raise HTTPException(status_code=503,
+                            detail="Briefing service not initialized")
+
+    owa_text = (req.owa_text or "").strip()
+    teams_text = (req.teams_text or "").strip()
+    if not owa_text and not teams_text:
+        raise HTTPException(status_code=400,
+                            detail="No content sent from extension")
+
+    summ = svc.summarizer or svc.live_summarizer
+    if summ is None:
+        raise HTTPException(
+            status_code=400,
+            detail=("No AI provider configured. Set an API key + model "
+                    "in Settings before importing a briefing."))
+
+    # Stitch OWA + Teams into the same labeled-section blob the
+    # Playwright path used (services/outlook_web_scraper.py:
+    # format_for_briefing_parser). Reusing that helper keeps the LLM
+    # prompt's input shape identical regardless of whether the data
+    # came from the extension or the (deprecated) Playwright path.
+    from services.outlook_web_scraper import format_for_briefing_parser
+    blob = format_for_briefing_parser(owa_text, teams_text=teams_text)
+    if len(blob.encode("utf-8")) > 50_000:
+        # Generous cap — see /briefing/import for rationale.
+        raise HTTPException(status_code=400,
+                            detail="Briefing too large (>50KB)")
+
+    try:
+        parsed = await summ.parse_daily_briefing(blob)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=f"LLM parse failed: {e}")
+
+    if isinstance(parsed, dict):
+        parsed["source"] = "chrome-extension"
+
+    stored = await asyncio.to_thread(
+        svc.daily_briefing_svc.save_parsed, parsed, blob, req.date)
+    logger.info(
+        f"Chrome-extension import: OWA={len(owa_text)} chars, "
+        f"Teams={len(teams_text)} chars → "
+        f"agenda={len(stored.get('agenda', []))}, "
+        f"needs_response={len(stored.get('needs_response', []))}")
     return stored
 
 
