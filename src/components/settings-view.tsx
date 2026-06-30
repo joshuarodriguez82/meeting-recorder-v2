@@ -1162,7 +1162,7 @@ function AIProviderSection({
           <SelectContent>
             <SelectItem value="anthropic">Anthropic — Claude (uses Anthropic API key above)</SelectItem>
             <SelectItem value="groq">Groq — free, fastest hosted inference (Llama, Mixtral, Gemma)</SelectItem>
-            <SelectItem value="gemini">Google Gemini — free tier (Gemini 2.0 Flash)</SelectItem>
+            <SelectItem value="gemini">Google Gemini — free tier (Gemini 2.5 Flash, 2.5 Pro, …)</SelectItem>
             <SelectItem value="openrouter">OpenRouter — free-tier Llama / Gemini / Qwen / DeepSeek</SelectItem>
             <SelectItem value="ollama">Ollama (local) — free, runs on your machine</SelectItem>
             <SelectItem value="custom">Custom OpenAI-compatible endpoint</SelectItem>
@@ -1359,15 +1359,25 @@ function AIProviderSection({
  * Failures (no network, GitHub rate limit, deleted repo) collapse to
  * an "Update check unavailable" line rather than an error toast.
  */
-// Compact override panel for the Live Co-Pilot's tick model. The main
-// AIProviderSection already does a lot — full preset list, model-id
-// dropdowns, key-acquisition instructions — so we don't try to repeat
-// it here. Power users opting in to a different live model can paste
-// a base URL + key + model id directly.
+// Override panel for the Live Co-Pilot's tick model. Mirrors the main
+// AIProviderSection: same preset switcher (Anthropic / Groq / Gemini /
+// OpenRouter / Ollama / Custom), same live model-discovery dropdown,
+// same Test connection button — just wired to the `live_*` settings
+// keys and ``scope=live`` on the backend probes so it tests its own
+// config in isolation from the main summarizer.
 //
 // Empty `live_ai_provider` = "use the main provider" (Phase A behavior).
-// "anthropic" + blank live_anthropic_api_key reuses the main key.
-// "openai" + base URL = OpenRouter / Ollama / Groq / Gemini / custom.
+function liveProviderPresetFromSettings(s: Settings): ProviderPreset {
+  if (s.live_ai_provider === "anthropic") return "anthropic";
+  if (s.live_ai_provider !== "openai") return "anthropic";
+  const base = (s.live_openai_base_url || "").toLowerCase();
+  if (base.includes("openrouter")) return "openrouter";
+  if (base.includes("groq.com")) return "groq";
+  if (base.includes("generativelanguage.googleapis")) return "gemini";
+  if (base.includes("localhost") || base.includes("127.0.0.1")) return "ollama";
+  return "custom";
+}
+
 function LiveCoPilotModelCard({
   settings, update,
 }: {
@@ -1375,6 +1385,144 @@ function LiveCoPilotModelCard({
   update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
 }) {
   const useOverride = (settings.live_ai_provider || "").trim() !== "";
+  const livePreset = liveProviderPresetFromSettings(settings);
+
+  // Live model-discovery — same shape as AIProviderSection's, but
+  // scope="live" so the backend reads live_anthropic_api_key /
+  // live_openai_api_key / live_openai_base_url for the fetch. Returns
+  // null on empty/error so the hardcoded fallback list wins (same UX
+  // contract as the main section).
+  const [liveModels, setLiveModels] = useState<
+    { value: string; label: string }[] | null
+  >(null);
+  useEffect(() => {
+    if (!useOverride) {
+      setLiveModels(null);
+      return;
+    }
+    if (livePreset === "custom" && !settings.live_openai_base_url) {
+      setLiveModels(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .getAvailableModels(
+        settings.live_ai_provider || "anthropic",
+        settings.live_openai_base_url || undefined,
+        "live",
+      )
+      .then((r) => {
+        if (cancelled) return;
+        if (r.models && r.models.length) {
+          setLiveModels(r.models);
+        } else {
+          setLiveModels(null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLiveModels(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [useOverride, livePreset, settings.live_ai_provider,
+      settings.live_openai_base_url]);
+
+  // Pick a preset's hardcoded fallback list — same as the main
+  // section. OpenRouter and Custom don't have a curated list here
+  // (OpenRouter has 200+ models; Custom is by definition unknown).
+  const liveOrFallback = (
+    fallback: { value: string; label: string }[]
+  ) => (liveModels && liveModels.length ? liveModels : fallback);
+  const livePresetModels =
+    livePreset === "anthropic" ? liveOrFallback(ANTHROPIC_MODELS)
+    : livePreset === "ollama" ? liveOrFallback(OLLAMA_MODELS)
+    : livePreset === "groq" ? liveOrFallback(GROQ_MODELS)
+    : livePreset === "gemini" ? liveOrFallback(GEMINI_MODELS)
+    : livePreset === "openrouter" ? (liveModels || [])
+    : null;
+  const liveModelIsPreset = livePresetModels
+    ? livePresetModels.some((m) => m.value === settings.live_claude_model)
+    : false;
+
+  // Apply a preset — populates live_ai_provider, live_openai_base_url,
+  // and (when sensible) live_claude_model. Mirrors applyPreset in the
+  // main section.
+  const applyLivePreset = (next: ProviderPreset) => {
+    if (next === "anthropic") {
+      update("live_ai_provider", "anthropic");
+      update("live_openai_base_url", "");
+      if (!ANTHROPIC_MODELS.find((m) => m.value === settings.live_claude_model)) {
+        update("live_claude_model", ANTHROPIC_MODELS[0].value);
+      }
+      return;
+    }
+    update("live_ai_provider", "openai");
+    if (next === "openrouter") {
+      update("live_openai_base_url", OPENROUTER_BASE);
+    } else if (next === "ollama") {
+      update("live_openai_base_url", OLLAMA_BASE);
+      if (!OLLAMA_MODELS.find((m) => m.value === settings.live_claude_model)) {
+        update("live_claude_model", OLLAMA_MODELS[0].value);
+      }
+    } else if (next === "groq") {
+      update("live_openai_base_url", GROQ_BASE);
+      if (!GROQ_MODELS.find((m) => m.value === settings.live_claude_model)) {
+        update("live_claude_model", GROQ_MODELS[0].value);
+      }
+    } else if (next === "gemini") {
+      update("live_openai_base_url", GEMINI_BASE);
+      if (!GEMINI_MODELS.find((m) => m.value === settings.live_claude_model)) {
+        update("live_claude_model", GEMINI_MODELS[0].value);
+      }
+    } else if (next === "custom") {
+      // Leave URL alone so the user fills it in.
+    }
+  };
+
+  // Test connection — scope="live" so the backend probes the live
+  // summarizer. Same UI shape as the main section's Test connection
+  // (emerald on success, red on failure, latency in ms, verbatim error).
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<
+    | { ok: true; latency_ms: number; reply: string; provider: string; model: string }
+    | { ok: false; error: string; latency_ms: number; provider: string; model: string }
+    | null
+  >(null);
+  const runLiveConnectionTest = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await api.testLLMConnection("live");
+      if (res.ok) {
+        setTestResult({
+          ok: true,
+          latency_ms: res.latency_ms,
+          reply: res.reply || "",
+          provider: res.provider,
+          model: res.model,
+        });
+      } else {
+        setTestResult({
+          ok: false,
+          latency_ms: res.latency_ms,
+          error: res.error || "Unknown error",
+          provider: res.provider,
+          model: res.model,
+        });
+      }
+    } catch (e) {
+      setTestResult({
+        ok: false,
+        latency_ms: 0,
+        error: e instanceof Error ? e.message : String(e),
+        provider: settings.live_ai_provider || settings.ai_provider,
+        model: settings.live_claude_model || settings.claude_model,
+      });
+    } finally {
+      setTesting(false);
+    }
+  };
 
   return (
     <Card>
@@ -1400,11 +1548,15 @@ function LiveCoPilotModelCard({
           checked={useOverride}
           onChange={(on) => {
             if (on) {
-              // Default to an OpenAI-compatible target with empty
-              // fields — the user fills in base URL + key + model.
-              update("live_ai_provider", "openai");
+              // Default to Anthropic so the preset switcher starts on a
+              // valid value rather than the bare "openai" mode that
+              // previously required the user to fill in everything.
+              update("live_ai_provider", "anthropic");
+              update("live_openai_base_url", "");
+              if (!settings.live_claude_model) {
+                update("live_claude_model", ANTHROPIC_MODELS[0].value);
+              }
             } else {
-              // Clear everything so the backend falls back cleanly.
               update("live_ai_provider", "");
               update("live_claude_model", "");
               update("live_openai_api_key", "");
@@ -1417,100 +1569,197 @@ function LiveCoPilotModelCard({
         {useOverride && (
           <>
             <div className="space-y-2">
-              <Label>Provider family</Label>
+              <Label>AI Provider</Label>
               <Select
-                value={settings.live_ai_provider}
-                onValueChange={(v) => v && update("live_ai_provider", v)}
+                value={livePreset}
+                onValueChange={(v) => v && applyLivePreset(v as ProviderPreset)}
               >
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="anthropic">
-                    Anthropic (e.g. claude-haiku-4-5)
-                  </SelectItem>
-                  <SelectItem value="openai">
-                    OpenAI-compatible (Ollama, OpenRouter, Groq, Gemini,
-                    custom)
-                  </SelectItem>
+                  <SelectItem value="anthropic">Anthropic — Claude (uses Anthropic API key below)</SelectItem>
+                  <SelectItem value="groq">Groq — free, fastest hosted inference (Llama, Mixtral, Gemma)</SelectItem>
+                  <SelectItem value="gemini">Google Gemini — free tier (Gemini 2.5 Flash, 2.5 Pro, …)</SelectItem>
+                  <SelectItem value="openrouter">OpenRouter — free-tier Llama / Gemini / Qwen / DeepSeek</SelectItem>
+                  <SelectItem value="ollama">Ollama (local) — free, runs on your machine</SelectItem>
+                  <SelectItem value="custom">Custom OpenAI-compatible endpoint</SelectItem>
                 </SelectContent>
               </Select>
-            </div>
-
-            <div className="space-y-2">
-              <Label>Model id</Label>
-              <Input
-                value={settings.live_claude_model}
-                onChange={(e) =>
-                  update("live_claude_model", e.target.value)
-                }
-                placeholder={
-                  settings.live_ai_provider === "anthropic"
-                    ? "claude-haiku-4-5"
-                    : "llama3.1, gpt-oss:20b, meta-llama/llama-3.3-70b-instruct:free, …"
-                }
-                className="font-mono text-sm"
-              />
               <p className="text-[11px] text-muted-foreground">
-                Leave blank to reuse the main provider&apos;s model id.
+                {livePreset === "anthropic" && (
+                  <>Uses Claude directly. The cheapest Haiku model is the default for tick calls.</>
+                )}
+                {livePreset === "groq" && (
+                  <>
+                    Get a free API key at{" "}
+                    <a href="https://console.groq.com/keys" className="underline" target="_blank" rel="noreferrer">
+                      console.groq.com
+                    </a>
+                    . Very fast inference (often &lt;1s per tick).
+                  </>
+                )}
+                {livePreset === "gemini" && (
+                  <>
+                    Get a free API key at{" "}
+                    <a href="https://aistudio.google.com/apikey" className="underline" target="_blank" rel="noreferrer">
+                      aistudio.google.com
+                    </a>
+                    . Free tier has daily request limits but ticks are tiny calls — fits fine.
+                  </>
+                )}
+                {livePreset === "openrouter" && (
+                  <>
+                    Get a free API key at{" "}
+                    <a href="https://openrouter.ai/settings/keys" className="underline" target="_blank" rel="noreferrer">
+                      openrouter.ai
+                    </a>
+                    . Free-tier models cap at ~50 req/day; a long meeting (~80 ticks) hits the cap.
+                  </>
+                )}
+                {livePreset === "ollama" && (
+                  <>
+                    Install Ollama from{" "}
+                    <a href="https://ollama.com/download" className="underline" target="_blank" rel="noreferrer">
+                      ollama.com
+                    </a>{" "}
+                    and run <code className="text-[11px]">ollama pull llama3.1</code>.
+                    Everything stays on your machine. No API key needed.
+                  </>
+                )}
+                {livePreset === "custom" && (
+                  <>Any OpenAI Chat Completions-compatible endpoint — LM Studio, vLLM, LocalAI, etc.</>
+                )}
               </p>
             </div>
 
-            {settings.live_ai_provider === "openai" && (
-              <>
-                <div className="space-y-2">
-                  <Label>Base URL</Label>
-                  <Input
-                    value={settings.live_openai_base_url}
-                    onChange={(e) =>
-                      update("live_openai_base_url", e.target.value)
-                    }
-                    placeholder="http://localhost:11434/v1   or   https://openrouter.ai/api/v1"
-                    className="font-mono text-sm"
-                  />
-                  <p className="text-[11px] text-muted-foreground">
-                    Ollama: <code>http://localhost:11434/v1</code>{" "}
-                    (install from{" "}
-                    <a
-                      href="https://ollama.com/download"
-                      className="underline"
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      ollama.com
-                    </a>
-                    , then <code>ollama pull llama3.1</code>).
-                    OpenRouter: <code>https://openrouter.ai/api/v1</code>.
-                  </p>
-                </div>
-
-                <div className="space-y-2">
-                  <Label>API key</Label>
-                  <Input
-                    type="password"
-                    value={settings.live_openai_api_key}
-                    onChange={(e) =>
-                      update("live_openai_api_key", e.target.value)
-                    }
-                    placeholder="sk-or-... (any non-empty string for Ollama)"
-                    autoComplete="off"
-                  />
-                </div>
-              </>
+            {/* Base URL — auto-set by preset; editable for custom. */}
+            {(livePreset === "ollama" || livePreset === "custom") && (
+              <div className="space-y-2">
+                <Label>Base URL</Label>
+                <Input
+                  value={settings.live_openai_base_url}
+                  onChange={(e) => update("live_openai_base_url", e.target.value)}
+                  placeholder="http://localhost:11434/v1   or   https://api.example.com/v1"
+                  className="font-mono text-sm"
+                />
+              </div>
             )}
 
-            {settings.live_ai_provider === "anthropic" && (
+            {/* API key — Anthropic vs OpenAI-compat depending on preset. */}
+            {livePreset === "anthropic" && (
               <div className="space-y-2">
                 <Label>Anthropic API key (optional)</Label>
                 <Input
                   type="password"
                   value={settings.live_anthropic_api_key}
-                  onChange={(e) =>
-                    update("live_anthropic_api_key", e.target.value)
-                  }
+                  onChange={(e) => update("live_anthropic_api_key", e.target.value)}
                   placeholder="Leave blank to reuse the main Anthropic key"
                   autoComplete="off"
                 />
+              </div>
+            )}
+            {(livePreset === "groq" || livePreset === "gemini" ||
+              livePreset === "openrouter" || livePreset === "ollama" ||
+              livePreset === "custom") && (
+              <div className="space-y-2">
+                <Label>
+                  {livePreset === "groq" ? "Groq API key"
+                    : livePreset === "gemini" ? "Gemini API key"
+                    : livePreset === "openrouter" ? "OpenRouter API key"
+                    : "API key"}
+                </Label>
+                <Input
+                  type="password"
+                  value={settings.live_openai_api_key}
+                  onChange={(e) => update("live_openai_api_key", e.target.value)}
+                  placeholder={livePreset === "ollama"
+                    ? "any non-empty string"
+                    : "sk-..."}
+                  autoComplete="off"
+                />
+              </div>
+            )}
+
+            {/* Model picker — dropdown when we have a list, free-form
+                input for custom or when the saved model isn't in the
+                current list (so power users can paste arbitrary ids). */}
+            <div className="space-y-2">
+              <Label>Live tick model</Label>
+              {livePresetModels && livePresetModels.length && liveModelIsPreset ? (
+                <Select
+                  value={settings.live_claude_model}
+                  onValueChange={(v) => v && update("live_claude_model", v)}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {livePresetModels.map((m) => (
+                      <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
+                <Input
+                  value={settings.live_claude_model}
+                  onChange={(e) => update("live_claude_model", e.target.value)}
+                  placeholder={livePreset === "anthropic"
+                    ? "claude-haiku-4-5"
+                    : "model id, e.g. llama-3.1-70b-instruct"}
+                  className="font-mono text-sm"
+                />
+              )}
+              {livePresetModels && livePresetModels.length > 0 && !liveModelIsPreset && (
+                <p className="text-[11px] text-amber-700">
+                  Saved model isn&apos;t in the live list — using free-form input.
+                  Switch presets or pick from the list below to use the dropdown.
+                </p>
+              )}
+              <p className="text-[11px] text-muted-foreground">
+                Leave blank to reuse the main provider&apos;s model id.
+                {liveModels && liveModels.length
+                  ? " (Live list from provider's /models endpoint.)"
+                  : null}
+              </p>
+            </div>
+
+            {/* Test connection — scope=live so backend probes the live
+                summarizer, not the main one. */}
+            <div className="flex items-center gap-3">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={runLiveConnectionTest}
+                disabled={testing}
+              >
+                {testing ? "Testing..." : "Test live connection"}
+              </Button>
+              <span className="text-[11px] text-muted-foreground">
+                Fires a 1-token chat completion against the saved LIVE
+                provider. Save settings first if you just edited them.
+              </span>
+            </div>
+            {testResult && testResult.ok && (
+              <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs">
+                <div className="font-medium text-emerald-900">
+                  ✓ Connected · {testResult.latency_ms} ms
+                </div>
+                <div className="text-emerald-800 mt-0.5">
+                  {testResult.provider} / {testResult.model}
+                  {testResult.reply ? ` — replied "${testResult.reply}"` : ""}
+                </div>
+              </div>
+            )}
+            {testResult && !testResult.ok && (
+              <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs">
+                <div className="font-medium text-red-900">
+                  ✗ Could not reach {testResult.provider} / {testResult.model}
+                </div>
+                <div className="text-red-800 mt-0.5 font-mono break-words">
+                  {testResult.error}
+                </div>
               </div>
             )}
 
