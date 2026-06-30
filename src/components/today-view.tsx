@@ -309,32 +309,12 @@ export function TodayView({ onNavigate }: Props) {
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap justify-end">
-          <Button
-            variant="default"
-            size="sm"
-            onClick={handleSyncFromOutlook}
-            disabled={syncing || signingIn}
-            className="gap-2"
-            title="Pull today's calendar from outlook.office.com via the persistent Chrome profile"
-          >
-            {syncing
-              ? <Loader2 className="h-4 w-4 animate-spin" />
-              : <CloudDownload className="h-4 w-4" />}
-            {syncing ? "Syncing…" : "Sync now"}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleSignInToOutlook}
-            disabled={syncing || signingIn}
-            className="gap-2"
-            title="Open Chrome to sign in (or re-MFA) — needed about once a week"
-          >
-            {signingIn
-              ? <Loader2 className="h-4 w-4 animate-spin" />
-              : <LogIn className="h-4 w-4" />}
-            {signingIn ? "Signing in…" : "Sign in to Microsoft"}
-          </Button>
+          {/* v1.1 of the Chrome extension is the canonical data path
+              now — Sync Now + Sign in to Microsoft buttons that drove
+              the doomed Playwright path (services/outlook_web_scraper)
+              are gone. The extension's toolbar icon → Capture & Send
+              replaces them. Import briefing stays for the manual
+              fallback paste flow. */}
           <Button
             variant="outline"
             size="sm"

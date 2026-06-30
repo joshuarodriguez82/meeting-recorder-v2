@@ -14,21 +14,49 @@
 // session because it's the same browser they signed into. No
 // Playwright, no automation flags, no bot detection.
 
+// Per-source config. Teams (Activity + Chat) needs more time than
+// OWA because the React tree is much heavier — first paint to
+// "fully populated feed" can be 20-30s on a normal connection. Inbox
+// gets a higher target because a focused-inbox list of 20+ emails
+// is naturally several KB of text. The min-useful floors are tuned
+// lower for Teams because some days the Activity feed is genuinely
+// empty (no @mentions, no missed calls).
 const SOURCES = [
-  { key: "owa", url: "https://outlook.office.com/calendar/view/day", label: "OWA" },
-  { key: "teams", url: "https://teams.microsoft.com/v2/?clientType=desktop#/activity", label: "Teams" },
-  { key: "inbox", url: "https://outlook.cloud.microsoft/mail/?folder=focusedinbox", label: "Inbox" },
-  { key: "chat", url: "https://teams.microsoft.com/v2/?clientType=desktop#/chat", label: "Chat" },
+  {
+    key: "owa",
+    url: "https://outlook.office.com/calendar/view/day",
+    label: "OWA",
+    maxWaitMs: 25_000,
+    targetChars: 1500,
+    minUsefulChars: 700,
+  },
+  {
+    key: "teams",
+    url: "https://teams.microsoft.com/v2/?clientType=desktop#/activity",
+    label: "Teams Activity",
+    maxWaitMs: 40_000,
+    targetChars: 1200,
+    minUsefulChars: 250,
+  },
+  {
+    key: "inbox",
+    url: "https://outlook.cloud.microsoft/mail/?folder=focusedinbox",
+    label: "Inbox",
+    maxWaitMs: 30_000,
+    targetChars: 2500,
+    minUsefulChars: 800,
+  },
+  {
+    key: "chat",
+    url: "https://teams.microsoft.com/v2/?clientType=desktop#/chat",
+    label: "Teams Chat",
+    maxWaitMs: 40_000,
+    targetChars: 1500,
+    minUsefulChars: 300,
+  },
 ];
 
-// Polling shape for "is the SPA done mounting." Target = "rich
-// enough, return early"; min-useful = "above this we accept stable
-// even if target wasn't hit (some days are quiet)"; max-wait = hard
-// ceiling.
 const POLL_MS = 1000;
-const MAX_WAIT_MS = 25_000;
-const TARGET_CHARS = 1500;
-const MIN_USEFUL_CHARS = 400;
 const STABILITY_POLLS = 3;
 
 // Dedupe: don't run a scheduled capture if one ran in the last hour.
@@ -170,12 +198,17 @@ async function captureAndSend(backendUrl, token, opts = {}) {
   const errors = [];
 
   // Run each source sequentially so we don't hammer Microsoft's
-  // anti-flooding with 4 simultaneous tab opens.
+  // anti-flooding with 4 simultaneous tab opens. Per-source timeouts
+  // (see SOURCES at top) — Teams gets ~40s, OWA/Inbox ~25-30s.
   for (const src of SOURCES) {
     try {
-      const text = await captureUrl(src.url, src.label);
-      payload[`${src.key}_text`] = text;
-      counts[src.key] = text.length;
+      const result = await captureUrl(src);
+      payload[`${src.key}_text`] = result.text;
+      counts[src.key] = result.text.length;
+      console.log(
+        `[ext] ${src.label}: ${result.text.length} chars, ` +
+        `exit=${result.exitReason}, elapsed=${result.elapsedMs}ms, ` +
+        `landed_url=${result.finalUrl}`);
     } catch (e) {
       console.error(`[ext] ${src.label} failed:`, e);
       errors.push(`${src.label}: ${e.message || String(e)}`);
@@ -235,36 +268,45 @@ async function captureAndSend(backendUrl, token, opts = {}) {
   }
 }
 
-async function captureUrl(url, label) {
-  const tab = await chrome.tabs.create({ url, active: false });
+// Returns { text, exitReason, elapsedMs, finalUrl } so caller can
+// log enough diagnostics to tell whether a short capture is because
+// the SPA was slow (max-wait) vs. genuinely empty (stable below
+// target) vs. bounced to login (finalUrl ≠ source URL).
+async function captureUrl(src) {
+  const tab = await chrome.tabs.create({ url: src.url, active: false });
   const tabId = tab.id;
+  const start = Date.now();
 
   try {
     await waitForTabComplete(tabId);
 
-    const start = Date.now();
     let lastLen = -1;
     let stableCount = 0;
     let lastText = "";
-    while (Date.now() - start < MAX_WAIT_MS) {
+    let exitReason = "max-wait";
+
+    while (Date.now() - start < src.maxWaitMs) {
       let text = "";
       try {
         text = await readMainText(tabId);
       } catch (e) {
-        console.warn(`[ext] ${label} read failed:`, e);
+        console.warn(`[ext] ${src.label} read failed:`, e);
+        exitReason = "read-error";
         break;
       }
       text = (text || "").trim();
       lastText = text;
-      if (text.length >= TARGET_CHARS) {
-        console.log(`[ext] ${label}: target reached ${text.length} chars in ${Math.round((Date.now()-start)/1000)}s`);
-        return text;
+      if (text.length >= src.targetChars) {
+        exitReason = "target-reached";
+        return await finish(tabId, text, exitReason, start);
       }
       if (text.length === lastLen && text.length > 0) {
         stableCount += 1;
         if (stableCount >= STABILITY_POLLS) {
-          console.log(`[ext] ${label}: stable at ${text.length} chars after ${Math.round((Date.now()-start)/1000)}s`);
-          return text;
+          exitReason = text.length >= src.minUsefulChars
+            ? "stable-useful"
+            : "stable-below-floor";
+          return await finish(tabId, text, exitReason, start);
         }
       } else {
         stableCount = 0;
@@ -272,11 +314,27 @@ async function captureUrl(url, label) {
       }
       await sleep(POLL_MS);
     }
-    console.warn(`[ext] ${label}: hit max-wait at ${lastText.length} chars`);
-    return lastText;
+    return await finish(tabId, lastText, exitReason, start);
   } finally {
     try { await chrome.tabs.remove(tabId); } catch (_) {}
   }
+}
+
+// Reads the tab's final URL (in case it redirected) before closing.
+// Useful diagnostic for "did this tab actually land on the right
+// page or did it bounce to login.microsoftonline?"
+async function finish(tabId, text, exitReason, start) {
+  let finalUrl = "(unknown)";
+  try {
+    const t = await chrome.tabs.get(tabId);
+    finalUrl = t.url || "(empty)";
+  } catch (_) { /* tab might already be gone */ }
+  return {
+    text,
+    exitReason,
+    elapsedMs: Date.now() - start,
+    finalUrl,
+  };
 }
 
 function waitForTabComplete(tabId) {
