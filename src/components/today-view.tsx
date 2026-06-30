@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   api,
+  ApiError,
   type DailyBriefing,
   type BriefingAgendaItem,
   type RecordingStatus,
@@ -35,7 +36,7 @@ import {
 import {
   Loader2, ClipboardPaste, RefreshCw, CheckCircle2, Circle,
   Square, CheckSquare, Calendar as CalendarIcon, Mic,
-  AlertCircle, Sparkles, Info, X,
+  AlertCircle, Sparkles, Info, X, CloudDownload, LogIn,
 } from "lucide-react";
 
 // Tailwind class fragments for meeting-type colors. Mirrors the token
@@ -89,6 +90,15 @@ export function TodayView({ onNavigate }: Props) {
   const [importError, setImportError] = useState<string | null>(null);
   const [recordingStatus, setRecordingStatus] = useState<RecordingStatus | null>(null);
   const [nowTick, setNowTick] = useState(0);
+  // Outlook Web sync state. `syncing` covers the headless scrape +
+  // LLM parse round-trip (typically ~10-25s end-to-end). `signingIn`
+  // covers the BLOCKING headed-Chrome window — the backend doesn't
+  // return until the user closes it, so this stays true potentially
+  // for minutes. `authExpired` is the "session cookies are stale,
+  // user needs to re-MFA" signal — surfaced after a Sync Now hits 423.
+  const [syncing, setSyncing] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
+  const [authExpired, setAuthExpired] = useState(false);
 
   // Re-render clock every 30s so "Right now" / time-of-day greeting
   // stay fresh without the data-fetch overhead.
@@ -158,6 +168,55 @@ export function TodayView({ onNavigate }: Props) {
       setImporting(false);
     }
   };
+
+  const handleSyncFromOutlook = useCallback(async () => {
+    if (syncing || signingIn) return;
+    setSyncing(true);
+    try {
+      const result = await api.syncBriefingFromOutlookWeb();
+      setBriefing(result);
+      setAuthExpired(false);
+      toast.success("Briefing synced from Outlook");
+    } catch (e: unknown) {
+      if (e instanceof ApiError && e.status === 423) {
+        // 423 LOCKED = session cookies are stale. Surface the banner
+        // rather than a transient toast so the user can act on it.
+        setAuthExpired(true);
+        toast.error("Microsoft 365 session expired — sign in again");
+      } else if (e instanceof ApiError && e.status === 503) {
+        toast.error(
+          e.message || "Sync unavailable — is Chrome installed?",
+          { duration: 8000 });
+      } else {
+        const msg = e instanceof Error ? e.message : String(e);
+        toast.error(`Sync failed: ${msg}`, { duration: 8000 });
+      }
+    } finally {
+      setSyncing(false);
+    }
+  }, [syncing, signingIn]);
+
+  const handleSignInToOutlook = useCallback(async () => {
+    if (signingIn || syncing) return;
+    setSigningIn(true);
+    // Show a stable toast so the user knows what to do — the request
+    // BLOCKS until the Chrome window closes, which could be a couple
+    // minutes if they're chasing down the Authenticator app.
+    const t = toast.loading(
+      "Chrome window opening — sign in, then close the window",
+      { duration: Infinity });
+    try {
+      await api.signInToOutlookWeb();
+      setAuthExpired(false);
+      toast.success("Signed in. Click Sync now to pull today's brief.",
+                     { id: t });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`Sign-in failed: ${msg}`, { id: t, duration: 8000 });
+    } finally {
+      setSigningIn(false);
+    }
+  }, [syncing, signingIn]);
 
   const toggleAction = async (actionId: string, currentlyDone: boolean) => {
     if (!briefing) return;
@@ -242,7 +301,33 @@ export function TodayView({ onNavigate }: Props) {
             )}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap justify-end">
+          <Button
+            variant="default"
+            size="sm"
+            onClick={handleSyncFromOutlook}
+            disabled={syncing || signingIn}
+            className="gap-2"
+            title="Pull today's calendar from outlook.office.com via the persistent Chrome profile"
+          >
+            {syncing
+              ? <Loader2 className="h-4 w-4 animate-spin" />
+              : <CloudDownload className="h-4 w-4" />}
+            {syncing ? "Syncing…" : "Sync now"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleSignInToOutlook}
+            disabled={syncing || signingIn}
+            className="gap-2"
+            title="Open Chrome to sign in (or re-MFA) — needed about once a week"
+          >
+            {signingIn
+              ? <Loader2 className="h-4 w-4 animate-spin" />
+              : <LogIn className="h-4 w-4" />}
+            {signingIn ? "Signing in…" : "Sign in to Microsoft"}
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -262,6 +347,30 @@ export function TodayView({ onNavigate }: Props) {
           </Button>
         </div>
       </div>
+
+      {authExpired && (
+        <div className="rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 flex items-start gap-3">
+          <AlertCircle className="h-5 w-5 mt-0.5 shrink-0" />
+          <div className="flex-1">
+            <div className="font-medium">
+              Microsoft 365 sign-in expired
+            </div>
+            <div className="mt-0.5 text-amber-800">
+              The persistent Chrome profile's session cookies are no longer
+              valid. Sign in again and the next Sync now will succeed.
+            </div>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={handleSignInToOutlook}
+            disabled={signingIn || syncing}
+            className="bg-white"
+          >
+            Sign in
+          </Button>
+        </div>
+      )}
 
       {!briefing && <EmptyState onImport={() => setImportOpen(true)} />}
 
