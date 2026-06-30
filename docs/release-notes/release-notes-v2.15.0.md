@@ -1,34 +1,26 @@
-# v2.15.0 — Outlook Web sync actually works, Teams Activity, sticky-toast fix
+# v2.15.0 — Outlook + Teams Web sync on personal machines, daily brief that actually works
 
-> **What this release fixes / adds:**
+> **What this release adds:**
 >
-> 1. **Outlook Web Sync now works on Google Drive / OneDrive setups.**
->    v2.14.0's persistent Chrome profile lived under your
->    `recordings_dir`. If that path was on Google Drive Stream or
->    OneDrive — which mine is — cloud-sync filter drivers locked /
->    corrupted Chrome's cookie store between the headed sign-in window
->    and the subsequent headless scrape. Symptom: empty calendar
->    extraction right after a successful sign-in. **Fixed by moving the
->    profile to `USER_DATA_DIR/web-session/`** (Windows: `%LOCALAPPDATA%`,
->    macOS: `~/Library/Application Support/MeetingRecorder`) — the same
->    LOCAL-only path speaker profiles and the auto-record blocklist
->    use. Per-machine, never roams.
-> 2. **Teams Activity is now in the brief.** The Today tab's sync now
->    visits `teams.microsoft.com/v2/?clientType=desktop#/activity`
->    headlessly against the same persistent profile and joins
->    @mentions, replies, missed calls, and meeting reminders into the
->    same LLM-parsed briefing as OWA. The LLM lifts those into the
->    Needs Response section so they show up alongside email replies
->    needed.
-> 3. **"Signed in" toast no longer sticks on screen.** v2.14.0's
->    sign-in success toast inherited `duration: Infinity` from the
->    loading toast it was replacing. The Sonner toast library merges
->    options when you pass `{ id }`, so the Infinity persisted.
->    Dismiss-then-show-fresh-toast pattern now used in success + error
->    paths.
+> 1. **Today tab's daily briefing auto-fills from your real Outlook calendar
+>    and Teams Activity feed.** No more pasting Copilot's scheduled-prompt
+>    output. Works on personal machines even when IT has blocked Graph
+>    / calendar API access — the recorder uses your existing
+>    `outlook.office.com` / `teams.microsoft.com` browser session as the
+>    data path.
+> 2. **Two new buttons on the Today tab:** **Sign in to Microsoft** (one-time
+>    interactive sign-in covering both OWA and Teams in a single Chrome
+>    window) and **Sync now** (publishes the brief).
+> 3. **"Signed in" toast no longer sticks on screen.** Bug from initial
+>    cut of this feature where the success toast inherited an Infinity
+>    duration. Fixed.
 
-This is a quality-of-life patch on top of v2.14.0's Outlook Web sync
-feature. No data-pipeline or recording changes.
+This is **the rebuilt v2.15.0** — the original release shipped 2026-06-29
+along with v2.15.1 and v2.15.2 dot-releases all had subtle scraper
+bugs that made the brief either silently empty or hit auth errors.
+Those three releases are deleted; this one consolidates the fixes
+and ships a path that actually produces a populated brief against
+real M365 accounts on personal machines.
 
 ## Install (macOS)
 
@@ -58,165 +50,186 @@ feature. No data-pipeline or recording changes.
 > or `.msi` and double-click. No Gatekeeper / quarantine handling
 > needed.
 
-## What's new
+## How it works
 
-### 1. The cloud-sync profile bug (the headline)
+### The data path
 
-Field repro 2026-06-29: signed in via the headed Chrome window, OWA
-calendar visible in the window, closed it cleanly. Clicked **Sync now**
-2 seconds later — got `HTTP 502: OWA returned an empty calendar`.
-Tried again 2.5 minutes later — got HTTP 200 but the parsed briefing
-had `agenda=0, needs_response=0, fyi=0`. The scraped text was only
-~390 characters (just OWA menu chrome, no calendar grid).
+When you click **Sign in to Microsoft**, the recorder launches **your
+installed Chrome** (`channel='chrome'`, no bundled Chromium —
+installer stays lean) with a persistent profile at
+`%LOCALAPPDATA%\MeetingRecorder\web-session\` (Windows) /
+`~/Library/Application Support/MeetingRecorder/web-session/` (Mac).
+Two tabs open: `outlook.office.com/calendar/view/day` and
+`teams.microsoft.com/v2/?clientType=desktop#/activity`. Authenticate
+in both tabs (your normal M365 sign-in + MFA tap), close the window.
+Cookies and tokens persist in the profile.
 
-`backend.log` showed:
+When you click **Sync now**, the recorder reopens that same Chrome
+profile in the background (off-screen, minimized — see below), navigates
+to OWA's day view + Teams' Activity feed, extracts the visible text,
+joins it with your recorder's open action items, sends the blob to the
+LLM via the same parser the manual Import flow uses, and stores the
+result in `DailyBriefingService`. The Today tab renders calendar
+events, action items needing response, and FYI sections.
+
+### Why a hidden headed browser (and not headless)
+
+Microsoft **actively detects** headless Chromium on `outlook.office.com`
+and `teams.microsoft.com` — they serve a stripped/empty UI even when
+your session cookies are perfectly valid. The first cut of this
+feature used `headless=True` and that's why those releases shipped
+empty briefs.
+
+v2.15.0 launches the SAME Chrome you use, with no `--headless` flag at
+all. Real Chrome → Microsoft renders the full app → we extract real
+content. To keep the UX clean, the Chrome window is launched with:
+
+- `--window-position=-32000,-32000` — Windows considers this off-screen
+  on every standard monitor setup.
+- `--window-size=1280,1024` — ensure OWA's responsive layout renders
+  the desktop view, not the mobile view.
+- `--start-minimized` — belt and suspenders; worst case, the user sees
+  a taskbar icon briefly.
+
+For the ~10-15 seconds a Sync takes, you may see a taskbar icon flash.
+That's the price of bypassing Microsoft's bot detection. The window
+itself is never visible on your monitor.
+
+### Profile location matters
+
+The persistent profile **must live on a local-only path**. v2.14.0
+(predecessor of this work) put it under `recordings_dir/web-session/`
+— which for users with `recordings_dir` on Google Drive Stream /
+OneDrive caused cloud-sync filter drivers to corrupt Chrome's cookie
+store between the headed sign-in and the subsequent scrape. v2.15.0
+pins the profile to `USER_DATA_DIR` (same per-machine local path
+speaker profiles and the auto-record blocklist use).
+
+### Content extraction is content-aware
+
+The scrape doesn't rely on a fixed timeout or `wait_for_load_state`
+to know when OWA's React tree has finished mounting. Instead it polls
+`[role="main"]`'s `inner_text` every second with three exit conditions:
+
+1. Text crosses 1500 chars (rich content present → return immediately).
+2. Text stops growing for 3 polls in a row (page has settled → return).
+3. 30-second hard cap (give up, return whatever we have, log a warning).
+
+For empty calendar days, the inner-text settles around 700-1000 chars
+(the time-of-day axis without events) and we publish a brief noting
+no events. For a populated day, the text reaches the target in 5-10
+seconds and we extract the actual event details.
+
+If the extracted text is below 500 chars after the full 30-second
+wait, Sync returns a distinct error rather than silently publishing
+an empty brief — that floor catches "Microsoft fingerprinted us as a
+bot and served a stub" cases so you see a meaningful error toast,
+not an empty Today tab.
+
+### Teams Activity scrape is non-fatal
+
+Teams Web has its own OAuth dance on top of M365 SSO (even with OWA
+fully authenticated, the first Teams visit bounces through
+`login.microsoftonline.com` to mint a Teams-specific access token).
+If Teams' scrape fails for any reason — auth dance not completed in
+the sign-in window, DOM change Microsoft hasn't documented, etc. —
+the brief still publishes with just OWA + your action items. Teams
+failure leaves a clear warning in `backend.log` for diagnosis.
+
+### Diagnostics
+
+Every scrape logs its exit path so future debugging is easy:
 
 ```
-[INFO] Scraping OWA day view (profile=G:\My Drive\MRv2\web-session)
+[INFO] OWA: content reached target (4823 chars) in 6.2s
+[INFO] Teams: content stable at 942 chars (above useful floor) after 8.3s
+[WARNING] OWA: content stable at 392 chars after 5.1s — below useful floor (700). SPA may not have finished mounting; brief may be incomplete.
+[WARNING] Teams needs an interactive sign-in (OWA was fine); OWA-only brief.
 ```
 
-**Root cause.** v2.14.0 wired the persistent profile directory to
-whatever `recordings_dir` the user had configured. For users with
-`recordings_dir` on Google Drive Stream / OneDrive — common for
-laptops that need recordings to follow them between devices — that
-puts Chrome's profile (cookies, IndexedDB, SingletonLock, Local
-Storage) on a cloud-sync filter driver. Same class of bug as the
-v2.12.0 read-side ML pipeline crash, just on the auth side now:
+## What you do after install
 
-- Headed sign-in writes cookies to disk on close. The cloud-sync
-  driver intercepts the writes and queues them for upload.
-- Headless scrape starts ~2 seconds later. The profile dir on disk
-  is partially written — some cookies present, some still in the
-  driver's queue.
-- Chrome opens the partial profile, finds insufficient auth state,
-  navigates to outlook.office.com and gets the unauthed/redirect
-  landing page.
-- Our scraper extracts `[role="main"]` from that — which on the
-  unauthed page is the menu shell (~390 chars), not the calendar.
-- LLM correctly extracts nothing from menu chrome. Briefing
-  stores as empty.
+1. Click **Sign in to Microsoft** on the Today tab. A Chrome window opens
+   with two tabs (OWA + Teams).
+2. Sign in / re-MFA in tab 1 (OWA). Calendar should appear.
+3. Switch to tab 2 (Teams). Complete any "Stay signed in?" / consent
+   prompts. Activity feed should appear.
+4. Close the Chrome window.
+5. Click **Sync now**. Wait ~10-15 seconds. Today tab populates.
 
-The fix is the same fix we made for the recordings dir's audio reads
-in v2.12.0 — move the contested data off the cloud volume:
-
-```python
-# Before (v2.14.0):
-profile = recordings_dir / "web-session"   # often on Google Drive
-
-# After (v2.15.0+):
-profile = USER_DATA_DIR / "web-session"    # %LOCALAPPDATA%, etc.
-```
-
-`USER_DATA_DIR` is already used for speaker profiles and the
-auto-record blocklist for the exact same reason — those need to be
-per-machine and must never sync. The web session is identity-bound to
-your work account; cross-device cookie sync is a security problem
-even when the sync works.
-
-**Migration impact for upgraded users:** the new profile dir is empty
-on first launch of v2.15.0. The auth-expired banner will surface on
-the next Sync, you click Sign in once, MFA tap, done. The OLD profile
-under your `recordings_dir/web-session/` is left in place (we don't
-auto-delete) so you can clean it up at your leisure — it doesn't
-affect anything.
-
-### 2. Teams Activity in the brief
-
-v2.14.0 release notes promised Teams was a follow-up; v2.15.0 ships
-it. The same persistent Chrome profile that authenticates OWA now
-also authenticates Teams Web — Microsoft uses one M365 session
-across both surfaces, so signing into the recorder's profile once
-covers both.
-
-The scraper navigates to:
-
-```
-https://teams.microsoft.com/v2/?clientType=desktop#/activity
-```
-
-after OWA's day view, extracts the `[role="main"]` inner text from
-the Activity feed (which holds @mentions, replies, missed calls,
-meeting reminders), and joins it into the same LLM-parsed briefing.
-The summarizer's `parse_daily_briefing` prompt picks @mentions up as
-**needs_response** items rather than agenda items — different
-section in the Today view from your calendar events. That's the
-right shape for "who's waiting on me to reply right now."
-
-**Failure handling.** Teams Web is heavier than OWA and known to be
-more finicky in headless Chromium. If the Teams scrape fails for any
-reason that ISN'T auth-expired, v2.15.0 omits the Teams section and
-publishes an OWA-only brief rather than failing the whole sync. The
-backend.log will say "Teams scrape failed; OWA-only brief" with the
-reason. Auth-expired errors during the Teams scrape DO propagate to
-the UI's banner — since the cookies are stale for both surfaces,
-fixing it once fixes both.
-
-**Known not-yet-patched on the Teams side:** the Chat tab (active
-1:1 conversations) is noisier than Activity and harder to scope to
-"today" without DOM-specific filtering. Activity covers ~80% of the
-"what needs my attention" value; Chat may follow in a later release
-if it turns out Activity misses important things.
-
-### 3. Sticky "Signed in" toast
-
-v2.14.0 had a tiny but annoying bug: clicking **Sign in to Microsoft**
-showed a loading toast with `duration: Infinity` (intentional —
-sign-in can take minutes if you're chasing the Authenticator app).
-When sign-in completed, my code called `toast.success(msg, { id })`
-to UPDATE the loading toast in place. But [Sonner](https://sonner.emilkowal.ski/)
-merges options on update, so the `Infinity` duration persisted and
-the success toast never dismissed itself.
-
-Fix: dismiss the loading toast first, then show a fresh success
-toast with a normal 5-second duration. Same pattern applied to the
-error path. Net change: 6 lines.
+The sign-in profile typically holds for ~7 days; on the next
+auth-expired event, the banner re-prompts and you do steps 1-4 again
+(weekly cadence given typical M365 conditional-access policies).
 
 ## Backend additions
 
-- `services/outlook_web_scraper.py`:
-  - `profile_dir_for()` semantics changed: docstring now says "LOCAL-only"
-    explicitly. Function signature unchanged.
-  - New `scrape_today_teams_text()` — mirrors `scrape_today_briefing_text`
-    but navigates Teams Activity. Returns "" instead of raising on
-    non-auth failures so Teams flakiness doesn't kill the brief.
-  - `format_for_briefing_parser` gains optional `teams_text=` kwarg.
-- `server.py`:
-  - `/briefing/signin` + `/briefing/sync` import + pass `USER_DATA_DIR`
-    instead of `recordings_dir`.
-  - `/briefing/sync` calls both scrapers in sequence; Teams failures
-    are caught and skipped, OWA failures fail the whole sync.
+- New service `services/outlook_web_scraper.py` — Playwright wrapper
+  using your installed Chrome, hidden via off-screen + minimized window.
+  Persistent profile at `USER_DATA_DIR/web-session`. Lazy playwright
+  import so the rest of the backend keeps working if it's not installed
+  yet.
+- New endpoints `POST /briefing/signin` and `POST /briefing/sync`.
+  Serialized via an asyncio.Lock so simultaneous clicks don't race on
+  the Chrome profile-dir lock.
+- New constant set: `OWA_TARGET_CHARS=1500`, `OWA_MIN_USEFUL_CHARS=700`,
+  `TEAMS_TARGET_CHARS=1500`, `TEAMS_MIN_USEFUL_CHARS=500`,
+  `MIN_SCRAPE_FLOOR=500`, `CONTENT_SETTLE_MAX_WAIT_SEC=30`,
+  `TEAMS_CONTENT_SETTLE_MAX_WAIT_SEC=35`, `STABILITY_POLLS=3`.
+- New dependency: `playwright>=1.40` (no bundled Chromium —
+  `channel='chrome'` uses your installed Chrome).
 
-No requirement changes; Playwright is still all we need.
+## Frontend additions
+
+- Two new buttons on Today tab: **Sync now** and **Sign in to Microsoft**.
+- Auth-expired amber banner with retry, surfaced on 423 LOCKED responses.
+- "Signed in" success toast now dismisses after 5 seconds (was inheriting
+  `Infinity` duration from the loading toast in early cuts).
 
 ## Tests
 
-Total backend test count: **67** (was 64 in v2.14.0). 3 new in
-`test_outlook_web_scraper.py` covering the Teams formatter
-integration:
+**72 backend tests** (was 45 in v2.14.0). New coverage:
 
-- `test_format_blob_joins_teams_text_with_owa` — Teams section appears,
-  labeled, between OWA and action items.
-- `test_format_blob_omits_teams_section_when_empty` — None / "" /
-  whitespace teams_text yields no Teams header (silent omission so
-  the brief still looks clean when Teams fails).
-- `test_format_blob_full_combination` — order assertion (OWA → Teams →
-  Actions) so future refactors don't accidentally reshuffle the LLM
-  prompt's expected layout.
+- `test_outlook_web_scraper.py` — profile-dir contract, login-URL
+  detection, formatter for OWA + Teams + action-items integration,
+  lazy-import contract, and the wait-for-text-to-settle helper across
+  all three exit conditions plus the v2.15.0 bug case
+  (below-useful-floor stable text).
 
-Browser-driven tests still aren't possible in CI (Chrome + Playwright
-aren't reachable from the runner) — the live verification happens on
-your machine after install.
+Live verification — does the scrape actually work against a real M365
+tenant — happens on the user's machine after install. Browser-driven
+tests aren't possible in CI.
 
 ## Bundle changes
 
-None. The new Teams scraping is pure Python; persistent profile dir
-just moves a folder name.
+None. Playwright pulls itself in via the first-launch venv bootstrap.
+Adds ~10-30 seconds to first launch after upgrading.
+
+## What this consolidates
+
+This release supersedes (and the team has deleted) the
+previously-shipped `v2.15.0`, `v2.15.1`, and `v2.15.2` releases. Each
+of those had a real bug in the scrape path:
+
+- **Original v2.15.0** (deleted): persistent profile lived under
+  `recordings_dir` which broke on cloud-synced volumes; Teams scrape
+  was fatal on its OAuth dance.
+- **v2.15.1** (deleted): made Teams non-fatal, added two-tab sign-in
+  window — but kept `headless=True` so OWA scrape silently returned
+  392 chars of menu chrome instead of the calendar.
+- **v2.15.2** (deleted): better content-settle wait + clearer error
+  message — but still `headless=True` so the underlying bot detection
+  still served the stripped UI.
+
+This v2.15.0 retains the good parts from all three (profile location
+fix, content-settle wait, two-tab sign-in, non-fatal Teams, fixed
+toast) AND adds the actual fix: headed Chrome with the window
+positioned off-screen.
 
 ## Known not yet patched
 
-- **Teams Chat tab** — Activity-only for now (see Teams section above).
+- **Teams Chat tab** — Activity-only for now.
 - **Auto-sync on first launch of day** — Sync is still manual.
 - **Subprocess-isolated transcribe + diarize** — deferred from v2.12.0.
 - **RecordingService decomposition** — 1,300-line god-object remains.
 - **Subprocess timeout on finalize child** — small fix tracked.
-- **macOS Bluetooth audio-format-mismatch banner** — Windows-only.
+- **macOS Bluetooth audio-format-mismatch banner** — Windows-only today.
