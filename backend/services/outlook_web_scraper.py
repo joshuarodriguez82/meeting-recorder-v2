@@ -107,7 +107,34 @@ MAX_SCRAPE_TEXT_BYTES = 30_000
 # a healthy connection and bounds the time a user waits on the Sync Now
 # button before they see "took too long."
 PAGE_LOAD_TIMEOUT_MS = 20_000
-CONTENT_WAIT_TIMEOUT_MS = 15_000
+# How long we'll wait for the React SPA to mount its actual content
+# (calendar grid / activity feed) into the page after initial load.
+# v2.15.1's networkidle approach returned in ~500ms because OWA's
+# initial bundle loaded fast and telemetry hadn't started yet — we
+# extracted from a barely-rendered shell (392 chars in the field
+# repro) instead of an actual calendar. v2.15.2 polls for inner-text
+# size to settle, which is the right signal for "is the SPA done
+# mounting." 30 seconds is enough for cold-cache OWA on a slow
+# tenant; Teams Web is heavier and gets a separate 35s cap.
+CONTENT_SETTLE_MAX_WAIT_SEC = 30.0
+TEAMS_CONTENT_SETTLE_MAX_WAIT_SEC = 35.0
+
+# Inner-text size thresholds. OWA's day view with NO events still
+# renders the time-of-day axis ("8 AM", "9 AM", ...) which is roughly
+# 600-1000 chars. The chrome alone (left nav + top bar + date strip,
+# no calendar grid) is ~250-450 chars. Crossing MIN_USEFUL_CHARS
+# means we have at least the grid axis; crossing TARGET_CHARS means
+# we likely have meeting tiles too. Below MIN_SCRAPE_FLOOR is a hard
+# failure — that's the v2.15.1 bug pattern (calendar didn't render).
+OWA_TARGET_CHARS = 1500     # full day view with some events
+OWA_MIN_USEFUL_CHARS = 700  # day view axis rendered, possibly no events
+TEAMS_TARGET_CHARS = 1500
+TEAMS_MIN_USEFUL_CHARS = 500
+MIN_SCRAPE_FLOOR = 500      # below this, treat as "didn't render"
+
+# How many consecutive equal-size polls before we declare the text
+# "stable" and stop waiting. Each poll is ~1s apart.
+STABILITY_POLLS = 3
 
 
 class OutlookScraperError(RuntimeError):
@@ -139,6 +166,89 @@ def _import_playwright():
             "the first-launch bootstrap will install it from "
             "requirements-*.txt."
         ) from e
+
+
+async def _wait_for_text_to_settle(
+    locator,
+    *,
+    target_chars: int,
+    min_useful_chars: int,
+    max_wait_sec: float,
+    label: str,
+) -> str:
+    """Poll the locator's inner-text every second until ONE of:
+      1. it reaches ``target_chars`` (we have what we want, return early),
+      2. it stops growing for ``STABILITY_POLLS`` polls in a row (the
+         page has settled; whatever's there is what we get), or
+      3. ``max_wait_sec`` elapses (give up and return whatever we have).
+
+    Returns the final text. Logs what happened so future repros are
+    easy to diagnose from backend.log alone.
+
+    Why this replaces ``wait_for_load_state("networkidle")``: in v2.15.1
+    OWA's React tree paints the menu shell first (~400 chars), then
+    networkidle fires when telemetry is briefly quiet (before the
+    calendar grid mounts), then we extracted from the shell-only DOM
+    and got the empty-brief bug. Polling actual inner-text size is
+    the only reliable signal that "the SPA is done mounting."
+    """
+    start = asyncio.get_event_loop().time()
+    deadline = start + max_wait_sec
+    last_len = -1
+    stable_count = 0
+    last_text = ""
+
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            text = await locator.inner_text(timeout=3000)
+            text = (text or "").strip()
+            last_text = text
+            now_len = len(text)
+            elapsed = asyncio.get_event_loop().time() - start
+
+            if now_len >= target_chars:
+                logger.info(
+                    f"{label}: content reached target ({now_len} chars) "
+                    f"in {elapsed:.1f}s")
+                return text
+
+            if now_len == last_len and now_len > 0:
+                stable_count += 1
+                if stable_count >= STABILITY_POLLS:
+                    # Text has been the same for N polls in a row —
+                    # the page is done loading whatever it's going to
+                    # load. If it's above the "useful" floor we
+                    # accept it (e.g. empty calendar day legitimately
+                    # has fewer chars). Below the floor is the bug
+                    # case — log distinctly and return anyway; the
+                    # caller decides whether to raise.
+                    if now_len >= min_useful_chars:
+                        logger.info(
+                            f"{label}: content stable at {now_len} chars "
+                            f"(below target {target_chars} but above "
+                            f"useful floor {min_useful_chars}) "
+                            f"after {elapsed:.1f}s")
+                    else:
+                        logger.warning(
+                            f"{label}: content stable at {now_len} chars "
+                            f"after {elapsed:.1f}s — below useful floor "
+                            f"({min_useful_chars}). SPA may not have "
+                            f"finished mounting; brief may be incomplete.")
+                    return text
+            else:
+                stable_count = 0
+                last_len = now_len
+        except Exception as e:  # noqa: BLE001
+            # inner_text occasionally throws on Playwright transient
+            # render-tree changes. Don't bail — just skip this poll.
+            logger.debug(f"{label}: inner_text poll failed: {e}")
+
+        await asyncio.sleep(1.0)
+
+    logger.warning(
+        f"{label}: content never settled within {max_wait_sec}s; "
+        f"using last={len(last_text)} chars.")
+    return last_text
 
 
 def _url_looks_like_login(url: str) -> bool:
@@ -332,30 +442,25 @@ async def scrape_today_briefing_text(user_data_dir: Path) -> str:
                 raise OutlookAuthExpired(
                     "Microsoft 365 session expired — sign in again.")
 
-            # Give the day-view rendering loop time to fill the main
-            # region. We don't pin a specific selector because OWA's
-            # DOM changes between releases; instead, wait for the body
-            # to settle on a stable inner-text size.
-            try:
-                await page.wait_for_load_state("networkidle",
-                                                timeout=CONTENT_WAIT_TIMEOUT_MS)
-            except Exception:  # noqa: BLE001
-                # networkidle can flap on OWA (background telemetry).
-                # Don't fail the scrape on it — just continue and grab
-                # whatever rendered.
-                logger.debug("OWA networkidle timed out; proceeding anyway")
-
-            # Extract the [role=main] inner text. OWA wraps the active
-            # calendar area in role=main; this consistently captures the
-            # visible day grid + sidebar agenda without dragging in the
-            # left nav. Fall back to body innerText if role=main isn't
-            # there (older OWA branches).
+            # Wait for the day-view's React tree to actually mount its
+            # content. v2.15.1 used wait_for_load_state("networkidle")
+            # which returned in ~500ms before the calendar grid
+            # rendered (resulting in 392-char extraction of just the
+            # menu chrome). v2.15.2 polls inner-text size: returns
+            # early when content is rich, falls back to stability
+            # detection when the day is genuinely empty, hard caps at
+            # 30s so the user's wait is bounded.
             try:
                 main = page.locator('[role="main"]').first
-                if await main.count() > 0:
-                    text = await main.inner_text(timeout=5_000)
-                else:
-                    text = await page.locator("body").inner_text(timeout=5_000)
+                main_present = await main.count() > 0
+                locator = main if main_present else page.locator("body")
+                text = await _wait_for_text_to_settle(
+                    locator,
+                    target_chars=OWA_TARGET_CHARS,
+                    min_useful_chars=OWA_MIN_USEFUL_CHARS,
+                    max_wait_sec=CONTENT_SETTLE_MAX_WAIT_SEC,
+                    label="OWA",
+                )
             except Exception as e:  # noqa: BLE001
                 raise OutlookScraperError(
                     f"Couldn't read OWA text content: {e}") from e
@@ -364,6 +469,18 @@ async def scrape_today_briefing_text(user_data_dir: Path) -> str:
             if not text:
                 raise OutlookScraperError(
                     "OWA returned an empty calendar — try Sign in again.")
+
+            # Hard floor — below this, the calendar grid never
+            # rendered. Raising here lets the UI show a distinct
+            # "content didn't load" error instead of silently
+            # publishing an empty brief like v2.15.1 did.
+            if len(text) < MIN_SCRAPE_FLOOR:
+                raise OutlookScraperError(
+                    f"OWA's calendar grid didn't render in time "
+                    f"(only {len(text)} chars extracted; expected "
+                    f"≥{MIN_SCRAPE_FLOOR}). Try Sync again, or click "
+                    f"Sign in to Microsoft and confirm your calendar "
+                    f"loads in the OWA tab before closing.")
 
             # If after all that the visible text screams "sign in to your
             # account" or similar, treat as auth-expired. OWA's interstitial
@@ -464,26 +581,22 @@ async def scrape_today_teams_text(user_data_dir: Path) -> str:
                 raise OutlookAuthExpired(
                     "Microsoft 365 session expired — sign in again.")
 
-            # Teams' main pane takes noticeably longer to populate
-            # than OWA's because the React tree mounts the activity
-            # feed after the initial chrome paints. Wait for
-            # networkidle but cap fairly aggressively — Teams sends
-            # continuous telemetry pings that can keep the network
-            # "busy" for the entire timeout.
-            try:
-                await page.wait_for_load_state(
-                    "networkidle", timeout=CONTENT_WAIT_TIMEOUT_MS)
-            except Exception:  # noqa: BLE001
-                logger.debug("Teams networkidle timed out; proceeding anyway")
-
-            # Same role=main extraction approach as OWA. Teams Web's
-            # active route fills role=main with the activity list.
+            # Same content-settle wait as OWA but with a longer
+            # ceiling. Teams Web's React tree takes 5-15s to fully
+            # mount the activity feed even on warm cache; networkidle
+            # never settles because of continuous telemetry. v2.15.1
+            # had the same shell-only extraction problem here.
             try:
                 main = page.locator('[role="main"]').first
-                if await main.count() > 0:
-                    text = await main.inner_text(timeout=5_000)
-                else:
-                    text = await page.locator("body").inner_text(timeout=5_000)
+                main_present = await main.count() > 0
+                locator = main if main_present else page.locator("body")
+                text = await _wait_for_text_to_settle(
+                    locator,
+                    target_chars=TEAMS_TARGET_CHARS,
+                    min_useful_chars=TEAMS_MIN_USEFUL_CHARS,
+                    max_wait_sec=TEAMS_CONTENT_SETTLE_MAX_WAIT_SEC,
+                    label="Teams",
+                )
             except Exception as e:  # noqa: BLE001
                 logger.warning(
                     f"Couldn't read Teams text content; skipping: {e}")
