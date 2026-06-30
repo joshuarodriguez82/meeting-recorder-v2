@@ -208,11 +208,18 @@ export function TodayView({ onNavigate }: Props) {
     try {
       await api.signInToOutlookWeb();
       setAuthExpired(false);
+      // Dismiss the loading toast (which has duration: Infinity) and
+      // show a fresh success so the success doesn't inherit infinity.
+      // sonner merges options on update; passing only {id} on success
+      // keeps the original Infinity duration so the toast never goes
+      // away — that's the "signed-in notification stuck on screen" bug.
+      toast.dismiss(t);
       toast.success("Signed in. Click Sync now to pull today's brief.",
-                     { id: t });
+                     { duration: 5000 });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      toast.error(`Sign-in failed: ${msg}`, { id: t, duration: 8000 });
+      toast.dismiss(t);
+      toast.error(`Sign-in failed: ${msg}`, { duration: 8000 });
     } finally {
       setSigningIn(false);
     }

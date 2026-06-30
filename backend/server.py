@@ -309,7 +309,7 @@ from services.daily_briefing_service import DailyBriefingService
 from services.outlook_web_scraper import (
     OutlookAuthExpired, OutlookScraperError, OutlookScraperUnavailable,
     format_for_briefing_parser, open_signin_window,
-    scrape_today_briefing_text,
+    scrape_today_briefing_text, scrape_today_teams_text,
 )
 from services.terminology_service import TerminologyService
 from services.prep_brief_cache_service import (
@@ -5847,10 +5847,14 @@ async def signin_to_outlook_web():
         raise HTTPException(
             status_code=409,
             detail="Another sign-in or sync is already running.")
-    data_root = Path(svc.settings.recordings_dir)
+    # v2.15.0+: profile lives in USER_DATA_DIR (LOCAL-only) instead of
+    # recordings_dir (often cloud-synced). Cloud-synced profile caused
+    # cookie-handoff failures between the headed sign-in and the
+    # subsequent headless scrape — see profile_dir_for() docstring.
+    from config.settings import USER_DATA_DIR
     async with _outlook_web_lock:
         try:
-            await open_signin_window(data_root)
+            await open_signin_window(USER_DATA_DIR)
         except OutlookScraperUnavailable as e:
             raise HTTPException(status_code=503, detail=str(e))
         except OutlookScraperError as e:
@@ -5886,10 +5890,13 @@ async def sync_briefing_from_outlook_web():
             status_code=409,
             detail="Another sign-in or sync is already running.")
 
-    data_root = Path(svc.settings.recordings_dir)
+    # v2.15.0+: profile is LOCAL-only at USER_DATA_DIR/web-session/.
+    # See profile_dir_for() for why; v2.14.0's recordings_dir-based
+    # path broke on cloud-synced volumes.
+    from config.settings import USER_DATA_DIR
     async with _outlook_web_lock:
         try:
-            owa_text = await scrape_today_briefing_text(data_root)
+            owa_text = await scrape_today_briefing_text(USER_DATA_DIR)
         except OutlookAuthExpired as e:
             # 423 Locked is the cleanest semantic for "auth state
             # expired, you must re-sign-in before this can succeed."
@@ -5898,8 +5905,28 @@ async def sync_briefing_from_outlook_web():
             raise HTTPException(status_code=503, detail=str(e))
         except OutlookScraperError as e:
             raise HTTPException(status_code=502, detail=str(e))
+        # Teams Activity scrape runs against the SAME profile right
+        # after OWA. Teams failures don't tank the brief — they just
+        # omit the Teams section so the user still gets calendar +
+        # action items. Auth-expired during Teams DOES propagate
+        # because if cookies are stale for Teams they're stale for OWA
+        # too (next refresh), and surfacing the banner is the right
+        # call. The scrape function returns "" on non-auth failures.
+        try:
+            teams_text = await scrape_today_teams_text(USER_DATA_DIR)
+        except OutlookAuthExpired as e:
+            raise HTTPException(status_code=423, detail=str(e))
+        except OutlookScraperUnavailable:
+            # Chrome went missing between OWA and Teams — extremely
+            # unlikely but possible. Continue without Teams rather
+            # than 503'ing the whole brief.
+            logger.warning("Teams scrape unavailable; OWA-only brief.")
+            teams_text = ""
+        except OutlookScraperError as e:
+            logger.warning(f"Teams scrape failed; OWA-only brief: {e}")
+            teams_text = ""
 
-    blob = format_for_briefing_parser(owa_text)
+    blob = format_for_briefing_parser(owa_text, teams_text=teams_text)
     try:
         parsed = await summ.parse_daily_briefing(blob)
     except RuntimeError as e:
