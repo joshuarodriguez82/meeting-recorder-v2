@@ -5805,6 +5805,12 @@ async def import_daily_briefing(req: BriefingImportRequest):
 class ExtensionImportRequest(BaseModel):
     owa_text: Optional[str] = ""
     teams_text: Optional[str] = ""
+    # v1.1 of the extension also captures the focused inbox and the
+    # Teams Chat surface so the brief reflects "what's actually waiting
+    # for me" — most needs_response items live in email, and Chat
+    # surfaces unread DMs that the Activity feed doesn't catch.
+    inbox_text: Optional[str] = ""
+    chat_text: Optional[str] = ""
     date: Optional[str] = None  # YYYY-MM-DD; defaults to today
 
 
@@ -5826,7 +5832,9 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
 
     owa_text = (req.owa_text or "").strip()
     teams_text = (req.teams_text or "").strip()
-    if not owa_text and not teams_text:
+    inbox_text = (req.inbox_text or "").strip()
+    chat_text = (req.chat_text or "").strip()
+    if not any((owa_text, teams_text, inbox_text, chat_text)):
         raise HTTPException(status_code=400,
                             detail="No content sent from extension")
 
@@ -5837,13 +5845,30 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
             detail=("No AI provider configured. Set an API key + model "
                     "in Settings before importing a briefing."))
 
-    # Stitch OWA + Teams into the same labeled-section blob the
-    # Playwright path used (services/outlook_web_scraper.py:
-    # format_for_briefing_parser). Reusing that helper keeps the LLM
-    # prompt's input shape identical regardless of whether the data
-    # came from the extension or the (deprecated) Playwright path.
-    from services.outlook_web_scraper import format_for_briefing_parser
-    blob = format_for_briefing_parser(owa_text, teams_text=teams_text)
+    # Stitch all four labeled sections into one blob for the LLM.
+    # v1.1 adds Inbox + Chat (was OWA + Teams only). The LLM-parse
+    # prompt treats labeled sections as topic hints, so adding more
+    # context here directly improves needs_response / fyi extraction.
+    blob_parts = []
+    if owa_text:
+        blob_parts.append("=== Today's Outlook Calendar ===\n\n" + owa_text)
+    if teams_text:
+        blob_parts.append(
+            "=== Today's Teams Activity (mentions, replies, missed calls) ===\n\n"
+            + teams_text)
+    if inbox_text:
+        # Inbox is the highest-signal needs_response source. Email
+        # threads waiting on the user are the canonical "needs response"
+        # items in real work.
+        blob_parts.append(
+            "=== Today's Outlook Focused Inbox (emails — likely needs_response items) ===\n\n"
+            + inbox_text)
+    if chat_text:
+        blob_parts.append(
+            "=== Today's Teams Chat (active 1:1 / group conversations) ===\n\n"
+            + chat_text)
+    blob = "\n\n".join(blob_parts)
+
     if len(blob.encode("utf-8")) > 50_000:
         # Generous cap — see /briefing/import for rationale.
         raise HTTPException(status_code=400,
@@ -5861,9 +5886,11 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
         svc.daily_briefing_svc.save_parsed, parsed, blob, req.date)
     logger.info(
         f"Chrome-extension import: OWA={len(owa_text)} chars, "
-        f"Teams={len(teams_text)} chars → "
+        f"Teams={len(teams_text)} chars, "
+        f"Inbox={len(inbox_text)} chars, Chat={len(chat_text)} chars → "
         f"agenda={len(stored.get('agenda', []))}, "
-        f"needs_response={len(stored.get('needs_response', []))}")
+        f"needs_response={len(stored.get('needs_response', []))}, "
+        f"fyi={len(stored.get('fyi', []))}")
     return stored
 
 

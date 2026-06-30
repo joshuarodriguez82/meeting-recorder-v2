@@ -7,7 +7,8 @@
     "tabs",
     "scripting",
     "storage",
-    "activeTab"
+    "activeTab",
+    "alarms"
   ],
   "host_permissions": [
     "https://outlook.office.com/*",

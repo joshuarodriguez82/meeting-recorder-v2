@@ -1,85 +1,203 @@
 // Meeting Recorder Chrome extension — background service worker.
 //
-// Orchestrates the capture flow:
-//   1. Open OWA day view (https://outlook.office.com/calendar/view/day)
-//      in a new tab. Wait for the React tree to mount enough content
-//      that we have a real calendar grid (uses inner-text size as the
-//      "is the SPA done" signal).
-//   2. Execute a content script in that tab to extract the inner text
-//      of [role="main"]. Close the tab.
-//   3. Open Teams Activity (https://teams.microsoft.com/v2/?clientType=desktop#/activity).
-//      Same wait + extract.
-//   4. POST both texts to the recorder's backend at
-//      /briefing/extension-import with the auth token.
+// Orchestrates the capture flow. v1.1 (chrome-extension-v1.1):
+//   1. Capture FOUR sources (was two in v1.0):
+//      - OWA day view  (calendar events)
+//      - Teams Activity (mentions, replies, missed calls)
+//      - Outlook inbox (top emails — most needs-response items live here)
+//      - Teams Chat    (active 1:1 / group chats with unread)
+//   2. Auto-schedule via chrome.alarms (3 default times per day,
+//      user-configurable). Service worker wakes up on each alarm,
+//      runs the capture, POSTs to the recorder.
 //
-// Key design choice: this runs in the USER'S real Chrome (not a
-// Playwright-controlled instance), so Microsoft's bot detection
-// doesn't fire and the user's real session cookies authenticate the
-// page loads. That's the whole point of doing this as an extension
-// instead of the previous Playwright approach.
+// All four scrapes run in the USER'S real Chrome. Microsoft trusts the
+// session because it's the same browser they signed into. No
+// Playwright, no automation flags, no bot detection.
 
-const OWA_URL = "https://outlook.office.com/calendar/view/day";
-const TEAMS_URL = "https://teams.microsoft.com/v2/?clientType=desktop#/activity";
+const SOURCES = [
+  { key: "owa", url: "https://outlook.office.com/calendar/view/day", label: "OWA" },
+  { key: "teams", url: "https://teams.microsoft.com/v2/?clientType=desktop#/activity", label: "Teams" },
+  { key: "inbox", url: "https://outlook.cloud.microsoft/mail/?folder=focusedinbox", label: "Inbox" },
+  { key: "chat", url: "https://teams.microsoft.com/v2/?clientType=desktop#/chat", label: "Chat" },
+];
 
-// Poll timing. Each tab gets up to MAX_WAIT_MS to settle; we extract
-// every POLL_MS to see if the inner-text size has reached the
-// "looks like real content" threshold or has stopped growing.
+// Polling shape for "is the SPA done mounting." Target = "rich
+// enough, return early"; min-useful = "above this we accept stable
+// even if target wasn't hit (some days are quiet)"; max-wait = hard
+// ceiling.
 const POLL_MS = 1000;
 const MAX_WAIT_MS = 25_000;
 const TARGET_CHARS = 1500;
-const MIN_USEFUL_CHARS = 500;
+const MIN_USEFUL_CHARS = 400;
 const STABILITY_POLLS = 3;
 
-// Listen for popup-initiated capture requests. async response is
-// returned via the standard return-true sendResponse pattern.
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg?.type === "capture-and-send") {
-    captureAndSend(msg.backendUrl, msg.token)
-      .then(sendResponse)
-      .catch((e) => sendResponse({ ok: false, error: e.message || String(e) }));
-    return true; // keep the message channel open for the async response
+// Dedupe: don't run a scheduled capture if one ran in the last hour.
+// Manual captures (popup button) bypass this.
+const DEDUPE_WINDOW_MS = 60 * 60 * 1000;
+
+// Default scheduled times when user enables auto-capture. Local
+// browser time (NOT UTC) — chrome.alarms.when uses ms-since-epoch
+// computed from a local Date, which makes per-time-of-day scheduling
+// work without the user thinking about timezones.
+const DEFAULT_CAPTURE_TIMES = ["08:00", "12:00", "17:00"];
+
+// ──────────────────────────────────────────────────────────────────
+// Lifecycle: re-arm alarms whenever the service worker (re)starts.
+// ──────────────────────────────────────────────────────────────────
+
+chrome.runtime.onInstalled.addListener(async () => {
+  await setupAlarms();
+});
+
+chrome.runtime.onStartup.addListener(async () => {
+  await setupAlarms();
+});
+
+// Watch for the user changing schedule settings and re-arm immediately
+// rather than waiting for the next browser restart.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  if (changes.autoCapture || changes.captureTimes) {
+    setupAlarms().catch((e) => console.warn("[ext] re-arm failed:", e));
   }
 });
 
-async function captureAndSend(backendUrl, token) {
+async function setupAlarms() {
+  try {
+    await chrome.alarms.clearAll();
+  } catch (_) { /* ignore */ }
+
+  const cfg = await chrome.storage.local.get({
+    autoCapture: false,
+    captureTimes: DEFAULT_CAPTURE_TIMES,
+  });
+  if (!cfg.autoCapture) {
+    console.log("[ext] auto-capture off; no alarms scheduled");
+    return;
+  }
+
+  for (const t of (cfg.captureTimes || [])) {
+    const next = nextOccurrence(t);
+    if (!next) continue;
+    chrome.alarms.create(`capture-${t}`, {
+      when: next.getTime(),
+      periodInMinutes: 24 * 60,  // daily
+    });
+    console.log(`[ext] scheduled ${t} (next: ${next.toString()})`);
+  }
+}
+
+function nextOccurrence(timeStr) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(timeStr || "");
+  if (!m) return null;
+  const hours = parseInt(m[1], 10);
+  const minutes = parseInt(m[2], 10);
+  if (hours > 23 || minutes > 59) return null;
+  const now = new Date();
+  const next = new Date(
+    now.getFullYear(), now.getMonth(), now.getDate(),
+    hours, minutes, 0, 0,
+  );
+  if (next.getTime() <= now.getTime() + 30_000) {
+    // Already passed today (or within next 30s); schedule for tomorrow.
+    next.setDate(next.getDate() + 1);
+  }
+  return next;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Alarm fires → capture (with dedup) and POST.
+// ──────────────────────────────────────────────────────────────────
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (!alarm?.name?.startsWith("capture-")) return;
+  console.log(`[ext] alarm fired: ${alarm.name}`);
+
+  const cfg = await chrome.storage.local.get({
+    backendUrl: "",
+    token: "",
+    lastCaptureAt: 0,
+  });
+
+  if (!cfg.backendUrl || !cfg.token) {
+    console.warn("[ext] alarm fired but extension not configured; skipping");
+    return;
+  }
+  if (Date.now() - cfg.lastCaptureAt < DEDUPE_WINDOW_MS) {
+    const mins = Math.round((Date.now() - cfg.lastCaptureAt) / 60_000);
+    console.log(`[ext] alarm dedupe: last capture ${mins} min ago, skipping`);
+    return;
+  }
+
+  await captureAndSend(cfg.backendUrl, cfg.token, { source: "alarm" });
+});
+
+// ──────────────────────────────────────────────────────────────────
+// Popup-initiated manual capture.
+// ──────────────────────────────────────────────────────────────────
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === "capture-and-send") {
+    captureAndSend(msg.backendUrl, msg.token, { source: "manual" })
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: e.message || String(e) }));
+    return true;
+  }
+  if (msg?.type === "get-status") {
+    chrome.storage.local.get({
+      lastCaptureAt: 0,
+      lastResult: null,
+      autoCapture: false,
+      captureTimes: DEFAULT_CAPTURE_TIMES,
+    }).then(sendResponse);
+    return true;
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────
+// The actual capture.
+// ──────────────────────────────────────────────────────────────────
+
+async function captureAndSend(backendUrl, token, opts = {}) {
   if (!backendUrl || !token) {
     return { ok: false, error: "Backend URL or token not configured. Open Settings." };
   }
 
-  let owaText = "";
-  let teamsText = "";
-  let owaErr = "";
-  let teamsErr = "";
+  console.log(`[ext] starting capture (source=${opts.source || "manual"})`);
 
-  // OWA capture. We don't fail the whole flow if Teams flakes, but
-  // OWA failing means the brief has no calendar — that's a real
-  // failure we surface to the user.
-  try {
-    owaText = await captureUrl(OWA_URL, "OWA");
-  } catch (e) {
-    owaErr = e.message || String(e);
-    console.error("[Meeting Recorder ext] OWA capture failed:", e);
+  const payload = {};
+  const counts = {};
+  const errors = [];
+
+  // Run each source sequentially so we don't hammer Microsoft's
+  // anti-flooding with 4 simultaneous tab opens.
+  for (const src of SOURCES) {
+    try {
+      const text = await captureUrl(src.url, src.label);
+      payload[`${src.key}_text`] = text;
+      counts[src.key] = text.length;
+    } catch (e) {
+      console.error(`[ext] ${src.label} failed:`, e);
+      errors.push(`${src.label}: ${e.message || String(e)}`);
+      payload[`${src.key}_text`] = "";
+      counts[src.key] = 0;
+    }
   }
 
-  // Teams capture. Best-effort; OWA-only brief is still useful.
-  try {
-    teamsText = await captureUrl(TEAMS_URL, "Teams");
-  } catch (e) {
-    teamsErr = e.message || String(e);
-    console.error("[Meeting Recorder ext] Teams capture failed:", e);
-  }
-
-  if (!owaText && !teamsText) {
-    return {
+  // If literally every source returned 0 chars, treat as a hard
+  // failure. Otherwise we still POST whatever we got — even just
+  // OWA is a useful brief.
+  const totalChars = Object.values(counts).reduce((a, b) => a + b, 0);
+  if (totalChars === 0) {
+    const result = {
       ok: false,
-      error: `Nothing captured. OWA: ${owaErr || "empty"} | Teams: ${teamsErr || "empty"}`,
+      error: `Every source returned nothing. ${errors.join(" | ")}`,
     };
+    await chrome.storage.local.set({ lastCaptureAt: Date.now(), lastResult: result });
+    return result;
   }
 
-  // POST to the recorder backend. Backend's /briefing/extension-import
-  // takes the two text blobs, runs them through the same
-  // parse_daily_briefing pipeline the existing Import button uses,
-  // and stores via DailyBriefingService.
+  // POST to the recorder backend.
   try {
     const res = await fetch(`${backendUrl}/briefing/extension-import`, {
       method: "POST",
@@ -87,44 +205,43 @@ async function captureAndSend(backendUrl, token) {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${token}`,
       },
-      body: JSON.stringify({
-        owa_text: owaText,
-        teams_text: teamsText,
-      }),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      return {
+      const result = {
         ok: false,
         error: `Backend returned ${res.status}: ${body.slice(0, 200)}`,
       };
+      await chrome.storage.local.set({ lastCaptureAt: Date.now(), lastResult: result });
+      return result;
     }
-    return {
+    const result = {
       ok: true,
-      owa_chars: owaText.length,
-      teams_chars: teamsText.length,
+      counts,
+      errors: errors.length ? errors : undefined,
+      ts: Date.now(),
     };
+    await chrome.storage.local.set({ lastCaptureAt: Date.now(), lastResult: result });
+    console.log(`[ext] captured & sent:`, counts);
+    return result;
   } catch (e) {
-    return {
+    const result = {
       ok: false,
       error: `Couldn't reach ${backendUrl} — is Meeting Recorder running? (${e.message})`,
     };
+    await chrome.storage.local.set({ lastCaptureAt: Date.now(), lastResult: result });
+    return result;
   }
 }
 
 async function captureUrl(url, label) {
-  // Open in a new tab in the current window. The user sees the tab
-  // briefly while we wait for content to render; this is intentional
-  // — closing it is exactly what makes the capture feel "active"
-  // rather than something silent that could leak data.
   const tab = await chrome.tabs.create({ url, active: false });
   const tabId = tab.id;
 
   try {
-    // Wait for the tab to finish initial load.
     await waitForTabComplete(tabId);
 
-    // Poll for content to settle.
     const start = Date.now();
     let lastLen = -1;
     let stableCount = 0;
@@ -134,7 +251,6 @@ async function captureUrl(url, label) {
       try {
         text = await readMainText(tabId);
       } catch (e) {
-        // Tab might have been closed by something; just stop polling.
         console.warn(`[ext] ${label} read failed:`, e);
         break;
       }
@@ -159,7 +275,6 @@ async function captureUrl(url, label) {
     console.warn(`[ext] ${label}: hit max-wait at ${lastText.length} chars`);
     return lastText;
   } finally {
-    // Always close the tab so we don't leave a sea of OWA tabs.
     try { await chrome.tabs.remove(tabId); } catch (_) {}
   }
 }
@@ -188,7 +303,6 @@ function waitForTabComplete(tabId) {
 async function readMainText(tabId) {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
-    // Use a self-contained function — no closures, no imports.
     func: () => {
       try {
         const main = document.querySelector('[role="main"]');
