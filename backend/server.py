@@ -5906,20 +5906,30 @@ async def sync_briefing_from_outlook_web():
         except OutlookScraperError as e:
             raise HTTPException(status_code=502, detail=str(e))
         # Teams Activity scrape runs against the SAME profile right
-        # after OWA. Teams failures don't tank the brief — they just
-        # omit the Teams section so the user still gets calendar +
-        # action items. Auth-expired during Teams DOES propagate
-        # because if cookies are stale for Teams they're stale for OWA
-        # too (next refresh), and surfacing the banner is the right
-        # call. The scrape function returns "" on non-auth failures.
+        # after OWA. ALL Teams failures (including auth-expired) are
+        # non-fatal — the brief still publishes OWA-only. v2.15.0
+        # propagated Teams' OutlookAuthExpired as a 423, assuming
+        # stale cookies for Teams meant stale cookies for OWA. That
+        # was wrong: Teams Web has its own OAuth dance on top of M365
+        # SSO (the v2/?clientType=desktop URL bounces through
+        # login.microsoftonline.com on first visit even when OWA's
+        # already authenticated, and may also hit "Stay signed in?"
+        # interstitials). The fix in v2.15.1 catches that here AND
+        # extends open_signin_window to also visit Teams so the
+        # one-time interactive dance gets handled during sign-in,
+        # not silently during sync.
         try:
             teams_text = await scrape_today_teams_text(USER_DATA_DIR)
         except OutlookAuthExpired as e:
-            raise HTTPException(status_code=423, detail=str(e))
+            # Distinct log level so users tailing backend.log can see
+            # "Teams needs sign-in" before they're confused about
+            # why Teams section is missing.
+            logger.warning(
+                f"Teams needs an interactive sign-in (OWA was fine); "
+                f"OWA-only brief. Click Sign in to Microsoft once and "
+                f"complete Teams' auth dance in the second tab. {e}")
+            teams_text = ""
         except OutlookScraperUnavailable:
-            # Chrome went missing between OWA and Teams — extremely
-            # unlikely but possible. Continue without Teams rather
-            # than 503'ing the whole brief.
             logger.warning("Teams scrape unavailable; OWA-only brief.")
             teams_text = ""
         except OutlookScraperError as e:

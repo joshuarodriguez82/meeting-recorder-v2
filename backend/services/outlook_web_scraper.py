@@ -167,14 +167,29 @@ def profile_dir_for(user_data_dir: Path) -> Path:
 
 
 async def open_signin_window(user_data_dir: Path) -> None:
-    """Spawn a HEADED Chrome window at OWA's calendar so the user can
-    sign in / re-MFA. Returns when the user closes the window (or after
-    a generous 10-minute timeout). Cookies persist in the profile dir.
+    """Spawn a HEADED Chrome window with TWO tabs — OWA's calendar
+    and Teams Activity — so the user can sign in (or re-MFA) to both
+    M365 surfaces in a single session. Returns when the user closes
+    the window (or after a generous 10-minute timeout). Cookies
+    persist in the profile dir.
 
     ``user_data_dir`` must be a LOCAL-only path — see ``profile_dir_for``
     for the rationale (v2.14.0 wired this to the user's recordings_dir
     which can be on Google Drive Stream / OneDrive, breaking the
     headed-then-headless cookie handoff).
+
+    v2.15.1+: opens a SECOND tab at Teams Activity. Background:
+    Teams Web has its own OAuth dance on top of M365 SSO. Even when
+    OWA has minted a valid cookie set, the first visit to
+    teams.microsoft.com bounces through login.microsoftonline.com to
+    issue a Teams-specific access token, and may hit "Stay signed in?"
+    or organization-consent interstitials that the headless scrape
+    can't navigate. The fix is to surface that dance during the
+    interactive sign-in flow: user signs in to OWA in tab 1 (their
+    normal flow), notices Teams loading in tab 2, completes any
+    additional prompts there, closes the window. After that one-time
+    dance, the headless Teams scrape works because the token is
+    cached in the persistent profile.
 
     Failure modes:
       - Chrome not installed → OutlookScraperUnavailable
@@ -187,7 +202,8 @@ async def open_signin_window(user_data_dir: Path) -> None:
     profile = profile_dir_for(user_data_dir)
     profile.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Opening Outlook sign-in window (profile={profile})")
+    logger.info(
+        f"Opening sign-in window (OWA + Teams; profile={profile})")
     try:
         async with async_playwright() as p:
             try:
@@ -203,16 +219,35 @@ async def open_signin_window(user_data_dir: Path) -> None:
                     f"Underlying error: {e}"
                 ) from e
 
-            # Reuse the about:blank tab Chrome opens on launch; never
-            # create a second one (extra tabs confuse the close-detection
-            # below).
-            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            # Tab 1: OWA day view (primary auth target). Reuses the
+            # about:blank tab Chrome opens on launch.
+            owa_page = ctx.pages[0] if ctx.pages else await ctx.new_page()
             try:
-                await page.goto(OWA_DAY_VIEW_URL, wait_until="domcontentloaded",
-                                timeout=PAGE_LOAD_TIMEOUT_MS)
+                await owa_page.goto(
+                    OWA_DAY_VIEW_URL, wait_until="domcontentloaded",
+                    timeout=PAGE_LOAD_TIMEOUT_MS)
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"OWA navigation failed in sign-in window: {e}")
                 # Don't raise — let the user manually navigate if needed.
+
+            # Tab 2: Teams Activity (secondary auth target). Opening
+            # a fresh page object instructs Chrome to make a new tab
+            # in the same window. The persistent context shares
+            # cookies across tabs, so any token Teams mints lands in
+            # the same profile the headless scrape will read later.
+            try:
+                teams_page = await ctx.new_page()
+                await teams_page.goto(
+                    TEAMS_ACTIVITY_URL, wait_until="domcontentloaded",
+                    timeout=PAGE_LOAD_TIMEOUT_MS)
+            except Exception as e:  # noqa: BLE001
+                # Teams tab failing here isn't fatal for sign-in —
+                # the user can still authenticate to OWA in tab 1
+                # and Sync now will publish an OWA-only brief. We
+                # log so future diagnosis sees what happened.
+                logger.warning(
+                    f"Teams tab failed to open in sign-in window "
+                    f"(OWA tab still works): {e}")
 
             # Wait for the user to close the browser. We poll ctx.pages
             # instead of awaiting page.wait_for_event('close') because
@@ -231,7 +266,7 @@ async def open_signin_window(user_data_dir: Path) -> None:
                 await ctx.close()
             except Exception:  # noqa: BLE001
                 pass
-            logger.info("Outlook sign-in window closed.")
+            logger.info("Sign-in window closed.")
     except OutlookScraperUnavailable:
         raise
     except Exception as e:  # noqa: BLE001
