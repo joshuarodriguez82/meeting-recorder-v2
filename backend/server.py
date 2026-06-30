@@ -306,6 +306,11 @@ from services.engagement_overlay_service import (
     EngagementOverlayService, KNOWN_STATUSES,
 )
 from services.daily_briefing_service import DailyBriefingService
+from services.outlook_web_scraper import (
+    OutlookAuthExpired, OutlookScraperError, OutlookScraperUnavailable,
+    format_for_briefing_parser, open_signin_window,
+    scrape_today_briefing_text,
+)
 from services.terminology_service import TerminologyService
 from services.prep_brief_cache_service import (
     PrepBriefCacheService, meeting_key as _prep_meeting_key,
@@ -5774,6 +5779,116 @@ async def patch_briefing_action(date: str, action_id: str,
     if updated is None:
         raise HTTPException(status_code=404, detail=f"No briefing for {date}")
     return updated
+
+
+# ── Outlook Web sync — drives the user's installed Chrome to scrape
+#    today's calendar from outlook.office.com, then feeds the resulting
+#    text through the same parser the manual "Import briefing" paste
+#    uses. Two endpoints:
+#
+#    POST /briefing/signin  → spawns a HEADED Chrome window so the user
+#                              can sign in or re-MFA. Persistent profile
+#                              dir keeps cookies across launches; weekly
+#                              MFA re-auth is the expected cadence given
+#                              typical M365 conditional-access policies.
+#    POST /briefing/sync    → runs the scrape headlessly against the
+#                              persistent profile, parses + stores the
+#                              briefing. Returns 423 LOCKED if the
+#                              session expired so the UI knows to prompt
+#                              re-sign-in (vs. a generic 500).
+#
+#    Concurrency: serialized via a single asyncio.Lock. Two clicks on
+#    Sync Now while a scrape is mid-flight would otherwise both try to
+#    open Chrome against the same user-data-dir; Chrome locks that dir
+#    so the second open errors loudly. Lock makes the second click a
+#    no-op-after-wait instead.
+
+# One per backend process; Sync and Signin share it so the user can't
+# trigger a sync while the sign-in window is open against the same
+# profile dir (Chrome would refuse the lock).
+_outlook_web_lock = asyncio.Lock()
+
+
+@app.post("/briefing/signin")
+async def signin_to_outlook_web():
+    """Open the headed Chrome window pointing at OWA's day view so the
+    user can sign in (or re-MFA). Blocks until the user closes the
+    window. Returns {"ok": true} on clean close."""
+    svc.load_settings()
+    if not svc.daily_briefing_svc:
+        raise HTTPException(status_code=503,
+                            detail="Briefing service not initialized")
+    if _outlook_web_lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail="Another sign-in or sync is already running.")
+    data_root = Path(svc.settings.recordings_dir)
+    async with _outlook_web_lock:
+        try:
+            await open_signin_window(data_root)
+        except OutlookScraperUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        except OutlookScraperError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+    return {"ok": True}
+
+
+@app.post("/briefing/sync")
+async def sync_briefing_from_outlook_web():
+    """Scrape OWA's day view via the persistent profile, parse the
+    resulting text with the same LLM pipeline manual Import uses, and
+    store as today's briefing. Returns the stored DailyBriefing JSON
+    (same shape as /briefing/import).
+
+    Status codes:
+      200 → success, returns DailyBriefing
+      423 LOCKED → session expired; UI prompts sign-in
+      503 → Playwright / Chrome not available on this machine
+      502 → scrape ran but extraction or LLM-parse failed
+    """
+    svc.load_settings()
+    if not svc.daily_briefing_svc:
+        raise HTTPException(status_code=503,
+                            detail="Briefing service not initialized")
+    summ = svc.summarizer or svc.live_summarizer
+    if summ is None:
+        raise HTTPException(
+            status_code=400,
+            detail=("No AI provider configured. Set an API key + model in "
+                    "Settings before syncing the briefing."))
+    if _outlook_web_lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail="Another sign-in or sync is already running.")
+
+    data_root = Path(svc.settings.recordings_dir)
+    async with _outlook_web_lock:
+        try:
+            owa_text = await scrape_today_briefing_text(data_root)
+        except OutlookAuthExpired as e:
+            # 423 Locked is the cleanest semantic for "auth state
+            # expired, you must re-sign-in before this can succeed."
+            raise HTTPException(status_code=423, detail=str(e))
+        except OutlookScraperUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        except OutlookScraperError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    blob = format_for_briefing_parser(owa_text)
+    try:
+        parsed = await summ.parse_daily_briefing(blob)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502,
+                            detail=f"LLM parse failed: {e}")
+
+    # Mark the source so the UI can show "Synced from Outlook"
+    # provenance distinct from manual paste imports.
+    if isinstance(parsed, dict):
+        parsed["source"] = "outlook-web-sync"
+
+    stored = await asyncio.to_thread(
+        svc.daily_briefing_svc.save_parsed, parsed, blob, None)
+    return stored
 
 
 # ── Domain terminology glossary ─────────────────────────────────────
