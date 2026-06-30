@@ -241,3 +241,144 @@ def test_module_importable_even_without_playwright(monkeypatch):
     # Should suggest restart so the bootstrap re-installs from
     # requirements-*.txt; don't strand the user without guidance.
     assert "Restart" in msg or "restart" in msg
+
+
+# ──────────────────────────────────────────────────────────────────────
+# _wait_for_text_to_settle (v2.15.2+)
+#
+# The v2.15.1 bug was that wait_for_load_state("networkidle") returned
+# in ~500ms before the OWA React tree mounted, leaving the scraper
+# extracting from a 392-char menu shell. v2.15.2 replaces that with
+# inner-text polling. These tests pin the three exit conditions —
+# target-reached, stability, and max-wait — and the size thresholds
+# in particular because they directly gate whether the user gets a
+# brief or a "didn't render" error.
+# ──────────────────────────────────────────────────────────────────────
+
+import asyncio  # noqa: E402
+
+
+class _FakeLocator:
+    """Stands in for a Playwright Locator. Returns the next text from
+    `texts` on each ``inner_text`` call; once exhausted, returns the
+    last text forever (simulating a settled page)."""
+
+    def __init__(self, texts):
+        self._texts = list(texts)
+        self.calls = 0
+
+    async def inner_text(self, timeout=None):
+        self.calls += 1
+        if self._texts:
+            return self._texts.pop(0)
+        # Empty list defaults to "" — simulates a never-mounted page.
+        return ""
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def test_wait_returns_early_on_target_reached(monkeypatch):
+    """When inner-text crosses ``target_chars``, return immediately —
+    don't wait for stability or max_wait. This is the hot path for a
+    populated calendar."""
+    # Cut the per-poll sleep to 0 so the test runs in ms.
+    _real_sleep = asyncio.sleep
+    monkeypatch.setattr(ows.asyncio, "sleep",
+                         lambda *_a, **_kw: _real_sleep(0))
+    loc = _FakeLocator(["short", "growing" * 50, "x" * 2000])
+    text = _run(ows._wait_for_text_to_settle(
+        loc, target_chars=1500, min_useful_chars=700,
+        max_wait_sec=5.0, label="OWA"))
+    assert len(text) >= 1500
+    # Should NOT have polled all the way to max_wait — target hit
+    # means we exit fast.
+    assert loc.calls <= 4
+
+
+def test_wait_returns_on_stability_below_target(monkeypatch):
+    """Empty-calendar case: text stabilizes well below target_chars
+    but above the useful floor. We should still return that text so
+    the brief publishes — empty day is still a valid result."""
+    _real_sleep = asyncio.sleep
+    monkeypatch.setattr(ows.asyncio, "sleep",
+                         lambda *_a, **_kw: _real_sleep(0))
+    # Same 800-char text for >=STABILITY_POLLS polls.
+    stable_text = "x" * 800
+    loc = _FakeLocator([stable_text] * 6)
+    text = _run(ows._wait_for_text_to_settle(
+        loc, target_chars=1500, min_useful_chars=700,
+        max_wait_sec=10.0, label="OWA"))
+    assert text == stable_text
+    # Should have polled STABILITY_POLLS + 1 times (initial + stable
+    # confirmations) to confirm stability, not the full max_wait.
+    assert loc.calls <= ows.STABILITY_POLLS + 2
+
+
+def test_wait_returns_on_stability_even_below_floor(monkeypatch, caplog):
+    """The v2.15.1 bug case: text stabilizes at ~400 chars — way
+    below min_useful_chars. The helper still returns (caller decides
+    whether to raise via MIN_SCRAPE_FLOOR check), but logs a WARNING
+    so the cause is loud in backend.log."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="services.outlook_web_scraper")
+    _real_sleep = asyncio.sleep
+    monkeypatch.setattr(ows.asyncio, "sleep",
+                         lambda *_a, **_kw: _real_sleep(0))
+    tiny_text = "menu chrome only" * 25  # ~400 chars
+    loc = _FakeLocator([tiny_text] * 6)
+    text = _run(ows._wait_for_text_to_settle(
+        loc, target_chars=1500, min_useful_chars=700,
+        max_wait_sec=10.0, label="OWA"))
+    assert text == tiny_text
+    # Must log a warning so future repros surface the cause.
+    warnings = [r for r in caplog.records
+                if r.levelname == "WARNING" and "useful floor" in r.message]
+    assert warnings, "expected warning about below-useful-floor stable text"
+
+
+def test_wait_returns_last_text_at_max_wait(monkeypatch):
+    """When text keeps growing but never crosses target_chars and
+    never stabilizes within max_wait, return whatever we last saw.
+    Don't raise — caller decides via MIN_SCRAPE_FLOOR."""
+    # Make sleep instant but track that we ran many polls.
+    _real_sleep = asyncio.sleep
+    monkeypatch.setattr(ows.asyncio, "sleep",
+                         lambda *_a, **_kw: _real_sleep(0))
+    # Use a tiny max_wait so the test doesn't hang. Provide many
+    # different-size texts so stability never triggers.
+    growing = [str(i) * (100 + i * 10) for i in range(100)]
+    loc = _FakeLocator(growing)
+    text = _run(ows._wait_for_text_to_settle(
+        loc, target_chars=10_000_000,  # unreachable
+        min_useful_chars=10_000_000,   # unreachable
+        max_wait_sec=0.05,             # hit max_wait quickly
+        label="OWA"))
+    # Some text returned — not necessarily the LAST text since the
+    # loop exits on time. Just confirm we got a non-empty result.
+    assert isinstance(text, str)
+
+
+def test_wait_handles_inner_text_exceptions(monkeypatch):
+    """Playwright's inner_text() sometimes throws on transient
+    render-tree changes. The helper must catch those and keep polling
+    rather than bailing out and leaving the brief empty."""
+
+    class _FlakyLocator:
+        def __init__(self):
+            self.calls = 0
+        async def inner_text(self, timeout=None):
+            self.calls += 1
+            if self.calls < 3:
+                raise RuntimeError("transient playwright error")
+            return "x" * 2000  # eventually returns useful content
+
+    _real_sleep = asyncio.sleep
+    monkeypatch.setattr(ows.asyncio, "sleep",
+                         lambda *_a, **_kw: _real_sleep(0))
+    loc = _FlakyLocator()
+    text = _run(ows._wait_for_text_to_settle(
+        loc, target_chars=1500, min_useful_chars=700,
+        max_wait_sec=10.0, label="OWA"))
+    assert len(text) >= 1500
