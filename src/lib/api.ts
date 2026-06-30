@@ -1383,10 +1383,17 @@ export const api = {
   // back to its hardcoded GEMINI_MODELS / GROQ_MODELS / etc. lists
   // when source !== "live". Cached server-side for 5 min so opening
   // settings repeatedly doesn't pound the provider.
-  getAvailableModels: (provider?: string, baseUrl?: string) => {
+  getAvailableModels: (
+    provider?: string, baseUrl?: string, scope?: "main" | "live",
+  ) => {
+    // scope="live" routes the backend to read live_* settings keys
+    // (live_anthropic_api_key, live_openai_api_key, live_openai_base_url)
+    // so the Live Co-Pilot Settings card can populate its own model
+    // dropdown without colliding with the main provider's keys.
     const params = new URLSearchParams();
     if (provider) params.set("provider", provider);
     if (baseUrl) params.set("base_url", baseUrl);
+    if (scope && scope !== "main") params.set("scope", scope);
     const qs = params.toString();
     return request<{
       models: { value: string; label: string }[];
@@ -1503,15 +1510,19 @@ export const api = {
   // next summarize/extract fails opaquely. Returns ok + latency on
   // success, or ok=false with a verbatim error string. ~10s timeout
   // server-side so a stuck endpoint can't hang the UI.
-  testLLMConnection: () =>
+  testLLMConnection: (scope: "main" | "live" = "main") =>
     request<{
       ok: boolean;
       provider: string;
       model: string;
+      scope?: "main" | "live";
       latency_ms: number;
       reply?: string;
       error?: string;
-    }>("/diagnostics/llm-test", { method: "POST" }),
+    }>("/diagnostics/llm-test", {
+      method: "POST",
+      body: JSON.stringify({ scope }),
+    }),
 
   // Auto pre-meeting briefs — generated backend-side before meetings.
   getAutoPrepBriefs: () => request<AutoPrepBrief[]>("/prep-brief/auto"),
