@@ -134,15 +134,76 @@ def test_format_blob_handles_empty_owa_text():
 
 
 # ──────────────────────────────────────────────────────────────────────
-# profile_dir_for
+# Teams formatter integration (v2.15.0+)
 # ──────────────────────────────────────────────────────────────────────
 
-def test_profile_dir_placed_next_to_briefings(tmp_path: Path):
-    """The persistent profile lives under the same data root as the
-    briefings/ dir. If a user wipes the recorder's data folder, the
-    web session cookies go with it — keeps the two pieces of state
-    co-located instead of one living in %APPDATA% and the other in a
-    cloud-synced folder."""
+def test_format_blob_joins_teams_text_with_owa():
+    """When teams_text is provided, it gets its own labeled section
+    after the calendar so the LLM lifts @mentions / replies into the
+    needs_response category — not the agenda one."""
+    out = ows.format_for_briefing_parser(
+        owa_text="9:00 AM Sync with Acme",
+        teams_text=(
+            "Sarah @Joshua mentioned you 8:42 AM: please review the SOW\n"
+            "Missed call from Bob, 8:55 AM"
+        ),
+    )
+    # OWA section still present and labeled.
+    assert "Today's Outlook Calendar" in out
+    assert "9:00 AM Sync with Acme" in out
+    # Teams section is present, labeled, and contains the raw text.
+    assert "Teams Activity" in out
+    assert "Sarah @Joshua mentioned you" in out
+    assert "Missed call from Bob" in out
+    # Section order matters for the LLM prompt — Teams sits between
+    # calendar and action items so the agenda + needs_response
+    # extraction stays grouped logically.
+    owa_idx = out.find("Today's Outlook Calendar")
+    teams_idx = out.find("Teams Activity")
+    assert owa_idx < teams_idx, "Teams section should follow OWA"
+
+
+def test_format_blob_omits_teams_section_when_empty():
+    """Empty or None teams_text shouldn't render an empty Teams
+    section header — Teams failures are explicitly silent so the
+    user's brief still looks correct without it."""
+    out_none = ows.format_for_briefing_parser("event", teams_text=None)
+    assert "Teams Activity" not in out_none
+    out_empty = ows.format_for_briefing_parser("event", teams_text="")
+    assert "Teams Activity" not in out_empty
+    out_whitespace = ows.format_for_briefing_parser(
+        "event", teams_text="   \n  \n")
+    assert "Teams Activity" not in out_whitespace
+
+
+def test_format_blob_full_combination():
+    """All three sections (OWA + Teams + open actions) coexist in the
+    expected order so the LLM's parse_daily_briefing prompt receives a
+    consistent layout."""
+    out = ows.format_for_briefing_parser(
+        owa_text="10am standup",
+        teams_text="@Joshua please review",
+        open_actions=[{"title": "Send proposal", "who": "Joshua"}],
+    )
+    owa_idx = out.find("Today's Outlook Calendar")
+    teams_idx = out.find("Teams Activity")
+    actions_idx = out.find("Open action items")
+    assert 0 <= owa_idx < teams_idx < actions_idx
+
+
+# ──────────────────────────────────────────────────────────────────────
+# profile_dir_for — v2.15.0+ contract
+# ──────────────────────────────────────────────────────────────────────
+
+def test_profile_dir_placed_under_user_data_dir(tmp_path: Path):
+    """The persistent profile lives under USER_DATA_DIR (LOCAL-only).
+    v2.14.0 put it under recordings_dir which often lives on Google
+    Drive Stream / OneDrive; cloud-sync filter drivers corrupt
+    Chrome's cookie store and SingletonLock writes, so the headed
+    sign-in's cookies never become available to the subsequent
+    headless scrape. Symptom: empty calendar even right after
+    sign-in. The directory NAME stays "web-session" so an upgraded
+    user just needs to re-sign-in once (no migration required)."""
     got = ows.profile_dir_for(tmp_path)
     assert got == tmp_path / "web-session"
 
