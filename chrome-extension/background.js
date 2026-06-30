@@ -349,24 +349,64 @@ async function finish(tabId, text, exitReason, start) {
   };
 }
 
-// Click the Teams sidebar nav button for `kw` (e.g. "chat",
-// "activity"). Microsoft strips hash routes on the cloud.microsoft
-// redirect, so #/chat in the initial URL doesn't actually land you
-// in chat — you land on whatever Teams' default view is. This
-// function navigates the SPA the way a user would: by clicking
-// the appropriate left-sidebar icon.
+// Navigate the Teams SPA to `kw` (e.g. "chat", "activity"). Microsoft
+// strips hash routes on the cloud.microsoft redirect, so #/chat in
+// the initial URL doesn't actually land you in chat — you land on
+// whatever Teams' default view is.
 //
-// Selectors try several patterns because Microsoft changes Teams'
-// DOM frequently:
-//   - data-tid: Microsoft's own test-id attribute, most stable
-//   - aria-label: accessibility label, fairly stable
-//   - role=tab + aria-label: also accessibility-driven
-//   - href contains the keyword: link-based fallback
-//
-// Retries up to 4 times with increasing delays — Teams' React
-// tree mounts asynchronously and the nav buttons may not exist on
-// the first poll right after domcontentloaded fires.
+// Strategy (in order):
+//   1. Set window.location.hash directly. The router intercepts
+//      hashchange and renders the matching view. This is the
+//      cheapest and most reliable approach — it doesn't depend on
+//      Microsoft's button DOM staying stable.
+//   2. Try a broad list of selectors as a fallback for builds where
+//      the hash route doesn't trigger a re-render.
+//   3. If everything fails, dump a diagnostic of visible data-tid
+//      / aria-label values to the worker console so we can SEE what
+//      Microsoft is shipping today and update the selectors.
 async function clickTeamsNav(tabId, kw) {
+  // chat is served by both `#/chat` and `#/conversations` in
+  // different Teams builds; try the friendlier one first.
+  const hashes = kw === "chat"
+    ? ["#/chat", "#/conversations"]
+    : [`#/${kw}`];
+
+  for (const h of hashes) {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        args: [h],
+        func: (h) => {
+          try {
+            if (window.location.hash !== h) {
+              window.location.hash = h;
+              // hashchange listeners are sync but the router's
+              // re-render is async. Caller sleeps after this.
+            }
+          } catch (_) { /* ignore */ }
+        },
+      });
+    } catch (e) {
+      console.warn(`[ext] Teams hash nav to ${h} failed:`, e);
+    }
+  }
+  await sleep(2000);
+
+  // Did the hash actually stick? If so, the router re-rendered and
+  // we're done — no need to fight the DOM for a click.
+  try {
+    const urlNow = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => window.location.hash || "",
+    });
+    const hashNow = urlNow?.[0]?.result || "";
+    if (hashes.includes(hashNow)) {
+      console.log(`[ext] Teams nav '${kw}' via hash ${hashNow}`);
+      await sleep(2000);  // let the view paint
+      return true;
+    }
+  } catch (_) { /* ignore — fall through to clicker */ }
+
   const Kw = kw.charAt(0).toUpperCase() + kw.slice(1);  // "Chat", "Activity"
   for (let attempt = 0; attempt < 4; attempt++) {
     if (attempt > 0) await sleep(1500);
@@ -375,18 +415,43 @@ async function clickTeamsNav(tabId, kw) {
         target: { tabId },
         args: [kw, Kw],
         func: (kw, Kw) => {
+          // Selectors are tried in order. data-tid is Microsoft's
+          // own test-id and tends to be most stable, then aria,
+          // then class/href fallbacks.
           const selectors = [
+            // data-tid patterns Microsoft has used for the left
+            // sidebar in different Teams builds:
             `[data-tid="app-bar-${kw}"]`,
+            `[data-tid="left-nav-${kw}"]`,
+            `[data-tid="${kw}-tab"]`,
+            `[data-tid="app-bar-${kw}-button"]`,
+            `[data-tid="appBar-${kw}"]`,
+            `[data-tid*="${kw}-bar"]`,
+            `[data-tid*="${kw}"]`,
             `[id="app-bar-${kw}"]`,
+            // Aria patterns — Microsoft frequently localizes
+            // visible text but keeps aria-label English for screen
+            // readers. Case-insensitive (`i` flag in attr selector)
+            // catches "Chat" / "chat" / "Chats" variants.
             `button[aria-label="${Kw}"]`,
+            `button[aria-label^="${Kw}"]`,
+            `button[aria-label*="${Kw}" i]`,
             `[role="tab"][aria-label="${Kw}"]`,
+            `[role="tab"][aria-label*="${Kw}" i]`,
+            `[role="treeitem"][aria-label*="${Kw}" i]`,
             `button[title="${Kw}"]`,
+            `button[title*="${Kw}" i]`,
+            // Hash-based anchor (some Teams builds render the
+            // sidebar as <a href="#/chat">):
+            `a[href*="#/${kw}"]`,
             `a[href*="/${kw}"]`,
-            `a[href*="conversations"]`,        // chat lives at /conversations
-            `[data-tid*="${kw}"]`,             // catch-all
+            `a[href*="conversations"]`,
+            `[role="link"][href*="${kw}"]`,
           ];
           for (const sel of selectors) {
-            const els = document.querySelectorAll(sel);
+            let els;
+            try { els = document.querySelectorAll(sel); }
+            catch (_) { continue; }
             for (const el of els) {
               // offsetParent === null means the element is hidden
               // (display:none or collapsed sidebar). Skip those.
@@ -403,10 +468,6 @@ async function clickTeamsNav(tabId, kw) {
       const clicked = result?.[0]?.result;
       if (clicked) {
         console.log(`[ext] Teams nav '${kw}' clicked via ${clicked} (attempt ${attempt + 1})`);
-        // Give the SPA time to render the new view's content before
-        // the caller starts polling for inner-text. 3s is enough for
-        // a warm Teams session; cold loads may still settle below
-        // target but at least we navigated to the right view.
         await sleep(3000);
         return true;
       }
@@ -414,7 +475,39 @@ async function clickTeamsNav(tabId, kw) {
       console.warn(`[ext] Teams nav '${kw}' click attempt ${attempt + 1} failed:`, e);
     }
   }
-  console.warn(`[ext] couldn't click Teams '${kw}' nav after 4 attempts — extracting whatever's on screen`);
+
+  // Final fallback: dump a list of the visible test-ids and
+  // aria-labels we DID see so we can extend the selectors next
+  // round. Without this we keep guessing in the dark.
+  try {
+    const diag = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const out = { tids: [], arias: [], hashNow: window.location.hash || "" };
+        for (const el of document.querySelectorAll("[data-tid]")) {
+          if (!el.offsetParent) continue;
+          const v = el.getAttribute("data-tid");
+          if (v && !out.tids.includes(v)) out.tids.push(v);
+          if (out.tids.length >= 60) break;
+        }
+        for (const el of document.querySelectorAll("[aria-label]")) {
+          if (!el.offsetParent) continue;
+          const v = el.getAttribute("aria-label");
+          if (v && !out.arias.includes(v)) out.arias.push(v);
+          if (out.arias.length >= 60) break;
+        }
+        return out;
+      },
+    });
+    const d = diag?.[0]?.result;
+    if (d) {
+      console.warn(`[ext] Teams nav '${kw}' diag — hash=${d.hashNow}`);
+      console.warn(`[ext] visible data-tid (${d.tids.length}):`, d.tids.join(" | "));
+      console.warn(`[ext] visible aria-label (${d.arias.length}):`, d.arias.join(" | "));
+    }
+  } catch (_) { /* diag is best-effort */ }
+
+  console.warn(`[ext] couldn't navigate Teams to '${kw}' — extracting whatever's on screen`);
   return false;
 }
 
