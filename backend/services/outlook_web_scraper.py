@@ -79,6 +79,13 @@ logger = get_logger(__name__)
 # parses it cleanly.
 OWA_DAY_VIEW_URL = "https://outlook.office.com/calendar/view/day"
 
+# Teams Web Activity feed: shows @mentions, replies, reactions, missed
+# calls, and meeting reminders — exactly the "what needs my attention
+# today" surface the briefing should reflect. The Chat tab is the next
+# obvious extension but it's much noisier (every active 1:1 thread)
+# and harder to scope to "today" without DOM-specific filtering.
+TEAMS_ACTIVITY_URL = "https://teams.microsoft.com/v2/?clientType=desktop#/activity"
+
 # Loose set of substrings that indicate the page navigated to a login
 # screen instead of the calendar. Microsoft uses several login domains
 # (login.microsoftonline.com is the primary, login.live.com is the
@@ -139,17 +146,35 @@ def _url_looks_like_login(url: str) -> bool:
     return any(needle in lo for needle in LOGIN_URL_NEEDLES)
 
 
-def profile_dir_for(data_root: Path) -> Path:
-    """Where the persistent Chrome profile lives. Kept next to the
-    briefings/ dir under the same data root so a user wiping recorder
-    state wipes the web session too."""
-    return Path(data_root) / "web-session"
+def profile_dir_for(user_data_dir: Path) -> Path:
+    """Where the persistent Chrome profile lives. Must be a LOCAL-only
+    path — passing the user's ``recordings_dir`` here (v2.14.0
+    behavior) was a bug because that directory is frequently a
+    cloud-synced folder (Google Drive Stream, OneDrive, iCloud). Chrome
+    stores cookies, IndexedDB, and a SingletonLock file in the profile;
+    putting any of those on a cloud-sync filter driver causes the same
+    contention class the v2.12.0 audio-read fix solved — the headed
+    sign-in window writes cookies that the headless scrape can't read
+    because they haven't synced down yet, and the sync conflict can
+    leave the profile partially-locked. Symptom: empty calendar
+    extraction even right after a successful sign-in.
+
+    v2.15.0+ pins this to ``USER_DATA_DIR`` (Windows: %LOCALAPPDATA%,
+    macOS: ~/Library/Application Support, Linux: ~/.config) — same
+    LOCAL-only rationale as speaker profiles and the auto-record
+    blocklist, which also must never roam between machines."""
+    return Path(user_data_dir) / "web-session"
 
 
-async def open_signin_window(data_root: Path) -> None:
+async def open_signin_window(user_data_dir: Path) -> None:
     """Spawn a HEADED Chrome window at OWA's calendar so the user can
     sign in / re-MFA. Returns when the user closes the window (or after
     a generous 10-minute timeout). Cookies persist in the profile dir.
+
+    ``user_data_dir`` must be a LOCAL-only path — see ``profile_dir_for``
+    for the rationale (v2.14.0 wired this to the user's recordings_dir
+    which can be on Google Drive Stream / OneDrive, breaking the
+    headed-then-headless cookie handoff).
 
     Failure modes:
       - Chrome not installed → OutlookScraperUnavailable
@@ -159,7 +184,7 @@ async def open_signin_window(data_root: Path) -> None:
         close any other Meeting Recorder Chrome window.
     """
     async_playwright = _import_playwright()
-    profile = profile_dir_for(data_root)
+    profile = profile_dir_for(user_data_dir)
     profile.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"Opening Outlook sign-in window (profile={profile})")
@@ -215,7 +240,7 @@ async def open_signin_window(data_root: Path) -> None:
         ) from e
 
 
-async def scrape_today_briefing_text(data_root: Path) -> str:
+async def scrape_today_briefing_text(user_data_dir: Path) -> str:
     """Open OWA's day view headlessly using the persistent profile and
     return the main region's inner text. Raises OutlookAuthExpired if
     the navigation hit a login page.
@@ -223,9 +248,13 @@ async def scrape_today_briefing_text(data_root: Path) -> str:
     Returns a free-form text blob, not structured data. Caller feeds it
     into ``summarizer.parse_daily_briefing`` which handles the LLM-parse
     + normalization the same way it does for manual Copilot pastes.
+
+    ``user_data_dir`` must be a LOCAL-only path. See ``profile_dir_for``
+    for why — v2.14.0 used the user's recordings_dir which sync-locked
+    Chrome's cookie store on cloud volumes.
     """
     async_playwright = _import_playwright()
-    profile = profile_dir_for(data_root)
+    profile = profile_dir_for(user_data_dir)
     if not profile.exists():
         # No profile dir yet = user has never signed in. Surface this
         # as auth-expired so the UI prompts the same sign-in flow.
@@ -326,14 +355,155 @@ async def scrape_today_briefing_text(data_root: Path) -> str:
                 pass
 
 
+async def scrape_today_teams_text(user_data_dir: Path) -> str:
+    """Open Teams Web's Activity feed headlessly using the persistent
+    profile and return the main region's inner text. Activity is the
+    surface that shows @mentions, replies, missed calls, meeting
+    reminders — i.e. the "needs my attention today" view, which is the
+    right shape for the daily briefing parser. The Chat tab is noisier
+    and harder to scope to "today" without filtering at the DOM level;
+    Activity is what to ship first.
+
+    Returns "" (empty string, not an error) if Teams fails — the
+    briefing should still succeed with just OWA. Specifically:
+      - Teams Web is heavier than OWA and more frequently breaks in
+        headless Chromium; treating Teams failures as fatal would
+        regress what OWA-only already does.
+      - Auth-expired flows are surfaced the SAME way as OWA via
+        ``OutlookAuthExpired``, since both surfaces share the M365
+        session cookies. If we hit login here we want the UI's
+        existing banner to fire.
+
+    ``user_data_dir`` is the same LOCAL-only path OWA uses. The same
+    persistent profile (cookies, MFA state) authenticates both.
+    """
+    async_playwright = _import_playwright()
+    profile = profile_dir_for(user_data_dir)
+    if not profile.exists():
+        raise OutlookAuthExpired(
+            "No Microsoft session yet — click Sign in to Microsoft.")
+
+    logger.info(f"Scraping Teams activity (profile={profile})")
+    async with async_playwright() as p:
+        try:
+            ctx = await p.chromium.launch_persistent_context(
+                user_data_dir=str(profile),
+                channel="chrome",
+                headless=True,
+                args=["--no-first-run", "--no-default-browser-check"],
+            )
+        except Exception as e:  # noqa: BLE001
+            # Same Chrome-missing surface as OWA — distinct from
+            # "Teams returned nothing" so the UI knows it's still a
+            # setup problem, not a per-surface flake.
+            raise OutlookScraperUnavailable(
+                f"Couldn't launch headless Chrome for Teams. "
+                f"Underlying error: {e}"
+            ) from e
+
+        try:
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            try:
+                # Teams Web is a heavier SPA than OWA — give it a bit
+                # more headroom on the initial navigation. The route's
+                # hash fragment (#/activity) doesn't survive
+                # domcontentloaded reliably; we let the redirect dance
+                # settle then check the URL.
+                await page.goto(
+                    TEAMS_ACTIVITY_URL,
+                    wait_until="domcontentloaded",
+                    timeout=PAGE_LOAD_TIMEOUT_MS,
+                )
+            except Exception as e:  # noqa: BLE001
+                # Don't fail the whole briefing if Teams navigation
+                # times out — log and return empty so OWA-only path
+                # still publishes a useful brief.
+                logger.warning(
+                    f"Teams navigation failed; skipping Teams section: {e}")
+                return ""
+
+            final_url = page.url
+            if _url_looks_like_login(final_url):
+                logger.info(
+                    f"Teams scrape redirected to login: {final_url}")
+                raise OutlookAuthExpired(
+                    "Microsoft 365 session expired — sign in again.")
+
+            # Teams' main pane takes noticeably longer to populate
+            # than OWA's because the React tree mounts the activity
+            # feed after the initial chrome paints. Wait for
+            # networkidle but cap fairly aggressively — Teams sends
+            # continuous telemetry pings that can keep the network
+            # "busy" for the entire timeout.
+            try:
+                await page.wait_for_load_state(
+                    "networkidle", timeout=CONTENT_WAIT_TIMEOUT_MS)
+            except Exception:  # noqa: BLE001
+                logger.debug("Teams networkidle timed out; proceeding anyway")
+
+            # Same role=main extraction approach as OWA. Teams Web's
+            # active route fills role=main with the activity list.
+            try:
+                main = page.locator('[role="main"]').first
+                if await main.count() > 0:
+                    text = await main.inner_text(timeout=5_000)
+                else:
+                    text = await page.locator("body").inner_text(timeout=5_000)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    f"Couldn't read Teams text content; skipping: {e}")
+                return ""
+
+            text = (text or "").strip()
+            if not text:
+                # Empty result here is the cloud-sync-profile bug class
+                # that bit OWA in v2.14.0 — but with the profile moved
+                # to USER_DATA_DIR in v2.15.0 it shouldn't repro. Log
+                # and return empty rather than failing the whole
+                # briefing.
+                logger.info(
+                    "Teams returned no activity text; section omitted.")
+                return ""
+
+            # Defensive auth check by content — Teams' login interstitial
+            # sometimes serves at teams.microsoft.com directly with a
+            # "Sign in" UI. Surface as auth-expired so the UI's banner
+            # fires; the OWA-side handler does the same.
+            lowered = text.lower()[:500]
+            if "sign in to your account" in lowered or \
+                    "pick an account" in lowered or \
+                    "stay signed in" in lowered:
+                raise OutlookAuthExpired(
+                    "Microsoft 365 sign-in page rendered for Teams.")
+
+            if len(text.encode("utf-8")) > MAX_SCRAPE_TEXT_BYTES:
+                logger.warning(
+                    f"Teams text exceeded {MAX_SCRAPE_TEXT_BYTES} bytes; truncating")
+                text = text.encode("utf-8")[:MAX_SCRAPE_TEXT_BYTES].decode(
+                    "utf-8", errors="ignore")
+            return text
+        finally:
+            try:
+                await ctx.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def format_for_briefing_parser(owa_text: str,
-                                open_actions: Optional[list] = None) -> str:
-    """Stitch the scraped OWA text and the recorder's open action items
-    into a single free-form blob that mimics the shape of a Copilot
-    daily-brief paste. The existing summarizer prompt for
+                                open_actions: Optional[list] = None,
+                                teams_text: Optional[str] = None) -> str:
+    """Stitch the scraped OWA + Teams text and the recorder's open
+    action items into a single free-form blob that mimics the shape of
+    a Copilot daily-brief paste. The existing summarizer prompt for
     ``parse_daily_briefing`` already handles loose, narrative-style
     input — we just give it labeled sections so the LLM finds the
     agenda + needs-response items cleanly.
+
+    ``teams_text`` is optional; when present (v2.15.0+) it gets its own
+    labeled section so the LLM can lift @mentions and missed-call
+    notifications into the needs_response category. Empty/None Teams
+    text is silently omitted (Teams scrape failures don't drop the
+    whole brief — OWA-only output is still useful).
 
     Keeping this function pure (no I/O, no LLM) so it's trivially
     testable.
@@ -342,6 +512,13 @@ def format_for_briefing_parser(owa_text: str,
     parts.append("=== Today's Outlook Calendar ===")
     parts.append("")
     parts.append((owa_text or "").strip() or "(no events visible)")
+
+    teams_clean = (teams_text or "").strip()
+    if teams_clean:
+        parts.append("")
+        parts.append("=== Today's Teams Activity (mentions, replies, missed calls) ===")
+        parts.append("")
+        parts.append(teams_clean)
 
     if open_actions:
         parts.append("")
