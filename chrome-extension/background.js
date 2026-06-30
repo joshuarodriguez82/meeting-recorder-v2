@@ -280,6 +280,18 @@ async function captureUrl(src) {
   try {
     await waitForTabComplete(tabId);
 
+    // Source-specific post-load nav. v1.0 just navigated to the URL
+    // and polled — fine for OWA and Inbox. Doesn't work for Teams
+    // Chat: Microsoft strips the #/chat hash fragment when it
+    // redirects teams.microsoft.com → teams.cloud.microsoft, so the
+    // tab lands on whatever Teams' default view is (Activity).
+    // The fix is to navigate via DOM click on the chat nav button
+    // after the page loads. Same approach available for other Teams
+    // tabs in the future (Calls, Files) if we want them.
+    if (src.key === "chat") {
+      await clickTeamsNav(tabId, "chat");
+    }
+
     let lastLen = -1;
     let stableCount = 0;
     let lastText = "";
@@ -335,6 +347,75 @@ async function finish(tabId, text, exitReason, start) {
     elapsedMs: Date.now() - start,
     finalUrl,
   };
+}
+
+// Click the Teams sidebar nav button for `kw` (e.g. "chat",
+// "activity"). Microsoft strips hash routes on the cloud.microsoft
+// redirect, so #/chat in the initial URL doesn't actually land you
+// in chat — you land on whatever Teams' default view is. This
+// function navigates the SPA the way a user would: by clicking
+// the appropriate left-sidebar icon.
+//
+// Selectors try several patterns because Microsoft changes Teams'
+// DOM frequently:
+//   - data-tid: Microsoft's own test-id attribute, most stable
+//   - aria-label: accessibility label, fairly stable
+//   - role=tab + aria-label: also accessibility-driven
+//   - href contains the keyword: link-based fallback
+//
+// Retries up to 4 times with increasing delays — Teams' React
+// tree mounts asynchronously and the nav buttons may not exist on
+// the first poll right after domcontentloaded fires.
+async function clickTeamsNav(tabId, kw) {
+  const Kw = kw.charAt(0).toUpperCase() + kw.slice(1);  // "Chat", "Activity"
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) await sleep(1500);
+    try {
+      const result = await chrome.scripting.executeScript({
+        target: { tabId },
+        args: [kw, Kw],
+        func: (kw, Kw) => {
+          const selectors = [
+            `[data-tid="app-bar-${kw}"]`,
+            `[id="app-bar-${kw}"]`,
+            `button[aria-label="${Kw}"]`,
+            `[role="tab"][aria-label="${Kw}"]`,
+            `button[title="${Kw}"]`,
+            `a[href*="/${kw}"]`,
+            `a[href*="conversations"]`,        // chat lives at /conversations
+            `[data-tid*="${kw}"]`,             // catch-all
+          ];
+          for (const sel of selectors) {
+            const els = document.querySelectorAll(sel);
+            for (const el of els) {
+              // offsetParent === null means the element is hidden
+              // (display:none or collapsed sidebar). Skip those.
+              if (!el || el.offsetParent === null) continue;
+              try {
+                el.click();
+                return sel;
+              } catch (_) { /* keep trying others */ }
+            }
+          }
+          return null;
+        },
+      });
+      const clicked = result?.[0]?.result;
+      if (clicked) {
+        console.log(`[ext] Teams nav '${kw}' clicked via ${clicked} (attempt ${attempt + 1})`);
+        // Give the SPA time to render the new view's content before
+        // the caller starts polling for inner-text. 3s is enough for
+        // a warm Teams session; cold loads may still settle below
+        // target but at least we navigated to the right view.
+        await sleep(3000);
+        return true;
+      }
+    } catch (e) {
+      console.warn(`[ext] Teams nav '${kw}' click attempt ${attempt + 1} failed:`, e);
+    }
+  }
+  console.warn(`[ext] couldn't click Teams '${kw}' nav after 4 attempts — extracting whatever's on screen`);
+  return false;
 }
 
 function waitForTabComplete(tabId) {
