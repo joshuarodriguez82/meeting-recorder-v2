@@ -506,6 +506,8 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
           card is for the catch-all patterns like "canceled". */}
       <AutoRecordBlocklistPatternsCard />
 
+      <ChromeExtensionCard />
+
       {/* Workflow */}
       <Card>
         <CardHeader>
@@ -874,6 +876,152 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
         </div>
       </div>
     </div>
+  );
+}
+
+// Chrome extension setup card.
+//
+// The Meeting Recorder Chrome extension (chrome-extension/ at repo
+// root, bundled into chrome-extension.zip in the release archive)
+// is the v2.16+ replacement for the Playwright-based OWA scrape that
+// fought Microsoft's enterprise-tenant automation detection through
+// the entire v2.15.x dot-release saga without ever winning. The
+// extension runs in the user's REAL Chrome — Microsoft's detection
+// doesn't fire — so the user's real session cookies authenticate
+// the scrape.
+//
+// Setup requires the user to paste two values into the extension's
+// settings: the backend URL and the per-launch auth token. The
+// frontend already knows both via api.ts's getBaseUrl + auth helpers,
+// so this card just surfaces them with Copy buttons and links to
+// installation instructions.
+function ChromeExtensionCard() {
+  const [backendUrl, setBackendUrl] = useState<string>("");
+  const [token, setToken] = useState<string>("");
+  const [tokenVisible, setTokenVisible] = useState(false);
+  const [copyMsg, setCopyMsg] = useState<string>("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        // getBaseUrl / getAuthToken aren't exported by api.ts at top
+        // level; pull them via the same plumbing that the request()
+        // helper does. Direct fetch against the local Tauri command
+        // surface returns the port + token.
+        const { invoke } = await import("@tauri-apps/api/core");
+        try {
+          const port = await invoke<number>("get_backend_port");
+          setBackendUrl(`http://127.0.0.1:${port}`);
+        } catch {
+          setBackendUrl("http://127.0.0.1:17645");
+        }
+        try {
+          const t = await invoke<string>("get_backend_token");
+          setToken(t || "");
+        } catch {
+          setToken("");
+        }
+      } catch {
+        // Running outside Tauri (dev mode). Show placeholders.
+        setBackendUrl("http://127.0.0.1:17645");
+        setToken("(no token — dev mode)");
+      }
+    })();
+  }, []);
+
+  const copy = async (label: string, val: string) => {
+    try {
+      await navigator.clipboard.writeText(val);
+      setCopyMsg(`${label} copied.`);
+      setTimeout(() => setCopyMsg(""), 2000);
+    } catch {
+      setCopyMsg(`Copy failed — select and Ctrl+C the ${label} field.`);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Chrome Extension</CardTitle>
+        <p className="text-xs text-muted-foreground mt-1">
+          The Meeting Recorder Chrome extension pulls today&apos;s
+          Outlook calendar + Teams Activity from your real Chrome and
+          POSTs it here. Use this when the v2.15.x in-app sync was
+          bouncing to login.microsoftonline.com on every attempt — the
+          extension runs in YOUR browser, so Microsoft&apos;s automation
+          detection doesn&apos;t fire.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="space-y-2">
+          <Label>Backend URL</Label>
+          <div className="flex gap-2">
+            <Input value={backendUrl} readOnly className="font-mono text-sm" />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => copy("Backend URL", backendUrl)}
+            >
+              Copy
+            </Button>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            v2.16+: port stays at <code className="text-[11px]">17645</code> across
+            recorder restarts (unless another app is holding it, then we
+            fall back to a random free port). You only need to re-paste
+            into the extension on the rare fallback case.
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Auth token</Label>
+          <div className="flex gap-2">
+            <Input
+              type={tokenVisible ? "text" : "password"}
+              value={token}
+              readOnly
+              className="font-mono text-sm"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setTokenVisible(!tokenVisible)}
+            >
+              {tokenVisible ? "Hide" : "Show"}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => copy("Token", token)}
+            >
+              Copy
+            </Button>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            v2.16+: persisted across launches at <code className="text-[11px]">%LOCALAPPDATA%\MeetingRecorder\extension-token</code>.
+            Delete that file to rotate. Paste once into the extension&apos;s
+            Settings → Auth token and it survives recorder restarts.
+          </p>
+        </div>
+
+        {copyMsg && (
+          <p className="text-xs text-emerald-700">{copyMsg}</p>
+        )}
+
+        <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground space-y-1">
+          <p className="font-medium text-foreground">First-time install:</p>
+          <p>1. Download <code>chrome-extension.zip</code> from the Meeting Recorder release page and extract to a folder you&apos;ll keep around.</p>
+          <p>2. In Chrome, open <code>chrome://extensions</code>, enable <strong>Developer mode</strong> (top-right toggle).</p>
+          <p>3. Click <strong>Load unpacked</strong>, select the extracted folder.</p>
+          <p>4. Pin the Meeting Recorder extension icon to your toolbar.</p>
+          <p>5. Click the icon → <strong>Settings</strong>, paste the URL + token from above, click <strong>Save</strong>.</p>
+          <p>6. Anytime you want a fresh brief: click the extension icon → <strong>Capture &amp; Send</strong>. Briefing appears in the Today tab.</p>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
