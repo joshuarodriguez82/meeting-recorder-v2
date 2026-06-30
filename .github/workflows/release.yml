@@ -303,26 +303,26 @@ jobs:
           mkdir -p artifacts
           cp src-tauri/target/release/bundle/nsis/*.exe artifacts/ 2>/dev/null || true
           cp src-tauri/target/release/bundle/msi/*.msi artifacts/ 2>/dev/null || true
-          # v2.16+: bundle the Chrome extension (chrome-extension/ at
-          # repo root) into the Windows artifact set. Users download
-          # this zip, extract, and "Load unpacked" in chrome://extensions.
-          # See backend/server.py:/briefing/extension-import for the
-          # receiving endpoint and src/components/settings-view.tsx:
-          # ChromeExtensionCard for the user-facing setup UI.
-          if [ -d "chrome-extension" ]; then
-            (cd chrome-extension && python -c "
-import os, zipfile
-with zipfile.ZipFile('../artifacts/chrome-extension.zip', 'w', zipfile.ZIP_DEFLATED) as z:
-    for root, dirs, files in os.walk('.'):
-        for f in files:
-            full = os.path.join(root, f)
-            arc = os.path.relpath(full, '.')
-            z.write(full, arc)
-            print('  added', arc)
-")
-            echo "Created chrome-extension.zip"
-          fi
           ls -la artifacts/
+
+      - name: Bundle Chrome extension (Windows only — Mac users get the
+              same zip from the Windows artifact)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # v2.16+: ship the Chrome extension (chrome-extension/ at repo
+        # root) as its own zip alongside the .exe and .msi. Users
+        # download, extract, then "Load unpacked" in chrome://extensions.
+        # See backend/server.py:/briefing/extension-import for the
+        # receiving endpoint and src/components/settings-view.tsx:
+        # ChromeExtensionCard for the user-facing setup UI.
+        run: |
+          if (Test-Path chrome-extension) {
+            Compress-Archive -Path chrome-extension\* -DestinationPath artifacts\chrome-extension.zip -Force
+            Write-Host "Created artifacts\chrome-extension.zip"
+            Get-ChildItem artifacts
+          } else {
+            Write-Host "chrome-extension dir not found at repo root — skipping"
+          }
 
       - name: Collect installer paths (macOS)
         if: runner.os == 'macOS'
