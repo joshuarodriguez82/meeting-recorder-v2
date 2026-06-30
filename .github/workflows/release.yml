@@ -305,6 +305,25 @@ jobs:
           cp src-tauri/target/release/bundle/msi/*.msi artifacts/ 2>/dev/null || true
           ls -la artifacts/
 
+      - name: Bundle Chrome extension (Windows only — Mac users get the
+              same zip from the Windows artifact)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # v2.16+: ship the Chrome extension (chrome-extension/ at repo
+        # root) as its own zip alongside the .exe and .msi. Users
+        # download, extract, then "Load unpacked" in chrome://extensions.
+        # See backend/server.py:/briefing/extension-import for the
+        # receiving endpoint and src/components/settings-view.tsx:
+        # ChromeExtensionCard for the user-facing setup UI.
+        run: |
+          if (Test-Path chrome-extension) {
+            Compress-Archive -Path chrome-extension\* -DestinationPath artifacts\chrome-extension.zip -Force
+            Write-Host "Created artifacts\chrome-extension.zip"
+            Get-ChildItem artifacts
+          } else {
+            Write-Host "chrome-extension dir not found at repo root — skipping"
+          }
+
       - name: Collect installer paths (macOS)
         if: runner.os == 'macOS'
         shell: bash
