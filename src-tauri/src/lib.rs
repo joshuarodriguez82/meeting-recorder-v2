@@ -27,13 +27,30 @@ struct BackendProcess(Mutex<Option<Child>>);
 /// cross-talk.
 static BACKEND_PORT: OnceLock<u16> = OnceLock::new();
 
+// Preferred fixed port. Picked so the Chrome extension doesn't need
+// to be reconfigured with a new URL after every recorder launch —
+// previously the port was always dynamic via bind-port-0, which gave
+// us a free port but a different one each launch. Field repro
+// 2026-06-30: user complained about re-pasting the URL every launch.
+// 17645 is in the IANA "Dynamic and/or Private" range (49152-65535
+// is technically reserved but 17645 has been in use for this app
+// since v2.1, with zero observed conflicts on real user machines).
+// If 17645 is taken (typically only when a stale backend from a
+// previously-running build is holding it, which the v2.10 single-
+// instance lock now prevents anyway), we fall back to bind-port-0
+// and the user re-pastes — same UX as before, but the common case
+// is now stable.
+const PREFERRED_PORT: u16 = 17645;
+
 fn pick_free_port() -> u16 {
-    // Bind to port 0; the OS picks a currently-free ephemeral port and
-    // tells us which one via local_addr. We drop the listener so the
-    // Python child can bind it next. There's a tiny TOCTOU window
-    // between drop and Python's bind where another process could grab
-    // the port — in practice never observed on localhost. If it ever
-    // bites, re-running fixes it.
+    // Try the preferred fixed port first. If it binds, we keep it
+    // (drop the listener so Python can bind it next, same TOCTOU
+    // window as the old behavior — in practice never observed).
+    if let Ok(listener) = TcpListener::bind(("127.0.0.1", PREFERRED_PORT)) {
+        drop(listener);
+        return PREFERRED_PORT;
+    }
+    // Fallback: bind port 0 and let the OS pick a free one.
     let listener = TcpListener::bind("127.0.0.1:0")
         .expect("Failed to bind 127.0.0.1:0 to discover a free port");
     let port = listener
@@ -58,13 +75,27 @@ fn backend_port() -> u16 {
 /// (env var to the child process, Tauri IPC to the frontend) — neither
 /// is reachable from a foreign web page.
 ///
-/// Regenerated on every app launch; never persisted to disk.
+/// v2.16+: persisted to disk at USER_DATA_DIR/extension-token, so the
+/// Chrome extension doesn't need its config re-pasted after every
+/// recorder launch. The file gets the user's account ACL (Windows
+/// default for files under %LOCALAPPDATA%), so other user accounts
+/// on the same machine can't read it. Threat model is "other apps
+/// running as my user" which is unchanged — those could already
+/// read every file I own. To rotate the token: delete the file and
+/// restart the recorder.
 static BACKEND_TOKEN: OnceLock<String> = OnceLock::new();
 
 fn generate_backend_token() -> String {
-    // 32 bytes from the OS CSPRNG, hex-encoded (64 chars). getrandom is
-    // the same primitive `rand` sits on top of — no need for the bigger
-    // crate just to fill one buffer.
+    // First, try to read a persisted token. If present and well-
+    // formed (64 hex chars), reuse it so the extension's saved
+    // token still works after a recorder restart.
+    if let Some(persisted) = read_persisted_token() {
+        return persisted;
+    }
+    // Generate a fresh one. 32 bytes from the OS CSPRNG, hex-
+    // encoded (64 chars). getrandom is the same primitive `rand`
+    // sits on top of — no need for the bigger crate just to fill
+    // one buffer.
     let mut bytes = [0u8; 32];
     getrandom::getrandom(&mut bytes)
         .expect("OS CSPRNG unavailable — cannot generate backend auth token");
@@ -72,7 +103,35 @@ fn generate_backend_token() -> String {
     for b in bytes {
         token.push_str(&format!("{:02x}", b));
     }
+    // Persist the new token. Best-effort: a write failure (read-only
+    // FS, AV interference) means the user re-pastes on next launch,
+    // same as the pre-v2.16 behavior — no functional regression.
+    let _ = write_persisted_token(&token);
     token
+}
+
+fn token_file_path() -> std::path::PathBuf {
+    data_root_dir().join("extension-token")
+}
+
+fn read_persisted_token() -> Option<String> {
+    let path = token_file_path();
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let trimmed = contents.trim().to_string();
+    // Validate: 64 hex chars. Anything else, ignore and regenerate.
+    if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(trimmed)
+    } else {
+        None
+    }
+}
+
+fn write_persisted_token(token: &str) -> std::io::Result<()> {
+    let path = token_file_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, token)
 }
 
 fn backend_token() -> &'static str {

@@ -131,59 +131,78 @@ const SECTIONS: Section[] = [
       <>
         <p>
           The <strong>Today</strong> tab is your morning dashboard — top priority, today&apos;s
-          agenda, action items needing a response, FYI items. It&apos;s populated by importing
-          the output of the scheduled prompt you already run in Microsoft 365 Copilot every
-          morning.
+          agenda, action items needing a response, FYI items, and checkbox-driven follow-ups
+          you can tick off as you handle them. It&apos;s populated by the
+          <strong> Meeting Recorder Chrome extension</strong>, which pulls four feeds from
+          Microsoft 365 — Outlook day calendar, Outlook focused inbox, Teams Activity,
+          Teams Chat — using your real signed-in Chrome session, and POSTs them here to be
+          summarized by Claude into the structured view.
         </p>
         <Tip>
-          <strong>Off by default — turn it on in Settings.</strong> Today is an opt-in feature
-          because it assumes you run a daily Microsoft 365 Copilot scheduled prompt and paste
-          its output in. If you don&apos;t have that setup, leave it off. To enable:
+          <strong>Off by default — turn it on in Settings.</strong> To enable:
           <strong> Settings → Today / Daily Briefing tab</strong>. Once on, a Today tab appears
-          at the top of the sidebar and becomes the default landing view. The toggle persists —
-          off stays off, on stays on, across restarts.
+          at the top of the sidebar and becomes the default landing view. The toggle persists
+          across restarts.
         </Tip>
         <p className="mt-2">
-          M365 Copilot doesn&apos;t expose scheduled-prompt output via any API, so the import is
-          manual but cheap: copy the briefing in Copilot → click <strong>Import briefing</strong>{" "}
-          on the Today tab → paste → Parse. Claude reshapes the free-form briefing into the
-          structured view.
+          The extension runs in YOUR Chrome, not a headless browser, so Microsoft&apos;s
+          enterprise-tenant automation detection doesn&apos;t fire — the scrape authenticates
+          with the same cookies you already use to read mail. This is the v2.16+ replacement
+          for the Playwright-based in-app sync from earlier versions.
         </p>
 
-        <h4 className="mt-5 mb-1 font-semibold">Step 1 — set up the scheduled prompt in M365 Copilot (one-time)</h4>
-        <p>
-          This is what generates the briefing every morning. You only do this once; Copilot then
-          runs it on a schedule and drops the result in your Copilot chat each day.
-        </p>
+        <h4 className="mt-5 mb-1 font-semibold">Step 1 — install the Chrome extension (one-time)</h4>
         <ol className="list-decimal pl-5 mt-2 space-y-1">
-          <li>Open <strong>Microsoft 365 Copilot</strong> (the chat at <code>m365.cloud.microsoft</code> or the Copilot app).</li>
-          <li>Paste the briefing prompt below into the chat and run it once to confirm the output looks right.</li>
-          <li>Under the prompt response, click <strong>Schedule prompt</strong>.</li>
-          <li>Set the schedule: <strong>every weekday morning</strong> at whatever time you start your day
-            (e.g. 7:00 AM). This is the &quot;time period&quot; the prompt&apos;s &quot;since my last sign-off&quot; /
-            &quot;today&apos;s agenda&quot; language keys off of.</li>
-          <li>Save. Copilot will now post a fresh briefing in your Copilot chat each scheduled morning.</li>
+          <li>Download <code>chrome-extension.zip</code> from the Meeting Recorder release page
+            on GitHub (it&apos;s an asset on every v2.16+ release).</li>
+          <li>Extract the zip to a folder you&apos;ll keep around — Chrome reloads the extension
+            from this folder on every browser start, so don&apos;t delete it.</li>
+          <li>Open <code>chrome://extensions</code> in Chrome and flip on
+            <strong> Developer mode</strong> (top-right toggle).</li>
+          <li>Click <strong>Load unpacked</strong> and pick the extracted folder. The
+            extension shows up as <em>Meeting Recorder — Capture OWA + Teams</em>.</li>
+          <li>Pin its icon to the Chrome toolbar so it&apos;s easy to find.</li>
         </ol>
 
-        <h4 className="mt-5 mb-1 font-semibold">The briefing prompt</h4>
+        <h4 className="mt-5 mb-1 font-semibold">Step 2 — paste the backend URL + token (one-time)</h4>
         <p>
-          Copy this verbatim into Copilot. It&apos;s written so the output maps cleanly onto the
-          Today view&apos;s sections (Inbox → &quot;Needs your response&quot;, Agenda → &quot;Today&apos;s
-          agenda&quot;, Top Priority → the hero card).
+          The extension talks to the recorder over HTTP on <code>127.0.0.1</code>. Both
+          values are on the recorder&apos;s <strong>Settings → Chrome Extension</strong> card
+          with one-click <em>Copy</em> buttons:
         </p>
-        <PromptBlock text={BRIEFING_PROMPT} />
-
-        <h4 className="mt-5 mb-1 font-semibold">Step 2 — every morning, import it</h4>
         <ol className="list-decimal pl-5 mt-2 space-y-1">
-          <li>Enable the tab once in <strong>Settings → Today / Daily Briefing tab</strong> (if you haven&apos;t).</li>
-          <li>Open your scheduled briefing in M365 Copilot and <strong>copy the whole response</strong>.</li>
-          <li>In Meeting Recorder, go to the <strong>Today</strong> tab → <strong>Import briefing</strong>.</li>
-          <li>Paste the briefing (Ctrl+V) into the dialog.</li>
-          <li>Click <strong>Parse and import</strong>. Today renders the structured briefing —
-            top priority, agenda with meeting-type tags, action items, FYI.</li>
-          <li>Check off action items as you complete them. Re-importing the same day preserves
-            what you&apos;ve already checked.</li>
+          <li>Click the extension icon → <strong>Settings</strong> (the gear).</li>
+          <li>Paste the <strong>Backend URL</strong> from the recorder
+            (e.g. <code>http://127.0.0.1:17645</code>).</li>
+          <li>Paste the <strong>Auth token</strong> — same card in the recorder, click
+            <em> Show</em> then <em>Copy</em>.</li>
+          <li>Click <strong>Save</strong>.</li>
         </ol>
+        <Tip>
+          <strong>Port stays at 17645 across recorder restarts</strong> in v2.16+, and the
+          token is persisted at <code>%LOCALAPPDATA%\MeetingRecorder\extension-token</code>
+          (Windows) / <code>~/Library/Application Support/MeetingRecorder/extension-token</code>{" "}
+          (Mac). You only re-paste if you delete the token file to rotate, or if another app
+          is squatting on port 17645 and the recorder falls back to a random port.
+        </Tip>
+
+        <h4 className="mt-5 mb-1 font-semibold">Step 3 — capture a briefing</h4>
+        <p>
+          <strong>Manual:</strong> click the extension icon → <strong>Capture &amp; Send</strong>.
+          Chrome opens four background tabs (Outlook calendar / Teams Activity / Outlook
+          inbox / Teams Chat), waits for each to render, extracts the text, closes them, and
+          POSTs the whole payload to the recorder. The Today tab fills in within a few
+          seconds. Total wall-clock is usually 30–90s depending on how cold Teams is.
+        </p>
+        <p className="mt-2">
+          <strong>Scheduled (recommended):</strong> in the extension popup, flip on
+          <strong> Auto-capture</strong> and pick up to three local times of day (defaults are
+          <code> 08:00</code>, <code>12:00</code>, <code>17:00</code>). The background service
+          worker fires a Chrome alarm at each time, runs the same capture, and updates Today
+          automatically. The alarms re-arm on browser start, persist across Chrome restarts,
+          and dedupe (no two captures within an hour). Chrome doesn&apos;t need to be focused
+          or even have a window open — as long as Chrome is running, the alarms fire.
+        </p>
 
         <Tip>
           The <strong>Right Now</strong> tile on the Today page reflects the current recording
@@ -191,15 +210,26 @@ const SECTIONS: Section[] = [
           Record view; when you&apos;re idle, it shows the next agenda item from the briefing.
         </Tip>
         <Tip>
-          Re-import as many times as you want during the day; the parser stores one briefing
-          per calendar date.
+          <strong>Check off action items.</strong> Items under <em>Needs your response</em>{" "}
+          have checkboxes. Tick them as you handle each one — the state survives the next
+          capture, so the 12:00 PM refresh won&apos;t un-check what you cleared at 09:00 AM.
         </Tip>
         <Tip>
-          Make the prompt yours. The example is a starting point — tweak the Inbox filters, add
-          a section for a specific project, or change the &quot;chief of staff&quot; framing. As long as
-          the output still has recognizable inbox / agenda / priority sections, the parser will
-          map it onto the Today view.
+          <strong>Right-click → Manage extensions → Service worker → Inspect</strong> opens
+          the extension&apos;s console. If a capture comes up short on one source, the worker
+          logs <code>[ext] Teams Activity: N chars, exit=…, landed_url=…</code> per source —
+          enough to tell whether a tab bounced to a login page or just had nothing to show.
         </Tip>
+
+        <h4 className="mt-5 mb-1 font-semibold">Fallback — manual Copilot paste</h4>
+        <p>
+          If you can&apos;t install the Chrome extension (locked-down work machine, no Chrome,
+          etc.) the older Microsoft 365 Copilot scheduled-prompt workflow is still wired up.
+          Run this prompt in M365 Copilot, copy the output, and click <strong>Import
+          briefing</strong> on the Today tab to paste it in. Same parser, same structured
+          view.
+        </p>
+        <PromptBlock text={BRIEFING_PROMPT} />
       </>
     ),
   },
@@ -1539,6 +1569,31 @@ open "/Applications/Meeting Recorder.app"
               Every stream close/terminate call is now wrapped with a 2-3s timeout. If a driver
               deadlocks the backend abandons it and returns anyway. If you still hit this, the
               backend log will show which operation exceeded its timeout.
+            </dd>
+          </div>
+          <div>
+            <dt className="font-medium text-sm">Chrome extension capture returns a short briefing</dt>
+            <dd className="text-sm text-muted-foreground mt-1">
+              Open <code>chrome://extensions</code> → Meeting Recorder → <em>service
+              worker → Inspect</em> and re-run the capture. The worker logs one line per source
+              showing the character count, the exit reason
+              (<code>target-reached</code> / <code>stable-useful</code> / <code>stable-below-floor</code>),
+              and the URL the tab actually landed on. <code>landed_url</code> pointing at
+              <code> login.microsoftonline.com</code> means your Outlook/Teams session expired in
+              Chrome — open <code>outlook.office.com</code> and <code>teams.microsoft.com</code>{" "}
+              in normal tabs, sign in, then retry. <code>stable-below-floor</code> on Teams Chat
+              specifically usually means the SPA hadn&apos;t loaded the chat list yet — give it
+              a manual click in a normal tab to warm the cache, then retry.
+            </dd>
+          </div>
+          <div>
+            <dt className="font-medium text-sm">Chrome extension can&apos;t reach the recorder</dt>
+            <dd className="text-sm text-muted-foreground mt-1">
+              The extension POSTs to <code>http://127.0.0.1:17645</code>. Make sure the recorder
+              is running. If the recorder fell back to a random port (rare — only when another
+              app is holding 17645), open <strong>Settings → Chrome Extension</strong>, copy the
+              new URL, and paste it into the extension&apos;s Settings page. The token also lives
+              there; you only re-paste if you deleted <code>extension-token</code> to rotate it.
             </dd>
           </div>
         </dl>

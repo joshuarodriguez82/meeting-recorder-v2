@@ -1,0 +1,174 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Meeting Recorder — Extension Settings</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      max-width: 640px;
+      margin: 40px auto;
+      padding: 0 20px;
+      color: #1a1a1a;
+      line-height: 1.5;
+    }
+    h1 { font-size: 20px; margin: 0 0 8px; }
+    h2 { font-size: 14px; margin: 24px 0 8px; }
+    p.subtitle { color: #666; margin: 0 0 24px; }
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      margin-top: 16px;
+      margin-bottom: 6px;
+    }
+    input[type="text"], input[type="password"], input[type="time"] {
+      width: 100%;
+      padding: 8px 10px;
+      font-size: 13px;
+      font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      box-sizing: border-box;
+    }
+    input[type="time"] {
+      width: 110px;
+    }
+    .help {
+      font-size: 11px;
+      color: #666;
+      margin-top: 4px;
+    }
+    button {
+      margin-top: 16px;
+      padding: 9px 16px;
+      background: #2563eb;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: white;
+      color: #2563eb;
+      border: 1px solid #2563eb;
+      margin-left: 8px;
+    }
+    button:hover { filter: brightness(0.95); }
+    #status {
+      margin-top: 12px;
+      font-size: 13px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      display: none;
+    }
+    #status.ok { background: #d1fae5; color: #065f46; display: block; }
+    #status.error { background: #fee2e2; color: #991b1b; display: block; }
+    .card {
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 16px;
+      margin-top: 24px;
+    }
+    .card h2 { margin-top: 0; }
+    .card p { font-size: 13px; margin: 4px 0; }
+    code {
+      background: #e5e7eb;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+    .schedule-times {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .toggle-row input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+    }
+    #lastCapture {
+      margin-top: 8px;
+      font-size: 12px;
+      color: #666;
+    }
+    .source-counts {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-top: 6px;
+      font-size: 12px;
+    }
+    .source-counts span {
+      background: #e5e7eb;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-family: ui-monospace, monospace;
+    }
+  </style>
+</head>
+<body>
+  <h1>Meeting Recorder — Extension Settings</h1>
+  <p class="subtitle">Configure where to send captured content and when to capture automatically.</p>
+
+  <h2>Connection</h2>
+  <label for="backendUrl">Meeting Recorder backend URL</label>
+  <input type="text" id="backendUrl" placeholder="http://127.0.0.1:52469">
+  <p class="help">From Meeting Recorder → Settings → Chrome Extension. Port changes each launch.</p>
+
+  <label for="token">Auth token</label>
+  <input type="password" id="token" placeholder="paste the per-launch token here">
+  <p class="help">From the same screen. New token on every recorder launch.</p>
+
+  <h2>Auto-capture schedule</h2>
+  <div class="toggle-row">
+    <input type="checkbox" id="autoCapture">
+    <label for="autoCapture" style="margin: 0;">Capture automatically at scheduled times</label>
+  </div>
+  <p class="help">Service worker fires at each time below while Chrome is running. If Chrome is closed at the scheduled time, that run is skipped (no daemon outside Chrome).</p>
+
+  <label>Times (24-hour, local time)</label>
+  <div class="schedule-times">
+    <input type="time" id="time1" value="08:00">
+    <input type="time" id="time2" value="12:00">
+    <input type="time" id="time3" value="17:00">
+  </div>
+  <p class="help">Each fires once per day. Same-hour duplicates are deduped (skipped if a capture ran within the last hour).</p>
+
+  <div id="lastCapture"></div>
+
+  <button id="saveBtn">Save</button>
+  <button id="testBtn" class="secondary">Test connection</button>
+  <button id="captureNowBtn" class="secondary">Capture now</button>
+
+  <div id="status"></div>
+
+  <div class="card">
+    <h2>How it works</h2>
+    <p>1. You stay signed in to Outlook + Teams in this Chrome (your normal browsing session).</p>
+    <p>2. On a schedule (or when you click <strong>Capture now</strong>), the extension opens these four URLs in the background:</p>
+    <ul style="font-size: 12px; margin: 4px 0;">
+      <li><code>outlook.office.com/calendar/view/day</code> — today's agenda</li>
+      <li><code>teams.microsoft.com/.../activity</code> — @mentions, replies, missed calls</li>
+      <li><code>outlook.cloud.microsoft/mail/?folder=focusedinbox</code> — focused inbox (most needs-response items live here)</li>
+      <li><code>teams.microsoft.com/.../chat</code> — active 1:1 / group chats</li>
+    </ul>
+    <p>3. Each tab waits ~10 seconds for content to render, the extension reads the <code>[role="main"]</code> inner text, then closes the tab.</p>
+    <p>4. Combined content is POSTed to your local Meeting Recorder backend; the LLM parses it into a daily briefing with check-offable action items.</p>
+    <p>5. Because the scrapes run in YOUR real Chrome (no Playwright), Microsoft's automation detection doesn't fire — your real session cookies authenticate everything.</p>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>
