@@ -1201,19 +1201,44 @@ def _fetch_ollama_local_models(base_url: str) -> list[dict]:
 async def get_provider_available_models(
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
+    scope: Optional[str] = None,
 ):
     """Live model roster for the configured (or query-overridden) AI
     provider. The UI calls this on Settings open; the hardcoded
     GEMINI_MODELS / GROQ_MODELS / OLLAMA_MODELS lists are kept as
     fallbacks for offline / bad-key cases.
 
+    ``scope=live`` reads ``live_*`` settings keys instead of the main
+    ones so the Live Co-Pilot section can populate its own model
+    dropdown without forcing the user to type model IDs by hand.
+    Default scope is "main" — preserves existing call shape.
+
     Query params let the UI test a candidate provider+url BEFORE saving
     — same shape as the test-connection endpoint. When omitted, reads
     the currently-saved settings."""
     s = svc.load_settings()
-    prov = (provider or s.ai_provider or "anthropic").lower()
-    base = (base_url or s.openai_base_url or "").strip()
-    cache_key = (prov, base)
+    # Scope routes BOTH the provider/url defaults and the API key
+    # selection. The live config has its own anthropic + openai_compat
+    # keys (live_anthropic_api_key, live_openai_api_key) so users can
+    # point the tick model at a separate provider/account from the
+    # main summarizer without leaking the main key.
+    use_live = (scope or "").lower() == "live"
+    if use_live:
+        default_provider = (s.live_ai_provider or s.ai_provider or "anthropic")
+        default_base = s.live_openai_base_url or s.openai_base_url or ""
+        anthropic_key = s.live_anthropic_api_key or s.anthropic_api_key
+        openai_key = s.live_openai_api_key or s.openai_api_key
+    else:
+        default_provider = s.ai_provider or "anthropic"
+        default_base = s.openai_base_url or ""
+        anthropic_key = s.anthropic_api_key
+        openai_key = s.openai_api_key
+    prov = (provider or default_provider or "anthropic").lower()
+    base = (base_url or default_base or "").strip()
+    # Cache key gains the scope so the main + live sections don't
+    # poison each other's caches (they may legitimately have different
+    # results when keys differ between accounts).
+    cache_key = (prov, base, "live" if use_live else "main")
     now = time.time()
     cached = _PROVIDER_MODELS_CACHE.get(cache_key)
     if cached and (now - cached["at"]) < _PROVIDER_MODELS_TTL:
@@ -1225,7 +1250,7 @@ async def get_provider_available_models(
     try:
         if prov == "anthropic":
             models = await asyncio.to_thread(
-                _fetch_anthropic_models, s.anthropic_api_key)
+                _fetch_anthropic_models, anthropic_key)
         elif prov == "openai":
             base_lower = base.lower()
             if "generativelanguage.googleapis" in base_lower:
@@ -1233,7 +1258,7 @@ async def get_provider_available_models(
                 # though the user's base_url points at /v1beta/openai/.
                 # We have the key either way.
                 models = await asyncio.to_thread(
-                    _fetch_gemini_models, s.openai_api_key)
+                    _fetch_gemini_models, openai_key)
             elif ("ollama" in base_lower or
                   ":11434" in base_lower or
                   "localhost:11434" in base_lower):
@@ -1241,7 +1266,7 @@ async def get_provider_available_models(
                     _fetch_ollama_local_models, base)
             else:
                 models = await asyncio.to_thread(
-                    _fetch_openai_compat_models, base, s.openai_api_key)
+                    _fetch_openai_compat_models, base, openai_key)
         else:
             err = f"Unknown provider: {prov!r}"
     except Exception as e:
@@ -5980,8 +6005,15 @@ async def get_diagnostics():
     return await asyncio.to_thread(_gather_diagnostics)
 
 
+class LLMTestRequest(BaseModel):
+    # "main" (default) → svc.summarizer; "live" → svc.live_summarizer.
+    # The Live Co-Pilot Settings card uses scope="live" to probe its
+    # own provider config without touching the main summarizer.
+    scope: Optional[str] = "main"
+
+
 @app.post("/diagnostics/llm-test")
-async def diagnose_llm_connection():
+async def diagnose_llm_connection(req: Optional[LLMTestRequest] = None):
     """Fire a tiny chat completion against the configured AI provider so
     the UI can give the user actionable "is my key / base URL / model
     actually reachable" feedback BEFORE the next summary fails.
@@ -5995,18 +6027,36 @@ async def diagnose_llm_connection():
         and surfaced as "responded but didn't return a chat
         completion."
 
+    ``scope`` in the request body picks which summarizer to test —
+    "main" (default) uses ``svc.summarizer``, "live" uses
+    ``svc.live_summarizer`` so the Live Co-Pilot card can verify its
+    own provider config in isolation from the main path.
+
     Doesn't touch settings — purely a read against whatever's currently
     configured. ~1 token in/out so it's nearly free against any
     rate-limited backend. ~10s timeout so a stuck endpoint can't hang
     the diagnostics page indefinitely."""
     s = svc.load_settings()
-    if not svc.summarizer:
+    use_live = ((req and req.scope) or "main").lower() == "live"
+    if use_live:
+        summarizer = svc.live_summarizer or svc.summarizer
+        provider_name = (s.live_ai_provider or s.ai_provider or "anthropic")
+        model_name = (s.live_claude_model or s.claude_model or "")
+    else:
+        summarizer = svc.summarizer
+        provider_name = s.ai_provider or "anthropic"
+        model_name = s.claude_model or ""
+    if not summarizer:
         return {
             "ok": False,
-            "provider": s.ai_provider or "anthropic",
-            "model": s.claude_model or "",
+            "provider": provider_name,
+            "model": model_name,
+            "scope": "live" if use_live else "main",
             "latency_ms": 0,
             "error": (
+                "Live summarizer not initialized — save Settings (with the "
+                "Live Co-Pilot override enabled), then try again."
+                if use_live else
                 "Summarizer not initialized — set up an AI provider in "
                 "Settings, save, then try again."
             ),
@@ -6019,7 +6069,7 @@ async def diagnose_llm_connection():
         # the same code path summary/extract uses without needing two
         # bespoke probes.
         reply = await asyncio.wait_for(
-            svc.summarizer._chat(
+            summarizer._chat(
                 "Reply with the single word OK.",
                 max_tokens=8,
             ),
@@ -6028,16 +6078,18 @@ async def diagnose_llm_connection():
         latency_ms = int((_t.monotonic() - t0) * 1000)
         return {
             "ok": True,
-            "provider": s.ai_provider or "anthropic",
-            "model": s.claude_model or "",
+            "provider": provider_name,
+            "model": model_name,
+            "scope": "live" if use_live else "main",
             "latency_ms": latency_ms,
             "reply": (reply or "").strip()[:80],
         }
     except asyncio.TimeoutError:
         return {
             "ok": False,
-            "provider": s.ai_provider or "anthropic",
-            "model": s.claude_model or "",
+            "provider": provider_name,
+            "model": model_name,
+            "scope": "live" if use_live else "main",
             "latency_ms": int((_t.monotonic() - t0) * 1000),
             "error": (
                 "Provider didn't respond within 10s. The endpoint may "
@@ -6052,8 +6104,9 @@ async def diagnose_llm_connection():
         # what an operator would want to see.
         return {
             "ok": False,
-            "provider": s.ai_provider or "anthropic",
-            "model": s.claude_model or "",
+            "provider": provider_name,
+            "model": model_name,
+            "scope": "live" if use_live else "main",
             "latency_ms": int((_t.monotonic() - t0) * 1000),
             "error": f"{type(e).__name__}: {e}",
         }
