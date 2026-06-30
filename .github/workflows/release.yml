@@ -1,11 +1,23 @@
 # Cross-platform release pipeline.
 #
-# Triggered by pushing a tag matching v*.*.* (e.g. `git tag v2.1.0 &&
-# git push --tags`). Each matrix entry builds a native installer and
-# uploads to the GitHub Release named after the tag. Body is sourced
-# from docs/release-notes/release-notes-vX.Y.Z.md if present;
-# otherwise GitHub's auto-
-# generated notes win.
+# Two ways to trigger:
+#   1. Push a tag matching v*.*.* (legacy path) — `git tag v2.1.0 &&
+#      git push --tags`. Tag SHA must match a commit whose
+#      tauri.conf.json declares the same version, or `verify-version`
+#      bails (v2.7.5–v2.7.7 stale-tag guard).
+#   2. `workflow_dispatch` — fire from the GitHub UI or via the API
+#      (`actions_run_trigger` from a Claude Code session). Reads
+#      tauri.conf.json on the current ref (default `main`), derives
+#      the tag name from that, atomically creates-or-moves the tag at
+#      the current SHA via the REST API, then runs the build matrix
+#      and publishes. This is the path that avoids the "publish
+#      before merge" trap — once the bump PR is merged, the dispatch
+#      tags + builds + publishes in one shot, no manual git tag dance.
+#
+# Each matrix entry builds a native installer and uploads to the
+# GitHub Release named after the tag. Body is sourced from
+# docs/release-notes/release-notes-vX.Y.Z.md if present; otherwise
+# GitHub's auto-generated notes win.
 #
 # Platforms:
 #   - windows-latest   → NSIS .exe + MSI, native x64 only.
@@ -33,17 +45,30 @@ on:
   push:
     tags:
       - 'v*.*.*'
-  # Manual trigger for dry-runs / re-running a failed build.
+  # Two-purpose manual trigger.
+  #   - publish=true (default): create-or-move the tag at the
+  #     currently-checked-out SHA, then build + publish a release.
+  #   - publish=false: build artifacts only (test build off a branch),
+  #     no tag mutation, no release.
+  # `tag` input is optional; if blank we derive `v<tauri.conf.json.version>`
+  # so the typical flow ("merge the version-bump PR, then fire") needs
+  # no inputs at all.
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to build from (e.g. v2.1.0)'
+        description: 'Tag name (blank = derive from tauri.conf.json.version, prefixed with v)'
         required: false
         default: ''
+      publish:
+        description: 'Create/move the tag and publish a release (uncheck for an artifact-only test build)'
+        required: false
+        default: true
+        type: boolean
 
 permissions:
-  # Required so the release-upload step can write the installers as
-  # release assets. GITHUB_TOKEN is auto-provided by GitHub Actions.
+  # contents:write lets the release-upload step write installer assets
+  # AND lets the prepare job atomically create/move the tag via the
+  # git/refs API. GITHUB_TOKEN is auto-provided by GitHub Actions.
   contents: write
 
 jobs:
@@ -54,40 +79,102 @@ jobs:
   # verifies the tagged TREE actually carries the version the tag
   # claims — if tauri.conf.json.version != the tag (leading `v`
   # stripped), nothing builds and the mismatch is named in the log.
+  # On workflow_dispatch, this ALSO creates/moves the tag at the
+  # current SHA when `publish=true`, eliminating the manual `git tag -f`
+  # step that used to be required after the version-bump PR merged.
   # Runs in seconds on the cheapest runner; the build matrix only
   # starts after it passes.
-  verify-version:
-    name: Verify tag matches tauri.conf.json
+  prepare:
+    name: Compute tag · verify version · (dispatch) move tag
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.compute.outputs.tag }}
+      publish: ${{ steps.compute.outputs.publish }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Compare tag to tauri.conf.json version
+      - name: Compute tag and publish flag
+        id: compute
         shell: bash
         env:
-          # Tag pushes: github.ref_name is the tag. Manual dispatch:
-          # use the `tag` input; when it's blank (dry-run of whatever
-          # ref was checked out) the check is skipped — there's no tag
-          # to be inconsistent with.
-          TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
         run: |
-          if [ -z "$TAG" ]; then
-            echo "No tag in play (manual dispatch without a tag input) — skipping."
-            exit 0
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Tag push — github.ref_name is the tag; publishing is the
+            # whole point of pushing a tag.
+            TAG="${GITHUB_REF_NAME}"
+            PUBLISH="true"
+          else
+            if [ -n "$INPUT_TAG" ]; then
+              TAG="$INPUT_TAG"
+            else
+              # Derive from tauri.conf.json so the dispatch needs zero
+              # inputs in the common case (just merged the bump PR).
+              VERSION=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+              TAG="v${VERSION}"
+            fi
+            PUBLISH="${INPUT_PUBLISH}"
           fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          echo "Computed tag=$TAG  publish=$PUBLISH"
+      - name: Verify tag matches tauri.conf.json
+        shell: bash
+        env:
+          TAG: ${{ steps.compute.outputs.tag }}
+        run: |
           CONF_VERSION=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
           TAG_VERSION="${TAG#v}"
           echo "tag=$TAG → expected version=$TAG_VERSION"
           echo "tauri.conf.json version=$CONF_VERSION (at $GITHUB_SHA)"
           if [ "$CONF_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error file=src-tauri/tauri.conf.json::Tag $TAG points at a tree whose tauri.conf.json says $CONF_VERSION. The tag was almost certainly pushed against a stale commit (the 2.7.5–2.7.7 failure mode). Re-tag the right SHA: git tag -f $TAG <sha> && git push -f origin $TAG"
+            echo "::error file=src-tauri/tauri.conf.json::Tag $TAG points at a tree whose tauri.conf.json says $CONF_VERSION. Either bump tauri.conf.json on this ref first, or re-fire workflow_dispatch with input tag=v$CONF_VERSION."
             exit 1
           fi
           echo "Version gate passed."
+      - name: Create or move tag at current SHA (workflow_dispatch + publish)
+        if: github.event_name == 'workflow_dispatch' && steps.compute.outputs.publish == 'true'
+        shell: bash
+        env:
+          # GITHUB_TOKEN has contents:write per `permissions:` above —
+          # enough for git/refs writes. No PAT or external secret
+          # needed; this is the whole point of the workflow_dispatch
+          # path replacing the manual `git tag -f` step.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.compute.outputs.tag }}
+        run: |
+          set -e
+          REPO="${GITHUB_REPOSITORY}"
+          SHA="${GITHUB_SHA}"
+          API="https://api.github.com/repos/${REPO}/git/refs"
+          AUTH="Authorization: Bearer ${GH_TOKEN}"
+          ACCEPT="Accept: application/vnd.github+json"
+          # Probe the tag. 200 → exists (move it); 404 → create it.
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "$AUTH" "${API}/tags/${TAG}")
+          if [ "$STATUS" = "200" ]; then
+            echo "Tag $TAG exists; moving to $SHA"
+            curl -sfL -X PATCH \
+              -H "$AUTH" -H "$ACCEPT" \
+              "${API}/tags/${TAG}" \
+              -d "{\"sha\":\"${SHA}\",\"force\":true}" \
+              | python3 -c "import sys,json; r=json.load(sys.stdin); print('moved →', r.get('object',{}).get('sha',''))"
+          elif [ "$STATUS" = "404" ]; then
+            echo "Tag $TAG does not exist; creating at $SHA"
+            curl -sfL -X POST \
+              -H "$AUTH" -H "$ACCEPT" \
+              "${API}" \
+              -d "{\"ref\":\"refs/tags/${TAG}\",\"sha\":\"${SHA}\"}" \
+              | python3 -c "import sys,json; r=json.load(sys.stdin); print('created →', r.get('object',{}).get('sha',''))"
+          else
+            echo "::error::Unexpected status $STATUS probing tag $TAG; aborting."
+            exit 1
+          fi
 
   build:
     name: Build (${{ matrix.label }})
-    needs: verify-version
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -221,6 +308,12 @@ jobs:
       - name: Collect installer paths (macOS)
         if: runner.os == 'macOS'
         shell: bash
+        env:
+          # prepare.outputs.tag works for BOTH triggers: on tag push
+          # it equals GITHUB_REF_NAME; on workflow_dispatch it's the
+          # derived "v<version>" so we don't end up with branch names
+          # like "main" in the artifact filename.
+          BUILD_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           set -e
           mkdir -p artifacts
@@ -236,12 +329,10 @@ jobs:
             echo "ERROR: no Meeting Recorder.app under expected paths" >&2
             exit 1
           fi
-          # Strip leading 'v' from the tag (v2.3.2 -> 2.3.2) so the
-          # filename matches the Windows installer convention. On a
-          # workflow_dispatch run from a branch, GITHUB_REF_NAME is the
-          # branch name; the resulting filename is ugly but the upload
-          # step is gated on refs/tags/v* anyway so it never publishes.
-          VERSION="${GITHUB_REF_NAME#v}"
+          # Strip leading 'v' from the prepare-computed tag (v2.3.2 ->
+          # 2.3.2) so the filename matches the Windows installer
+          # convention regardless of which trigger fired.
+          VERSION="${BUILD_TAG#v}"
           OUT="artifacts/Meeting.Recorder_${VERSION}_universal.zip"
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT"
           ls -la artifacts/
@@ -260,21 +351,29 @@ jobs:
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
-        # Only attach to the release on tag-triggered runs. Manual
-        # workflow_dispatch produces artifacts but doesn't publish.
-        if: startsWith(github.ref, 'refs/tags/v')
+        # Publish on tag pushes AND on workflow_dispatch runs that
+        # opted in (publish=true). When the prepare job moved the tag
+        # for us, the action attaches to that tag's release; when this
+        # is a tag-push event, it attaches to the existing release.
+        if: |
+          startsWith(github.ref, 'refs/tags/v') ||
+          (github.event_name == 'workflow_dispatch' && needs.prepare.outputs.publish == 'true')
         with:
+          # Pin the release to prepare's computed tag rather than
+          # GITHUB_REF_NAME — the dispatch path's ref is a branch, not
+          # a tag.
+          tag_name: ${{ needs.prepare.outputs.tag }}
           # docs/release-notes/release-notes-vX.Y.Z.md is the canonical
-          # body source per
-          # this repo's convention. If the file is missing the action
-          # falls back to GitHub's auto-generated notes.
-          body_path: docs/release-notes/release-notes-${{ github.ref_name }}.md
+          # body source per this repo's convention. If the file is
+          # missing the action falls back to GitHub's auto-generated
+          # notes.
+          body_path: docs/release-notes/release-notes-${{ needs.prepare.outputs.tag }}.md
           fail_on_unmatched_files: false
           files: artifacts/*
-          # Auto-publish on tag push. Pipeline has been steady and the
-          # manual review step was just adding friction. Flip back to
-          # `true` if a future bad build slips through and we want a
-          # gate again.
+          # Auto-publish. Pipeline has been steady and the manual
+          # review step was just adding friction. Flip back to `true`
+          # if a future bad build slips through and we want a gate
+          # again.
           draft: false
           prerelease: false
 
