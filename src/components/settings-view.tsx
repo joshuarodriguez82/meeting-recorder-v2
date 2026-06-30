@@ -967,8 +967,10 @@ function ChromeExtensionCard() {
             </Button>
           </div>
           <p className="text-[11px] text-muted-foreground">
-            Port changes each launch. If the extension stops working
-            after restarting Meeting Recorder, paste the new URL.
+            v2.16+: port stays at <code className="text-[11px]">17645</code> across
+            recorder restarts (unless another app is holding it, then we
+            fall back to a random free port). You only need to re-paste
+            into the extension on the rare fallback case.
           </p>
         </div>
 
@@ -999,8 +1001,9 @@ function ChromeExtensionCard() {
             </Button>
           </div>
           <p className="text-[11px] text-muted-foreground">
-            Regenerated on every Meeting Recorder launch. Paste into
-            the extension&apos;s Settings → Auth token.
+            v2.16+: persisted across launches at <code className="text-[11px]">%LOCALAPPDATA%\MeetingRecorder\extension-token</code>.
+            Delete that file to rotate. Paste once into the extension&apos;s
+            Settings → Auth token and it survives recorder restarts.
           </p>
         </div>
 

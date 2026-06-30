@@ -359,15 +359,52 @@ function waitForTabComplete(tabId) {
 }
 
 async function readMainText(tabId) {
+  // outlook.cloud.microsoft and teams.cloud.microsoft don't always
+  // wrap real content in [role="main"] — they use a different
+  // shell layout where [role="main"] is a sparse wrapper. Try
+  // several semantic landmarks in order and pick the LARGEST
+  // result so we don't accidentally extract from an outer chrome
+  // element that only contains nav.
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     func: () => {
       try {
-        const main = document.querySelector('[role="main"]');
-        if (main && (main.innerText || "").trim().length > 0) {
-          return main.innerText;
+        const selectors = [
+          '[role="main"]',
+          'main',
+          '[role="grid"]',           // calendar grid, inbox list
+          '[role="feed"]',           // Teams Activity uses feed role
+          '[role="region"]',
+          '[data-app-section]',      // OWA / outlook.cloud
+          '#mainPaneContainer',      // outlook.cloud.microsoft mail body
+          '#app',                    // teams.cloud.microsoft shell
+        ];
+        let best = "";
+        let bestSel = "";
+        for (const sel of selectors) {
+          const els = document.querySelectorAll(sel);
+          for (const el of els) {
+            const t = (el?.innerText || "").trim();
+            if (t.length > best.length) {
+              best = t;
+              bestSel = sel;
+            }
+          }
         }
-        return document.body ? document.body.innerText : "";
+        // Fallback to body if no semantic landmark beat 100 chars —
+        // sometimes the only useful content IS in plain divs.
+        if (best.length < 100) {
+          const bodyText = (document.body?.innerText || "").trim();
+          if (bodyText.length > best.length) {
+            best = bodyText;
+            bestSel = "body";
+          }
+        }
+        // Stash the winning selector on window for inline debugging
+        // (visible via the extension's service-worker console only
+        // if we re-execute and read it back; mostly here for future
+        // me when this needs tweaking).
+        return best;
       } catch (e) {
         return "";
       }
