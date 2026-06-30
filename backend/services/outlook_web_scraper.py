@@ -86,6 +86,39 @@ OWA_DAY_VIEW_URL = "https://outlook.office.com/calendar/view/day"
 # and harder to scope to "today" without DOM-specific filtering.
 TEAMS_ACTIVITY_URL = "https://teams.microsoft.com/v2/?clientType=desktop#/activity"
 
+# Chrome launch args that make a HEADED browser invisible-ish on Windows
+# without triggering Microsoft's headless-browser detection. Origin of
+# this approach: the v2.15.0 → v2.15.2 dot-release chase taught us that
+# Microsoft actively detects --headless=new on outlook.office.com and
+# serves a stripped/empty UI even when cookies are valid. The fix is to
+# run a REAL Chrome (no --headless flag at all) but position the window
+# off-screen and start it minimized so the user doesn't see it during
+# the ~10-15s scrape. Real Chrome bypasses the bot detection because
+# every signal (User-Agent, navigator.webdriver, canvas fingerprint,
+# AudioContext fingerprint, …) matches a normal user.
+#
+# Args breakdown:
+#   --window-position=-32000,-32000 → puts the window at coordinates
+#     Windows considers off-screen on every standard monitor setup.
+#     Win32's default desktop spans (0,0)-(virtual screen size); -32000
+#     is past the negative bound of any plausible multi-monitor layout.
+#   --window-size=1280,1024 → ensure the SPA renders at a "real" size
+#     even though we never show it. OWA's responsive layout collapses
+#     to a phone-style view below ~700px which we don't want to scrape.
+#   --start-minimized → ALSO minimize to taskbar so even if window
+#     positioning gets clipped to the visible desktop on some setups,
+#     the worst-case is a taskbar icon flash, not a window on screen.
+#   --no-first-run --no-default-browser-check → suppress Chrome's
+#     "first time" / "set as default browser?" prompts that would
+#     otherwise block automation in a fresh profile.
+HIDDEN_HEADED_ARGS = [
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--window-position=-32000,-32000",
+    "--window-size=1280,1024",
+    "--start-minimized",
+]
+
 # Loose set of substrings that indicate the page navigated to a login
 # screen instead of the calendar. Microsoft uses several login domains
 # (login.microsoftonline.com is the primary, login.live.com is the
@@ -409,15 +442,20 @@ async def scrape_today_briefing_text(user_data_dir: Path) -> str:
     logger.info(f"Scraping OWA day view (profile={profile})")
     async with async_playwright() as p:
         try:
+            # headless=False is INTENTIONAL — Microsoft detects headless
+            # Chromium on outlook.office.com and serves a stripped UI
+            # (the v2.15.0–v2.15.2 empty-brief saga). HIDDEN_HEADED_ARGS
+            # positions the window off-screen + starts it minimized so
+            # the user doesn't see it during the scrape.
             ctx = await p.chromium.launch_persistent_context(
                 user_data_dir=str(profile),
                 channel="chrome",
-                headless=True,
-                args=["--no-first-run", "--no-default-browser-check"],
+                headless=False,
+                args=HIDDEN_HEADED_ARGS,
             )
         except Exception as e:  # noqa: BLE001
             raise OutlookScraperUnavailable(
-                f"Couldn't launch headless Chrome. Is Chrome installed? "
+                f"Couldn't launch Chrome for OWA scrape. Is Chrome installed? "
                 f"Underlying error: {e}"
             ) from e
 
@@ -538,18 +576,21 @@ async def scrape_today_teams_text(user_data_dir: Path) -> str:
     logger.info(f"Scraping Teams activity (profile={profile})")
     async with async_playwright() as p:
         try:
+            # Same headed-but-hidden launch as OWA — Teams Web has the
+            # same bot detection. See HIDDEN_HEADED_ARGS comment for
+            # why we're not using --headless=new.
             ctx = await p.chromium.launch_persistent_context(
                 user_data_dir=str(profile),
                 channel="chrome",
-                headless=True,
-                args=["--no-first-run", "--no-default-browser-check"],
+                headless=False,
+                args=HIDDEN_HEADED_ARGS,
             )
         except Exception as e:  # noqa: BLE001
             # Same Chrome-missing surface as OWA — distinct from
             # "Teams returned nothing" so the UI knows it's still a
             # setup problem, not a per-surface flake.
             raise OutlookScraperUnavailable(
-                f"Couldn't launch headless Chrome for Teams. "
+                f"Couldn't launch Chrome for Teams scrape. "
                 f"Underlying error: {e}"
             ) from e
 
