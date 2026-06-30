@@ -1488,6 +1488,25 @@ export const api = {
     request<DailyBriefing>(
       `/briefing/${encodeURIComponent(date)}/actions/${encodeURIComponent(actionId)}`,
       { method: "PATCH", body: JSON.stringify({ done }) }),
+  // Outlook Web sync — drives the user's installed Chrome (channel='chrome')
+  // against the persistent profile at <recordings_dir>/web-session/ to
+  // scrape today's calendar from outlook.office.com, then runs the
+  // resulting text through the same LLM parser the manual import uses.
+  //
+  // signInToOutlookWeb POSTs and BLOCKS until the user closes the
+  // headed Chrome window (up to ~10 minutes; the backend bails after
+  // that deadline). Callers should show a "Sign-in window opened —
+  // close it when done" hint and not race a second sign-in or sync
+  // while this is in flight (backend returns 409 if another sync/
+  // signin overlaps).
+  //
+  // syncBriefingFromOutlookWeb returns the stored DailyBriefing or
+  // throws ApiError with status===423 when the session expired —
+  // callers should catch that case and prompt sign-in.
+  signInToOutlookWeb: () =>
+    request<{ ok: true }>("/briefing/signin", { method: "POST" }),
+  syncBriefingFromOutlookWeb: () =>
+    request<DailyBriefing>("/briefing/sync", { method: "POST" }),
 
   // Domain terminology glossary — biases transcription toward the user's
   // jargon and corrects known mis-hears. Seeded server-side with a
