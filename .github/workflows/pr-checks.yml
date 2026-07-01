@@ -77,10 +77,13 @@ jobs:
       # The data-loss suite: audio finalization, crash recovery, session
       # persistence (backend/tests). Deliberately needs only numpy /
       # scipy / soundfile — no torch, no whisper, no pyannote — so it
-      # installs and runs in well under a minute. Heavier integration
-      # tests belong in a separate, optional job when they exist.
+      # installs and runs in well under a minute. `fastapi` is added for
+      # the route-parity guard, which imports the app headlessly to
+      # assert the route table (heavy ML deps stay lazy — see
+      # tests/_app_import.py). Heavier integration tests belong in a
+      # separate, optional job when they exist.
       - name: Install test dependencies
-        run: pip install numpy scipy soundfile pytest
+        run: pip install numpy scipy soundfile pytest fastapi
       - name: Run backend tests
         run: python -m pytest backend/tests -q
 
