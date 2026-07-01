@@ -248,6 +248,130 @@ def _stream_resample_to_file(
     return total_out
 
 
+def _wav_layout(path: str) -> Optional[dict]:
+    """Parse a WAV's chunk layout WITHOUT trusting the declared data
+    size. Returns fmt params + the data chunk's content offset and
+    declared size + the real file size — or None if it isn't a
+    RIFF/WAVE we can read.
+
+    Stops at the first ``data`` chunk (always the last chunk in the
+    recorder's streaming captures) so a stale/truncated data-size field
+    can't send us seeking into raw PCM hunting for phantom chunks."""
+    import struct
+    p = Path(path)
+    try:
+        file_size = p.stat().st_size
+    except OSError:
+        return None
+    if file_size < 44:
+        return None
+    try:
+        with open(p, "rb") as f:
+            riff = f.read(12)
+            if len(riff) < 12 or riff[0:4] != b"RIFF" or riff[8:12] != b"WAVE":
+                return None
+            channels = samplerate = block_align = bits = None
+            while True:
+                hdr = f.read(8)
+                if len(hdr) < 8:
+                    break
+                cid, csize = struct.unpack("<4sI", hdr)
+                content = f.tell()
+                if cid == b"fmt ":
+                    fmt = f.read(min(csize, 16))
+                    if len(fmt) >= 16:
+                        (_afmt, channels, samplerate, _br,
+                         block_align, bits) = struct.unpack("<HHIIHH", fmt[:16])
+                    f.seek(content + csize + (csize & 1))
+                elif cid == b"data":
+                    return {
+                        "file_size": file_size,
+                        "data_offset": content,
+                        "declared_data_size": csize,
+                        "channels": channels,
+                        "samplerate": samplerate,
+                        "block_align": block_align,
+                        "bits": bits,
+                    }
+                else:
+                    f.seek(content + csize + (csize & 1))
+    except (OSError, struct.error):
+        return None
+    return None
+
+
+def repair_truncated_wav_header(path: str) -> dict:
+    """Rewrite a WAV's RIFF + data chunk sizes to cover the PCM actually
+    on disk, when the declared data size is short of what the file's
+    byte count implies. Returns {"repaired": bool, "reason": str,
+    "declared_frames": int, "actual_frames": int}.
+
+    This is the fingerprint of a process killed mid-recording: the
+    streaming writer flushes audio frames continuously but only patches
+    the RIFF/data length fields on a clean close. A hard kill (crash,
+    installer launch, power loss) leaves those fields stale, so every
+    reader — sf.info, the merge, media players — sees only the handful
+    of frames the header advertises even though the full recording is
+    physically present. Left unrepaired, recovery merges the short
+    length and then deletes the temp that held everything (field repro:
+    session 191D826D, 2026-06-30 — 20+ min captured, 1 min survived).
+
+    Idempotent and safe: on a cleanly-closed file the declared size
+    already matches the bytes, so this is a no-op. Assumes ``data`` is
+    the final chunk (true for the recorder's streaming captures, the
+    only files this is ever called on). Never raises — returns
+    ``repaired=False`` on any malformed input."""
+    import struct
+    layout = _wav_layout(path)
+    if not layout:
+        return {"repaired": False, "reason": "unreadable"}
+    ba = layout["block_align"]
+    if not ba:
+        return {"repaired": False, "reason": "no_fmt"}
+    actual = layout["file_size"] - layout["data_offset"]
+    actual -= actual % ba                       # align down to whole frames
+    declared = layout["declared_data_size"]
+    declared_frames = declared // ba
+    actual_frames = max(actual, 0) // ba
+    # Only touch the file when the real PCM is meaningfully longer than
+    # the header claims (one block of slack avoids churn on good files).
+    if actual <= declared + ba:
+        return {"repaired": False, "reason": "header_ok",
+                "declared_frames": declared_frames,
+                "actual_frames": actual_frames}
+    try:
+        with open(path, "r+b") as f:
+            f.seek(layout["data_offset"] - 4)   # data chunk size field
+            f.write(struct.pack("<I", actual))
+            f.seek(4)                           # RIFF chunk size field
+            f.write(struct.pack("<I", layout["file_size"] - 8))
+            f.flush()
+    except (OSError, struct.error) as e:
+        return {"repaired": False, "reason": f"write_failed: {e}",
+                "declared_frames": declared_frames,
+                "actual_frames": actual_frames}
+    return {"repaired": True, "reason": "rewrote_sizes",
+            "declared_frames": declared_frames,
+            "actual_frames": actual_frames}
+
+
+def wav_byte_implied_duration(path: str) -> float:
+    """Seconds of audio the file's actual byte count implies, ignoring
+    the header's declared length. 0.0 if unreadable. Used as a
+    truncation tripwire: if a merge produced far fewer seconds than the
+    source bytes imply, the source must be preserved, not deleted."""
+    layout = _wav_layout(path)
+    if not layout:
+        return 0.0
+    ba = layout["block_align"]
+    sr = layout["samplerate"]
+    if not ba or not sr:
+        return 0.0
+    actual = layout["file_size"] - layout["data_offset"]
+    frames = max(actual, 0) // ba
+    return frames / sr
+
+
 def finalize_recording_streaming(
     mic_wav_path: str,
     loopback_wav_path: Optional[str],
@@ -294,6 +418,19 @@ def finalize_recording_streaming(
     mic_path = Path(mic_wav_path)
     if not mic_path.exists():
         raise RuntimeError(f"Mic recording not found: {mic_wav_path}")
+    # Repair a header left truncated by a mid-recording kill BEFORE we
+    # trust sf.info's frame count. Without this, a WAV whose length
+    # field was never finalized reports only the frames the stale
+    # header advertises, and we merge (and later delete) a fraction of
+    # the real capture. No-op on cleanly-closed files.
+    mic_rep = repair_truncated_wav_header(str(mic_path))
+    if mic_rep.get("repaired"):
+        logger.warning(
+            f"Repaired truncated mic header {mic_path.name}: "
+            f"{mic_rep.get('declared_frames')} → "
+            f"{mic_rep.get('actual_frames')} frames — recording was "
+            f"interrupted before the WAV was finalized"
+        )
     mic_info = sf.info(str(mic_path))
     if mic_info.frames == 0:
         raise RuntimeError(f"Mic recording is empty: {mic_wav_path}")
@@ -325,6 +462,16 @@ def finalize_recording_streaming(
                 f"merging mic-only"
             )
         else:
+            # Same header repair as the mic side — a loopback stream
+            # killed mid-write under-reports its length too.
+            lb_rep = repair_truncated_wav_header(str(loopback_wav_path))
+            if lb_rep.get("repaired"):
+                logger.warning(
+                    f"Repaired truncated loopback header "
+                    f"{Path(loopback_wav_path).name}: "
+                    f"{lb_rep.get('declared_frames')} → "
+                    f"{lb_rep.get('actual_frames')} frames"
+                )
             try:
                 lb_info = sf.info(str(loopback_wav_path))
                 if lb_info.frames > 0:
