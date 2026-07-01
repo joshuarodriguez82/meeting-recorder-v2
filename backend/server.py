@@ -229,7 +229,16 @@ def _verify_and_repair_dependencies() -> None:
 # are also missing, that's a deeper venv corruption the regular
 # repair can't fix (importing torch may itself crash). We let those
 # fail loudly at their use site instead.
-_verify_and_repair_dependencies()
+#
+# Skippable via MEETING_RECORDER_SKIP_DEP_REPAIR=1. The repair shells
+# out to `pip install` at import time, which is correct for the
+# packaged app (self-heals a corrupt venv) but makes `import server`
+# impossible in CI / tests without a full ML venv. Setting the flag
+# lets the route-parity smoke test import the app headlessly — heavy
+# deps stay lazy and fail only at their use site, which the smoke test
+# never reaches.
+if os.environ.get("MEETING_RECORDER_SKIP_DEP_REPAIR") != "1":
+    _verify_and_repair_dependencies()
 
 
 # Compatibility patches needed before importing pyannote/torch:
