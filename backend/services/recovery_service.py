@@ -28,7 +28,10 @@ from typing import Dict, List, Optional
 
 from models.session import Session
 from services.session_service import SessionService
-from utils.audio_utils import finalize_recording_streaming
+from utils.audio_utils import (
+    finalize_recording_streaming,
+    wav_byte_implied_duration,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -159,6 +162,29 @@ def recover_orphans(
                 f"left on disk for manual recovery"
             )
             results.append({"session_id": sid, "status": f"merge_failed: {e}"})
+            continue
+
+        # Truncation tripwire. The merged output should be about as long
+        # as the mic temp's on-disk bytes imply. If it came out
+        # dramatically shorter, the merge dropped audio (e.g. a header
+        # we couldn't repair) — DELETE the short output and KEEP the
+        # temps, rather than replacing the only full-length copy with a
+        # fragment and then unlinking the source. This is the invariant
+        # that would have saved session 191D826D: 20+ min of mic bytes,
+        # a 1-min merge, source deleted.
+        mic_implied_s = wav_byte_implied_duration(mic)
+        if mic_implied_s > 5.0 and duration_s < mic_implied_s * 0.9 - 1.0:
+            logger.error(
+                f"Merged {sid}.wav is {duration_s:.1f}s but the mic temp's "
+                f"bytes imply {mic_implied_s:.1f}s — refusing to discard the "
+                f"source. KEEPING temp files for manual recovery; dropping "
+                f"the truncated merge."
+            )
+            _safe_unlink(final_wav)
+            results.append({
+                "session_id": sid,
+                "status": "kept_source_duration_mismatch",
+            })
             continue
 
         # Build a stub Session so SessionService.save writes JSON in the
