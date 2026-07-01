@@ -6088,40 +6088,8 @@ async def sync_briefing_from_outlook_web():
     return stored
 
 
-# ── Domain terminology glossary ─────────────────────────────────────
-#
-# Biases Whisper toward the user's jargon (initial_prompt) and corrects
-# known mis-hears post-transcription. Seeded with a curated SA / CCaaS /
-# cloud / sales vocabulary; fully user-editable.
-
-class TerminologyUpdateRequest(BaseModel):
-    terms: List[str] = []
-    corrections: Dict[str, str] = {}
-
-
-@app.get("/terminology")
-async def get_terminology():
-    svc.load_settings()
-    if not svc.terminology_svc:
-        return {"terms": [], "corrections": {}}
-    return await asyncio.to_thread(svc.terminology_svc.get_all)
-
-
-@app.put("/terminology")
-async def put_terminology(req: TerminologyUpdateRequest):
-    svc.load_settings()
-    if not svc.terminology_svc:
-        raise HTTPException(status_code=503, detail="Terminology service not initialized")
-    return await asyncio.to_thread(
-        svc.terminology_svc.set_all, req.terms, req.corrections)
-
-
-@app.post("/terminology/reset")
-async def reset_terminology():
-    svc.load_settings()
-    if not svc.terminology_svc:
-        raise HTTPException(status_code=503, detail="Terminology service not initialized")
-    return await asyncio.to_thread(svc.terminology_svc.reset)
+# Domain terminology glossary routes moved to routers/terminology.py
+# (router split). Included via app.include_router near the bottom.
 
 
 # ── Diagnostics ─────────────────────────────────────────────────────
@@ -6853,6 +6821,17 @@ async def startup():
             logger.exception(f"Background backfill aborted: {e}")
 
     _t.Thread(target=_backfill_search_index, daemon=True).start()
+
+
+# ── Router modules (server.py split) ────────────────────────────────
+# Domains progressively extracted from this file into routers/. Each
+# include_router registers the exact paths that used to live inline
+# above; the route-parity test (tests/test_route_parity.py) guards that
+# the full (path, methods) table is unchanged. Imported here at the
+# bottom so the router modules' `from server import svc` sees a fully
+# populated module.
+from routers.terminology import router as terminology_router  # noqa: E402
+app.include_router(terminology_router)
 
 
 if __name__ == "__main__":

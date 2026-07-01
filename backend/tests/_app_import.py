@@ -51,12 +51,29 @@ def import_app():
     return server.app
 
 
+def _walk_routes(routes) -> list:
+    """Flatten a route list, recursing into mounted routers.
+
+    FastAPI's ``include_router`` (0.13x+) doesn't copy a router's routes
+    flat into ``app.routes`` — it mounts a single ``_IncludedRouter``
+    wrapper that dispatches into the original router. To reconstruct the
+    real served (path, methods) table we recurse through each wrapper's
+    ``original_router.routes``. Routes decorated directly on the app
+    (``@app.get``) still appear flat and are captured as-is. Handles
+    arbitrary nesting."""
+    out = []
+    for r in routes:
+        orig = getattr(r, "original_router", None)
+        if orig is not None and hasattr(orig, "routes"):
+            out.extend(_walk_routes(orig.routes))
+        elif getattr(r, "path", None):
+            out.append([r.path, sorted(r.methods or [])])
+    return out
+
+
 def route_table(app) -> list:
     """[(path, sorted(methods)), …] for every real route, sorted — the
-    canonical structural fingerprint the split must preserve."""
-    rows = [
-        [r.path, sorted(r.methods or [])]
-        for r in app.routes
-        if getattr(r, "path", None)
-    ]
-    return sorted(rows)
+    canonical structural fingerprint the split must preserve. Recurses
+    into mounted routers so a route reads the same whether it's declared
+    on the app or lives in an included router module."""
+    return sorted(_walk_routes(app.routes))
