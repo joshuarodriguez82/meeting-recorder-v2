@@ -25,6 +25,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 from anthropic import AsyncAnthropic
+from core._coach_text import dedup_against as _dedup_against
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -252,13 +253,31 @@ def _coerce_json(text: str) -> Optional[dict]:
 # the service layer hasn't been wired or has returned empty for some
 # reason — keeps coaching alive instead of erroring.
 _COACH_OUTPUT_RULES = (
-    "Reply with a JSON object — and nothing else — using exactly these keys:\n"
-    '  "clarifying_questions": up to 3 short questions, ≤120 chars each.\n'
-    '  "risks": up to 3 short flags, ≤120 chars each.\n'
-    '  "follow_ups": up to 3 short concrete suggestions, ≤120 chars each.\n'
-    "If a category has nothing useful for THIS specific moment, return "
-    "an empty array — do NOT fabricate generic advice to fill the slot. "
-    "Do not include markdown, prose, or code fences around the JSON."
+    "You are coaching in real time. MOST ticks should be nearly empty — "
+    "silence is the correct and common output. Only surface something "
+    "when it is SPECIFIC to what was just said and genuinely useful to "
+    "the SA RIGHT NOW.\n\n"
+    "HARD RULES:\n"
+    "- Return AT MOST 2 items TOTAL across all three lists. Usually 0 or "
+    "1. Never pad to fill slots.\n"
+    "- Every item must name the specific system, vendor, number, person, "
+    "or decision from the transcript it reacts to. If an item could be "
+    "pasted into a different meeting unchanged, DROP it.\n"
+    "- BANNED — never output these or anything like them: 'request an "
+    "update', 'schedule a follow-up', 'request documentation', 'confirm "
+    "the status', or 'vendor lock-in' as a bare standalone risk. These "
+    "are noise.\n"
+    "- Do NOT repeat or reword anything you or a previous tick already "
+    "said.\n\n"
+    "Reply with ONLY a JSON object (no markdown, no prose, no code "
+    "fences) using exactly these keys, any of which may be an empty "
+    "array:\n"
+    '  "clarifying_questions": specific probes tied to this moment, '
+    "≤120 chars each.\n"
+    '  "risks": concrete named risks the room has not acknowledged, '
+    "≤120 chars each.\n"
+    '  "follow_ups": concrete next steps naming the artifact/person, '
+    "≤120 chars each."
 )
 
 # Hot-tick variant: same wire format, but the rules emphasize urgency
@@ -353,7 +372,8 @@ class Summarizer:
 
     async def _chat(self, prompt: str, max_tokens: int = 1024,
                     timeout: float = 60.0,
-                    image_paths: Optional[List[str]] = None) -> str:
+                    image_paths: Optional[List[str]] = None,
+                    json_mode: bool = False) -> str:
         """
         Provider-agnostic "one-shot user prompt → assistant text" helper.
 
@@ -398,12 +418,30 @@ class Summarizer:
         # (10 min) for local providers so a real generation isn't killed
         # mid-flight; still bounded so a genuine hang eventually fails.
         local_timeout = max(timeout, 600.0)
+        kwargs = dict(
+            model=self._model,
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        # JSON mode: Gemini's OpenAI-compat endpoint (and most modern
+        # servers) honor response_format to force a clean JSON object.
+        # Older / smaller endpoints (some Ollama builds, a few OpenRouter
+        # models) reject the param — so we try WITH it and fall back to a
+        # plain call on any error rather than failing the whole tick.
+        if json_mode:
+            try:
+                resp = await asyncio.wait_for(
+                    self._openai_client.chat.completions.create(
+                        **kwargs, response_format={"type": "json_object"}),
+                    timeout=local_timeout,
+                )
+                return resp.choices[0].message.content or ""
+            except Exception as e:
+                logger.info(
+                    "response_format=json_object rejected by %s (%s); "
+                    "retrying without it", self._model, type(e).__name__)
         resp = await asyncio.wait_for(
-            self._openai_client.chat.completions.create(
-                model=self._model,
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            ),
+            self._openai_client.chat.completions.create(**kwargs),
             timeout=local_timeout,
         )
         return resp.choices[0].message.content or ""
@@ -633,7 +671,17 @@ class Summarizer:
             # Hot ticks have a tighter budget — narrower window, more
             # frequent firing, much higher chance the answer is empty.
             # Wide ticks keep the original 512-token budget.
-            tokens = 256 if hot else 512
+            # Token budget. Anthropic returns visible text directly, so a
+            # tight budget is fine. OpenAI-compat "thinking" models —
+            # Gemini 2.5 in particular — spend hidden reasoning tokens
+            # against max_tokens, so a small budget makes them return
+            # EMPTY content (the "connection test works but the panel
+            # stays blank" bug). Give non-Anthropic providers far more
+            # headroom so the JSON survives after the reasoning.
+            if self._provider == "anthropic":
+                tokens = 256 if hot else 512
+            else:
+                tokens = 640 if hot else 1500
             # Timeout: caller may pass an interval-aware value (kept under
             # the poll cadence so ticks never overlap). Falls back to a
             # provider-aware default — local models (Ollama) are slower
@@ -644,7 +692,11 @@ class Summarizer:
                     timeout_s = 10.0 if hot else 20.0
                 else:
                     timeout_s = 15.0 if hot else 35.0
-            raw = await self._chat(prompt, max_tokens=tokens, timeout=timeout_s)
+            # json_mode forces a clean JSON object on providers that
+            # support it (Gemini, most OpenAI-compat) — best-effort with
+            # a plain-call fallback inside _chat.
+            raw = await self._chat(
+                prompt, max_tokens=tokens, timeout=timeout_s, json_mode=True)
         except Exception as e:
             # Include the exception type because some exceptions
             # (asyncio.TimeoutError in particular) have an empty __str__,
@@ -666,7 +718,26 @@ class Summarizer:
                 "error": err, "error_detail": f"{kind}: {e}"[:200],
             }
 
-        parsed = _coerce_json(raw) or {}
+        parsed = _coerce_json(raw)
+        if parsed is None:
+            # Non-empty-but-unparseable OR empty output. This is the
+            # Gemini-2.5 "reasoning ate the token budget → empty content"
+            # case, or a model that ignored the JSON contract. Surface it
+            # so the panel shows WHY it's quiet instead of looking like a
+            # meeting with nothing worth flagging.
+            detail = ("empty response" if not (raw or "").strip()
+                      else "unparseable (non-JSON) response")
+            logger.warning(
+                "coach_tick: %s from %s/%s; raw[:200]=%r",
+                detail, self._provider, self._model, (raw or "")[:200])
+            return {
+                "clarifying_questions": [], "risks": [], "follow_ups": [],
+                "error": "no_output",
+                "error_detail": (
+                    f"Model returned {detail}. If this is a Gemini/thinking "
+                    f"model, its reasoning may be exhausting the token "
+                    f"budget — try a different model."),
+            }
 
         def _clean(key: str) -> List[str]:
             items = parsed.get(key)
@@ -683,11 +754,31 @@ class Summarizer:
                     break
             return out
 
-        return {
-            "clarifying_questions": _clean("clarifying_questions"),
-            "risks": _clean("risks"),
-            "follow_ups": _clean("follow_ups"),
-        }
+        # Cross-tick dedup + filler removal. The field failure mode was
+        # the model re-emitting "vendor lock-in" / "request an update"
+        # every tick; drop anything that near-duplicates something from
+        # ANY prior tick this meeting, and strip generic process-filler.
+        prior_all = {"clarifying_questions": [], "risks": [], "follow_ups": []}
+        for t in (prior_ticks or []):
+            for k in prior_all:
+                prior_all[k].extend(t.get(k) or [])
+
+        cq = _dedup_against(_clean("clarifying_questions"),
+                            prior_all["clarifying_questions"])
+        rk = _dedup_against(_clean("risks"), prior_all["risks"])
+        fu = _dedup_against(_clean("follow_ups"), prior_all["follow_ups"])
+
+        # Total-output backstop: the prompt asks for ≤2 items total, but
+        # enforce a hard cap of 3 so a misbehaving model can't firehose
+        # the panel. Priority order: questions → risks → follow-ups.
+        result = {"clarifying_questions": [], "risks": [], "follow_ups": []}
+        budget = 3
+        for key, items in (("clarifying_questions", cq),
+                           ("risks", rk), ("follow_ups", fu)):
+            take = items[:max(0, budget)]
+            result[key] = take
+            budget -= len(take)
+        return result
 
     async def extract_action_items(
         self, transcript: str, notes: str = "",
