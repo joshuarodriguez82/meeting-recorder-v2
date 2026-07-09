@@ -3692,30 +3692,30 @@ def _do_export_session(session_id: str, copy_audio: bool) -> None:
     folder = _client_export_folder(session)
     if not folder:
         return
-    paths = svc.export_svc.export_all(
-        session, target_dir=folder, copy_audio=copy_audio)
+    # Dedicated ExportService for the worker thread. export_all swaps its
+    # own `_dir` for the duration of a (possibly minutes-long) network
+    # copy; sharing svc.export_svc would let that swap race request-path
+    # exports and land one session's artifacts in another client's
+    # folder. strict=True so a failed WAV copy RAISES and the worker's
+    # retry schedule fires (export_all otherwise swallows it).
+    global _WORKER_EXPORT_SVC
+    if _WORKER_EXPORT_SVC is None:
+        _WORKER_EXPORT_SVC = ExportService(svc.settings.recordings_dir)
+    _WORKER_EXPORT_SVC.export_all(
+        session, target_dir=folder, copy_audio=copy_audio, strict=True)
     logger.info(f"Auto-exported session {session_id} to {folder}")
-    # Track audio copies so retention can reach them later.
-    AUDIO_EXTS = (".wav", ".mp3", ".m4a", ".flac")
-    new_audio = [p for p in paths if p.lower().endswith(AUDIO_EXTS)]
-    if new_audio:
-        existing = set(session.exported_audio_paths)
-        changed = False
-        for p in new_audio:
-            if p not in existing:
-                session.exported_audio_paths.append(p)
-                existing.add(p)
-                changed = True
-        if changed:
-            # Persist the list so a crash between here and the next save
-            # doesn't orphan the copy from retention's view.
-            try:
-                svc.session_svc.save(session)
-            except Exception as save_err:
-                logger.warning(
-                    f"Could not persist exported_audio_paths for "
-                    f"{session_id}: {save_err}")
+    # Deliberately NOT writing exported_audio_paths back to the session
+    # JSON here: this worker holds a snapshot loaded BEFORE the copy, so
+    # saving it would clobber transcript/summary the main thread wrote
+    # while the copy ran (a real data-loss race). Retention instead
+    # discovers these mirror copies via _client_export_dirs (which now
+    # enumerates the mirror subfolders) and sweeps them by
+    # recorder-generated filename.
 
+
+# Worker-owned ExportService (see _do_export_session) — built lazily on
+# first export so it picks up the configured recordings_dir.
+_WORKER_EXPORT_SVC: Optional[ExportService] = None
 
 # Single background thread for all designated-folder / cloud-mirror
 # copies. THE INVARIANT (2026-07-09 Drive-stall incident): the record →
@@ -3795,12 +3795,20 @@ async def export_session(session_id: str):
     target = _client_export_folder(session)
 
     def _do():
+        # Text artifacts only, synchronously — they're KB-sized. The
+        # audio copy (large, and `target` may be a cloud mirror) is
+        # handed to the background worker so a stalled mount can never
+        # hang this request (2026-07-09 Drive-stall rule). Previously
+        # this did copy_audio=bool(target) inline, which re-introduced
+        # the exact freeze for a mirror-resolved target.
         return svc.export_svc.export_all(
-            session, target_dir=target, copy_audio=bool(target))
+            session, target_dir=target, copy_audio=False)
 
     paths = await asyncio.to_thread(_do)
+    if target:
+        _EXPORT_WORKER.enqueue(session_id, copy_audio=True)
     return {"ok": True, "target_dir": target or svc.settings.recordings_dir,
-            "paths": paths}
+            "paths": paths, "audio_export": "queued" if target else None}
 
 
 # ── System / filesystem helpers ──────────────────────────────────────
@@ -5448,19 +5456,31 @@ async def delete_ghost_sessions(req: GhostSessionDeleteRequest):
 
 
 def _client_export_dirs() -> list[str]:
-    """Configured per-client Designated Folders, so retention can sweep
-    untracked recorder copies that orphaned in them."""
+    """Folders retention should sweep for orphaned recorder copies:
+    every client's explicit Designated Folder PLUS every immediate
+    subfolder of the Cloud Mirror root. The worker doesn't write
+    exported_audio_paths back to the session (that would race the main
+    thread's saves), so the mirror subfolders are how retention reaches
+    those WAV copies — without this they'd accumulate forever."""
+    dirs: list[str] = []
     try:
-        if not svc.client_cfg_svc:
-            return []
-        return [
-            cfg.export_folder
-            for cfg in svc.client_cfg_svc.get_all().values()
-            if getattr(cfg, "export_folder", "")
-        ]
+        if svc.client_cfg_svc:
+            dirs.extend(
+                cfg.export_folder
+                for cfg in svc.client_cfg_svc.get_all().values()
+                if getattr(cfg, "export_folder", "")
+            )
     except Exception as e:
         logger.warning(f"Could not enumerate client export dirs: {e}")
-        return []
+    mirror_root = getattr(svc.settings, "cloud_mirror_dir", "") or ""
+    if mirror_root:
+        try:
+            root = Path(mirror_root)
+            if root.exists():
+                dirs.extend(str(d) for d in root.iterdir() if d.is_dir())
+        except OSError as e:
+            logger.warning(f"Could not enumerate cloud mirror subdirs: {e}")
+    return dirs
 
 
 # Re-check roughly twice a day. Retention is day-granular so this is

@@ -46,17 +46,34 @@ _RETRY_DELAYS_S = (5.0, 30.0, 120.0)
 
 _INVALID_FOLDER_CHARS = '<>:"/\\|?*'
 
+# Windows refuses to create a directory named after a reserved DOS
+# device, with or without an extension (CON, NUL, COM1…). A client
+# acronym that happens to match would make every mkdir/copy fail and
+# the session silently never mirror; suffix such names to dodge it.
+_WINDOWS_RESERVED = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
 
 def sanitize_folder_name(name: str) -> str:
     """Make a client name safe to use as a single folder component.
     Windows-reserved characters are replaced, edges trimmed of dots and
-    spaces (Explorer refuses trailing dots). Falls back to 'Unfiled'
-    when nothing survivable remains."""
+    spaces (Explorer refuses trailing dots), and reserved DOS device
+    names are suffixed. Falls back to 'Unfiled' when nothing survivable
+    remains."""
     cleaned = "".join(
         ("-" if c in _INVALID_FOLDER_CHARS or ord(c) < 32 else c)
         for c in (name or "")
     ).strip(" .")
-    return cleaned or "Unfiled"
+    if not cleaned:
+        return "Unfiled"
+    # A reserved device name is matched case-insensitively and ignoring
+    # any extension (CON, con, CON.txt all collide).
+    if cleaned.split(".")[0].upper() in _WINDOWS_RESERVED:
+        cleaned = f"{cleaned}_"
+    return cleaned
 
 
 def resolve_export_folder(
@@ -88,50 +105,64 @@ class ExportWorker:
 
     def __init__(self, do_export: Callable[[str, bool], None]):
         self._do_export = do_export
-        self._q: "queue.Queue[tuple[str, bool]]" = queue.Queue()
-        self._pending: set[tuple[str, bool]] = set()
+        # Queue items are (session_id, copy_audio, attempt). Retries are
+        # re-queued (not re-slept-on the worker) so one failing job can't
+        # head-of-line-block every other session's export.
+        self._q: "queue.Queue[tuple[str, bool, int]]" = queue.Queue()
+        # Coalesce NEW enqueues on session_id → OR'd copy_audio. Cleared
+        # at DEQUEUE, so a re-enqueue arriving while a job runs schedules
+        # a fresh export of the newer artifacts instead of being dropped.
+        self._pending: dict[str, bool] = {}
         self._lock = threading.Lock()
         self._thread = threading.Thread(
             target=self._run, name="export-worker", daemon=True)
         self._thread.start()
 
     def enqueue(self, session_id: str, copy_audio: bool = False) -> None:
-        """Queue a session for export. Never blocks, never raises.
-        Coalesces an identical job already waiting in the queue."""
-        job = (session_id, copy_audio)
+        """Queue a session for export. Never blocks, never raises. A new
+        enqueue for a session already pending ORs its copy_audio flag in
+        (copy_audio=True is a superset export) rather than adding a
+        redundant second job."""
         with self._lock:
-            if job in self._pending:
+            if session_id in self._pending:
+                self._pending[session_id] = (
+                    self._pending[session_id] or copy_audio)
                 return
-            self._pending.add(job)
-        self._q.put(job)
+            self._pending[session_id] = copy_audio
+        self._q.put((session_id, copy_audio, 0))
 
     def _run(self) -> None:
         while True:
-            job = self._q.get()
-            session_id, copy_audio = job
+            session_id, copy_audio, attempt = self._q.get()
             try:
-                self._run_with_retries(session_id, copy_audio)
+                if attempt == 0:
+                    # Clear the coalescing slot at dequeue and pick up any
+                    # copy_audio flag OR'd in since it was queued.
+                    with self._lock:
+                        copy_audio = self._pending.pop(session_id, copy_audio)
+                self._attempt_once(session_id, copy_audio, attempt)
             finally:
-                with self._lock:
-                    self._pending.discard(job)
                 self._q.task_done()
 
-    def _run_with_retries(self, session_id: str, copy_audio: bool) -> None:
-        attempts = 1 + len(_RETRY_DELAYS_S)
-        for i in range(attempts):
-            try:
-                self._do_export(session_id, copy_audio)
-                return
-            except Exception as e:
-                if i < len(_RETRY_DELAYS_S):
-                    delay = _RETRY_DELAYS_S[i]
-                    logger.warning(
-                        f"Export of session {session_id} failed "
-                        f"(attempt {i + 1}/{attempts}): {e} — retrying "
-                        f"in {delay:.0f}s")
-                    time.sleep(delay)
-                else:
-                    logger.error(
-                        f"Export of session {session_id} failed after "
-                        f"{attempts} attempts: {e} — giving up (the next "
-                        f"processing step will re-enqueue it)")
+    def _attempt_once(self, session_id: str, copy_audio: bool,
+                      attempt: int) -> None:
+        try:
+            self._do_export(session_id, copy_audio)
+        except Exception as e:
+            if attempt < len(_RETRY_DELAYS_S):
+                delay = _RETRY_DELAYS_S[attempt]
+                logger.warning(
+                    f"Export of session {session_id} failed "
+                    f"(attempt {attempt + 1}): {e} — retrying in "
+                    f"{delay:.0f}s")
+                # Re-queue after the delay WITHOUT blocking the worker, so
+                # a dead mount can't stall every other session's export.
+                t = threading.Timer(
+                    delay, self._q.put,
+                    args=((session_id, copy_audio, attempt + 1),))
+                t.daemon = True
+                t.start()
+            else:
+                logger.error(
+                    f"Export of session {session_id} failed after "
+                    f"{attempt + 1} attempts: {e} — giving up")

@@ -41,6 +41,7 @@ class ExportService:
         session: Session,
         target_dir: Optional[str] = None,
         copy_audio: bool = True,
+        strict: bool = False,
     ) -> List[str]:
         """
         Write every available artifact for this session into target_dir.
@@ -54,6 +55,17 @@ class ExportService:
         Silently skips any artifact the session doesn't have yet rather
         than raising — a session with only a transcript still produces a
         useful export.
+
+        `strict` (used by the background export worker): re-raise a failed
+        AUDIO copy instead of swallowing it, so the worker's retry
+        schedule fires on a transient cloud-mount stall. Without this the
+        worker could never retry the one artifact — the multi-hundred-MB
+        WAV — the whole async design exists to protect. SameFileError is
+        still swallowed (copying onto ourselves is a no-op, not a
+        failure). This method does NOT mutate shared instance state
+        beyond the try/finally `_dir` swap; the worker uses a dedicated
+        ExportService instance so that swap can't race request-path
+        exports.
         """
         out: List[str] = []
         orig_dir = self._dir
@@ -77,10 +89,14 @@ class ExportService:
                 try:
                     shutil.copy2(src, dst)
                     out.append(str(dst))
-                except (OSError, shutil.SameFileError) as e:
-                    # SameFileError happens when target_dir == recordings_dir
-                    # and we'd be copying onto ourselves — safe to ignore.
+                except shutil.SameFileError as e:
+                    # target_dir == recordings_dir; copying onto ourselves
+                    # is a no-op, not a failure — safe to ignore.
                     logger.warning(f"Audio copy skipped: {e}")
+                except OSError as e:
+                    logger.warning(f"Audio copy failed: {e}")
+                    if strict:
+                        raise
         finally:
             self._dir = orig_dir
         return out
