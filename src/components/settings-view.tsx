@@ -149,6 +149,9 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
   const [cleaning, setCleaning] = useState(false);
   const [ghostCount, setGhostCount] = useState<number | null>(null);
   const [purging, setPurging] = useState(false);
+  // Which settings tab is showing. Grouped so the page stops being one
+  // endless scroll — each tab is ~4-5 related cards.
+  const [tab, setTab] = useState<string>("setup");
 
   useEffect(() => {
     (async () => {
@@ -258,8 +261,37 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
     }
   };
 
+  const SETTINGS_TABS = [
+    { id: "setup", label: "Setup" },
+    { id: "integrations", label: "Templates & Integrations" },
+    { id: "recording", label: "Recording & Co-Pilot" },
+    { id: "data", label: "Data & Diagnostics" },
+  ];
+
   return (
     <div className="mx-auto max-w-3xl space-y-6">
+      {/* Tab bar — sticky so it stays reachable while a tab's cards scroll */}
+      <div className="sticky top-0 z-10 -mx-6 border-b border-border bg-background/95 px-6 backdrop-blur">
+        <div className="mx-auto flex max-w-3xl flex-wrap gap-1">
+          {SETTINGS_TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setTab(t.id)}
+              className={
+                "-mb-px border-b-2 px-3 py-2 text-sm font-medium transition-colors " +
+                (tab === t.id
+                  ? "border-primary text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground")
+              }
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {tab === "setup" && (<>
       {/* API Keys */}
       <Card>
         <CardHeader>
@@ -462,6 +494,9 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
         </CardContent>
       </Card>
 
+      </>)}
+
+      {tab === "integrations" && (<>
       {/* Summary Templates */}
       <SummaryTemplatesCard />
 
@@ -508,6 +543,9 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
 
       <ChromeExtensionCard />
 
+      </>)}
+
+      {tab === "recording" && (<>
       {/* Workflow */}
       <Card>
         <CardHeader>
@@ -770,6 +808,9 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
       {/* GPU acceleration */}
       <GpuAccelerationCard />
 
+      </>)}
+
+      {tab === "data" && (<>
       {/* Diagnostics — health checks + log tail */}
       <DiagnosticsCard />
 
@@ -865,6 +906,8 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
           )}
         </CardContent>
       </Card>
+
+      </>)}
 
       {/* Save bar */}
       <div className="sticky bottom-0 -mx-6 border-t border-border bg-background/95 px-6 py-3 backdrop-blur">
