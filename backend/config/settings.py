@@ -241,6 +241,16 @@ class Settings:
     # is how many minutes before the meeting to generate it.
     auto_prep_brief_enabled: bool
     auto_prep_brief_lead_min: int
+    # Root network folder for background per-client session exports
+    # ("Cloud Mirror"). When set, every session whose client has no
+    # explicit Designated Folder is exported to
+    # <cloud_mirror_dir>/<client>/ (or /Unfiled/ without a client tag)
+    # by the background export worker — asynchronously, so a slow
+    # cloud-stream mount can never stall recording/processing. Empty =
+    # off. This is the supported way to get sessions onto Google Drive
+    # / a NAS; recordings_dir itself must stay on LOCAL disk (see the
+    # 2026-07-09 Drive-stall incident notes in services/export_worker.py).
+    cloud_mirror_dir: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -365,6 +375,7 @@ class Settings:
             today_view_enabled=_get_bool("TODAY_VIEW_ENABLED", False),
             auto_prep_brief_enabled=_get_bool("AUTO_PREP_BRIEF_ENABLED", False),
             auto_prep_brief_lead_min=_get_int("AUTO_PREP_BRIEF_LEAD_MIN", 10),
+            cloud_mirror_dir=_get("CLOUD_MIRROR_DIR", ""),
         )
 
     @property
@@ -442,6 +453,7 @@ class Settings:
         today_view_enabled: bool = False,
         auto_prep_brief_enabled: bool = False,
         auto_prep_brief_lead_min: int = 10,
+        cloud_mirror_dir: str = "",
     ) -> None:
         """Write settings back to the .env file.
 
@@ -510,6 +522,7 @@ class Settings:
             f"TODAY_VIEW_ENABLED={'true' if today_view_enabled else 'false'}\n"
             f"AUTO_PREP_BRIEF_ENABLED={'true' if auto_prep_brief_enabled else 'false'}\n"
             f"AUTO_PREP_BRIEF_LEAD_MIN={auto_prep_brief_lead_min}\n"
+            f"CLOUD_MIRROR_DIR={cloud_mirror_dir}\n"
         )
         # Write to the canonical LOCALAPPDATA location first. In rare cases
         # a Tauri-spawned Python child cannot open files under LOCALAPPDATA
