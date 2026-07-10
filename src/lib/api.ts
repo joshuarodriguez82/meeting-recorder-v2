@@ -195,6 +195,10 @@ export interface Settings {
   // OFF by default (one LLM call/meeting). Lead = minutes before start.
   auto_prep_brief_enabled: boolean;
   auto_prep_brief_lead_min: number;
+  // Cloud Mirror: root network folder for background per-client session
+  // exports (Google Drive / NAS). Empty = off. The recordings folder
+  // itself must stay on a LOCAL disk — this is the safe path to cloud.
+  cloud_mirror_dir: string;
 }
 
 // A single co-pilot mode (persona) or meeting-type (modifier). Shape
