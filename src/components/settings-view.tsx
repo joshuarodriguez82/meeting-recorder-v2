@@ -444,11 +444,63 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
               </Button>
             </div>
             <p className="text-xs text-muted-foreground leading-relaxed">
-              Point this at a cloud-synced folder (OneDrive, iCloud Drive,
-              Dropbox) to sync sessions, clients, and summary templates
-              across your devices. Existing sessions stay where they are —
-              new recordings go to the new location starting after Save.
-              The app needs to restart for the change to take full effect.
+              <strong>Use a local folder</strong> (e.g.{" "}
+              <code className="text-[11px]">C:\Users\you\MeetingRecordings</code>).
+              Recording writes large audio streams here in real time — a
+              cloud-stream folder (Google Drive <code className="text-[11px]">G:\</code>,
+              OneDrive Files On-Demand) stalls those writes and can freeze
+              the backend mid-recording. To get sessions onto a network /
+              cloud folder, set the <strong>Cloud Mirror</strong> below —
+              it copies in the background where a slow drive can&apos;t
+              hurt a recording. Existing sessions stay where they are;
+              restart the app after changing.
+            </p>
+          </div>
+
+          <div className="space-y-2 border-t pt-4">
+            <Label>Cloud Mirror — network folder for finished sessions (optional)</Label>
+            <div className="flex gap-2">
+              <Input
+                value={settings.cloud_mirror_dir || ""}
+                onChange={(e) => update("cloud_mirror_dir", e.target.value)}
+                placeholder="G:\My Drive\MRv2  (empty = off)"
+                className="font-mono text-sm"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                onClick={async () => {
+                  try {
+                    const { open } = await import("@tauri-apps/plugin-dialog");
+                    const picked = await open({
+                      directory: true,
+                      multiple: false,
+                      defaultPath: settings.cloud_mirror_dir || undefined,
+                      title: "Choose cloud mirror folder",
+                    });
+                    if (typeof picked === "string" && picked) {
+                      update("cloud_mirror_dir", picked);
+                    }
+                  } catch (e) {
+                    toast.error(
+                      `Folder picker unavailable: ${(e as Error).message ?? e}`);
+                  }
+                }}
+              >
+                Browse…
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              After each recording and processing step, the session&apos;s
+              audio, transcript, summary, and extractions are copied here
+              into a subfolder named for its <strong>client</strong>{" "}
+              (sessions without a client go to{" "}
+              <code className="text-[11px]">Unfiled</code>). Copies run in
+              the background with retries — a slow or briefly-offline
+              drive delays the copy, never the recording. A client&apos;s
+              explicit Designated Folder (Clients view) still wins over
+              this root. Point your other machines at this folder to read
+              sessions from anywhere.
             </p>
           </div>
         </CardContent>
