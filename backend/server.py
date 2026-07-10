@@ -332,6 +332,7 @@ from services._cloud_sync import CloudFileNotReadyError
 from services.client_config_service import ClientConfig, ClientConfigService
 from services.engagement_service import EngagementService
 from services.export_service import ExportService
+from services.export_worker import ExportWorker, resolve_export_folder
 from services.recording_service import RecordingService
 from services.retention_service import cleanup as run_retention_cleanup, folder_stats
 from services.recovery_service import recover_orphans
@@ -937,6 +938,9 @@ class SettingsDTO(BaseModel):
     # meeting and notify when ready. OFF by default (one LLM call/meeting).
     auto_prep_brief_enabled: bool = False
     auto_prep_brief_lead_min: int = 10
+    # Root network folder for background per-client exports ("Cloud
+    # Mirror"). Empty = off. See services/export_worker.py.
+    cloud_mirror_dir: str = ""
 
 
 class StartRecordingRequest(BaseModel):
@@ -1358,6 +1362,7 @@ async def get_settings():
         today_view_enabled=s.today_view_enabled,
         auto_prep_brief_enabled=s.auto_prep_brief_enabled,
         auto_prep_brief_lead_min=s.auto_prep_brief_lead_min,
+        cloud_mirror_dir=s.cloud_mirror_dir,
     )
 
 
@@ -1436,6 +1441,7 @@ async def save_settings(payload: SettingsDTO):
         today_view_enabled=bool(payload.today_view_enabled),
         auto_prep_brief_enabled=bool(payload.auto_prep_brief_enabled),
         auto_prep_brief_lead_min=max(1, min(120, payload.auto_prep_brief_lead_min or 10)),
+        cloud_mirror_dir=(payload.cloud_mirror_dir or "").strip(),
     )
     # If the recordings folder changed, migrate client + template state
     # from the previous folder to the new one. Copy, not move, so the
@@ -2652,6 +2658,7 @@ async def set_live_copilot_enabled(payload: dict):
         today_view_enabled=s.today_view_enabled,
         auto_prep_brief_enabled=s.auto_prep_brief_enabled,
         auto_prep_brief_lead_min=s.auto_prep_brief_lead_min,
+        cloud_mirror_dir=s.cloud_mirror_dir,
     )
     # Update the cached Settings in-place so the change is visible
     # immediately, without going through load_settings() which would
@@ -3653,56 +3660,77 @@ async def suggest_tagging(req: SuggestTaggingRequest):
 
 
 def _client_export_folder(session: Session) -> Optional[str]:
-    """Return the user-designated folder for this session's client, or None."""
-    if not session.client or not svc.client_cfg_svc:
-        return None
-    cfg = svc.client_cfg_svc.get(session.client)
-    if cfg and cfg.export_folder:
-        return cfg.export_folder
-    return None
+    """Resolve the export target for this session: the client's explicit
+    Designated Folder, else <cloud_mirror_dir>/<client> (or /Unfiled)
+    when the global mirror root is configured, else None."""
+    client = (getattr(session, "client", "") or "").strip()
+    explicit = ""
+    if client and svc.client_cfg_svc:
+        cfg = svc.client_cfg_svc.get(client)
+        if cfg and cfg.export_folder:
+            explicit = cfg.export_folder
+    mirror_root = getattr(svc.settings, "cloud_mirror_dir", "") or ""
+    return resolve_export_folder(explicit, client, mirror_root)
 
 
-def _auto_export_to_client(session: Session, copy_audio: bool = False) -> None:
-    """
-    If this session's client has a designated export folder, drop every
-    available artifact there. Called after any step that adds new
-    content (processing, summarize, action items, decisions, requirements,
-    and on stop_recording for the audio copy). Best-effort — never blocks
-    the main flow on an export failure.
+def _do_export_session(session_id: str, copy_audio: bool) -> None:
+    """Worker-side export body — runs ONLY on the ExportWorker thread.
+
+    Re-loads the session fresh from disk (the enqueuer's in-memory
+    object may be stale by the time this runs) and RAISES on failure so
+    the worker's retry schedule applies — a cloud-stream mount that
+    stalls once usually succeeds on the 30s retry.
 
     Audio copies are recorded on the session's `exported_audio_paths` so
     retention can clean them up later. We don't track the text artifacts
     (transcript.txt, summary.txt, etc.) — they're KB-sized, keeping them
-    as the archival copy is exactly the point of the Designated Folder.
+    as the archival copy is exactly the point of the export.
     """
+    session = svc.session_svc.load_full(session_id)
+    if not session:
+        return
     folder = _client_export_folder(session)
     if not folder:
         return
-    try:
-        paths = svc.export_svc.export_all(
-            session, target_dir=folder, copy_audio=copy_audio)
-        logger.info(f"Auto-exported session {session.session_id} to {folder}")
-        # Track audio copies so retention can reach them later.
-        AUDIO_EXTS = (".wav", ".mp3", ".m4a", ".flac")
-        new_audio = [p for p in paths if p.lower().endswith(AUDIO_EXTS)]
-        if new_audio:
-            existing = set(session.exported_audio_paths)
-            for p in new_audio:
-                if p not in existing:
-                    session.exported_audio_paths.append(p)
-                    existing.add(p)
-            # Persist the list so a crash between here and the next save
-            # doesn't orphan the copy from retention's view.
-            try:
-                svc.session_svc.save(session)
-            except Exception as save_err:
-                logger.warning(
-                    f"Could not persist exported_audio_paths for "
-                    f"{session.session_id}: {save_err}")
-    except Exception as e:
-        logger.warning(
-            f"Auto-export to '{folder}' failed for session "
-            f"{session.session_id}: {e}")
+    # Dedicated ExportService for the worker thread. export_all swaps its
+    # own `_dir` for the duration of a (possibly minutes-long) network
+    # copy; sharing svc.export_svc would let that swap race request-path
+    # exports and land one session's artifacts in another client's
+    # folder. strict=True so a failed WAV copy RAISES and the worker's
+    # retry schedule fires (export_all otherwise swallows it).
+    global _WORKER_EXPORT_SVC
+    if _WORKER_EXPORT_SVC is None:
+        _WORKER_EXPORT_SVC = ExportService(svc.settings.recordings_dir)
+    _WORKER_EXPORT_SVC.export_all(
+        session, target_dir=folder, copy_audio=copy_audio, strict=True)
+    logger.info(f"Auto-exported session {session_id} to {folder}")
+    # Deliberately NOT writing exported_audio_paths back to the session
+    # JSON here: this worker holds a snapshot loaded BEFORE the copy, so
+    # saving it would clobber transcript/summary the main thread wrote
+    # while the copy ran (a real data-loss race). Retention instead
+    # discovers these mirror copies via _client_export_dirs (which now
+    # enumerates the mirror subfolders) and sweeps them by
+    # recorder-generated filename.
+
+
+# Worker-owned ExportService (see _do_export_session) — built lazily on
+# first export so it picks up the configured recordings_dir.
+_WORKER_EXPORT_SVC: Optional[ExportService] = None
+
+# Single background thread for all designated-folder / cloud-mirror
+# copies. THE INVARIANT (2026-07-09 Drive-stall incident): the record →
+# finalize → process path never writes to a network folder — a stalled
+# cloud mount can no longer freeze the backend, trip the Tauri
+# watchdog, and kill an in-flight recording.
+_EXPORT_WORKER = ExportWorker(_do_export_session)
+
+
+def _auto_export_to_client(session: Session, copy_audio: bool = False) -> None:
+    """Queue this session's export. Non-blocking, never raises — call
+    sites keep the same signature they had when this ran inline."""
+    if session is None:
+        return
+    _EXPORT_WORKER.enqueue(session.session_id, copy_audio=copy_audio)
 
 
 # ── Client configs (per-client designated export folder) ──────────────
@@ -3767,12 +3795,20 @@ async def export_session(session_id: str):
     target = _client_export_folder(session)
 
     def _do():
+        # Text artifacts only, synchronously — they're KB-sized. The
+        # audio copy (large, and `target` may be a cloud mirror) is
+        # handed to the background worker so a stalled mount can never
+        # hang this request (2026-07-09 Drive-stall rule). Previously
+        # this did copy_audio=bool(target) inline, which re-introduced
+        # the exact freeze for a mirror-resolved target.
         return svc.export_svc.export_all(
-            session, target_dir=target, copy_audio=bool(target))
+            session, target_dir=target, copy_audio=False)
 
     paths = await asyncio.to_thread(_do)
+    if target:
+        _EXPORT_WORKER.enqueue(session_id, copy_audio=True)
     return {"ok": True, "target_dir": target or svc.settings.recordings_dir,
-            "paths": paths}
+            "paths": paths, "audio_export": "queued" if target else None}
 
 
 # ── System / filesystem helpers ──────────────────────────────────────
@@ -5420,19 +5456,31 @@ async def delete_ghost_sessions(req: GhostSessionDeleteRequest):
 
 
 def _client_export_dirs() -> list[str]:
-    """Configured per-client Designated Folders, so retention can sweep
-    untracked recorder copies that orphaned in them."""
+    """Folders retention should sweep for orphaned recorder copies:
+    every client's explicit Designated Folder PLUS every immediate
+    subfolder of the Cloud Mirror root. The worker doesn't write
+    exported_audio_paths back to the session (that would race the main
+    thread's saves), so the mirror subfolders are how retention reaches
+    those WAV copies — without this they'd accumulate forever."""
+    dirs: list[str] = []
     try:
-        if not svc.client_cfg_svc:
-            return []
-        return [
-            cfg.export_folder
-            for cfg in svc.client_cfg_svc.get_all().values()
-            if getattr(cfg, "export_folder", "")
-        ]
+        if svc.client_cfg_svc:
+            dirs.extend(
+                cfg.export_folder
+                for cfg in svc.client_cfg_svc.get_all().values()
+                if getattr(cfg, "export_folder", "")
+            )
     except Exception as e:
         logger.warning(f"Could not enumerate client export dirs: {e}")
-        return []
+    mirror_root = getattr(svc.settings, "cloud_mirror_dir", "") or ""
+    if mirror_root:
+        try:
+            root = Path(mirror_root)
+            if root.exists():
+                dirs.extend(str(d) for d in root.iterdir() if d.is_dir())
+        except OSError as e:
+            logger.warning(f"Could not enumerate cloud mirror subdirs: {e}")
+    return dirs
 
 
 # Re-check roughly twice a day. Retention is day-granular so this is
@@ -5722,6 +5770,7 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         today_view_enabled=s.today_view_enabled,
         auto_prep_brief_enabled=s.auto_prep_brief_enabled,
         auto_prep_brief_lead_min=s.auto_prep_brief_lead_min,
+        cloud_mirror_dir=s.cloud_mirror_dir,
     )
     svc.settings = dataclasses.replace(
         s, live_copilot_mode=new_mode, live_copilot_meeting_type=new_type)
