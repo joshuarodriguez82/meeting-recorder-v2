@@ -491,16 +491,18 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
               </Button>
             </div>
             <p className="text-xs text-muted-foreground leading-relaxed">
-              After each recording and processing step, the session&apos;s
-              audio, transcript, summary, and extractions are copied here
-              into a subfolder named for its <strong>client</strong>{" "}
-              (sessions without a client go to{" "}
-              <code className="text-[11px]">Unfiled</code>). Copies run in
-              the background with retries — a slow or briefly-offline
-              drive delays the copy, never the recording. A client&apos;s
-              explicit Designated Folder (Clients view) still wins over
-              this root. Point your other machines at this folder to read
-              sessions from anywhere.
+              After each processing step, the session&apos;s{" "}
+              <strong>transcript, summary, action items, decisions,
+              and requirements</strong> are copied here into a subfolder
+              named for its <strong>client</strong> (sessions without a
+              client go to <code className="text-[11px]">Unfiled</code>).
+              The <strong>raw audio and session file stay on local disk</strong>
+              {" "}— they&apos;re what stalled Google Drive in earlier builds
+              and nobody reads a WAV from a shared drive anyway. Copies
+              run in the background with retries; a slow or briefly-
+              offline drive delays the text copy, never the recording. A
+              client&apos;s explicit Designated Folder (Clients view)
+              wins over this root and follows the same text-only rule.
             </p>
           </div>
         </CardContent>
