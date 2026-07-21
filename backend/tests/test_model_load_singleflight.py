@@ -99,3 +99,49 @@ def test_failed_load_can_be_retried(monkeypatch):
     assert svc_obj.models_ready is False
     assert svc_obj.models_loading is False       # flag released on failure
     assert svc_obj.models_error is not None      # surfaced to /status
+
+
+# ── Crash-resilient auto-process resume (same incident class) ────────
+
+from datetime import datetime, timedelta
+
+from models.session import Session
+
+
+def test_auto_process_marker_round_trips_through_json():
+    s = Session(session_id="AP1")
+    s.auto_process_pending = {
+        "resumes": 1, "template": "General", "follow_up": False,
+        "started_at": "2026-07-21T08:00:00",
+    }
+    restored = Session.from_dict(s.to_dict())
+    assert restored.auto_process_pending == s.auto_process_pending
+    # And absence stays absent (legacy JSONs).
+    bare = Session.from_dict(Session(session_id="AP2").to_dict())
+    assert bare.auto_process_pending is None
+
+
+def test_resume_decision_fresh_marker_resumes():
+    now = datetime.now()
+    marker = {"resumes": 0, "started_at": (now - timedelta(hours=1)).isoformat()}
+    assert server._auto_process_resume_decision(marker, now) == "resume"
+
+
+def test_resume_decision_poison_pill_gives_up():
+    now = datetime.now()
+    marker = {"resumes": 2, "started_at": now.isoformat()}
+    assert server._auto_process_resume_decision(marker, now) == "give_up"
+
+
+def test_resume_decision_stale_marker():
+    now = datetime.now()
+    marker = {"resumes": 0,
+              "started_at": (now - timedelta(hours=72)).isoformat()}
+    assert server._auto_process_resume_decision(marker, now) == "stale"
+
+
+def test_resume_decision_malformed_marker_still_resumes():
+    # Garbage fields must not crash the startup pass.
+    assert server._auto_process_resume_decision({}, datetime.now()) == "resume"
+    assert server._auto_process_resume_decision(
+        {"resumes": "x", "started_at": 42}, datetime.now()) == "resume"

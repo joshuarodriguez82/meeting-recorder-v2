@@ -2884,6 +2884,54 @@ def _stamp_processing_error(session_id: str, message: Optional[str]) -> None:
             f"[auto-process] could not stamp error on {session_id}: {e}")
 
 
+def _stamp_auto_process_pending(
+    session_id: str, marker: Optional[dict],
+) -> None:
+    """Persist (or clear, marker=None) the crash-resilient auto-process
+    marker. It's the ONLY record that survives a mid-processing backend
+    death (segfault, watchdog kill, power loss) — no exception handler
+    runs in those cases, so retry loops and in-memory sets are useless.
+    The startup resume pass reads this to re-queue the session."""
+    try:
+        session = svc.session_svc.load_full(session_id)
+        if not session:
+            return
+        session.auto_process_pending = marker
+        svc.session_svc.save(session)
+    except Exception as e:
+        logger.warning(
+            f"[auto-process] could not stamp pending marker on "
+            f"{session_id}: {e}")
+
+
+# Poison-pill cap: how many CRASH resumes a session gets before we stop
+# retrying and surface the failure. A WAV that reliably segfaults
+# native transcription must not turn into an infinite crash-loop where
+# every backend boot re-queues the job that kills the backend.
+_AUTO_PROCESS_MAX_CRASH_RESUMES = 2
+# Markers older than this are stale (machine was off for days, user has
+# moved on) — surface, don't silently re-run big LLM spends.
+_AUTO_PROCESS_RESUME_MAX_AGE_H = 48
+
+
+def _auto_process_resume_decision(marker: dict, now: datetime) -> str:
+    """Pure decision for a found marker: 'resume' | 'give_up' | 'stale'."""
+    try:
+        resumes = int(marker.get("resumes", 0))
+    except (TypeError, ValueError):
+        resumes = 0
+    if resumes >= _AUTO_PROCESS_MAX_CRASH_RESUMES:
+        return "give_up"
+    try:
+        started = datetime.fromisoformat(str(marker.get("started_at", "")))
+        age_h = (now - started).total_seconds() / 3600.0
+    except (TypeError, ValueError):
+        age_h = 0.0
+    if age_h > _AUTO_PROCESS_RESUME_MAX_AGE_H:
+        return "stale"
+    return "resume"
+
+
 async def _auto_process_session(session_id: str, template: str,
                                 follow_up: bool) -> None:
     """Run the full extraction pipeline for a just-stopped session in the
@@ -2913,6 +2961,7 @@ async def _auto_process_session(session_id: str, template: str,
                         f"(attempt {attempt}): "
                         f"{result.get('stages')}")
                     _stamp_processing_error(session_id, None)  # clear any prior
+                    _stamp_auto_process_pending(session_id, None)
                     return
                 # ok:False → critical stage failed; capture reason + retry.
                 stages = result.get("stages", {}) if isinstance(result, dict) else {}
@@ -2925,6 +2974,7 @@ async def _auto_process_session(session_id: str, template: str,
                 logger.warning(
                     f"[auto-process] session {session_id} skipped: {e.detail}")
                 _stamp_processing_error(session_id, str(e.detail))
+                _stamp_auto_process_pending(session_id, None)
                 return
             except Exception as e:
                 last_reason = f"{type(e).__name__}: {e}"
@@ -2943,6 +2993,7 @@ async def _auto_process_session(session_id: str, template: str,
         msg = f"Auto-processing failed after {attempts} attempts: {last_reason}"
         logger.error(f"[auto-process] session {session_id}: {msg}")
         _stamp_processing_error(session_id, msg)
+        _stamp_auto_process_pending(session_id, None)
     finally:
         _auto_processed_sessions.discard(session_id)
 
@@ -2967,6 +3018,14 @@ def _maybe_auto_process(session) -> None:
     logger.info(
         f"[auto-process] kicking off for session {sid} "
         f"(template={template}, follow_up={follow_up})")
+    # Stamp the crash-resilient marker BEFORE starting: if the backend
+    # dies mid-transcription (segfault — no handler runs), the startup
+    # resume pass finds this and re-queues instead of leaving the
+    # session silently unprocessed after the UI said "Transcribing…".
+    _stamp_auto_process_pending(sid, {
+        "resumes": 0, "template": template, "follow_up": follow_up,
+        "started_at": datetime.now().isoformat(),
+    })
     asyncio.create_task(_auto_process_session(sid, template, follow_up))
 
 
@@ -6871,7 +6930,80 @@ async def startup():
     # request doesn't pay the latency. These populate module-level caches.
     import threading as _t
 
-    _t.Thread(target=_recover_orphans, daemon=True).start()
+    # Resume auto-processing orphaned by a mid-processing backend death.
+    # A segfault (the Windows 0xC0000005 class) kills the process with
+    # no exception handler — the in-memory retry loop, dedup set, and
+    # "Transcribing…" status all vanish, and before this pass nothing
+    # ever picked the session back up: it sat unprocessed forever after
+    # the UI said it was processing. Runs AFTER crash recovery (which
+    # may finalize the very session that needs processing). Poison-pill
+    # capped: a session that repeatedly crashes the backend gets a
+    # visible processing_error instead of an infinite boot-crash loop.
+    _loop = asyncio.get_running_loop()
+
+    def _resume_orphaned_auto_process():
+        try:
+            if svc.settings is None or svc.session_svc is None:
+                return
+            rows = svc.session_svc.list_sessions()
+            for row in rows:
+                if row.get("has_transcript"):
+                    continue  # processing completed; stale marker is moot
+                sid = row.get("session_id") or ""
+                if not sid or sid in _auto_processed_sessions:
+                    continue
+                session = svc.session_svc.load_full(sid)
+                marker = getattr(session, "auto_process_pending", None) \
+                    if session else None
+                if not isinstance(marker, dict):
+                    continue
+                verdict = _auto_process_resume_decision(marker, datetime.now())
+                if verdict == "give_up":
+                    logger.error(
+                        f"[auto-process] session {sid} crashed the backend "
+                        f"{marker.get('resumes')}+ times mid-processing — "
+                        f"giving up (run Process manually)")
+                    _stamp_processing_error(
+                        sid,
+                        "Processing crashed repeatedly (likely during "
+                        "transcription). Try Process manually; if it keeps "
+                        "failing, the audio file may trigger a native bug.")
+                    _stamp_auto_process_pending(sid, None)
+                    continue
+                if verdict == "stale":
+                    logger.warning(
+                        f"[auto-process] session {sid} has a stale pending "
+                        f"marker (> {_AUTO_PROCESS_RESUME_MAX_AGE_H}h) — "
+                        f"not auto-resuming")
+                    _stamp_processing_error(
+                        sid, "Auto-processing was interrupted and is too old "
+                             "to auto-resume — run Process manually.")
+                    _stamp_auto_process_pending(sid, None)
+                    continue
+                # resume
+                resumes = int(marker.get("resumes", 0)) + 1
+                _auto_processed_sessions.add(sid)
+                _stamp_auto_process_pending(sid, {**marker, "resumes": resumes})
+                logger.info(
+                    f"[auto-process] resuming session {sid} after backend "
+                    f"restart (crash-resume {resumes}/"
+                    f"{_AUTO_PROCESS_MAX_CRASH_RESUMES})")
+                asyncio.run_coroutine_threadsafe(
+                    _auto_process_session(
+                        sid,
+                        str(marker.get("template") or "General"),
+                        bool(marker.get("follow_up", False)),
+                    ),
+                    _loop,
+                )
+        except Exception as e:
+            logger.exception(f"[auto-process] resume pass failed: {e}")
+
+    def _recover_then_resume():
+        _recover_orphans()
+        _resume_orphaned_auto_process()
+
+    _t.Thread(target=_recover_then_resume, daemon=True).start()
     _t.Thread(target=_audit_ghost_sessions, daemon=True).start()
 
     def _prewarm_audio():
