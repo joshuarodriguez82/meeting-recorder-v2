@@ -261,10 +261,13 @@ export function RecordView({
         setDuration(status.duration_s);
         setModelsLoading(status.models_loading);
 
-        // Kick off background model load if not already done
-        if (!status.models_ready && !status.models_loading) {
-          api.loadModels().catch(() => {});
-        }
+        // Deliberately NOT auto-loading models here anymore. Opening
+        // the app used to fire /models/load on Record-view mount, which
+        // raced the other load triggers at boot and fed the
+        // 0xC0000005 crash loop (2026-07-21 logs). Models now load
+        // only when actually needed: on record-start when live
+        // transcription is enabled, or on Process. Recording itself
+        // never requires them.
       } catch (e) {
         console.error(e);
       }

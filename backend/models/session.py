@@ -80,6 +80,16 @@ class Session:
         # retries", "Ollama unreachable", ...). Cleared on any successful
         # process. None = no failure recorded.
         self.processing_error: Optional[str] = None
+        # Crash-resilient auto-process marker. Stamped to DISK when
+        # backend auto-processing starts, cleared on success/permanent
+        # failure. If the backend dies mid-processing (the Windows
+        # 0xC0000005 segfault class killed the process mid-transcribe,
+        # so no exception handler ever ran), the startup resume pass
+        # finds this marker and re-queues the session — previously it
+        # just sat unprocessed forever after the UI said "Transcribing…".
+        # Shape: {"resumes": int, "template": str, "follow_up": bool,
+        # "started_at": iso}. None = nothing pending.
+        self.auto_process_pending: Optional[dict] = None
         # Read-only sync-integrity finding from stop_recording: set when a
         # capture stream fell meaningfully behind wall-clock (dropped
         # frames / clock drift) or the mic + system-audio tracks diverged.
@@ -138,6 +148,7 @@ class Session:
             "audio_actual_duration_s": self.audio_actual_duration_s,
             "audio_expected_duration_s": self.audio_expected_duration_s,
             "processing_error": self.processing_error,
+            "auto_process_pending": self.auto_process_pending,
             "sync_warning": self.sync_warning,
         }
 
@@ -187,6 +198,7 @@ class Session:
         session.audio_actual_duration_s = data.get("audio_actual_duration_s")
         session.audio_expected_duration_s = data.get("audio_expected_duration_s")
         session.processing_error = data.get("processing_error") or None
+        session.auto_process_pending = data.get("auto_process_pending") or None
         session.sync_warning = data.get("sync_warning") or None
 
         # Rebuild speakers
