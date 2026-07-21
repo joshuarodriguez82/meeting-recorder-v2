@@ -140,6 +140,9 @@ export default function Home() {
   // session, and only show each unique skip-reason once.
   const lastAutoSessionRef = useRef<string | null>(null);
   const lastSkipReasonRef = useRef<string | null>(null);
+  // Consecutive failed status-poll ticks — 2+ shows the "Reconnecting"
+  // banner instead of raw fetch errors while a respawned backend boots.
+  const failedTicksRef = useRef(0);
   // Live timer for the recording badge. Ticks every second while a
   // recording is active so the badge label shows real elapsed time.
   const [recordingElapsedS, setRecordingElapsedS] = useState(0);
@@ -288,8 +291,20 @@ export default function Home() {
           })();
         }
       } catch {
-        // Backend unreachable — don't overwrite any message in flight.
+        // Backend unreachable — usually a watchdog respawn after a
+        // backend exit. Tell the user what's happening instead of
+        // letting every view surface raw "failed to fetch" noise; the
+        // next successful tick clears it automatically.
+        failedTicksRef.current += 1;
+        if (failedTicksRef.current >= 2) {
+          setPipelineStatus({
+            loading: true,
+            text: "Reconnecting to backend… (it restarted — one moment)",
+          });
+        }
+        return;
       }
+      failedTicksRef.current = 0;
     };
     tick();
     const id = setInterval(tick, 2000);
