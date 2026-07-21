@@ -11,6 +11,18 @@ import subprocess
 import sys
 import threading
 import time
+
+# ── Native-crash hardening (MUST run before any ML import) ──────────
+# faster-whisper (ctranslate2) and pyannote (torch) each bundle their
+# own OpenMP runtime. Loading both into one Windows process can abort
+# with STATUS_ACCESS_VIOLATION (0xC0000005) at native init — the
+# 2026-07-21 rust.log shows the backend segfaulting repeatedly during
+# "Loading transcription engine", crash-looping through watchdog
+# respawns. KMP_DUPLICATE_LIB_OK is Intel OpenMP's documented escape
+# hatch for exactly this double-runtime case. setdefault so a user-set
+# value still wins.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict
@@ -138,9 +150,10 @@ os.environ.setdefault("FOR_DISABLE_STACK_TRACE", "1")
 # repair pip install.
 
 def _verify_and_repair_dependencies() -> None:
-    """Import-test critical packages. If any are missing, re-run
-    `pip install -r requirements-*.txt` to repair the venv in place."""
-    import importlib
+    """Check critical packages are installed (metadata only — no
+    imports). If any are missing, re-run `pip install -r
+    requirements-*.txt` to repair the venv in place."""
+    import importlib.util
 
     # Map of (importable module name) → (human label for log lines).
     # Whisper / pyannote / faster-whisper are intentionally NOT here:
@@ -155,9 +168,18 @@ def _verify_and_repair_dependencies() -> None:
     }
     missing: list[str] = []
     for module, label in critical.items():
+        # find_spec checks installed-ness from package metadata WITHOUT
+        # executing the import. The old import_module() check silently
+        # imported sentence_transformers + speechbrain — both of which
+        # pull in torch — at process start, BEFORE uvicorn could bind.
+        # On corporate machines where AV scans every native DLL, that
+        # held /health hostage for 30s–3min and the frontend sat on
+        # "Starting backend…" the whole time. Metadata check: <10ms.
         try:
-            importlib.import_module(module)
-        except ImportError:
+            found = importlib.util.find_spec(module) is not None
+        except (ImportError, ValueError):
+            found = False
+        if not found:
             missing.append(label)
             sys.stderr.write(
                 f"[deps] {module} is missing from the venv\n")
@@ -626,6 +648,10 @@ class Services:
         self.models_ready = False
         self.models_loading = False
         self.models_error: Optional[str] = None
+        # Makes ensure_models_loaded's check-and-set atomic so only ONE
+        # thread can ever run the native torch/ctranslate2 init — see
+        # the single-flight note on ensure_models_loaded.
+        self._model_load_lock = threading.Lock()
         self.record_started_at: Optional[datetime] = None
         # Latest status message from the recording/processing pipeline,
         # surfaced to the frontend via /recording/status so the user can
@@ -821,11 +847,24 @@ class Services:
         return self.settings
 
     def ensure_models_loaded(self):
-        """Blocking: load transcription + diarization engines if not loaded."""
-        if self.models_ready or self.models_loading:
-            return
-        self.models_loading = True
-        self.models_error = None
+        """Blocking: load transcription + diarization engines if not loaded.
+
+        SINGLE-FLIGHT — the check-and-set below is atomic under
+        _model_load_lock. Before this, five endpoints each spawned their
+        own load thread (Record-view mount fires /models/load, auto-
+        record start, manual start, both process endpoints); at app-open
+        several fired near-simultaneously, both threads passed the
+        non-atomic `ready or loading` check, and two concurrent
+        torch/ctranslate2 native inits in one process intermittently
+        segfaulted (0xC0000005) — the 2026-07-21 rust.log crash loop
+        during "Loading transcription engine". One loader ever; every
+        other caller returns immediately and polls models_ready.
+        """
+        with self._model_load_lock:
+            if self.models_ready or self.models_loading:
+                return
+            self.models_loading = True
+            self.models_error = None
         try:
             s = self.load_settings()
             if not s.is_configured:
@@ -2145,8 +2184,12 @@ def _auto_record_start(meeting: dict) -> None:
     svc.auto_record_subject = (subject[:120] if subject else name) or "Untitled meeting"
 
     # Mirror the HTTP route's pre-warm step so live transcription has
-    # Whisper ready when the first window completes.
+    # Whisper ready when the first window completes. ONLY when live
+    # transcription is on — recording itself never needs models, and a
+    # model load that crashes (the 0xC0000005 class) must not be able
+    # to take down a recording that didn't ask for AI.
     if (svc.settings and svc.settings.is_configured
+            and svc.settings.live_transcription_enabled
             and not svc.models_ready and not svc.models_loading):
         threading.Thread(target=svc.ensure_models_loaded, daemon=True).start()
     _start_recording_sync(req)
@@ -2192,7 +2235,11 @@ async def start_recording(req: StartRecordingRequest):
     # this the first window sits waiting 5-10s for the cold model load
     # before any text appears, which feels like the live preview is
     # broken. The load runs in a thread; recording starts immediately.
+    # ONLY when live transcription is on — recording never requires
+    # models; with the preview off there is nothing to warm, and a
+    # crashing model load must not be able to touch a recording.
     if (svc.settings and svc.settings.is_configured
+            and svc.settings.live_transcription_enabled
             and not svc.models_ready and not svc.models_loading):
         threading.Thread(target=svc.ensure_models_loaded, daemon=True).start()
     try:
