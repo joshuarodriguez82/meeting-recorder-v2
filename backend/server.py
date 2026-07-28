@@ -336,7 +336,10 @@ from services.copilot_meeting_type_service import CoPilotMeetingTypeService
 from services.engagement_overlay_service import (
     EngagementOverlayService, KNOWN_STATUSES,
 )
-from services.daily_briefing_service import DailyBriefingService
+from services.daily_briefing_service import (
+    BriefingUnreadableError,
+    DailyBriefingService,
+)
 from services.outlook_web_scraper import (
     OutlookAuthExpired, OutlookScraperError, OutlookScraperUnavailable,
     format_for_briefing_parser, open_signin_window,
@@ -6060,7 +6063,16 @@ async def get_today_briefing():
     svc.load_settings()
     if not svc.daily_briefing_svc:
         raise HTTPException(status_code=503, detail="Briefing service not initialized")
-    data = await asyncio.to_thread(svc.daily_briefing_svc.get, None)
+    try:
+        data = await asyncio.to_thread(svc.daily_briefing_svc.get, None)
+    except BriefingUnreadableError as e:
+        # Present-but-unreadable must NOT look like "no briefing today".
+        # Returning {} here made the Today tab fall back to its
+        # first-run import screen, so a transient read failure looked
+        # exactly like the day's briefing had been lost.
+        raise HTTPException(
+            status_code=503,
+            detail=f"Today's briefing is temporarily unreadable: {e}")
     return data or {}
 
 
@@ -6073,6 +6085,10 @@ async def get_briefing_by_date(date: str):
         data = await asyncio.to_thread(svc.daily_briefing_svc.get, date)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except BriefingUnreadableError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Briefing for {date} is temporarily unreadable: {e}")
     return data or {}
 
 

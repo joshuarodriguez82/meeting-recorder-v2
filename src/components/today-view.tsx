@@ -81,9 +81,26 @@ interface Props {
   onNavigate?: (id: string) => void;
 }
 
+/**
+ * Last successfully-loaded briefing, kept at module scope so it
+ * survives this component unmounting.
+ *
+ * Switching tabs unmounts TodayView and destroys its state. On the way
+ * back the fetch may fail or be slow (the backend restarts more eagerly
+ * since the v2.19.2 watchdog work), and `briefing` would still be null
+ * — so the tab rendered its first-run "import a briefing" screen and
+ * the whole day's briefing looked like it had vanished. It hadn't: it
+ * was on disk the entire time. Seeding from this cache means a tab
+ * switch re-renders the briefing instantly and revalidates behind it.
+ */
+let _cachedBriefing: DailyBriefing | null = null;
+
 export function TodayView({ onNavigate }: Props) {
-  const [briefing, setBriefing] = useState<DailyBriefing | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [briefing, setBriefing] = useState<DailyBriefing | null>(_cachedBriefing);
+  // Only show the full-page spinner on a genuine cold start.
+  const [loading, setLoading] = useState(_cachedBriefing === null);
+  // Distinct from "no briefing exists": the fetch itself failed.
+  const [loadFailed, setLoadFailed] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [importing, setImporting] = useState(false);
@@ -110,14 +127,25 @@ export function TodayView({ onNavigate }: Props) {
   const refreshBriefing = useCallback(async () => {
     try {
       const data = await api.getTodayBriefing();
-      // Backend returns {} when no briefing exists for today.
+      // Backend returns {} only when it affirmatively has no briefing
+      // for today. A file that exists but can't be read now comes back
+      // as a 503 and lands in the catch below instead, so it can never
+      // masquerade as "you haven't imported one yet".
       if (data && typeof data === "object" && "date" in (data as object)) {
-        setBriefing(data as DailyBriefing);
+        _cachedBriefing = data as DailyBriefing;
+        setBriefing(_cachedBriefing);
       } else {
+        _cachedBriefing = null;
         setBriefing(null);
       }
+      setLoadFailed(false);
     } catch (e) {
+      // Fetch failed — backend restarting, slow, or briefly unreadable.
+      // Keep showing whatever we already have and flag it. Falling back
+      // to the import screen here is what made a perfectly intact
+      // briefing look lost.
       console.warn("Briefing fetch failed", e);
+      setLoadFailed(true);
     } finally {
       setLoading(false);
     }
@@ -138,6 +166,15 @@ export function TodayView({ onNavigate }: Props) {
     const t = setInterval(refreshRecording, 5_000);
     return () => clearInterval(t);
   }, [refreshBriefing, refreshRecording]);
+
+  // A failed briefing load is usually transient — the backend is
+  // restarting, or the file was momentarily locked. Retry quietly
+  // instead of making the user notice and click something.
+  useEffect(() => {
+    if (!loadFailed) return;
+    const t = setInterval(refreshBriefing, 5_000);
+    return () => clearInterval(t);
+  }, [loadFailed, refreshBriefing]);
 
   // The dialog used to auto-pull the system clipboard on open, intending
   // to save the user a Ctrl+V if they'd just copied from M365 Copilot.
@@ -359,7 +396,32 @@ export function TodayView({ onNavigate }: Props) {
         </div>
       )}
 
-      {!briefing && <EmptyState onImport={() => setImportOpen(true)} />}
+      {/* Only offer the first-run import screen when the backend has
+          actually told us there's no briefing. If the load failed, say
+          so and keep retrying — telling the user to import a briefing
+          they already imported is worse than saying nothing. */}
+      {!briefing && !loadFailed && (
+        <EmptyState onImport={() => setImportOpen(true)} />
+      )}
+      {!briefing && loadFailed && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 p-6 text-sm dark:border-amber-900 dark:bg-amber-950/40">
+          <div className="font-medium text-amber-900 dark:text-amber-200">
+            Couldn&apos;t load today&apos;s briefing
+          </div>
+          <p className="mt-1 text-amber-800 dark:text-amber-300">
+            Your briefing is still saved — the app just couldn&apos;t read it
+            right now (the backend may be restarting). Retrying automatically…
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            className="mt-3"
+            onClick={refreshBriefing}
+          >
+            Retry now
+          </Button>
+        </div>
+      )}
 
       {briefing && (
         <>
