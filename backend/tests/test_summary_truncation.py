@@ -14,19 +14,26 @@ here:
 """
 
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-# summarizer.py imports the anthropic SDK at module load, and building a
-# Summarizer touches config.settings (python-dotenv). Neither is in the
-# lightweight test env.
+# summarizer.py imports the anthropic SDK at module load; the test env is
+# deliberately lightweight (numpy/scipy/soundfile/fastapi only).
 for _m in ("anthropic", "dotenv"):
     sys.modules.setdefault(_m, MagicMock())
 
 from core.summarizer import Summarizer, _flag_truncation  # noqa: E402
 
 
-def _summarizer(provider: str = "anthropic") -> Summarizer:
-    return Summarizer(api_key="x", model="claude-haiku-4-5", provider=provider)
+def _budget_for(provider: str, base: int) -> int:
+    """Evaluate `_budget` without constructing a real Summarizer.
+
+    Building one for provider="openai" requires the `openai` package,
+    which the CI test env intentionally doesn't install — and the budget
+    rule is pure logic over `self._provider`, so a duck-typed stub tests
+    exactly what matters with no SDK dependency.
+    """
+    return Summarizer._budget(SimpleNamespace(_provider=provider), base)
 
 
 # ── The marker: truncation is never silent ──────────────────────────
@@ -56,20 +63,17 @@ def test_marker_survives_trailing_whitespace():
 def test_summary_budget_is_large_enough_for_a_real_meeting():
     # 1024 tokens (~750 words) truncated real summaries. Anything at or
     # below that ceiling reintroduces the bug.
-    budget = _summarizer()._budget(8192)
+    budget = _budget_for("anthropic", 8192)
     assert budget >= 8192, f"summary budget regressed to {budget}"
 
 
 def test_openai_compatible_providers_get_headroom_for_hidden_reasoning():
     # Gemini 2.5 et al burn hidden reasoning tokens against max_tokens —
     # the same effect that made the live co-pilot return nothing at all.
-    anthropic_budget = _summarizer("anthropic")._budget(8192)
-    openai_budget = _summarizer("openai")._budget(8192)
-    assert openai_budget > anthropic_budget, (
+    assert _budget_for("openai", 8192) > _budget_for("anthropic", 8192), (
         "OpenAI-compatible providers need a larger budget than Anthropic "
         "for the same visible output")
 
 
 def test_budget_scales_with_the_requested_base():
-    s = _summarizer()
-    assert s._budget(4096) < s._budget(8192)
+    assert _budget_for("anthropic", 4096) < _budget_for("anthropic", 8192)
