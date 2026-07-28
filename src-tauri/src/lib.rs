@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1031,6 +1031,123 @@ fn port_in_use(port: u16) -> bool {
     }
 }
 
+/// Can the backend actually SERVE a request right now?
+///
+/// `try_wait()` answers only "is the process alive", which is the wrong
+/// question. A backend can be running and still be useless to the app:
+/// wedged on a native model load, its listening socket broken across a
+/// sleep/resume cycle, or its event loop blocked on a stalled network
+/// write. In every one of those states the old watchdog saw a live PID,
+/// concluded all was well, and left the user with an app that couldn't
+/// record until they restarted it manually.
+///
+/// `/health` is auth-exempt server-side (`_AUTH_EXEMPT_PATHS` in
+/// server.py), so this needs no token. Hand-rolled HTTP/1.1 over
+/// `TcpStream` to avoid pulling an HTTP client into the shell for one
+/// request. Generous timeouts: a busy backend is not a dead one, and a
+/// false negative here costs a kill.
+fn backend_healthy() -> bool {
+    probe_health(backend_port())
+}
+
+/// Port-parameterised body of [`backend_healthy`], split out so the
+/// probe can be exercised against a fake server in tests.
+fn probe_health(port: u16) -> bool {
+    let addr = match format!("127.0.0.1:{}", port).parse() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    let mut stream = match TcpStream::connect_timeout(&addr, Duration::from_millis(1500)) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(1500)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(3000)));
+    let req = format!(
+        "GET /health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+        port
+    );
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 32];
+    let healthy = match stream.read(&mut buf) {
+        Ok(n) if n > 0 => {
+            let head = &buf[..n];
+            head.starts_with(b"HTTP/1.1 200") || head.starts_with(b"HTTP/1.0 200")
+        }
+        _ => false,
+    };
+    let _ = stream.shutdown(Shutdown::Both);
+    healthy
+}
+
+/// What the watchdog should do on a given tick.
+#[derive(Debug, PartialEq, Eq)]
+enum WatchdogAction {
+    /// Backend is serving requests — nothing to do.
+    Idle,
+    /// Alive but not answering yet. Keep counting; a backend mid-model-load
+    /// or mid-transcription is briefly unresponsive and must not be killed.
+    WaitUnhealthy,
+    /// Alive but unreachable past the limit — wedged. Kill it so it can
+    /// be replaced.
+    KillThenRespawn,
+    /// Down, but the port hasn't been released yet. A wait state, NOT a
+    /// failure — see the regression note in the tests.
+    WaitForPort,
+    /// Down and the port is free — start a fresh one.
+    Respawn,
+}
+
+/// Pure watchdog policy, extracted so the decision that used to strand
+/// users without a backend is unit-testable.
+///
+/// `unhealthy_streak` counts consecutive failed health probes INCLUDING
+/// the current tick.
+fn next_watchdog_action(
+    child_alive: bool,
+    healthy: bool,
+    unhealthy_streak: u32,
+    unhealthy_limit: u32,
+    port_held: bool,
+) -> WatchdogAction {
+    if child_alive {
+        if healthy {
+            return WatchdogAction::Idle;
+        }
+        if unhealthy_streak < unhealthy_limit {
+            return WatchdogAction::WaitUnhealthy;
+        }
+        return WatchdogAction::KillThenRespawn;
+    }
+    if port_held {
+        return WatchdogAction::WaitForPort;
+    }
+    WatchdogAction::Respawn
+}
+
+/// Kill the current sidecar so the watchdog's respawn path can replace
+/// it. Used when the process is alive but has stopped answering.
+fn kill_backend_process(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<BackendProcess>() {
+        if let Ok(mut guard) = state.0.lock() {
+            if let Some(mut child) = guard.take() {
+                match child.kill() {
+                    Ok(_) => {
+                        // Reap it so the OS releases the PID and the
+                        // listening socket, instead of leaving a zombie
+                        // that keeps the port busy.
+                        let _ = child.wait();
+                        rlog("Unresponsive backend killed");
+                    }
+                    Err(e) => rlog(&format!("Failed to kill unresponsive backend: {}", e)),
+                }
+            }
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let backend = BackendProcess(Mutex::new(None));
@@ -1103,13 +1220,25 @@ pub fn run() {
             // after a short delay.
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
-                let mut consecutive_restarts = 0;
+                // Consecutive health-probe failures against a process
+                // that is still ALIVE. Six polls ≈ 30s of sustained
+                // unreachability before we conclude it's wedged and
+                // kill it. Deliberately patient: a backend mid-model-load
+                // or mid-transcription can be briefly unresponsive, and
+                // killing one of those costs the user real work.
+                const UNHEALTHY_LIMIT: u32 = 6;
+                let mut unhealthy_streak: u32 = 0;
+                // Backoff applies ONLY to genuinely failed spawn attempts.
+                let mut respawn_backoff_secs: u64 = 5;
+
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(5));
                     if BOOTSTRAPPING.load(Ordering::Relaxed) {
-                        consecutive_restarts = 0;
+                        unhealthy_streak = 0;
+                        respawn_backoff_secs = 5;
                         continue;
                     }
+
                     let child_alive = if let Some(state) = app_handle.try_state::<BackendProcess>() {
                         if let Ok(mut guard) = state.0.lock() {
                             match guard.as_mut() {
@@ -1130,22 +1259,74 @@ pub fn run() {
                             }
                         } else { true }
                     } else { true };
-                    if child_alive {
-                        consecutive_restarts = 0;
-                        continue;
+
+                    // Alive is necessary but not sufficient — ask whether
+                    // it can actually answer. Probe only when alive; a
+                    // dead backend needs no probe.
+                    let healthy = child_alive && backend_healthy();
+                    if child_alive && !healthy {
+                        unhealthy_streak += 1;
                     }
-                    consecutive_restarts += 1;
-                    if consecutive_restarts > 5 {
-                        rlog("Backend crashed 5+ times in a row — giving up. \
-                              Check backend.log for the cause, reinstall if needed.");
-                        break;
+
+                    match next_watchdog_action(
+                        child_alive,
+                        healthy,
+                        unhealthy_streak,
+                        UNHEALTHY_LIMIT,
+                        port_in_use(backend_port()),
+                    ) {
+                        WatchdogAction::Idle => {
+                            unhealthy_streak = 0;
+                            respawn_backoff_secs = 5;
+                            continue;
+                        }
+                        WatchdogAction::WaitUnhealthy => continue,
+                        WatchdogAction::WaitForPort => {
+                            // The port can stay bound after the process
+                            // dies (Windows TIME_WAIT, a lingering
+                            // grandchild). This is a WAIT state, not a
+                            // failure. The old code counted it against a
+                            // 5-strike budget and then permanently
+                            // `break`-ed out of this loop — so a crash
+                            // whose port took ~25s to clear left the app
+                            // with no backend and no recovery until the
+                            // user restarted it. That was the "reconnect
+                            // before you can record" bug.
+                            rlog("Backend down, port still held — waiting for it to clear");
+                            continue;
+                        }
+                        WatchdogAction::KillThenRespawn => {
+                            rlog(&format!(
+                                "Backend alive but unreachable for ~{}s — killing it \
+                                 so it can be replaced",
+                                unhealthy_streak * 5));
+                            kill_backend_process(&app_handle);
+                            unhealthy_streak = 0;
+                            // Port likely still held for a moment; next
+                            // tick handles the respawn.
+                            continue;
+                        }
+                        WatchdogAction::Respawn => {}
                     }
-                    if port_in_use(backend_port()) {
-                        continue;
-                    }
-                    rlog(&format!("Respawning backend (attempt {})", consecutive_restarts));
-                    if let Err(e) = spawn_python_backend(&app_handle) {
-                        rlog(&format!("Respawn failed: {}", e));
+                    unhealthy_streak = 0;
+
+                    rlog("Respawning backend");
+                    match spawn_python_backend(&app_handle) {
+                        Ok(_) => {
+                            respawn_backoff_secs = 5;
+                        }
+                        Err(e) => {
+                            // Never give up permanently — back off and
+                            // keep trying. A transient failure (AV lock,
+                            // disk pressure) must not brick recovery for
+                            // the rest of the app's lifetime.
+                            rlog(&format!(
+                                "Respawn failed: {} — retrying in {}s",
+                                e, respawn_backoff_secs));
+                            std::thread::sleep(
+                                std::time::Duration::from_secs(respawn_backoff_secs));
+                            respawn_backoff_secs = (respawn_backoff_secs * 2).min(60);
+                        }
                     }
                 }
             });
@@ -1638,4 +1819,118 @@ fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
         *state.0.lock().unwrap() = Some(child);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod watchdog_tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::thread;
+
+    // ── Policy: the decision that used to strand users ──────────────
+
+    #[test]
+    fn serving_backend_is_left_alone() {
+        assert_eq!(
+            next_watchdog_action(true, true, 0, 6, true),
+            WatchdogAction::Idle
+        );
+    }
+
+    #[test]
+    fn briefly_unresponsive_backend_is_not_killed() {
+        // Mid-model-load / mid-transcription: alive, not answering, but
+        // well under the limit. Killing here would cost the user work.
+        for streak in 1..6 {
+            assert_eq!(
+                next_watchdog_action(true, false, streak, 6, true),
+                WatchdogAction::WaitUnhealthy,
+                "streak {streak} should still be tolerated"
+            );
+        }
+    }
+
+    #[test]
+    fn wedged_backend_is_killed_once_past_the_limit() {
+        // The case try_wait() can never see: process alive, socket dead
+        // (sleep/resume), unreachable for ~30s.
+        assert_eq!(
+            next_watchdog_action(true, false, 6, 6, true),
+            WatchdogAction::KillThenRespawn
+        );
+    }
+
+    #[test]
+    fn dead_backend_with_held_port_waits_instead_of_giving_up() {
+        // THE REGRESSION. A crashed backend leaves the port in TIME_WAIT
+        // (up to ~2 min on Windows). The old watchdog counted each of
+        // these ticks as a failed restart and permanently exited after
+        // five — leaving the app with no backend for the rest of its
+        // life, which is why recording required restarting the app.
+        // This must be a wait, forever if necessary, never a give-up.
+        for streak in [0, 5, 50, 5_000] {
+            assert_eq!(
+                next_watchdog_action(false, false, streak, 6, true),
+                WatchdogAction::WaitForPort,
+                "a held port must never be treated as a failed restart"
+            );
+        }
+    }
+
+    #[test]
+    fn dead_backend_with_free_port_respawns() {
+        assert_eq!(
+            next_watchdog_action(false, false, 0, 6, false),
+            WatchdogAction::Respawn
+        );
+    }
+
+    // ── Probe: "is it actually serving?" ────────────────────────────
+
+    fn serve_once(response: &'static [u8]) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                let mut buf = [0u8; 512];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(response);
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn probe_accepts_a_200() {
+        let port = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+        assert!(probe_health(port));
+    }
+
+    #[test]
+    fn probe_rejects_a_500() {
+        let port = serve_once(b"HTTP/1.1 500 Internal Server Error\r\n\r\n");
+        assert!(!probe_health(port));
+    }
+
+    #[test]
+    fn probe_rejects_nothing_listening() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // free it, so the connect refuses
+        assert!(!probe_health(port));
+    }
+
+    #[test]
+    fn probe_rejects_a_socket_that_accepts_but_never_answers() {
+        // The wedged backend: TCP accept succeeds (so port_in_use and a
+        // liveness check both look fine) but no HTTP response ever comes.
+        // The read timeout must make this a failure, not a hang.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            let _held = listener.accept();
+            thread::sleep(Duration::from_secs(10));
+        });
+        assert!(!probe_health(port));
+    }
 }
