@@ -126,3 +126,11 @@ jobs:
           printf 'PK\005\006\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0' > backend-bundle.zip
       - name: cargo check
         run: cargo check --manifest-path src-tauri/Cargo.toml
+      # Unit tests for the backend watchdog policy + health probe. Linux
+      # only: the tests are pure std (socket + decision logic) with no
+      # platform-specific branches, and `cargo test` needs full codegen
+      # where `cargo check` doesn't — running it on all three platforms
+      # would roughly triple this job for no added coverage.
+      - name: cargo test
+        if: runner.os == 'Linux'
+        run: cargo test --lib --manifest-path src-tauri/Cargo.toml
