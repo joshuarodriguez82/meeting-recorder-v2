@@ -217,6 +217,32 @@ def _visual_instruction(n_imgs: int) -> str:
     )
 
 
+def _flag_truncation(text: str, truncated: bool, limit: int, model: str) -> str:
+    """Make a hit token ceiling VISIBLE instead of silently returning a
+    half-written artifact.
+
+    Field repro (2026-07-31): meeting summaries stopped mid-sentence
+    ("...based on KB match quality,") with no error anywhere. The
+    summary call was capped at 1024 tokens (~750 words) and NOTHING in
+    this module inspected `stop_reason` / `finish_reason`, so a
+    truncated summary was saved, exported, and emailed as if it were
+    complete. Raising the budgets fixes the common case; this makes any
+    remaining case self-evident instead of a mystery the user has to
+    notice by reading to the end.
+    """
+    if not truncated:
+        return text
+    logger.warning(
+        f"Output TRUNCATED at max_tokens={limit} on {model} — returned "
+        f"{len(text)} chars; artifact is incomplete."
+    )
+    return (
+        f"{text.rstrip()}\n\n---\n"
+        f"⚠️ **This output was cut off** — the model hit its {limit:,}-token "
+        f"limit. Re-run this step to regenerate it in full."
+    )
+
+
 def _coerce_json(text: str) -> Optional[dict]:
     """Best-effort 'model text → dict'. Tolerates code fences and a
     little surrounding prose by falling back to the outermost {...}
@@ -370,6 +396,17 @@ class Summarizer:
                 base_url=effective_base,
             )
 
+    def _budget(self, base: int) -> int:
+        """Output-token budget for a long-form artifact.
+
+        Non-Anthropic providers get extra headroom: on OpenAI-compatible
+        endpoints, "thinking" models (Gemini 2.5 and friends) spend
+        hidden reasoning tokens against max_tokens, so an identical
+        budget yields materially LESS visible output — the same effect
+        that made the live co-pilot return empty results before v2.17.0.
+        """
+        return base if self._provider == "anthropic" else int(base * 1.5)
+
     async def _chat(self, prompt: str, max_tokens: int = 1024,
                     timeout: float = 60.0,
                     image_paths: Optional[List[str]] = None,
@@ -405,7 +442,12 @@ class Summarizer:
                 ),
                 timeout=timeout,
             )
-            return msg.content[0].text
+            return _flag_truncation(
+                msg.content[0].text,
+                getattr(msg, "stop_reason", None) == "max_tokens",
+                max_tokens,
+                self._model,
+            )
         # OpenAI-compatible (OpenRouter / Ollama / LM Studio / ...).
         # Text-only — see docstring.
         #
@@ -435,7 +477,12 @@ class Summarizer:
                         **kwargs, response_format={"type": "json_object"}),
                     timeout=local_timeout,
                 )
-                return resp.choices[0].message.content or ""
+                return _flag_truncation(
+                    resp.choices[0].message.content or "",
+                    getattr(resp.choices[0], "finish_reason", None) == "length",
+                    max_tokens,
+                    self._model,
+                )
             except Exception as e:
                 logger.info(
                     "response_format=json_object rejected by %s (%s); "
@@ -444,7 +491,12 @@ class Summarizer:
             self._openai_client.chat.completions.create(**kwargs),
             timeout=local_timeout,
         )
-        return resp.choices[0].message.content or ""
+        return _flag_truncation(
+            resp.choices[0].message.content or "",
+            getattr(resp.choices[0], "finish_reason", None) == "length",
+            max_tokens,
+            self._model,
+        )
 
     async def stream_chat(self, prompt: str, max_tokens: int = 2048):
         """
@@ -541,7 +593,7 @@ class Summarizer:
         try:
             summary = await self._chat(
                 _with_user_notes(instruction, transcript, notes),
-                max_tokens=1024, timeout=90.0,
+                max_tokens=self._budget(8192), timeout=180.0,
                 image_paths=image_paths,
             )
             logger.info("Summary received.")
@@ -808,7 +860,7 @@ class Summarizer:
         try:
             result = await self._chat(
                 _with_user_notes(instruction, transcript, notes),
-                max_tokens=1024, timeout=60.0,
+                max_tokens=self._budget(8192), timeout=120.0,
                 image_paths=image_paths,
             )
             logger.info("Action items extracted.")
@@ -848,7 +900,7 @@ class Summarizer:
         try:
             result = await self._chat(
                 _with_user_notes(instruction, transcript, notes),
-                max_tokens=1024, timeout=60.0,
+                max_tokens=self._budget(8192), timeout=120.0,
                 image_paths=image_paths,
             )
             logger.info("Decisions extracted.")
@@ -905,7 +957,7 @@ class Summarizer:
         prompt = _with_user_notes(instruction, transcript, notes)
         try:
             raw = await self._chat(
-                prompt, max_tokens=2048, timeout=90.0,
+                prompt, max_tokens=self._budget(4096), timeout=120.0,
                 image_paths=image_paths,
             )
             parsed = _coerce_json(raw)
@@ -918,7 +970,7 @@ class Summarizer:
                     "valid and parseable, with no surrounding text or "
                     "code fences:\n\n" + raw
                 )
-                raw = await self._chat(repair, max_tokens=2048, timeout=90.0)
+                raw = await self._chat(repair, max_tokens=self._budget(4096), timeout=120.0)
                 parsed = _coerce_json(raw)
             if parsed is None:
                 # Log a truncated preview of what the model actually
@@ -1034,7 +1086,7 @@ class Summarizer:
                     f"{user_context_block}\n\n"
                     f"=== PRIOR MEETING NOTES ===\n{prior_notes}"
                 ),
-                max_tokens=1500, timeout=90.0,
+                max_tokens=self._budget(4096), timeout=120.0,
             )
             logger.info("Calendar-based prep brief generated.")
             return result
@@ -1088,7 +1140,7 @@ class Summarizer:
                     f"{user_block}\n\n"
                     f"=== PRIOR MEETING NOTES ===\n{prior_notes}"
                 ),
-                max_tokens=1024, timeout=60.0,
+                max_tokens=self._budget(4096), timeout=120.0,
             )
             logger.info("Prep brief generated.")
             return result
@@ -1126,7 +1178,7 @@ class Summarizer:
         try:
             result = await self._chat(
                 _with_user_notes(instruction, transcript, notes),
-                max_tokens=2048, timeout=90.0,
+                max_tokens=self._budget(8192), timeout=120.0,
                 image_paths=image_paths,
             )
             logger.info("Requirements extracted.")
@@ -1162,7 +1214,7 @@ class Summarizer:
                     "{\"SPEAKER_00\": \"John Smith\", \"SPEAKER_02\": \"Sarah Jones\"}\n\n"
                     f"Transcript:\n{transcript}"
                 ),
-                max_tokens=512, timeout=30.0,
+                max_tokens=self._budget(1024), timeout=60.0,
             )).strip()
             logger.info(f"Speaker identification response: {raw}")
 
@@ -1303,7 +1355,7 @@ class Summarizer:
         )
 
         try:
-            raw = await self._chat(instruction, max_tokens=2048, timeout=60.0)
+            raw = await self._chat(instruction, max_tokens=self._budget(4096), timeout=120.0)
         except Exception as e:
             logger.warning(
                 f"parse_daily_briefing chat failed: {type(e).__name__}: {e}")
