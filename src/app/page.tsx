@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { toast } from "sonner";
-import { api, formatBytes, openExternal, type Meeting, type SessionSummary } from "@/lib/api";
+import { api, formatBytes, openExternal, setRecordingActive, type Meeting, type SessionSummary } from "@/lib/api";
 import {
   Mic, History, CheckSquare, Target, Search,
   LayoutDashboard, Settings as SettingsIcon, HelpCircle, Loader2,
@@ -143,6 +143,9 @@ export default function Home() {
   // Consecutive failed status-poll ticks — 2+ shows the "Reconnecting"
   // banner instead of raw fetch errors while a respawned backend boots.
   const failedTicksRef = useRef(0);
+  // Last recording state pushed down to the Tauri shell, so we only
+  // invoke when it actually changes.
+  const lastRecordingFlagRef = useRef<boolean | null>(null);
   // Live timer for the recording badge. Ticks every second while a
   // recording is active so the badge label shows real elapsed time.
   const [recordingElapsedS, setRecordingElapsedS] = useState(0);
@@ -232,6 +235,16 @@ export default function Home() {
 
         // Mirror the recording state so the persistent badge can
         // render on every tab — not just inside the Record view.
+        // Keep the shell's watchdog in sync with reality. This poll is
+        // the authoritative source: it also covers recordings the user
+        // never clicked Start for (calendar auto-record) and ones still
+        // running when the app was reopened. Only push on change so we
+        // aren't invoking Tauri every 2s.
+        if (lastRecordingFlagRef.current !== !!s.is_recording) {
+          lastRecordingFlagRef.current = !!s.is_recording;
+          void setRecordingActive(!!s.is_recording);
+        }
+
         setRecordingNow({
           isRecording: !!s.is_recording,
           sessionId: s.session_id ?? null,
