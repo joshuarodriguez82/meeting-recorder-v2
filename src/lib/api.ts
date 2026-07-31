@@ -74,6 +74,24 @@ async function authHeaders(): Promise<Record<string, string>> {
  * "Join meeting" link (and any external link) needs this. Falls back
  * to window.open outside Tauri (plain `npm run dev`).
  */
+/**
+ * Tell the Tauri shell whether a recording is in progress.
+ *
+ * The shell's backend watchdog kills an unresponsive backend so it can
+ * be replaced — correct when idle, catastrophic mid-recording, because
+ * the meeting can't be re-run. The Rust side can't ask the backend
+ * (it's unreachable precisely when the watchdog is deciding), so the
+ * UI pushes the state down. Best-effort: outside Tauri this is a no-op.
+ */
+export async function setRecordingActive(active: boolean): Promise<void> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("set_recording_active", { active });
+  } catch {
+    /* not running under Tauri, or the command isn't available */
+  }
+}
+
 export async function openExternal(url: string): Promise<void> {
   try {
     const { invoke } = await import("@tauri-apps/api/core");
