@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, openExternal, openSystemSettings, type AudioDevice, type AudioSyncRisk, type Meeting, type RecordingStatus, type SessionFull, type SessionSummary } from "@/lib/api";
+import { api, openExternal, openSystemSettings, setRecordingActive, type AudioDevice, type AudioSyncRisk, type Meeting, type RecordingStatus, type SessionFull, type SessionSummary } from "@/lib/api";
 import { toast } from "sonner";
 import {
   Calendar as CalendarIcon,
@@ -569,6 +569,10 @@ export function RecordView({
         conference_room_mode: conferenceRoomMode,
       });
       setRecording(true);
+      // Suppress the shell's watchdog kill for the duration of the
+      // recording — an unresponsive backend may still be capturing
+      // audio, and this meeting can't be re-run.
+      void setRecordingActive(true);
       setDuration(0);
       setScreenshotCount(0);
       setSession(null);
@@ -605,6 +609,7 @@ export function RecordView({
     try {
       const res = await api.stopRecording();
       setRecording(false);
+      void setRecordingActive(false);
       toast.success("Recording saved", { description: res.audio_path });
       // Reload the session into the UI
       const s = await api.getSessionFull(res.session_id);
