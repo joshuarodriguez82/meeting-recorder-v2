@@ -160,6 +160,29 @@ fn get_backend_token() -> String {
 /// "respawn" a backend that hasn't been spawned yet.
 static BOOTSTRAPPING: AtomicBool = AtomicBool::new(false);
 
+/// True while a recording is in progress, set by the frontend via
+/// `set_recording_active`.
+///
+/// The watchdog must NEVER kill the backend while this is true. A
+/// recording is the one thing in this app that cannot be re-run: the
+/// meeting is over. Trading a possibly-wedged backend for a lost
+/// recording is never the right call, so when this is set the watchdog
+/// downgrades to "restart only if the process is genuinely dead".
+static RECORDING_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Tauri command: tell the shell whether a recording is in progress.
+///
+/// The Rust side can't ask the backend this — when the backend is
+/// unreachable (exactly when the watchdog is deciding whether to kill
+/// it) there's nobody to ask. So the frontend, which knows, pushes the
+/// state down.
+#[tauri::command]
+fn set_recording_active(active: bool) {
+    RECORDING_ACTIVE.store(active, Ordering::Relaxed);
+    rlog(&format!("Recording active = {active} (watchdog kill {})",
+                  if active { "SUPPRESSED" } else { "allowed" }));
+}
+
 // ─── Platform helpers ───────────────────────────────────────────────
 //
 // The whole shell is structured around three platform abstractions:
@@ -1179,7 +1202,8 @@ pub fn run() {
             capture_screenshot,
             download_and_run_update,
             open_external,
-            open_system_settings
+            open_system_settings,
+            set_recording_active
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -1221,21 +1245,34 @@ pub fn run() {
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
                 // Consecutive health-probe failures against a process
-                // that is still ALIVE. Six polls ≈ 30s of sustained
-                // unreachability before we conclude it's wedged and
-                // kill it. Deliberately patient: a backend mid-model-load
-                // or mid-transcription can be briefly unresponsive, and
-                // killing one of those costs the user real work.
-                const UNHEALTHY_LIMIT: u32 = 6;
+                // that is still ALIVE, before we conclude it's wedged.
+                //
+                // This was 6 (~30s) and that was WRONG — it killed
+                // healthy backends. Loading the transcription and
+                // diarization models holds Python's GIL and blocks the
+                // event loop; field logs show that taking 7-36s, longer
+                // on a cold start behind antivirus. A freshly respawned
+                // backend would go quiet loading models, get killed at
+                // 30s, respawn, and repeat — the watchdog fighting the
+                // very recovery it exists to perform. 24 polls (~2 min)
+                // clears the realistic slow case with room to spare.
+                const UNHEALTHY_LIMIT: u32 = 24;
+                // Don't health-judge a backend that hasn't had time to
+                // finish importing and bind its port yet. Without this,
+                // every respawn starts its unhealthy streak immediately
+                // and races the model load.
+                const SPAWN_GRACE: Duration = Duration::from_secs(60);
                 let mut unhealthy_streak: u32 = 0;
                 // Backoff applies ONLY to genuinely failed spawn attempts.
                 let mut respawn_backoff_secs: u64 = 5;
+                let mut last_spawn = std::time::Instant::now();
 
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(5));
                     if BOOTSTRAPPING.load(Ordering::Relaxed) {
                         unhealthy_streak = 0;
                         respawn_backoff_secs = 5;
+                        last_spawn = std::time::Instant::now();
                         continue;
                     }
 
@@ -1260,12 +1297,34 @@ pub fn run() {
                         } else { true }
                     } else { true };
 
+                    // A backend still inside its startup grace window is
+                    // not "unhealthy" — it's booting. Skip the probe
+                    // entirely so importing/model-loading can't build a
+                    // streak against it.
+                    if child_alive && last_spawn.elapsed() < SPAWN_GRACE {
+                        unhealthy_streak = 0;
+                        continue;
+                    }
+
                     // Alive is necessary but not sufficient — ask whether
                     // it can actually answer. Probe only when alive; a
                     // dead backend needs no probe.
                     let healthy = child_alive && backend_healthy();
                     if child_alive && !healthy {
                         unhealthy_streak += 1;
+                    }
+
+                    // A recording is unrepeatable. While one is running
+                    // we never kill an alive backend, however unhealthy
+                    // it looks — an unresponsive recorder may still be
+                    // capturing audio to disk, and killing it guarantees
+                    // the loss that health-checking was meant to prevent.
+                    if child_alive && !healthy
+                        && RECORDING_ACTIVE.load(Ordering::Relaxed)
+                    {
+                        rlog("Backend unresponsive but a RECORDING IS ACTIVE — \
+                              refusing to kill it");
+                        continue;
                     }
 
                     match next_watchdog_action(
@@ -1302,6 +1361,7 @@ pub fn run() {
                                 unhealthy_streak * 5));
                             kill_backend_process(&app_handle);
                             unhealthy_streak = 0;
+                            last_spawn = std::time::Instant::now();
                             // Port likely still held for a moment; next
                             // tick handles the respawn.
                             continue;
@@ -1314,6 +1374,10 @@ pub fn run() {
                     match spawn_python_backend(&app_handle) {
                         Ok(_) => {
                             respawn_backoff_secs = 5;
+                            // Fresh process: restart the grace window so
+                            // its import + model load isn't judged.
+                            last_spawn = std::time::Instant::now();
+                            unhealthy_streak = 0;
                         }
                         Err(e) => {
                             // Never give up permanently — back off and
@@ -1841,9 +1905,9 @@ mod watchdog_tests {
     fn briefly_unresponsive_backend_is_not_killed() {
         // Mid-model-load / mid-transcription: alive, not answering, but
         // well under the limit. Killing here would cost the user work.
-        for streak in 1..6 {
+        for streak in 1..24 {
             assert_eq!(
-                next_watchdog_action(true, false, streak, 6, true),
+                next_watchdog_action(true, false, streak, 24, true),
                 WatchdogAction::WaitUnhealthy,
                 "streak {streak} should still be tolerated"
             );
@@ -1853,11 +1917,32 @@ mod watchdog_tests {
     #[test]
     fn wedged_backend_is_killed_once_past_the_limit() {
         // The case try_wait() can never see: process alive, socket dead
-        // (sleep/resume), unreachable for ~30s.
+        // (sleep/resume), unreachable well past the limit.
         assert_eq!(
-            next_watchdog_action(true, false, 6, 6, true),
+            next_watchdog_action(true, false, 24, 24, true),
             WatchdogAction::KillThenRespawn
         );
+    }
+
+    #[test]
+    fn model_loading_window_never_reaches_the_kill_threshold() {
+        // REGRESSION (v2.19.2 field logs): the limit was 6 polls (~30s)
+        // and it executed healthy backends. Loading the transcription
+        // and diarization models holds the GIL and blocks the event
+        // loop for 7-36s, longer on a cold start behind antivirus — so
+        // a freshly respawned backend went quiet loading models, got
+        // killed at 30s, respawned, and looped. The threshold must sit
+        // comfortably beyond the worst observed model load.
+        let worst_observed_model_load_secs = 36;
+        let polls_during_model_load = worst_observed_model_load_secs / 5;
+        for streak in 0..=polls_during_model_load {
+            assert_eq!(
+                next_watchdog_action(true, false, streak, 24, true),
+                WatchdogAction::WaitUnhealthy,
+                "a backend {}s into loading models must not be killed",
+                streak * 5
+            );
+        }
     }
 
     #[test]
