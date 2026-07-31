@@ -149,6 +149,19 @@ def _normalize_fyi(raw: Dict[str, Any]) -> Dict[str, Any]:
     return item
 
 
+class BriefingUnreadableError(RuntimeError):
+    """The briefing file for a date EXISTS but could not be read/parsed.
+
+    Deliberately distinct from "no briefing saved for this date".
+    Collapsing the two into None meant a transient read failure (cloud
+    sync stall, partial write, locked file) reached the Today tab as an
+    empty {} — indistinguishable from a first run — so the tab rendered
+    its "import a briefing" onboarding screen and looked like the day's
+    briefing had been lost. It hadn't; it just couldn't be read that
+    second.
+    """
+
+
 class DailyBriefingService:
     """Thread-safe per-date storage for parsed daily briefings."""
 
@@ -166,7 +179,15 @@ class DailyBriefingService:
             raise ValueError(f"Invalid date: {date_iso!r}")
         return self._root / f"{date_iso}.json"
 
-    def _read_locked(self, date_iso: str) -> Optional[Dict[str, Any]]:
+    def _read_locked(self, date_iso: str,
+                     strict: bool = False) -> Optional[Dict[str, Any]]:
+        """Read one date's briefing.
+
+        `strict=True` raises BriefingUnreadableError when the file is
+        present but unreadable, so callers can tell "couldn't read it"
+        apart from "there isn't one". Writers pass strict=False: a
+        corrupt file must stay overwritable, not become permanent.
+        """
         p = self._path_for(date_iso)
         if not p.exists():
             return None
@@ -174,6 +195,8 @@ class DailyBriefingService:
             return json.loads(p.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(f"briefing {date_iso} unreadable ({e})")
+            if strict:
+                raise BriefingUnreadableError(str(e)) from e
             return None
 
     def _write_locked(self, date_iso: str, data: Dict[str, Any]) -> None:
@@ -198,7 +221,7 @@ class DailyBriefingService:
     def get(self, date_iso: Optional[str] = None) -> Optional[Dict[str, Any]]:
         d = date_iso or _today_iso()
         with self._lock:
-            raw = self._read_locked(d)
+            raw = self._read_locked(d, strict=True)
         if raw is None:
             return None
         return _normalize_briefing(raw)
