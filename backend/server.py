@@ -3154,12 +3154,23 @@ async def get_session(session_id: str):
 async def delete_session(session_id: str):
     svc.load_settings()
     svc.session_svc.delete(session_id)
-    # Drop the session's semantic-search sidecar too — otherwise stale
-    # entries linger in the in-memory index and the next search would
-    # surface chunks pointing at a session that no longer exists.
+    # Drop the search cache so the in-memory chunk matrix stops
+    # answering Q&A with citations pointing at a session that no longer
+    # exists.
+    #
+    # Field report 2026-08-07 (bug 2b): SessionService.delete() now
+    # removes session_<id>.embeddings.pkl itself (across every root, not
+    # just the primary dir — see SessionService.delete's docstring), so
+    # by the time delete_session_index() ran here its file-exists check
+    # always failed and it silently skipped invalidate(). The pickle was
+    # correctly gone from disk, but the OLD in-memory matrix stayed
+    # loaded until something else happened to invalidate it — the search
+    # index kept answering with citations that 404'd. invalidate() is
+    # unconditional and cheap (it only drops a cache, index_session()
+    # rebuilds it lazily on next query), so call it regardless of
+    # whether a file happened to still be there to delete.
     if svc.search_svc:
-        await asyncio.to_thread(
-            svc.search_svc.delete_session_index, session_id)
+        await asyncio.to_thread(svc.search_svc.invalidate)
     # And the commitments sidecar — same reasoning. Stale commitments
     # pointing at a deleted session would surface in the tracker.
     if svc.commitments_svc:
@@ -3822,6 +3833,33 @@ async def suggest_tagging(req: SuggestTaggingRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _resolve_primary_file(src_dir: Path, name: str) -> Optional[Path]:
+    """Find `name` (an exact filename) anywhere under the primary
+    recordings dir, recursively. Restricted to the primary root by
+    design — see _archive_session's bug 3 note; archiving must never
+    read from an archive/extra root.
+
+    When more than one copy exists (shouldn't normally happen within a
+    single root, but subfolders make it possible), the newest by mtime
+    wins, matching SessionService._resolve_json's rule.
+    """
+    best: Optional[Path] = None
+    best_mtime = -1.0
+    try:
+        candidates = list(src_dir.rglob(name))
+    except OSError:
+        return None
+    for p in candidates:
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > best_mtime:
+            best_mtime = mtime
+            best = p
+    return best
+
+
 def _archive_session(session_id: str) -> None:
     """Copy a session's JSON + small sidecars into SESSION_ARCHIVE_DIR.
 
@@ -3847,8 +3885,16 @@ def _archive_session(session_id: str) -> None:
         names.append(f"session_{session_id}{suffix}")
     copied = 0
     for name in names:
-        src = src_dir / name
-        if not src.is_file():
+        # Bug 3 (field report 2026-08-07): this used to be a flat
+        # `src_dir / name` lookup, so a session filed into a subfolder
+        # of the primary dir (list_sessions() has recursed into
+        # subfolders since this same field report) was never found and
+        # so never reached the roaming archive. Search recursively, but
+        # ONLY within the primary dir — never an archive/extra root,
+        # since that would copy an archived file onto itself (or worse,
+        # copy a stale archive copy over a fresher local one).
+        src = _resolve_primary_file(src_dir, name)
+        if src is None or not src.is_file():
             continue
         dst = dest / name
         try:
@@ -4098,13 +4144,20 @@ def _reconcile_archive() -> int:
     enqueue-on-process path is the fast lane, this is what makes a
     missed one a delay instead of a permanent gap. Idempotent — a fully
     archived library queues nothing.
+
+    Field report 2026-08-07 (bug 3): this used a non-recursive
+    ``src_dir.glob("session_*.json")`` while list_sessions() had already
+    become recursive — a session filed into a subfolder of the primary
+    dir would show up locally but never reach the roaming archive, so
+    it would never appear on the user's other machine. rglob with the
+    same dotted-stem sidecar skip list_sessions() uses.
     """
     if not _session_archive_dir():
         return 0
     dest = Path(_session_archive_dir()).expanduser()
     src_dir = Path(svc.settings.recordings_dir)
     queued = 0
-    for src in src_dir.glob("session_*.json"):
+    for src in src_dir.rglob("session_*.json"):
         if "." in src.stem:
             continue
         dst = dest / src.name

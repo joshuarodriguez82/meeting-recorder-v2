@@ -176,6 +176,107 @@ def test_local_copy_wins_when_newer_than_archive(tmp_path):
     assert rows[0]["has_summary"] is True
 
 
+def test_load_returns_session_that_exists_only_in_extra_root(tmp_path):
+    """Bug 1: list_sessions() found it via the extra root, but load()
+    still hard-coded the primary dir and 404'd on click."""
+    local = tmp_path / "local"
+    archive = tmp_path / "synced"
+    local.mkdir(parents=True, exist_ok=True)
+    _write(archive, "ONLY01", name="archive-only")
+
+    svc = SessionService(str(local), extra_dirs=[str(archive)])
+    ids = {s["session_id"] for s in svc.list_sessions()}
+    assert "ONLY01" in ids
+
+    data = svc.load("ONLY01")
+    assert data is not None
+    assert data["display_name"] == "archive-only"
+
+    full = svc.load_full("ONLY01")
+    assert full is not None
+    assert full.session_id == "ONLY01"
+
+
+def test_load_matches_list_sessions_newest_wins_local_newer(tmp_path):
+    """load() must agree with list_sessions() about which copy is
+    canonical when the local copy is newer."""
+    local = tmp_path / "local"
+    archive = tmp_path / "synced"
+    _write(archive, "AG01", name="from-archive", mtime=1_000_000)
+    _write(local, "AG01", name="from-local", mtime=2_000_000)
+
+    svc = SessionService(str(local), extra_dirs=[str(archive)])
+    rows = svc.list_sessions()
+    assert rows[0]["display_name"] == "from-local"
+    data = svc.load("AG01")
+    assert data["display_name"] == "from-local"
+
+
+def test_load_matches_list_sessions_newest_wins_archive_newer(tmp_path):
+    """Same as above with the mtimes swapped."""
+    local = tmp_path / "local"
+    archive = tmp_path / "synced"
+    _write(archive, "AG02", name="from-archive", mtime=2_000_000)
+    _write(local, "AG02", name="from-local", mtime=1_000_000)
+
+    svc = SessionService(str(local), extra_dirs=[str(archive)])
+    rows = svc.list_sessions()
+    assert rows[0]["display_name"] == "from-archive"
+    data = svc.load("AG02")
+    assert data["display_name"] == "from-archive"
+
+
+# ── delete: sidecars + every root ──────────────────────────────────────
+
+def _touch_sidecars(d, sid, *, wav=False, log=False):
+    d.mkdir(parents=True, exist_ok=True)
+    for suffix in (".embeddings.pkl", ".commitments.json", ".item_status.json"):
+        (d / f"session_{sid}{suffix}").write_text("x", encoding="utf-8")
+    if wav:
+        (d / f"session_{sid}.wav").write_bytes(b"\x00")
+    if log:
+        (d / f"session_{sid}.log").write_text("log", encoding="utf-8")
+
+
+def test_delete_removes_json_and_all_sidecars_from_primary_and_extra_root(tmp_path):
+    local = tmp_path / "local"
+    archive = tmp_path / "synced"
+    _write(local, "DEL01")
+    _touch_sidecars(local, "DEL01", wav=True, log=True)
+    _write(archive, "DEL01")
+    _touch_sidecars(archive, "DEL01")
+
+    svc = SessionService(str(local), extra_dirs=[str(archive)])
+    svc.delete("DEL01")
+
+    for d in (local, archive):
+        for suffix in (".json", ".embeddings.pkl", ".commitments.json",
+                       ".item_status.json"):
+            assert not (d / f"session_DEL01{suffix}").exists(), (
+                f"{d / f'session_DEL01{suffix}'} was not removed")
+    assert not (local / "session_DEL01.wav").exists()
+    assert not (local / "session_DEL01.log").exists()
+
+    assert svc.list_sessions() == []
+
+
+def test_delete_removes_copy_that_only_exists_in_extra_root(tmp_path):
+    local = tmp_path / "local"
+    archive = tmp_path / "synced"
+    local.mkdir(parents=True, exist_ok=True)
+    _write(archive, "DEL02")
+    _touch_sidecars(archive, "DEL02")
+
+    svc = SessionService(str(local), extra_dirs=[str(archive)])
+    assert any(s["session_id"] == "DEL02" for s in svc.list_sessions())
+
+    svc.delete("DEL02")
+
+    assert not (archive / "session_DEL02.json").exists()
+    assert not (archive / "session_DEL02.embeddings.pkl").exists()
+    assert svc.list_sessions() == []
+
+
 def test_archive_copy_wins_when_newer_than_local(tmp_path):
     """The other machine processed it more recently — its version wins,
     so a stale local stub can't mask a finished summary."""

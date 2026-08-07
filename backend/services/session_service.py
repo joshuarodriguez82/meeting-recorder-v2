@@ -148,6 +148,36 @@ class SessionService:
         logger.info(f"Session atomically saved: {final_path}")
         return str(final_path)
 
+    def _resolve_json(self, session_id: str) -> Optional[Path]:
+        """Find the session_<id>.json file across every root, preferring
+        the primary dir's normal (non-recursive) location for the common
+        case and otherwise the newest copy across all roots.
+
+        Field report 2026-08-07: list_sessions() was made multi-root and
+        recursive, but load() still hard-coded
+        ``self._recordings_dir / f"session_{id}.json"`` — a session that
+        list_sessions() found only under an archive root (or nested in a
+        primary-dir subfolder) would 404 the moment a user clicked it,
+        even though it was right there in the list. The two methods MUST
+        agree on which copy is canonical when a session exists in more
+        than one place, so this uses the exact same newest-mtime rule
+        list_sessions() uses for its cross-root dedupe — otherwise the
+        list shows one version and clicking it opens another.
+        """
+        target_name = f"session_{session_id}.json"
+        best_path: Optional[Path] = None
+        best_mtime = -1.0
+        for root in self._scan_roots():
+            for path in root.rglob(target_name):
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    continue
+                if mtime > best_mtime:
+                    best_mtime = mtime
+                    best_path = path
+        return best_path
+
     def load(self, session_id: str) -> Optional[dict]:
         """Load a session JSON by ID. Returns raw dict.
 
@@ -159,10 +189,14 @@ class SessionService:
         the recovery script wrote the JSON with a BOM, and the previous
         ``open(... encoding='utf-8')`` here raised JSONDecodeError on the
         BOM byte. ``utf-8-sig`` is a strict superset — files without a
-        BOM still decode identically."""
-        path = self._recordings_dir / f"session_{session_id}.json"
-        if not path.exists():
-            logger.warning(f"Session file not found: {path}")
+        BOM still decode identically.
+
+        Resolves across every root (see _resolve_json) — a session that
+        exists only under an archive root must still load, not 404."""
+        path = self._resolve_json(session_id)
+        if path is None:
+            logger.warning(
+                f"Session file not found for {session_id} in any root")
             return None
         try:
             with open(path, "r", encoding="utf-8-sig") as f:
@@ -323,8 +357,29 @@ class SessionService:
         return results
 
     def delete(self, session_id: str) -> None:
-        """Delete session JSON, WAV, and session log if they exist."""
-        for suffix in (".json", ".wav", ".log"):
+        """Delete a session's JSON, audio, log, and search/derived
+        sidecars — from EVERY root, not just the primary dir.
+
+        Field report 2026-08-07 (shipped bug): the original delete()
+        only removed (".json", ".wav", ".log") from self._recordings_dir.
+        Two consequences once multi-root discovery landed:
+
+          (a) The .embeddings.pkl / .commitments.json / .item_status.json
+              sidecars were never cleaned up, so a deleted session's
+              chunks stayed live in SearchService's in-memory index and
+              Q&A kept citing a session_id that now 404s.
+          (b) A copy of the same session in an extra/archive root
+              survived the delete and resurrected the session in
+              list_sessions() the next time it scanned.
+
+        Best-effort per file: one locked/unreadable file must not stop
+        the rest from being cleaned up.
+        """
+        primary_suffixes = (
+            ".json", ".wav", ".log",
+            ".embeddings.pkl", ".commitments.json", ".item_status.json",
+        )
+        for suffix in primary_suffixes:
             p = self._recordings_dir / f"session_{session_id}{suffix}"
             if p.exists():
                 try:
@@ -332,6 +387,32 @@ class SessionService:
                     logger.info(f"Deleted {p.name}")
                 except OSError as e:
                     logger.warning(f"Could not delete {p}: {e}")
+
+        # Non-primary roots: audio never lives here (writes only ever go
+        # to the primary dir — see __init__), but JSON + sidecars can,
+        # via the roaming archive or an old RECORDINGS_DIR. rglob so a
+        # copy filed into a subfolder is still found.
+        sidecar_names = {
+            f"session_{session_id}.json",
+            f"session_{session_id}.log",
+            f"session_{session_id}.embeddings.pkl",
+            f"session_{session_id}.commitments.json",
+            f"session_{session_id}.item_status.json",
+        }
+        try:
+            primary_resolved = self._recordings_dir.expanduser().resolve()
+        except OSError:
+            primary_resolved = self._recordings_dir
+        for root in self._scan_roots():
+            if root == primary_resolved:
+                continue
+            for name in sidecar_names:
+                for p in root.rglob(name):
+                    try:
+                        p.unlink()
+                        logger.info(f"Deleted {p} (extra root)")
+                    except OSError as e:
+                        logger.warning(f"Could not delete {p}: {e}")
 
     def import_from_file(
         self,
