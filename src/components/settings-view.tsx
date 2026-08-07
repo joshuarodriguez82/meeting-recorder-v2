@@ -2273,6 +2273,15 @@ function SessionArchiveStatusPanel({ savedAt }: { savedAt: number }) {
   const sharedReasons = sharedRows
     .map((r) => r.reason)
     .filter((r): r is string => !!r);
+  // Foreign per-machine folder paths healed by the last reconcile sweep
+  // (field report 2026-08-07: a Windows client_configs.json roamed a
+  // `G:\My Drive\...` export folder onto the user's Mac, which then kept
+  // re-queuing exports against a drive letter that can never exist
+  // there). Summed across rows even though only client_configs.json
+  // ever carries this key, so the count stays correct if that changes.
+  const sanitizedClearedCount = sharedRows.reduce(
+    (sum, r) => sum + (r.sanitized_cleared?.length ?? 0), 0
+  );
   let sharedLine = "Clients & templates: in sync";
   if (sharedRows.some((r) => r.direction === "pull")) {
     sharedLine = "Clients & templates: will pull from archive";
@@ -2308,6 +2317,12 @@ function SessionArchiveStatusPanel({ savedAt }: { savedAt: number }) {
             {reason}
           </div>
         ))}
+        {sanitizedClearedCount > 0 && (
+          <div className="text-amber-600 dark:text-amber-500">
+            Cleared {sanitizedClearedCount} folder path{sanitizedClearedCount === 1 ? "" : "s"} that
+            belong{sanitizedClearedCount === 1 ? "s" : ""} to another machine
+          </div>
+        )}
       </div>
       <Button
         size="sm" variant="outline" onClick={syncNow}
