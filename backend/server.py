@@ -361,6 +361,7 @@ from services.engagement_service import EngagementService
 from services.export_service import ExportService
 from services.export_worker import ExportWorker, resolve_export_folder
 from services import export_reconcile
+from services import archive_reconcile
 from services.recording_service import RecordingService
 from services.retention_service import cleanup as run_retention_cleanup, folder_stats
 from services.recovery_service import recover_orphans
@@ -1002,6 +1003,11 @@ class SettingsDTO(BaseModel):
     # Root network folder for background per-client exports ("Cloud
     # Mirror"). Empty = off. See services/export_worker.py.
     cloud_mirror_dir: str = ""
+    # Session Archive: roaming folder for session JSONs so a library
+    # shows up on every machine pointed at the same synced folder.
+    # Field report 2026-08-07 — see config/settings.py's
+    # session_archive_dir docstring and _session_archive_dir() below.
+    session_archive_dir: str = ""
 
 
 class StartRecordingRequest(BaseModel):
@@ -1424,6 +1430,7 @@ async def get_settings():
         auto_prep_brief_enabled=s.auto_prep_brief_enabled,
         auto_prep_brief_lead_min=s.auto_prep_brief_lead_min,
         cloud_mirror_dir=s.cloud_mirror_dir,
+        session_archive_dir=s.session_archive_dir,
     )
 
 
@@ -1461,6 +1468,32 @@ async def save_settings(payload: SettingsDTO):
     prev_recordings_dir = (
         svc.settings.recordings_dir if svc.settings else None
     )
+
+    # Capture the previous Session Archive folder so we know AFTER the
+    # save whether it actually changed — that's what decides whether we
+    # kick a background reconcile (see below).
+    prev_archive_dir = (
+        (svc.settings.session_archive_dir or "").strip() if svc.settings else ""
+    )
+
+    # Validate the Session Archive folder BEFORE writing it. Deliberately
+    # does NOT mkdir a missing path — this setting exists specifically to
+    # point at a cloud-synced folder shared with another machine, and a
+    # typo'd path (or a Drive/OneDrive mount that hasn't come up yet)
+    # must surface as an error immediately rather than silently creating
+    # a fresh, empty, un-synced folder that looks like it's "working"
+    # (field report 2026-08-07).
+    new_archive_dir = (payload.session_archive_dir or "").strip()
+    if new_archive_dir and not Path(new_archive_dir).expanduser().is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Session Archive folder does not exist: {new_archive_dir}. "
+                "Create the folder first (or fix the path) — an "
+                "unreachable sync path should surface here, not be "
+                "created and silently start out empty."
+            ),
+        )
 
     Settings.save_to_env(
         anthropic_api_key=payload.anthropic_api_key,
@@ -1503,6 +1536,7 @@ async def save_settings(payload: SettingsDTO):
         auto_prep_brief_enabled=bool(payload.auto_prep_brief_enabled),
         auto_prep_brief_lead_min=max(1, min(120, payload.auto_prep_brief_lead_min or 10)),
         cloud_mirror_dir=(payload.cloud_mirror_dir or "").strip(),
+        session_archive_dir=new_archive_dir,
     )
     # If the recordings folder changed, migrate client + template state
     # from the previous folder to the new one. Copy, not move, so the
@@ -1553,6 +1587,28 @@ async def save_settings(payload: SettingsDTO):
             await asyncio.to_thread(apply_startup, bool(payload.launch_on_startup))
         except Exception as e:
             logger.warning(f"launch_on_startup transition failed: {e}")
+
+    # If the Session Archive folder actually changed (set, cleared, or
+    # repointed), kick a reconcile in the background right away rather
+    # than waiting for the next process/export to trigger one — that's
+    # what makes existing sessions start populating the shared folder
+    # immediately instead of only "the next meeting onward" (field
+    # report 2026-08-07). Fire-and-forget: _reconcile_archive() only
+    # enqueues onto the ExportWorker, it doesn't copy inline, so this
+    # returns fast either way — the background task is purely so a slow
+    # rglob over a huge library can't delay the Settings save response.
+    if new_archive_dir != prev_archive_dir:
+        async def _archive_reconcile_after_save() -> None:
+            try:
+                queued = await asyncio.to_thread(_reconcile_archive)
+                if queued:
+                    logger.info(
+                        f"Archive reconcile after settings save queued "
+                        f"{queued} session(s)")
+            except Exception as e:
+                logger.warning(
+                    f"Archive reconcile after settings save failed: {e}")
+        asyncio.create_task(_archive_reconcile_after_save())
 
     return {"ok": True}
 
@@ -2728,6 +2784,7 @@ async def set_live_copilot_enabled(payload: dict):
         auto_prep_brief_enabled=s.auto_prep_brief_enabled,
         auto_prep_brief_lead_min=s.auto_prep_brief_lead_min,
         cloud_mirror_dir=s.cloud_mirror_dir,
+        session_archive_dir=s.session_archive_dir,
     )
     # Update the cached Settings in-place so the change is visible
     # immediately, without going through load_settings() which would
@@ -3138,6 +3195,33 @@ async def unprocessed_sessions():
                 })
         return results
     return await asyncio.to_thread(_do)
+
+
+# Declared BEFORE @app.get("/sessions/{session_id}") for the same reason
+# as /sessions/diagnostics and /sessions/unprocessed above — the dynamic
+# {session_id} pattern matches a single literal path segment too, so a
+# later declaration here would be dead and 404 as "session not found"
+# (field report 2026-08-07: /sessions/diagnostics itself was caught by
+# exactly this ~900 lines too late).
+@app.get("/sessions/archive-status")
+async def get_archive_status():
+    """Status of the roaming Session Archive: configured folder, whether
+    it's currently reachable, and how many sessions are on each side.
+    Polled by the Session Archive card in Settings after load and after
+    every Sync now click."""
+    svc.load_settings()
+    return await asyncio.to_thread(_archive_status_report)
+
+
+@app.post("/sessions/archive/sync")
+async def sync_archive():
+    """"Sync now" — queue every local session missing from the Session
+    Archive, then return the refreshed status. Idempotent: a fully
+    archived library queues 0 and the status comes back unchanged."""
+    svc.load_settings()
+    queued = await asyncio.to_thread(_reconcile_archive)
+    report = await asyncio.to_thread(_archive_status_report)
+    return {**report, "queued": queued}
 
 
 @app.get("/sessions/{session_id}")
@@ -3969,7 +4053,21 @@ def _session_archive_dir() -> str:
     Writing a few-KB JSON off the hot path is the same shape as the
     Designated Folder export that has run safely since v2.19; the thing
     that stalled was a multi-hundred-MB WAV copied synchronously.
+
+    SOURCE OF THE VALUE (2026-08-07). This used to be a bare
+    os.getenv() read — there was no Settings UI for it at all, so a user
+    could only turn it on by hand-editing config.env or setting a
+    process env var, and one did exactly that and then couldn't find it
+    anywhere in the app. It's a first-class Settings field
+    (session_archive_dir) now, editable from the Session Archive card in
+    Settings. The env var is kept as a fallback ONLY so anyone already
+    setting SESSION_ARCHIVE_DIR by hand keeps working unchanged — the
+    Settings value always wins when both are present.
     """
+    if svc.settings is not None:
+        configured = (getattr(svc.settings, "session_archive_dir", "") or "").strip()
+        if configured:
+            return configured
     return (os.getenv("SESSION_ARCHIVE_DIR", "") or "").strip()
 
 
@@ -4146,33 +4244,49 @@ def _reconcile_archive() -> int:
     missed one a delay instead of a permanent gap. Idempotent — a fully
     archived library queues nothing.
 
-    Field report 2026-08-07 (bug 3): this used a non-recursive
-    ``src_dir.glob("session_*.json")`` while list_sessions() had already
-    become recursive — a session filed into a subfolder of the primary
-    dir would show up locally but never reach the roaming archive, so
-    it would never appear on the user's other machine. rglob with the
-    same dotted-stem sidecar skip list_sessions() uses.
+    The comparison itself lives in services/archive_reconcile.py
+    (pending_session_ids), shared with GET /sessions/archive-status so
+    the "P pending" the status endpoint reports and what Sync now
+    actually queues can never drift apart (field report 2026-08-07,
+    bug 3 — see that module's docstring for the original bug).
     """
-    if not _session_archive_dir():
+    archive = _session_archive_dir()
+    if not archive:
         return 0
-    dest = Path(_session_archive_dir()).expanduser()
     src_dir = Path(svc.settings.recordings_dir)
-    queued = 0
-    for src in src_dir.rglob("session_*.json"):
-        if "." in src.stem:
-            continue
-        dst = dest / src.name
-        try:
-            if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
-                continue
-        except OSError:
-            pass
-        sid = src.stem.replace("session_", "")
+    pending = archive_reconcile.pending_session_ids(src_dir, archive)
+    for sid in pending:
         _EXPORT_WORKER.enqueue(sid, copy_audio=False)
-        queued += 1
+    queued = len(pending)
     if queued:
-        logger.info(f"Archive reconcile queued {queued} session(s) -> {dest}")
+        logger.info(f"Archive reconcile queued {queued} session(s) -> {archive}")
     return queued
+
+
+def _archive_status_report() -> dict:
+    """Snapshot of the roaming Session Archive: what's configured, how
+    many session JSONs are on each side, and how many still owe a copy.
+
+    Pure inspection — stats files, never copies — so it's cheap enough
+    to call on every poll from the Settings UI. Shares its convergence
+    rule with _reconcile_archive() via services/archive_reconcile.py;
+    see that module's docstring for why a disconnected/unreachable
+    archive folder must read as "everything pending", never "all
+    present".
+    """
+    archive = _session_archive_dir()
+    src_dir = Path(svc.settings.recordings_dir)
+    folder_present = bool(archive) and Path(archive).expanduser().is_dir()
+    sessions_local = len(archive_reconcile.local_session_ids(src_dir))
+    sessions_in_archive = len(archive_reconcile.archived_session_ids(archive))
+    pending = len(archive_reconcile.pending_session_ids(src_dir, archive))
+    return {
+        "folder": archive or "",
+        "folder_present": folder_present,
+        "sessions_in_archive": sessions_in_archive,
+        "sessions_local": sessions_local,
+        "pending": pending,
+    }
 
 
 def _reconcile_all_clients() -> None:
@@ -6414,6 +6528,7 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         auto_prep_brief_enabled=s.auto_prep_brief_enabled,
         auto_prep_brief_lead_min=s.auto_prep_brief_lead_min,
         cloud_mirror_dir=s.cloud_mirror_dir,
+        session_archive_dir=s.session_archive_dir,
     )
     svc.settings = dataclasses.replace(
         s, live_copilot_mode=new_mode, live_copilot_meeting_type=new_type)
