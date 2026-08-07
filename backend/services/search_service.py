@@ -21,6 +21,15 @@ plenty fast for the 100s-of-thousands-of-chunks scale a single user
 will ever produce on their laptop. invalidate() drops the cache so
 the next query picks up newly-indexed sessions.
 
+LMA gap analysis 2026-08-07: the same matrix now also loads per-client
+document chunks from <recordings_dir>/doc_index/*.pkl (see
+services/document_service.py) — one pickle per indexed document, same
+model_id/embeddings conventions, so a document chunk and a transcript
+chunk are directly comparable by cosine similarity in one dot product.
+Each metadata row carries "source": "session" | "document" so results
+and the client filter can tell them apart; session-hit result dicts
+keep every existing field unchanged (the frontend depends on them).
+
 When a user runs a session through /process, recording_service triggers
 index_session() to embed + persist that session's chunks. Old sessions
 processed before this feature shipped need a one-time backfill
@@ -188,6 +197,17 @@ class SearchService:
         if client or project:
             mask = np.ones(len(sims), dtype=bool)
             for i, meta in enumerate(self._metadata):
+                if meta.get("source") == "document":
+                    # Documents have no "project" — a project-scoped
+                    # search has nothing to match against, so exclude
+                    # them entirely rather than let an unrelated
+                    # document leak into a project-filtered result set.
+                    if project:
+                        mask[i] = False
+                        continue
+                    if client and (meta.get("client") or "") != client:
+                        mask[i] = False
+                    continue
                 sess = sess_lookup.get(meta["session_id"])
                 if not sess:
                     mask[i] = False
@@ -213,8 +233,22 @@ class SearchService:
             if not np.isfinite(sim):
                 continue
             meta = self._metadata[int(idx)]
+            if meta.get("source") == "document":
+                results.append({
+                    "source": "document",
+                    "doc_name": meta.get("doc_name", ""),
+                    "doc_path": meta.get("doc_path", ""),
+                    "client": meta.get("client", ""),
+                    "text": meta["text"],
+                    "similarity": sim,
+                })
+                continue
             sess = sess_lookup.get(meta["session_id"], {})
             results.append({
+                # Existing fields are untouched — the frontend depends
+                # on this exact shape for session hits. "source" is
+                # additive.
+                "source": "session",
                 "session_id": meta["session_id"],
                 "display_name": sess.get("display_name") or "",
                 "started_at": sess.get("started_at") or "",
@@ -230,7 +264,8 @@ class SearchService:
     # ── Internals ───────────────────────────────────────────────────
 
     def _load_index(self) -> None:
-        """Load every per-session embedding pickle into one flat matrix."""
+        """Load every per-session embedding pickle, plus every per-document
+        doc_index pickle, into one flat matrix."""
         if self._loaded:
             return
         with self._lock:
@@ -269,6 +304,7 @@ class SearchService:
                 session_id = payload.get("session_id") or _session_id_from_filename(f)
                 for i, ch in enumerate(chunks):
                     all_meta.append({
+                        "source": "session",
                         "session_id": session_id,
                         "chunk_index": i,
                         "start_s": float(ch["start_s"]),
@@ -276,6 +312,40 @@ class SearchService:
                         "text": ch["text"],
                     })
                 all_vectors.append(np.asarray(vecs, dtype=np.float32))
+
+            doc_count = 0
+            doc_dir = recordings_dir / "doc_index"
+            if doc_dir.is_dir():
+                for f in sorted(doc_dir.glob("doc_*.pkl")):
+                    try:
+                        payload = pickle.loads(f.read_bytes())
+                    except Exception as e:
+                        logger.warning(f"Could not read {f.name}: {e}")
+                        continue
+                    if payload.get("model_id") != _model_id():
+                        continue
+                    vecs = payload.get("embeddings")
+                    chunks = payload.get("chunks") or []
+                    if vecs is None or len(vecs) != len(chunks):
+                        logger.warning(
+                            f"{f.name} length mismatch (vecs="
+                            f"{len(vecs) if vecs is not None else 'None'}, "
+                            f"chunks={len(chunks)}) — skipping")
+                        continue
+                    doc_name = payload.get("doc_name") or f.name
+                    doc_path = payload.get("doc_path") or ""
+                    doc_client = payload.get("client") or ""
+                    for i, ch in enumerate(chunks):
+                        all_meta.append({
+                            "source": "document",
+                            "doc_name": doc_name,
+                            "doc_path": doc_path,
+                            "client": doc_client,
+                            "chunk_index": i,
+                            "text": ch["text"],
+                        })
+                    all_vectors.append(np.asarray(vecs, dtype=np.float32))
+                    doc_count += 1
 
             if all_vectors:
                 self._matrix = np.concatenate(all_vectors, axis=0)
@@ -285,8 +355,8 @@ class SearchService:
             self._metadata = all_meta
             self._loaded = True
             logger.info(
-                f"Search index loaded: {len(all_meta)} chunks "
-                f"from {len(all_vectors)} sessions "
+                f"Search index loaded: {len(all_meta)} chunks from "
+                f"{len(files)} session(s) + {doc_count} document(s) "
                 f"({self._matrix.nbytes // 1024} KB)")
 
 
