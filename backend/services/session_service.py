@@ -22,15 +22,86 @@ logger = get_logger(__name__)
 class SessionService:
     """Handles JSON serialization of Session objects."""
 
-    def __init__(self, recordings_dir: str):
+    def __init__(self, recordings_dir: str, extra_dirs=None):
         self._recordings_dir = Path(recordings_dir)
         self._recordings_dir.mkdir(parents=True, exist_ok=True)
+        # Additional roots to READ sessions from (never written to).
+        #
+        # Field report 2026-08-07: a user with hundreds of recordings saw
+        # ~15 in the app. Cause was structural, not data loss — scanning
+        # was a single non-recursive glob over exactly one directory, so
+        # every session recorded while RECORDINGS_DIR pointed somewhere
+        # else stayed on disk and permanently invisible. Nothing migrated
+        # them and nothing reported them missing.
+        #
+        # Reads now span the primary dir plus any extra roots, and recurse
+        # into subfolders. Writes still go only to _recordings_dir, so the
+        # extra roots are strictly an archive view.
+        self._extra_dirs = [Path(d) for d in (extra_dirs or []) if str(d).strip()]
 
     @property
     def recordings_dir(self) -> Path:
         """Public read-only accessor — used by SearchService to find
         per-session embedding sidecar files (session_<id>.embeddings.pkl)."""
         return self._recordings_dir
+
+    def _scan_roots(self) -> List[Path]:
+        """Every directory sessions are READ from, de-duplicated and
+        with nested roots collapsed (a root inside another root would
+        otherwise double-count under the recursive walk)."""
+        roots: List[Path] = []
+        seen = set()
+        for d in [self._recordings_dir, *self._extra_dirs]:
+            try:
+                rd = d.expanduser().resolve()
+            except OSError:
+                continue
+            key = str(rd).lower()
+            if key in seen or not rd.is_dir():
+                continue
+            seen.add(key)
+            roots.append(rd)
+        # Drop any root contained within another to avoid double-walking.
+        pruned: List[Path] = []
+        for r in roots:
+            if any(r != o and o in r.parents for o in roots):
+                continue
+            pruned.append(r)
+        return pruned
+
+    def scan_report(self) -> dict:
+        """Where sessions were found and what got skipped.
+
+        Exists because every skip below is silent: an un-hydrated cloud
+        placeholder, a truncated JSON, a non-dict file — each is logged
+        and dropped, which renders identically to "you have no sessions".
+        That ambiguity has now caused three separate field reports, so
+        the counts are exposed rather than only logged.
+        """
+        report = {"roots": [], "total": 0, "skipped": 0, "skipped_detail": []}
+        for root in self._scan_roots():
+            found = 0
+            for path in root.rglob("session_*.json"):
+                if "." in path.stem:
+                    continue
+                found += 1
+                try:
+                    data = json.loads(read_text_hydrated(path))
+                    if not isinstance(data, dict):
+                        raise ValueError("root is not a JSON object")
+                except CloudFileNotReadyError:
+                    report["skipped"] += 1
+                    report["skipped_detail"].append(
+                        {"path": str(path), "reason": "cloud placeholder not downloaded"})
+                except Exception as e:
+                    report["skipped"] += 1
+                    report["skipped_detail"].append(
+                        {"path": str(path), "reason": str(e)})
+            report["roots"].append({"path": str(root), "session_files": found})
+            report["total"] += found
+        # Keep the payload bounded — the count is what matters.
+        report["skipped_detail"] = report["skipped_detail"][:50]
+        return report
 
     def save(self, session: Session) -> str:
         """
@@ -77,6 +148,36 @@ class SessionService:
         logger.info(f"Session atomically saved: {final_path}")
         return str(final_path)
 
+    def _resolve_json(self, session_id: str) -> Optional[Path]:
+        """Find the session_<id>.json file across every root, preferring
+        the primary dir's normal (non-recursive) location for the common
+        case and otherwise the newest copy across all roots.
+
+        Field report 2026-08-07: list_sessions() was made multi-root and
+        recursive, but load() still hard-coded
+        ``self._recordings_dir / f"session_{id}.json"`` — a session that
+        list_sessions() found only under an archive root (or nested in a
+        primary-dir subfolder) would 404 the moment a user clicked it,
+        even though it was right there in the list. The two methods MUST
+        agree on which copy is canonical when a session exists in more
+        than one place, so this uses the exact same newest-mtime rule
+        list_sessions() uses for its cross-root dedupe — otherwise the
+        list shows one version and clicking it opens another.
+        """
+        target_name = f"session_{session_id}.json"
+        best_path: Optional[Path] = None
+        best_mtime = -1.0
+        for root in self._scan_roots():
+            for path in root.rglob(target_name):
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    continue
+                if mtime > best_mtime:
+                    best_mtime = mtime
+                    best_path = path
+        return best_path
+
     def load(self, session_id: str) -> Optional[dict]:
         """Load a session JSON by ID. Returns raw dict.
 
@@ -88,10 +189,14 @@ class SessionService:
         the recovery script wrote the JSON with a BOM, and the previous
         ``open(... encoding='utf-8')`` here raised JSONDecodeError on the
         BOM byte. ``utf-8-sig`` is a strict superset — files without a
-        BOM still decode identically."""
-        path = self._recordings_dir / f"session_{session_id}.json"
-        if not path.exists():
-            logger.warning(f"Session file not found: {path}")
+        BOM still decode identically.
+
+        Resolves across every root (see _resolve_json) — a session that
+        exists only under an archive root must still load, not 404."""
+        path = self._resolve_json(session_id)
+        if path is None:
+            logger.warning(
+                f"Session file not found for {session_id} in any root")
             return None
         try:
             with open(path, "r", encoding="utf-8-sig") as f:
@@ -108,11 +213,23 @@ class SessionService:
 
     def list_sessions(self) -> List[dict]:
         """
-        Scan recordings dir for all session_*.json files.
+        Scan every configured root for session_*.json files.
         Returns a list of summaries sorted newest first.
+
+        Recursive and multi-root as of 2026-08-07 (see __init__): a
+        single non-recursive glob over one directory hid every session
+        recorded before RECORDINGS_DIR was last changed, and every
+        session filed into a subfolder.
         """
         results: List[dict] = []
-        for path in self._recordings_dir.glob("session_*.json"):
+        # Same session id can legitimately appear under two roots (an old
+        # recordings dir plus a copy in the current one). Keep the newest
+        # by file mtime so the app shows the most-processed version.
+        seen_ids: dict = {}
+        paths = []
+        for root in self._scan_roots():
+            paths.extend(root.rglob("session_*.json"))
+        for path in paths:
             # Skip sidecar files (session_<id>.commitments.json,
             # session_<id>.item_status.json, …) that share the
             # session_*.json glob but aren't canonical session records.
@@ -146,6 +263,17 @@ class SessionService:
                 continue
 
             session_id = data.get("session_id") or path.stem.replace("session_", "")
+
+            # De-dupe across roots. An old recordings dir and the current
+            # one can both hold the same session; prefer the file written
+            # most recently, which is the more-processed copy.
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            prior = seen_ids.get(session_id)
+            if prior is not None and prior[0] >= mtime:
+                continue
             audio_path = data.get("audio_path")
             audio_exists = bool(audio_path) and Path(audio_path).exists()
 
@@ -161,7 +289,7 @@ class SessionService:
             except Exception:
                 pass
 
-            results.append({
+            summary = {
                 "session_id": session_id,
                 "display_name": data.get("display_name") or f"Session {session_id}",
                 "started_at": data.get("started_at"),
@@ -213,15 +341,45 @@ class SessionService:
                 # dropped frames vs wall-clock). Surfaced as an info chip.
                 "sync_warning": data.get("sync_warning"),
                 "json_path": str(path),
-            })
+            }
+            if prior is not None:
+                # Same id seen in another root; this copy is newer, so it
+                # replaces the earlier one in place rather than appending
+                # a duplicate row.
+                results[prior[1]] = summary
+                seen_ids[session_id] = (mtime, prior[1])
+            else:
+                seen_ids[session_id] = (mtime, len(results))
+                results.append(summary)
 
         # Sort newest first
         results.sort(key=lambda r: r.get("started_at") or "", reverse=True)
         return results
 
     def delete(self, session_id: str) -> None:
-        """Delete session JSON, WAV, and session log if they exist."""
-        for suffix in (".json", ".wav", ".log"):
+        """Delete a session's JSON, audio, log, and search/derived
+        sidecars — from EVERY root, not just the primary dir.
+
+        Field report 2026-08-07 (shipped bug): the original delete()
+        only removed (".json", ".wav", ".log") from self._recordings_dir.
+        Two consequences once multi-root discovery landed:
+
+          (a) The .embeddings.pkl / .commitments.json / .item_status.json
+              sidecars were never cleaned up, so a deleted session's
+              chunks stayed live in SearchService's in-memory index and
+              Q&A kept citing a session_id that now 404s.
+          (b) A copy of the same session in an extra/archive root
+              survived the delete and resurrected the session in
+              list_sessions() the next time it scanned.
+
+        Best-effort per file: one locked/unreadable file must not stop
+        the rest from being cleaned up.
+        """
+        primary_suffixes = (
+            ".json", ".wav", ".log",
+            ".embeddings.pkl", ".commitments.json", ".item_status.json",
+        )
+        for suffix in primary_suffixes:
             p = self._recordings_dir / f"session_{session_id}{suffix}"
             if p.exists():
                 try:
@@ -229,6 +387,32 @@ class SessionService:
                     logger.info(f"Deleted {p.name}")
                 except OSError as e:
                     logger.warning(f"Could not delete {p}: {e}")
+
+        # Non-primary roots: audio never lives here (writes only ever go
+        # to the primary dir — see __init__), but JSON + sidecars can,
+        # via the roaming archive or an old RECORDINGS_DIR. rglob so a
+        # copy filed into a subfolder is still found.
+        sidecar_names = {
+            f"session_{session_id}.json",
+            f"session_{session_id}.log",
+            f"session_{session_id}.embeddings.pkl",
+            f"session_{session_id}.commitments.json",
+            f"session_{session_id}.item_status.json",
+        }
+        try:
+            primary_resolved = self._recordings_dir.expanduser().resolve()
+        except OSError:
+            primary_resolved = self._recordings_dir
+        for root in self._scan_roots():
+            if root == primary_resolved:
+                continue
+            for name in sidecar_names:
+                for p in root.rglob(name):
+                    try:
+                        p.unlink()
+                        logger.info(f"Deleted {p} (extra root)")
+                    except OSError as e:
+                        logger.warning(f"Could not delete {p}: {e}")
 
     def import_from_file(
         self,

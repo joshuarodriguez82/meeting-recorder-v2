@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -685,16 +686,32 @@ class Services:
     def load_settings(self) -> Settings:
         if self.settings is None:
             self.settings = Settings.from_env()
-            self.session_svc = SessionService(self.settings.recordings_dir)
+            self.session_svc = SessionService(
+                self.settings.recordings_dir,
+                extra_dirs=_archive_recordings_dirs(self.settings.recordings_dir),
+            )
             self.export_svc = ExportService(self.settings.recordings_dir)
             # Per-client configs and user-authored templates live ALONGSIDE
-            # the recordings dir so they sync with the user's session
-            # library — point RECORDINGS_DIR at a cloud-synced folder
-            # (iCloud / OneDrive) and clients + templates roam across
-            # devices automatically. Migration on first v2.4 launch (or on
-            # a recordings_dir change) copies the file from the legacy
-            # USER_DATA_DIR location, leaving the old copy as a fallback
-            # in case the user downgrades.
+            # the recordings dir so they travel with the session library.
+            #
+            # DO NOT point RECORDINGS_DIR at a cloud-synced folder to get
+            # roaming. An earlier version of this comment recommended
+            # exactly that, and it is wrong: recordings_dir is where the
+            # record/process path writes multi-hundred-MB WAVs, and a
+            # cloud-stream mount stalling mid-write is the 2026-07-09
+            # incident that wedged the backend, tripped the Tauri
+            # watchdog, and cost recordings (see services/export_worker.py).
+            # It also stranded one user's library across two machines.
+            #
+            # For roaming, set SESSION_ARCHIVE_DIR to the synced folder:
+            # session JSONs are copied there by the BACKGROUND worker and
+            # read back as an archive root, so every machine sees one
+            # library while each records to its own local disk.
+            #
+            # Migration on first v2.4 launch (or on a recordings_dir
+            # change) copies the file from the legacy USER_DATA_DIR
+            # location, leaving the old copy as a fallback in case the
+            # user downgrades.
             from config.settings import USER_DATA_DIR
             from pathlib import Path as _Path
             import shutil as _shutil
@@ -3069,6 +3086,29 @@ async def list_sessions():
     return await asyncio.to_thread(_do)
 
 
+# Declared BEFORE /sessions/{session_id} for the same reason as the
+# note below — the dynamic pattern matches the literal segment
+# "diagnostics" and would 404 as a missing session.
+@app.get("/sessions/diagnostics")
+async def sessions_diagnostics():
+    """Where the app is looking for sessions, how many files each root
+    holds, and what it had to skip.
+
+    Every skip in list_sessions() is otherwise silent — an un-hydrated
+    cloud placeholder, truncated JSON, or a non-dict file is logged and
+    dropped, which looks exactly like "you have no sessions". Three
+    separate field reports have now traced back to that ambiguity, so
+    the numbers are queryable instead of buried in a log file.
+    """
+    svc.load_settings()
+    def _do():
+        report = svc.session_svc.scan_report()
+        report["primary_dir"] = str(svc.session_svc.recordings_dir)
+        report["visible_in_app"] = len(svc.session_svc.list_sessions())
+        return report
+    return await asyncio.to_thread(_do)
+
+
 # IMPORTANT: declare this BEFORE @app.get("/sessions/{session_id}").
 # FastAPI matches routes in registration order; the dynamic {session_id}
 # pattern matches literal segments too, so a later /sessions/unprocessed
@@ -3114,12 +3154,23 @@ async def get_session(session_id: str):
 async def delete_session(session_id: str):
     svc.load_settings()
     svc.session_svc.delete(session_id)
-    # Drop the session's semantic-search sidecar too — otherwise stale
-    # entries linger in the in-memory index and the next search would
-    # surface chunks pointing at a session that no longer exists.
+    # Drop the search cache so the in-memory chunk matrix stops
+    # answering Q&A with citations pointing at a session that no longer
+    # exists.
+    #
+    # Field report 2026-08-07 (bug 2b): SessionService.delete() now
+    # removes session_<id>.embeddings.pkl itself (across every root, not
+    # just the primary dir — see SessionService.delete's docstring), so
+    # by the time delete_session_index() ran here its file-exists check
+    # always failed and it silently skipped invalidate(). The pickle was
+    # correctly gone from disk, but the OLD in-memory matrix stayed
+    # loaded until something else happened to invalidate it — the search
+    # index kept answering with citations that 404'd. invalidate() is
+    # unconditional and cheap (it only drops a cache, index_session()
+    # rebuilds it lazily on next query), so call it regardless of
+    # whether a file happened to still be there to delete.
     if svc.search_svc:
-        await asyncio.to_thread(
-            svc.search_svc.delete_session_index, session_id)
+        await asyncio.to_thread(svc.search_svc.invalidate)
     # And the commitments sidecar — same reasoning. Stale commitments
     # pointing at a deleted session would surface in the tracker.
     if svc.commitments_svc:
@@ -3782,6 +3833,145 @@ async def suggest_tagging(req: SuggestTaggingRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _resolve_primary_file(src_dir: Path, name: str) -> Optional[Path]:
+    """Find `name` (an exact filename) anywhere under the primary
+    recordings dir, recursively. Restricted to the primary root by
+    design — see _archive_session's bug 3 note; archiving must never
+    read from an archive/extra root.
+
+    When more than one copy exists (shouldn't normally happen within a
+    single root, but subfolders make it possible), the newest by mtime
+    wins, matching SessionService._resolve_json's rule.
+    """
+    best: Optional[Path] = None
+    best_mtime = -1.0
+    try:
+        candidates = list(src_dir.rglob(name))
+    except OSError:
+        return None
+    for p in candidates:
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > best_mtime:
+            best_mtime = mtime
+            best = p
+    return best
+
+
+def _archive_session(session_id: str) -> None:
+    """Copy a session's JSON + small sidecars into SESSION_ARCHIVE_DIR.
+
+    Runs ONLY on the ExportWorker thread (see _do_export_session), so a
+    stalled cloud mount delays other exports and never the app.
+
+    Deliberately excludes the WAV. Audio is what wedged the backend on
+    2026-07-09 and is not what another machine needs in order to show,
+    search, or answer questions about a meeting — the JSON carries the
+    transcript, summary, action items, decisions and requirements.
+
+    Skips the copy when the destination already holds a same-or-newer
+    file, so two machines syncing the same folder don't fight.
+    """
+    archive = _session_archive_dir()
+    if not archive:
+        return
+    dest = Path(archive).expanduser()
+    dest.mkdir(parents=True, exist_ok=True)
+    src_dir = Path(svc.settings.recordings_dir)
+    names = [f"session_{session_id}.json"]
+    for suffix in (".embeddings.pkl", ".commitments.json", ".item_status.json"):
+        names.append(f"session_{session_id}{suffix}")
+    copied = 0
+    for name in names:
+        # Bug 3 (field report 2026-08-07): this used to be a flat
+        # `src_dir / name` lookup, so a session filed into a subfolder
+        # of the primary dir (list_sessions() has recursed into
+        # subfolders since this same field report) was never found and
+        # so never reached the roaming archive. Search recursively, but
+        # ONLY within the primary dir — never an archive/extra root,
+        # since that would copy an archived file onto itself (or worse,
+        # copy a stale archive copy over a fresher local one).
+        src = _resolve_primary_file(src_dir, name)
+        if src is None or not src.is_file():
+            continue
+        dst = dest / name
+        try:
+            if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
+                continue
+        except OSError:
+            pass  # can't stat the destination — just attempt the copy
+        shutil.copy2(src, dst)
+        copied += 1
+    if copied:
+        logger.info(
+            f"Archived session {session_id} ({copied} file(s)) to {dest}")
+
+
+def _archive_recordings_dirs(primary: str) -> list:
+    """Read-only roots to scan for sessions besides the active one.
+
+    Field report 2026-08-07: a user with hundreds of recordings saw ~15.
+    Nothing was lost — session discovery was a single non-recursive glob
+    over whatever RECORDINGS_DIR currently points at, so every session
+    recorded while it pointed elsewhere became permanently invisible.
+
+    Two sources, both read-only:
+
+      1. The BUILT-IN DEFAULT (<USER_DATA_DIR>/recordings), included
+         automatically whenever the user has overridden RECORDINGS_DIR.
+         This is the common case — the app defaulted somewhere, the user
+         later pointed it at their own folder, and the original library
+         silently dropped out of view. Costs nothing when the directory
+         doesn't exist.
+      2. ARCHIVE_RECORDINGS_DIRS in config.env — a semicolon-separated
+         list, for anyone whose history is spread wider than that.
+    """
+    out: list = []
+    try:
+        from config.settings import USER_DATA_DIR
+        default_dir = Path(USER_DATA_DIR) / "recordings"
+        if str(default_dir).lower() != str(Path(primary)).lower():
+            out.append(str(default_dir))
+    except Exception as e:
+        logger.warning(f"Could not resolve default recordings dir: {e}")
+    raw = os.getenv("ARCHIVE_RECORDINGS_DIRS", "") or ""
+    out.extend(part.strip() for part in raw.split(";") if part.strip())
+    # The roaming archive is both written (by the background worker) and
+    # read here, so a session processed on one machine shows up on every
+    # other machine pointed at the same synced folder.
+    archive = _session_archive_dir()
+    if archive:
+        out.append(archive)
+    return out
+
+
+def _session_archive_dir() -> str:
+    """Cloud-synced folder holding session JSONs so a library roams
+    across machines.
+
+    THE THREE-LOCATION RULE (2026-08-07). A user with a Windows box and a
+    Mac cannot share a library if each only reads its own local disk, and
+    cannot point RECORDINGS_DIR at the cloud either — that's the
+    2026-07-09 Drive-stall incident, where a WAV copy on the record path
+    wedged the backend and cost recordings. So the jobs are split:
+
+      RECORDINGS_DIR      local, authoritative, holds the audio. The
+                          record/process path writes here and ONLY here.
+      SESSION_ARCHIVE_DIR synced. Session JSONs + their small sidecars,
+                          copied by the BACKGROUND worker with retries.
+                          Never audio, never on the record path.
+      cloud_mirror_dir /  derived .txt artifacts for humans to read.
+      Designated Folders
+
+    Writing a few-KB JSON off the hot path is the same shape as the
+    Designated Folder export that has run safely since v2.19; the thing
+    that stalled was a multi-hundred-MB WAV copied synchronously.
+    """
+    return (os.getenv("SESSION_ARCHIVE_DIR", "") or "").strip()
+
+
 def _client_export_folder(session: Session) -> Optional[str]:
     """Resolve the export target for this session: the client's explicit
     Designated Folder, else <cloud_mirror_dir>/<client> (or /Unfiled)
@@ -3816,6 +4006,11 @@ def _do_export_session(session_id: str, _copy_audio: bool) -> None:
     session = svc.session_svc.load_full(session_id)
     if not session:
         return
+    # Roaming archive first, and independent of any client tag — an
+    # untagged meeting still needs to reach your other machine. Raises on
+    # failure so the worker's 5s/30s/120s retry schedule covers a sync
+    # client that's momentarily holding the file.
+    _archive_session(session_id)
     folder = _client_export_folder(session)
     if not folder:
         return
@@ -3940,6 +4135,43 @@ def _reconcile_client(client: str) -> dict:
             f"Reconcile '{client}': queued {queued} session(s) for export "
             f"to {report['folder']}")
     return {**report, "queued": queued}
+
+
+def _reconcile_archive() -> int:
+    """Queue every local session that isn't in the roaming archive yet.
+
+    Same convergence rule as the Designated Folder reconciler: the
+    enqueue-on-process path is the fast lane, this is what makes a
+    missed one a delay instead of a permanent gap. Idempotent — a fully
+    archived library queues nothing.
+
+    Field report 2026-08-07 (bug 3): this used a non-recursive
+    ``src_dir.glob("session_*.json")`` while list_sessions() had already
+    become recursive — a session filed into a subfolder of the primary
+    dir would show up locally but never reach the roaming archive, so
+    it would never appear on the user's other machine. rglob with the
+    same dotted-stem sidecar skip list_sessions() uses.
+    """
+    if not _session_archive_dir():
+        return 0
+    dest = Path(_session_archive_dir()).expanduser()
+    src_dir = Path(svc.settings.recordings_dir)
+    queued = 0
+    for src in src_dir.rglob("session_*.json"):
+        if "." in src.stem:
+            continue
+        dst = dest / src.name
+        try:
+            if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
+                continue
+        except OSError:
+            pass
+        sid = src.stem.replace("session_", "")
+        _EXPORT_WORKER.enqueue(sid, copy_audio=False)
+        queued += 1
+    if queued:
+        logger.info(f"Archive reconcile queued {queued} session(s) -> {dest}")
+    return queued
 
 
 def _reconcile_all_clients() -> None:
@@ -7013,6 +7245,10 @@ async def startup():
             await asyncio.to_thread(_reconcile_all_clients)
         except Exception as e:
             logger.warning(f"Startup reconcile failed: {e}")
+        try:
+            await asyncio.to_thread(_reconcile_archive)
+        except Exception as e:
+            logger.warning(f"Startup archive reconcile failed: {e}")
 
     try:
         asyncio.create_task(_startup_reconcile())
