@@ -355,6 +355,7 @@ from services.calendar_service import (
 )
 from services._cloud_sync import CloudFileNotReadyError
 from services.client_config_service import ClientConfig, ClientConfigService
+from services import document_service
 from services.engagement_service import EngagementService
 from services.export_service import ExportService
 from services.export_worker import ExportWorker, resolve_export_folder
@@ -3975,6 +3976,7 @@ async def get_client_configs():
         return {
             name: {
                 "export_folder": cfg.export_folder,
+                "knowledge_folder": cfg.knowledge_folder,
                 "display_name": cfg.display_name or name,
             }
             for name, cfg in svc.client_cfg_svc.get_all().items()
@@ -3989,28 +3991,70 @@ async def get_client_configs():
 
 
 class ClientConfigDTO(BaseModel):
-    export_folder: str = ""
+    # Optional + None-default (not "") so the endpoint can tell "field
+    # omitted, leave it alone" apart from "field explicitly cleared".
+    # LMA gap analysis 2026-08-07: the Designated Folder card and the
+    # new Knowledge Folder card each PUT only the one field they own —
+    # if this endpoint rebuilt ClientConfig from just the payload (the
+    # pre-knowledge_folder behavior), saving a Designated Folder would
+    # silently wipe out whatever Knowledge Folder was already saved and
+    # vice versa.
+    export_folder: Optional[str] = None
+    knowledge_folder: Optional[str] = None
 
 
 @app.put("/clients/config/{client_name}")
 async def put_client_config(client_name: str, payload: ClientConfigDTO):
     svc.load_settings()
-    folder = payload.export_folder.strip()
-    # Validate a non-empty folder path so the user catches typos up front
-    # rather than at the next recording when nothing shows up there.
-    if folder:
-        p = Path(folder).expanduser()
-        try:
-            p.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Can't create or access '{folder}': {e}",
-            )
-        folder = str(p)
+    existing = svc.client_cfg_svc.get(client_name) or ClientConfig()
+
+    folder = existing.export_folder
+    if payload.export_folder is not None:
+        folder = payload.export_folder.strip()
+        # Validate a non-empty folder path so the user catches typos up
+        # front rather than at the next recording when nothing shows up
+        # there. A Designated Folder is an EXPORT target, so creating it
+        # is correct — there's nothing there yet to lose.
+        if folder:
+            p = Path(folder).expanduser()
+            try:
+                p.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Can't create or access '{folder}': {e}",
+                )
+            folder = str(p)
+
+    knowledge_folder = existing.knowledge_folder
+    if payload.knowledge_folder is not None:
+        knowledge_folder = payload.knowledge_folder.strip()
+        # Unlike export_folder, a Knowledge Folder is the user's
+        # EXISTING documents (SOWs, discovery notes, requirements
+        # docs) — mkdir-ing it on a typo would silently create an empty
+        # folder and mask the mistake instead of surfacing it. 400 with
+        # a clear message so the user fixes the path instead.
+        if knowledge_folder:
+            p = Path(knowledge_folder).expanduser()
+            if not p.is_dir():
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Knowledge folder '{knowledge_folder}' doesn't "
+                        f"exist or isn't a directory."
+                    ),
+                )
+            knowledge_folder = str(p)
+
     def _do():
         svc.client_cfg_svc.set(
-            client_name, ClientConfig(export_folder=folder))
+            client_name,
+            ClientConfig(
+                export_folder=folder,
+                knowledge_folder=knowledge_folder,
+                display_name=existing.display_name,
+            ),
+        )
         # Backfill. Setting a Designated Folder used to apply only to
         # meetings recorded AFTER the change, so a user who filed a
         # back-catalogue found the folder holding a fraction of it
@@ -4022,6 +4066,7 @@ async def put_client_config(client_name: str, payload: ClientConfigDTO):
     return {
         "ok": True,
         "export_folder": folder,
+        "knowledge_folder": knowledge_folder,
         "queued": report.get("queued", 0),
         "mirrored": report.get("mirrored", 0),
         "exportable": report.get("exportable", 0),
@@ -4050,6 +4095,113 @@ async def reconcile_client_exports(client_name: str):
         return await asyncio.to_thread(_reconcile_client, client_name)
     except CloudFileNotReadyError as e:
         raise HTTPException(status_code=503, detail=str(e))
+
+
+def _knowledge_embed_fn():
+    """Resolve the shared local embedding path (core.embeddings), the
+    exact one SearchService/session indexing already uses, so document
+    chunks and transcript chunks land in the same vector space.
+
+    Returns None when sentence-transformers isn't installed — the
+    caller turns that into a 503 rather than a stack trace, matching
+    how /search/semantic and /sessions/{id}/embed degrade (LMA gap
+    analysis 2026-08-07: a document reindex is exactly the kind of
+    "ran once, silently did nothing" failure mode those field reports
+    are about, so this is loud instead of silent).
+    """
+    from core.embeddings import embed_texts, is_available
+    if not is_available():
+        return None
+    return embed_texts
+
+
+@app.post("/clients/{client_name}/knowledge/reindex")
+async def reindex_client_knowledge(client_name: str):
+    """Extract, chunk, and embed every supported document in this
+    client's Knowledge Folder, then drop stale entries for documents
+    that no longer exist. Invalidates the search cache afterward so the
+    new chunks are searchable / citable in Q&A immediately."""
+    svc.load_settings()
+    cfg = svc.client_cfg_svc.get(client_name) if svc.client_cfg_svc else None
+    folder = (cfg.knowledge_folder if cfg else "") or ""
+    if not folder:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No knowledge folder configured for '{client_name}'. "
+                "Set one from the client's Knowledge Folder card first."
+            ),
+        )
+    if not Path(folder).expanduser().is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Knowledge folder '{folder}' doesn't exist or isn't a directory.",
+        )
+
+    embed_fn = _knowledge_embed_fn()
+    if embed_fn is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Semantic embedding isn't available (sentence-transformers "
+                "not installed) — install it and restart to index documents."
+            ),
+        )
+
+    def _do():
+        recordings_dir = svc.session_svc.recordings_dir
+        report = document_service.index_folder(
+            folder, client_name, embed_fn, recordings_dir)
+        removed = document_service.remove_stale(
+            folder, client_name, recordings_dir)
+        report["removed_stale"] = removed
+        return report
+
+    try:
+        report = await asyncio.to_thread(_do)
+    except Exception as e:
+        logger.exception(f"Knowledge reindex failed for '{client_name}'")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if svc.search_svc:
+        await asyncio.to_thread(svc.search_svc.invalidate)
+    return report
+
+
+@app.get("/clients/{client_name}/knowledge")
+async def get_client_knowledge_status(client_name: str):
+    """Status without reindexing — configured folder, whether it's
+    currently reachable, and how much of this client's document index
+    is on disk. Cheap: reads doc_index pickle headers, no embedding."""
+    svc.load_settings()
+    cfg = svc.client_cfg_svc.get(client_name) if svc.client_cfg_svc else None
+    folder = (cfg.knowledge_folder if cfg else "") or ""
+
+    def _do():
+        indexed_docs = 0
+        total_chunks = 0
+        if svc.session_svc:
+            doc_dir = Path(svc.session_svc.recordings_dir) / "doc_index"
+            if doc_dir.is_dir():
+                import pickle as _pickle
+                for f in doc_dir.glob("doc_*.pkl"):
+                    try:
+                        payload = _pickle.loads(f.read_bytes())
+                    except Exception:
+                        continue
+                    if (payload.get("client") or "") != client_name:
+                        continue
+                    indexed_docs += 1
+                    total_chunks += len(payload.get("chunks") or [])
+        return {
+            "client": client_name,
+            "knowledge_folder": folder,
+            "folder_present": bool(folder) and Path(folder).expanduser().is_dir(),
+            "indexed_documents": indexed_docs,
+            "total_chunks": total_chunks,
+        }
+
+    return await asyncio.to_thread(_do)
 
 
 @app.post("/sessions/{session_id}/export")

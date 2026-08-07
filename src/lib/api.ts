@@ -611,6 +611,27 @@ export interface ClientExportStatus {
   pending: { session_id: string; display_name: string; missing: string[] }[];
 }
 
+export interface DocumentSkip {
+  file: string;
+  reason: string;
+}
+
+export interface KnowledgeReindexReport {
+  indexed: number;
+  unchanged: number;
+  skipped: DocumentSkip[];
+  total_chunks: number;
+  removed_stale: number;
+}
+
+export interface ClientKnowledgeStatus {
+  client: string;
+  knowledge_folder: string;
+  folder_present: boolean;
+  indexed_documents: number;
+  total_chunks: number;
+}
+
 export const api = {
   // Resolve the cached backend base URL. Exposed for non-`request`
   // callers that need the URL directly — most notably the live
@@ -1436,13 +1457,20 @@ export const api = {
     }>(`/providers/available-models${qs ? `?${qs}` : ""}`);
   },
 
-  // Per-client configs (designated export folders, etc.)
+  // Per-client configs (designated export folder, knowledge folder, etc.)
   getClientConfigs: () =>
-    request<Record<string, { export_folder: string; display_name?: string }>>(
-      "/clients/config"),
-  setClientConfig: (name: string, cfg: { export_folder: string }) =>
+    request<Record<string, {
+      export_folder: string;
+      knowledge_folder?: string;
+      display_name?: string;
+    }>>("/clients/config"),
+  // Both fields are optional — the endpoint merges onto the existing
+  // stored config, so the Designated Folder card and the Knowledge
+  // Folder card can each PUT only the field they own without wiping
+  // the other one out.
+  setClientConfig: (name: string, cfg: { export_folder?: string; knowledge_folder?: string }) =>
     request<{
-      ok: boolean; export_folder: string;
+      ok: boolean; export_folder: string; knowledge_folder: string;
       // Setting a folder backfills everything already tagged to this
       // client, so the response reports what it queued.
       queued?: number; mirrored?: number; exportable?: number;
@@ -1460,6 +1488,16 @@ export const api = {
   reconcileClientExports: (name: string) =>
     request<ClientExportStatus & { queued: number }>(
       `/clients/${encodeURIComponent(name)}/reconcile`, { method: "POST" }
+    ),
+
+  // Knowledge Folder: per-client document search + Q&A index.
+  getClientKnowledge: (name: string) =>
+    request<ClientKnowledgeStatus>(
+      `/clients/${encodeURIComponent(name)}/knowledge`),
+  reindexClientKnowledge: (name: string) =>
+    request<KnowledgeReindexReport>(
+      `/clients/${encodeURIComponent(name)}/knowledge/reindex`,
+      { method: "POST" }
     ),
 
   exportSession: (id: string) =>

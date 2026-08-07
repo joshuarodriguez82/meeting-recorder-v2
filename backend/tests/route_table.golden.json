@@ -132,6 +132,18 @@
   ]
  ],
  [
+  "/clients/{client_name}/knowledge",
+  [
+   "GET"
+  ]
+ ],
+ [
+  "/clients/{client_name}/knowledge/reindex",
+  [
+   "POST"
+  ]
+ ],
+ [
   "/clients/{client_name}/reconcile",
   [
    "POST"
