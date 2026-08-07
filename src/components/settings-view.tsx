@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { api, formatBytes, type Settings, type TemplateEntry, type CoPilotPromptEntry } from "@/lib/api";
+import { useCallback, useEffect, useState } from "react";
+import { api, formatBytes, type ArchiveStatus, type Settings, type TemplateEntry, type CoPilotPromptEntry } from "@/lib/api";
 import { estimateCopilotCost, formatUsd } from "@/lib/copilot-cost";
 import { confirmDialog } from "@/lib/confirm";
 import { toast } from "sonner";
@@ -146,6 +146,11 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
     wav_count: number;
   } | null>(null);
   const [saving, setSaving] = useState(false);
+  // Bumped after every successful Save Settings — the Session Archive
+  // card watches this to refresh its status readout (folder counts) so
+  // a folder change shows up without the user having to leave the tab
+  // and come back.
+  const [settingsSavedAt, setSettingsSavedAt] = useState(0);
   const [cleaning, setCleaning] = useState(false);
   const [ghostCount, setGhostCount] = useState<number | null>(null);
   const [purging, setPurging] = useState(false);
@@ -198,6 +203,7 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
       // (e.g. the Today tab's visibility) reflect immediately without a
       // restart or focus event.
       onSaved?.();
+      setSettingsSavedAt(Date.now());
     } catch (e) {
       toast.error(`Save failed: ${e instanceof Error ? e.message : e}`);
     } finally {
@@ -505,6 +511,71 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
               wins over this root and follows the same text-only rule.
             </p>
           </div>
+        </CardContent>
+      </Card>
+
+      {/* Session Archive (v2.20: cross-device library sync via a
+          user-owned synced folder — see server.py's _session_archive_dir
+          "three-location rule" docstring for how this differs from
+          Cloud Mirror above). */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Session Archive</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="space-y-2">
+            <Label>
+              Roaming folder for session files (iCloud / OneDrive / Google
+              Drive) — optional
+            </Label>
+            <div className="flex gap-2">
+              <Input
+                value={settings.session_archive_dir || ""}
+                onChange={(e) => update("session_archive_dir", e.target.value)}
+                placeholder="~/iCloud Drive/MRv2 Archive  (empty = off)"
+                className="font-mono text-sm"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                onClick={async () => {
+                  try {
+                    const { open } = await import("@tauri-apps/plugin-dialog");
+                    const picked = await open({
+                      directory: true,
+                      multiple: false,
+                      defaultPath: settings.session_archive_dir || undefined,
+                      title: "Choose Session Archive folder",
+                    });
+                    if (typeof picked === "string" && picked) {
+                      update("session_archive_dir", picked);
+                    }
+                  } catch (e) {
+                    toast.error(
+                      `Folder picker unavailable: ${(e as Error).message ?? e}`);
+                  }
+                }}
+              >
+                Browse…
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Each machine records to its own local disk — a Mac and a PC
+              never share a filesystem. Point this at a folder your sync
+              client (iCloud Drive, OneDrive, Google Drive) already keeps
+              in sync between your machines, and every processed
+              meeting&apos;s <strong>transcript, summary, action items,
+              decisions, and requirements</strong> is copied there in the
+              background so the other machine sees the same library.{" "}
+              <strong>Audio is never copied here</strong> — only the small
+              session file. The folder must already exist; it won&apos;t
+              be created for you, so a typo&apos;d path or an unmounted
+              drive fails loudly on Save instead of quietly starting an
+              empty archive. Click <strong>Save Settings</strong> below
+              after entering a path.
+            </p>
+          </div>
+          <SessionArchiveStatusPanel savedAt={settingsSavedAt} />
         </CardContent>
       </Card>
 
@@ -2139,6 +2210,86 @@ function AutoRecordBlocklistPatternsCard() {
         )}
       </CardContent>
     </Card>
+  );
+}
+
+// Session Archive status readout + "Sync now". Deliberately fetches its
+// own status independent of the Settings form's dirty/clean state — the
+// folder path in the form above may be mid-edit and unsaved, but this
+// panel always reflects what's ACTUALLY configured server-side right
+// now, same as ClientExportStatus does for Designated Folders in
+// clients-view.tsx. `savedAt` is bumped by the parent after every
+// successful Save Settings so a folder change refreshes this without
+// requiring the user to leave and re-enter the tab.
+function SessionArchiveStatusPanel({ savedAt }: { savedAt: number }) {
+  const [status, setStatus] = useState<ArchiveStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+
+  const loadStatus = useCallback(async () => {
+    try {
+      setStatus(await api.getArchiveStatus());
+    } catch {
+      setStatus(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void loadStatus(); }, [loadStatus, savedAt]);
+
+  const syncNow = async () => {
+    setSyncing(true);
+    try {
+      const res = await api.syncArchive();
+      setStatus(res);
+      toast.success(
+        res.queued
+          ? `Queued ${res.queued} session${res.queued === 1 ? "" : "s"} to copy into the archive`
+          : "Everything is already in the archive"
+      );
+    } catch (e) {
+      toast.error(`Sync failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  if (loading || !status || !status.folder) {
+    // Nothing configured (or the check itself failed) — no readout to
+    // show. The input + explanation above already cover the empty case.
+    return null;
+  }
+
+  return (
+    <div className="flex items-center justify-between gap-2 rounded-md border px-3 py-2.5">
+      <div className="text-xs min-w-0 space-y-1">
+        <div className="text-muted-foreground">
+          <strong className="text-foreground">{status.sessions_in_archive}</strong>{" "}
+          session{status.sessions_in_archive === 1 ? "" : "s"} in shared archive
+          {" · "}
+          <strong className="text-foreground">{status.sessions_local}</strong>{" "}
+          local
+          {" · "}
+          <strong className="text-foreground">{status.pending}</strong>{" "}
+          pending
+        </div>
+        {!status.folder_present && (
+          <div className="text-amber-600 dark:text-amber-500">
+            Folder not reachable right now — sync client offline, drive
+            unmounted, or the path changed. Nothing can copy until it&apos;s
+            back.
+          </div>
+        )}
+      </div>
+      <Button
+        size="sm" variant="outline" onClick={syncNow}
+        disabled={syncing || !status.folder_present}
+        title="Copy any local sessions missing from the archive"
+      >
+        {syncing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Sync now"}
+      </Button>
+    </div>
   );
 }
 

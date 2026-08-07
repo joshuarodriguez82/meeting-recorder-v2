@@ -81,7 +81,10 @@ def test_literal_session_routes_precede_the_catch_all():
     app = import_app()
     paths = [r.path for r in app.routes if hasattr(r, "path")]
     catch_all = paths.index("/sessions/{session_id}")
-    for literal in ("/sessions/diagnostics", "/sessions/unprocessed"):
+    for literal in (
+        "/sessions/diagnostics", "/sessions/unprocessed",
+        "/sessions/archive-status",
+    ):
         assert literal in paths, f"{literal} missing"
         assert paths.index(literal) < catch_all, (
             f"{literal} is registered AFTER /sessions/{{session_id}} and is "
