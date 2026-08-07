@@ -22,15 +22,86 @@ logger = get_logger(__name__)
 class SessionService:
     """Handles JSON serialization of Session objects."""
 
-    def __init__(self, recordings_dir: str):
+    def __init__(self, recordings_dir: str, extra_dirs=None):
         self._recordings_dir = Path(recordings_dir)
         self._recordings_dir.mkdir(parents=True, exist_ok=True)
+        # Additional roots to READ sessions from (never written to).
+        #
+        # Field report 2026-08-07: a user with hundreds of recordings saw
+        # ~15 in the app. Cause was structural, not data loss — scanning
+        # was a single non-recursive glob over exactly one directory, so
+        # every session recorded while RECORDINGS_DIR pointed somewhere
+        # else stayed on disk and permanently invisible. Nothing migrated
+        # them and nothing reported them missing.
+        #
+        # Reads now span the primary dir plus any extra roots, and recurse
+        # into subfolders. Writes still go only to _recordings_dir, so the
+        # extra roots are strictly an archive view.
+        self._extra_dirs = [Path(d) for d in (extra_dirs or []) if str(d).strip()]
 
     @property
     def recordings_dir(self) -> Path:
         """Public read-only accessor — used by SearchService to find
         per-session embedding sidecar files (session_<id>.embeddings.pkl)."""
         return self._recordings_dir
+
+    def _scan_roots(self) -> List[Path]:
+        """Every directory sessions are READ from, de-duplicated and
+        with nested roots collapsed (a root inside another root would
+        otherwise double-count under the recursive walk)."""
+        roots: List[Path] = []
+        seen = set()
+        for d in [self._recordings_dir, *self._extra_dirs]:
+            try:
+                rd = d.expanduser().resolve()
+            except OSError:
+                continue
+            key = str(rd).lower()
+            if key in seen or not rd.is_dir():
+                continue
+            seen.add(key)
+            roots.append(rd)
+        # Drop any root contained within another to avoid double-walking.
+        pruned: List[Path] = []
+        for r in roots:
+            if any(r != o and o in r.parents for o in roots):
+                continue
+            pruned.append(r)
+        return pruned
+
+    def scan_report(self) -> dict:
+        """Where sessions were found and what got skipped.
+
+        Exists because every skip below is silent: an un-hydrated cloud
+        placeholder, a truncated JSON, a non-dict file — each is logged
+        and dropped, which renders identically to "you have no sessions".
+        That ambiguity has now caused three separate field reports, so
+        the counts are exposed rather than only logged.
+        """
+        report = {"roots": [], "total": 0, "skipped": 0, "skipped_detail": []}
+        for root in self._scan_roots():
+            found = 0
+            for path in root.rglob("session_*.json"):
+                if "." in path.stem:
+                    continue
+                found += 1
+                try:
+                    data = json.loads(read_text_hydrated(path))
+                    if not isinstance(data, dict):
+                        raise ValueError("root is not a JSON object")
+                except CloudFileNotReadyError:
+                    report["skipped"] += 1
+                    report["skipped_detail"].append(
+                        {"path": str(path), "reason": "cloud placeholder not downloaded"})
+                except Exception as e:
+                    report["skipped"] += 1
+                    report["skipped_detail"].append(
+                        {"path": str(path), "reason": str(e)})
+            report["roots"].append({"path": str(root), "session_files": found})
+            report["total"] += found
+        # Keep the payload bounded — the count is what matters.
+        report["skipped_detail"] = report["skipped_detail"][:50]
+        return report
 
     def save(self, session: Session) -> str:
         """
@@ -108,11 +179,23 @@ class SessionService:
 
     def list_sessions(self) -> List[dict]:
         """
-        Scan recordings dir for all session_*.json files.
+        Scan every configured root for session_*.json files.
         Returns a list of summaries sorted newest first.
+
+        Recursive and multi-root as of 2026-08-07 (see __init__): a
+        single non-recursive glob over one directory hid every session
+        recorded before RECORDINGS_DIR was last changed, and every
+        session filed into a subfolder.
         """
         results: List[dict] = []
-        for path in self._recordings_dir.glob("session_*.json"):
+        # Same session id can legitimately appear under two roots (an old
+        # recordings dir plus a copy in the current one). Keep the newest
+        # by file mtime so the app shows the most-processed version.
+        seen_ids: dict = {}
+        paths = []
+        for root in self._scan_roots():
+            paths.extend(root.rglob("session_*.json"))
+        for path in paths:
             # Skip sidecar files (session_<id>.commitments.json,
             # session_<id>.item_status.json, …) that share the
             # session_*.json glob but aren't canonical session records.
@@ -146,6 +229,17 @@ class SessionService:
                 continue
 
             session_id = data.get("session_id") or path.stem.replace("session_", "")
+
+            # De-dupe across roots. An old recordings dir and the current
+            # one can both hold the same session; prefer the file written
+            # most recently, which is the more-processed copy.
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            prior = seen_ids.get(session_id)
+            if prior is not None and prior[0] >= mtime:
+                continue
             audio_path = data.get("audio_path")
             audio_exists = bool(audio_path) and Path(audio_path).exists()
 
@@ -161,7 +255,7 @@ class SessionService:
             except Exception:
                 pass
 
-            results.append({
+            summary = {
                 "session_id": session_id,
                 "display_name": data.get("display_name") or f"Session {session_id}",
                 "started_at": data.get("started_at"),
@@ -213,7 +307,16 @@ class SessionService:
                 # dropped frames vs wall-clock). Surfaced as an info chip.
                 "sync_warning": data.get("sync_warning"),
                 "json_path": str(path),
-            })
+            }
+            if prior is not None:
+                # Same id seen in another root; this copy is newer, so it
+                # replaces the earlier one in place rather than appending
+                # a duplicate row.
+                results[prior[1]] = summary
+                seen_ids[session_id] = (mtime, prior[1])
+            else:
+                seen_ids[session_id] = (mtime, len(results))
+                results.append(summary)
 
         # Sort newest first
         results.sort(key=lambda r: r.get("started_at") or "", reverse=True)

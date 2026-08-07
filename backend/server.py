@@ -685,7 +685,10 @@ class Services:
     def load_settings(self) -> Settings:
         if self.settings is None:
             self.settings = Settings.from_env()
-            self.session_svc = SessionService(self.settings.recordings_dir)
+            self.session_svc = SessionService(
+                self.settings.recordings_dir,
+                extra_dirs=_archive_recordings_dirs(self.settings.recordings_dir),
+            )
             self.export_svc = ExportService(self.settings.recordings_dir)
             # Per-client configs and user-authored templates live ALONGSIDE
             # the recordings dir so they sync with the user's session
@@ -3069,6 +3072,29 @@ async def list_sessions():
     return await asyncio.to_thread(_do)
 
 
+# Declared BEFORE /sessions/{session_id} for the same reason as the
+# note below — the dynamic pattern matches the literal segment
+# "diagnostics" and would 404 as a missing session.
+@app.get("/sessions/diagnostics")
+async def sessions_diagnostics():
+    """Where the app is looking for sessions, how many files each root
+    holds, and what it had to skip.
+
+    Every skip in list_sessions() is otherwise silent — an un-hydrated
+    cloud placeholder, truncated JSON, or a non-dict file is logged and
+    dropped, which looks exactly like "you have no sessions". Three
+    separate field reports have now traced back to that ambiguity, so
+    the numbers are queryable instead of buried in a log file.
+    """
+    svc.load_settings()
+    def _do():
+        report = svc.session_svc.scan_report()
+        report["primary_dir"] = str(svc.session_svc.recordings_dir)
+        report["visible_in_app"] = len(svc.session_svc.list_sessions())
+        return report
+    return await asyncio.to_thread(_do)
+
+
 # IMPORTANT: declare this BEFORE @app.get("/sessions/{session_id}").
 # FastAPI matches routes in registration order; the dynamic {session_id}
 # pattern matches literal segments too, so a later /sessions/unprocessed
@@ -3780,6 +3806,38 @@ async def suggest_tagging(req: SuggestTaggingRequest):
     except Exception as e:
         logger.exception("Suggest tagging failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _archive_recordings_dirs(primary: str) -> list:
+    """Read-only roots to scan for sessions besides the active one.
+
+    Field report 2026-08-07: a user with hundreds of recordings saw ~15.
+    Nothing was lost — session discovery was a single non-recursive glob
+    over whatever RECORDINGS_DIR currently points at, so every session
+    recorded while it pointed elsewhere became permanently invisible.
+
+    Two sources, both read-only:
+
+      1. The BUILT-IN DEFAULT (<USER_DATA_DIR>/recordings), included
+         automatically whenever the user has overridden RECORDINGS_DIR.
+         This is the common case — the app defaulted somewhere, the user
+         later pointed it at their own folder, and the original library
+         silently dropped out of view. Costs nothing when the directory
+         doesn't exist.
+      2. ARCHIVE_RECORDINGS_DIRS in config.env — a semicolon-separated
+         list, for anyone whose history is spread wider than that.
+    """
+    out: list = []
+    try:
+        from config.settings import USER_DATA_DIR
+        default_dir = Path(USER_DATA_DIR) / "recordings"
+        if str(default_dir).lower() != str(Path(primary)).lower():
+            out.append(str(default_dir))
+    except Exception as e:
+        logger.warning(f"Could not resolve default recordings dir: {e}")
+    raw = os.getenv("ARCHIVE_RECORDINGS_DIRS", "") or ""
+    out.extend(part.strip() for part in raw.split(";") if part.strip())
+    return out
 
 
 def _client_export_folder(session: Session) -> Optional[str]:
