@@ -657,6 +657,12 @@ export interface SharedStateFileStatus {
   archive_mtime: number | null;
   direction: "push" | "pull" | "in-sync" | "absent";
   reason: string | null;
+  // client_configs.json only: per-machine folder paths (export_folder /
+  // knowledge_folder) that the last reconcile sweep cleared because they
+  // were structurally foreign to this platform (e.g. a Windows drive
+  // letter roamed onto a Mac). Field report 2026-08-07. Absent/empty on
+  // summary_templates.json, which carries no filesystem paths.
+  sanitized_cleared?: { client: string; field: string; old_value: string }[];
 }
 
 export interface ArchiveStatus {

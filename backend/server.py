@@ -363,6 +363,7 @@ from services.export_worker import ExportWorker, resolve_export_folder
 from services import export_reconcile
 from services import archive_reconcile
 from services import shared_state_sync
+from services.shared_state_sync import CLIENT_CONFIGS_FILE
 from services.recording_service import RecordingService
 from services.retention_service import cleanup as run_retention_cleanup, folder_stats
 from services.recovery_service import recover_orphans
@@ -4271,22 +4272,46 @@ def _reset_shared_state_services() -> None:
         svc.session_svc, svc.client_cfg_svc, svc.commitments_svc)
 
 
+# Last outcome of shared_state_sync.sanitize_local_paths(), captured so
+# GET /sessions/archive-status can show it without re-running (and
+# re-mutating!) the sanitize pass on every poll — status() elsewhere in
+# this module is deliberately pure/read-only, so the one operation that
+# actually rewrites client_configs.json (healing foreign G:\ paths,
+# field report 2026-08-07) has to remember its own result rather than
+# being recomputed from a "pure inspection" call. Reset to [] on every
+# _reconcile_archive() run, including runs that find nothing to clear,
+# so a healed machine's readout clears itself on the next sweep instead
+# of showing a stale warning forever.
+_LAST_SANITIZE_CLEARED: list = []
+
+
 def _reconcile_archive() -> int:
     """Roam client_configs.json / summary_templates.json, then queue
     every local session that isn't in the roaming archive yet.
 
-    PULL FIRST (field report 2026-08-07): a newer client list or
-    template set sitting in the archive must land locally BEFORE
-    anything else in this sweep (or a request racing it) reads the
-    client roster — otherwise a client that was added, or a template
-    edited, only on the OTHER machine keeps looking absent for one more
-    cycle even after the data is sitting right there in the archive
-    folder. PUSH runs second so a local edit made since the last sweep
-    still goes out promptly. See services/shared_state_sync.py for why
-    client_configs.json / summary_templates.json never rode along with
-    the session-JSON archive copy in the first place, and the JSON/dict
-    safety gate that keeps a half-synced archive file from clobbering a
-    good local one.
+    SANITIZE FIRST (field report 2026-08-07, second incident same day):
+    before either side of the roam runs, clear any per-machine folder
+    path in the LOCAL client_configs.json that is structurally foreign
+    to this platform (e.g. `G:\\My Drive\\Zorg` on macOS) — damage done by
+    the pre-fix whole-file copy (or any other route) that would
+    otherwise keep getting queued against every reconcile sweep. See
+    services/shared_state_sync.py:sanitize_local_paths for the
+    conservative detection rule.
+
+    PULL SECOND: a newer client list or template set sitting in the
+    archive must land locally BEFORE anything else in this sweep (or a
+    request racing it) reads the client roster — otherwise a client that
+    was added, or a template edited, only on the OTHER machine keeps
+    looking absent for one more cycle even after the data is sitting
+    right there in the archive folder. PUSH runs last so a local edit
+    made since the last sweep still goes out promptly — pushed with
+    export_folder/knowledge_folder blanked in the archive copy, since
+    those are per-machine (field report 2026-08-07: that's the whole fix
+    — client IDENTITY roams, per-machine PATHS never do). See
+    services/shared_state_sync.py for why client_configs.json /
+    summary_templates.json never rode along with the session-JSON
+    archive copy in the first place, and the JSON/dict safety gate that
+    keeps a half-synced archive file from clobbering a good local one.
 
     Same convergence rule as the Designated Folder reconciler: the
     enqueue-on-process path is the fast lane, this is what makes a
@@ -4299,10 +4324,19 @@ def _reconcile_archive() -> int:
     actually queues can never drift apart (field report 2026-08-07,
     bug 3 — see that module's docstring for the original bug).
     """
+    global _LAST_SANITIZE_CLEARED
     archive = _session_archive_dir()
     if not archive:
         return 0
     src_dir = Path(svc.settings.recordings_dir)
+
+    cleared = shared_state_sync.sanitize_local_paths(str(src_dir))
+    _LAST_SANITIZE_CLEARED = cleared
+    if cleared:
+        logger.info(
+            f"Shared state sanitize cleared {len(cleared)} foreign "
+            f"folder path(s): {cleared}")
+        _reset_shared_state_services()
 
     pulled = shared_state_sync.pull(str(src_dir), archive)
     if pulled:
@@ -4338,6 +4372,19 @@ def _archive_status_report() -> dict:
     sessions_local = len(archive_reconcile.local_session_ids(src_dir))
     sessions_in_archive = len(archive_reconcile.archived_session_ids(archive))
     pending = len(archive_reconcile.pending_session_ids(src_dir, archive))
+
+    shared_state = shared_state_sync.status(str(src_dir), archive)
+    # Surface the last sanitize_local_paths() outcome (field report
+    # 2026-08-07: the Mac was re-queuing exports against `G:\My Drive\...`
+    # paths roamed in from Windows) on the client_configs.json row so the
+    # Settings card can tell the user their config was healed, instead of
+    # the fix happening silently. Additive key on an existing row — the
+    # per-file dict shape everything else reads is untouched when nothing
+    # was cleared (empty list, same as "no reason" elsewhere in this dict).
+    if CLIENT_CONFIGS_FILE in shared_state:
+        shared_state[CLIENT_CONFIGS_FILE]["sanitized_cleared"] = list(
+            _LAST_SANITIZE_CLEARED)
+
     return {
         "folder": archive or "",
         "folder_present": folder_present,
@@ -4347,7 +4394,7 @@ def _archive_status_report() -> dict:
         # client_configs.json / summary_templates.json roaming status
         # (field report 2026-08-07) — additive key, existing keys above
         # are untouched so the frontend's current reads keep working.
-        "shared_state": shared_state_sync.status(str(src_dir), archive),
+        "shared_state": shared_state,
     }
 
 
