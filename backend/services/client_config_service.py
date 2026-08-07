@@ -34,6 +34,13 @@ def _normalize(name: str) -> str:
 @dataclass
 class ClientConfig:
     export_folder: str = ""
+    # Folder of existing client documents (SOWs, discovery notes,
+    # requirements docs) to extract, chunk, and embed alongside
+    # transcript chunks so semantic search + cross-meeting Q&A can cite
+    # them too. Default "" keeps old client_configs.json entries
+    # readable without a migration — a missing key reads the same as
+    # "no knowledge folder configured yet" (LMA gap analysis 2026-08-07).
+    knowledge_folder: str = ""
     # Preserved original casing of the client name. Stored at write
     # time so the UI can list clients that have been created but not
     # yet tagged onto any session, without losing the user's chosen
@@ -94,6 +101,7 @@ class ClientConfigService:
         return {
             name: ClientConfig(
                 export_folder=(entry or {}).get("export_folder", "") or "",
+                knowledge_folder=(entry or {}).get("knowledge_folder", "") or "",
                 display_name=(entry or {}).get("display_name", "") or name,
             )
             for name, entry in raw.items()
@@ -110,6 +118,7 @@ class ClientConfigService:
             return None
         return ClientConfig(
             export_folder=entry.get("export_folder", "") or "",
+            knowledge_folder=entry.get("knowledge_folder", "") or "",
             display_name=entry.get("display_name", "") or client.strip())
 
     def set(self, client: str, cfg: ClientConfig) -> None:
