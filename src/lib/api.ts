@@ -643,12 +643,30 @@ export interface ClientKnowledgeStatus {
 // shape (folder / folder_present / counts) since it's the same
 // convergence pattern, one level simpler — one artifact (the session
 // JSON) per session instead of five independently-earned ones.
+// Per-file roaming status for client_configs.json / summary_templates.json
+// (field report 2026-08-07: these lived alongside the recordings dir but
+// were never part of the session-JSON archive copy, so a client that
+// exists only in client_configs.json — no tagged meeting yet — plus its
+// Designated/Knowledge Folder settings, plus custom summary templates,
+// never made it to the second machine). Mirrors
+// backend/services/shared_state_sync.py's status() dict shape exactly.
+export interface SharedStateFileStatus {
+  local_present: boolean;
+  archive_present: boolean;
+  local_mtime: number | null;
+  archive_mtime: number | null;
+  direction: "push" | "pull" | "in-sync" | "absent";
+  reason: string | null;
+}
+
 export interface ArchiveStatus {
   folder: string;
   folder_present: boolean;
   sessions_in_archive: number;
   sessions_local: number;
   pending: number;
+  // Keyed by filename ("client_configs.json", "summary_templates.json").
+  shared_state?: Record<string, SharedStateFileStatus>;
 }
 
 export const api = {
