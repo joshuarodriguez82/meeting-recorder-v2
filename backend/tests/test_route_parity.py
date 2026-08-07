@@ -67,3 +67,22 @@ def test_critical_routes_present():
         "/briefing/extension-import",
     ):
         assert must in paths, f"missing critical route {must}"
+
+
+def test_literal_session_routes_precede_the_catch_all():
+    """/sessions/{session_id} matches literal segments too, so any
+    /sessions/<literal> route registered after it is dead — the request
+    falls into the catch-all and 404s as a missing session.
+
+    Caught /sessions/diagnostics registered ~900 lines too late
+    (2026-08-07). The golden route table can't catch this: the route is
+    present either way, only unreachable.
+    """
+    app = import_app()
+    paths = [r.path for r in app.routes if hasattr(r, "path")]
+    catch_all = paths.index("/sessions/{session_id}")
+    for literal in ("/sessions/diagnostics", "/sessions/unprocessed"):
+        assert literal in paths, f"{literal} missing"
+        assert paths.index(literal) < catch_all, (
+            f"{literal} is registered AFTER /sessions/{{session_id}} and is "
+            f"therefore unreachable — move it above the catch-all")
