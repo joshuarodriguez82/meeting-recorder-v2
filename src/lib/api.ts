@@ -601,6 +601,16 @@ export interface ProcessFullStages {
   follow_up_drafts?: string;
 }
 
+export interface ClientExportStatus {
+  client: string;
+  folder: string;
+  folder_present: boolean;
+  total: number;
+  exportable: number;
+  mirrored: number;
+  pending: { session_id: string; display_name: string; missing: string[] }[];
+}
+
 export const api = {
   // Resolve the cached backend base URL. Exposed for non-`request`
   // callers that need the URL directly — most notably the live
@@ -1431,9 +1441,25 @@ export const api = {
     request<Record<string, { export_folder: string; display_name?: string }>>(
       "/clients/config"),
   setClientConfig: (name: string, cfg: { export_folder: string }) =>
-    request<{ ok: boolean; export_folder: string }>(
+    request<{
+      ok: boolean; export_folder: string;
+      // Setting a folder backfills everything already tagged to this
+      // client, so the response reports what it queued.
+      queued?: number; mirrored?: number; exportable?: number;
+    }>(
       `/clients/config/${encodeURIComponent(name)}`,
       { method: "PUT", body: JSON.stringify(cfg) }
+    ),
+
+  // Designated-Folder mirror status: how many of this client's meetings
+  // have their artifacts on disk in the folder, and which don't.
+  getClientExportStatus: (name: string) =>
+    request<ClientExportStatus>(
+      `/clients/${encodeURIComponent(name)}/export-status`),
+  // Idempotent "Sync now" — queues an export for anything missing.
+  reconcileClientExports: (name: string) =>
+    request<ClientExportStatus & { queued: number }>(
+      `/clients/${encodeURIComponent(name)}/reconcile`, { method: "POST" }
     ),
 
   exportSession: (id: string) =>
