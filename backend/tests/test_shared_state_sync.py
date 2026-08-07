@@ -17,7 +17,13 @@ from pathlib import Path
 
 import pytest
 
-from services.shared_state_sync import SHARED_FILES, pull, push, status
+from services.shared_state_sync import (
+    SHARED_FILES,
+    pull,
+    push,
+    sanitize_local_paths,
+    status,
+)
 
 
 def _write(path: Path, payload: dict, mtime: float | None = None) -> Path:
@@ -39,16 +45,55 @@ def _write_raw(path: Path, text: str, mtime: float | None = None) -> Path:
 # ── push ─────────────────────────────────────────────────────────────
 
 def test_push_copies_when_local_newer(tmp_path):
+    # client_configs.json push is field-aware (see below) so this uses
+    # summary_templates.json (no filesystem paths) to test the plain
+    # whole-file-copy path in isolation.
     local = tmp_path / "recordings"
     archive = tmp_path / "archive"
     archive.mkdir()
-    _write(local / "client_configs.json", {"acme": {"export_folder": "x"}}, mtime=2000)
+    _write(local / "summary_templates.json", {"General": {"prompt": "x"}}, mtime=2000)
+    copied = push(str(local), str(archive))
+    assert copied == ["summary_templates.json"]
+    assert (archive / "summary_templates.json").is_file()
+    assert json.loads((archive / "summary_templates.json").read_text()) == {
+        "General": {"prompt": "x"}
+    }
+
+
+# ── field-aware merge: client_configs.json push blanks per-machine paths ──
+
+def test_push_blanks_export_and_knowledge_folder_keeps_keys_and_display_name(tmp_path):
+    """Field report 2026-08-07: client_configs.json carries absolute,
+    machine-specific paths (export_folder, knowledge_folder). Pushing to
+    the shared archive must never publish this machine's local paths —
+    only the client's identity (key + display_name) roams."""
+    local = tmp_path / "recordings"
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    _write(
+        local / "client_configs.json",
+        {
+            "acme": {
+                "export_folder": "~/Acme",
+                "knowledge_folder": "~/Acme/Docs",
+                "display_name": "Acme Corp",
+            }
+        },
+        mtime=2000,
+    )
     copied = push(str(local), str(archive))
     assert copied == ["client_configs.json"]
-    assert (archive / "client_configs.json").is_file()
-    assert json.loads((archive / "client_configs.json").read_text()) == {
-        "acme": {"export_folder": "x"}
+    archived = json.loads((archive / "client_configs.json").read_text())
+    assert archived == {
+        "acme": {
+            "export_folder": "",
+            "knowledge_folder": "",
+            "display_name": "Acme Corp",
+        }
     }
+    # Local copy is untouched — only the archive's copy is blanked.
+    local_data = json.loads((local / "client_configs.json").read_text())
+    assert local_data["acme"]["export_folder"] == "~/Acme"
 
 
 def test_push_copies_when_archive_absent(tmp_path):
@@ -97,13 +142,16 @@ def test_push_noop_when_local_file_absent(tmp_path):
 # ── pull ─────────────────────────────────────────────────────────────
 
 def test_pull_copies_when_archive_newer(tmp_path):
+    # client_configs.json pull is field-aware (see the merge tests below)
+    # so this exercises the plain whole-file-copy path via
+    # summary_templates.json, which has no filesystem paths.
     local = tmp_path / "recordings"
     archive = tmp_path / "archive"
-    _write(local / "client_configs.json", {"a": {}}, mtime=1000)
-    _write(archive / "client_configs.json", {"a": {}, "b": {}}, mtime=5000)
+    _write(local / "summary_templates.json", {"a": {}}, mtime=1000)
+    _write(archive / "summary_templates.json", {"a": {}, "b": {}}, mtime=5000)
     copied = pull(str(local), str(archive))
-    assert copied == ["client_configs.json"]
-    assert json.loads((local / "client_configs.json").read_text()) == {
+    assert copied == ["summary_templates.json"]
+    assert json.loads((local / "summary_templates.json").read_text()) == {
         "a": {}, "b": {}
     }
 
@@ -150,7 +198,8 @@ def test_pull_creates_local_file_when_absent(tmp_path):
 # ── round trip ───────────────────────────────────────────────────────
 
 def test_round_trip_push_then_pull_identical_bytes(tmp_path):
-    """Machine A pushes its client_configs.json to the shared archive;
+    """Machine A pushes its summary_templates.json (no filesystem paths,
+    so still plain whole-file-copy semantics) to the shared archive;
     machine B (a separate local dir) pulls from that same archive and
     ends up byte-identical."""
     archive = tmp_path / "archive"
@@ -159,19 +208,312 @@ def test_round_trip_push_then_pull_identical_bytes(tmp_path):
     machine_b = tmp_path / "machine_b"
     machine_b.mkdir()
 
-    payload = {"acme": {"export_folder": "/A", "knowledge_folder": "/K",
-                         "display_name": "Acme"}}
+    payload = {"General": {"prompt": "Summarize this.", "is_default": True}}
+    _write(machine_a / "summary_templates.json", payload, mtime=9999)
+
+    pushed = push(str(machine_a), str(archive))
+    assert pushed == ["summary_templates.json"]
+
+    pulled = pull(str(machine_b), str(archive))
+    assert pulled == ["summary_templates.json"]
+
+    a_bytes = (machine_a / "summary_templates.json").read_bytes()
+    b_bytes = (machine_b / "summary_templates.json").read_bytes()
+    assert a_bytes == b_bytes
+
+
+def test_round_trip_push_then_pull_client_identity_not_paths(tmp_path):
+    """Machine A (Windows) pushes client_configs.json to the shared
+    archive; machine B (a fresh Mac, no client_configs.json yet) pulls
+    from that archive. The client's IDENTITY (key + display_name) roams,
+    but machine A's Windows path never lands on machine B — field report
+    2026-08-07's `G:\\My Drive\\[scrubbed]` incident."""
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    machine_a = tmp_path / "machine_a"
+    machine_b = tmp_path / "machine_b"
+    machine_b.mkdir()
+
+    payload = {
+        "acme": {
+            "export_folder": r"G:\My Drive\[scrubbed]",
+            "knowledge_folder": r"G:\My Drive\[scrubbed]\Docs",
+            "display_name": "Acme",
+        }
+    }
     _write(machine_a / "client_configs.json", payload, mtime=9999)
 
     pushed = push(str(machine_a), str(archive))
     assert pushed == ["client_configs.json"]
+    # the archive copy itself must never carry machine A's path
+    archived = json.loads((archive / "client_configs.json").read_text())
+    assert archived["acme"]["export_folder"] == ""
+    assert archived["acme"]["knowledge_folder"] == ""
 
     pulled = pull(str(machine_b), str(archive))
     assert pulled == ["client_configs.json"]
+    b_data = json.loads((machine_b / "client_configs.json").read_text())
+    assert b_data == {
+        "acme": {
+            "export_folder": "",
+            "knowledge_folder": "",
+            "display_name": "Acme",
+        }
+    }
 
-    a_bytes = (machine_a / "client_configs.json").read_bytes()
-    b_bytes = (machine_b / "client_configs.json").read_bytes()
-    assert a_bytes == b_bytes
+
+# ── field-aware merge: pull preserves local paths, unions keys ─────────
+
+def test_pull_preserves_local_folder_paths_even_when_archive_has_foreign_ones(tmp_path):
+    """The core 2026-08-07 fix: even though the archive copy is newer and
+    carries a different (foreign) path for a client that also exists
+    locally, the LOCAL export_folder/knowledge_folder must win."""
+    local = tmp_path / "recordings"
+    archive = tmp_path / "archive"
+    _write(
+        local / "client_configs.json",
+        {
+            "[scrubbed]": {
+                "export_folder": "~/Documents/[scrubbed]",
+                "knowledge_folder": "~/Documents/[scrubbed]/Docs",
+                "display_name": "[scrubbed]",
+            }
+        },
+        mtime=1000,
+    )
+    _write(
+        archive / "client_configs.json",
+        {
+            "[scrubbed]": {
+                "export_folder": r"G:\My Drive\[scrubbed]",
+                "knowledge_folder": r"G:\My Drive\[scrubbed]\Docs",
+                "display_name": "[scrubbed]",
+            }
+        },
+        mtime=5000,
+    )
+    copied = pull(str(local), str(archive))
+    assert copied == ["client_configs.json"]
+    local_data = json.loads((local / "client_configs.json").read_text())
+    assert local_data["[scrubbed]"]["export_folder"] == "~/Documents/[scrubbed]"
+    assert local_data["[scrubbed]"]["knowledge_folder"] == "~/Documents/[scrubbed]/Docs"
+
+
+def test_pull_adds_archive_only_clients_with_empty_folder_fields(tmp_path):
+    """A client that exists only in the archive (created on the OTHER
+    machine, no tagged meeting here yet) arrives locally with the folder
+    fields empty — the user sets them locally, they never come from the
+    archive."""
+    local = tmp_path / "recordings"
+    archive = tmp_path / "archive"
+    _write(
+        local / "client_configs.json",
+        {"[scrubbed]": {"export_folder": "/local/[scrubbed]", "display_name": "[scrubbed]"}},
+        mtime=1000,
+    )
+    _write(
+        archive / "client_configs.json",
+        {
+            "[scrubbed]": {"export_folder": "/local/[scrubbed]", "display_name": "[scrubbed]"},
+            "[scrubbed]": {
+                "export_folder": r"G:\My Drive\[scrubbed]",
+                "knowledge_folder": r"G:\My Drive\[scrubbed]\Docs",
+                "display_name": "[scrubbed]",
+            },
+        },
+        mtime=5000,
+    )
+    copied = pull(str(local), str(archive))
+    assert copied == ["client_configs.json"]
+    local_data = json.loads((local / "client_configs.json").read_text())
+    assert local_data["[scrubbed]"]["export_folder"] == "/local/[scrubbed]"
+    assert local_data["[scrubbed]"]["export_folder"] == ""
+    assert local_data["[scrubbed]"]["knowledge_folder"] == ""
+    assert local_data["[scrubbed]"]["display_name"] == "[scrubbed]"
+
+
+def test_pull_never_deletes_local_client_missing_from_archive(tmp_path):
+    """A machine that hasn't synced a given client yet must not wipe the
+    other machine's list — the local-only client survives a pull."""
+    local = tmp_path / "recordings"
+    archive = tmp_path / "archive"
+    _write(
+        local / "client_configs.json",
+        {
+            "[scrubbed]": {"export_folder": "/local/[scrubbed]", "display_name": "[scrubbed]"},
+            "only-local": {"export_folder": "/local/OnlyLocal", "display_name": "Only Local"},
+        },
+        mtime=1000,
+    )
+    _write(
+        archive / "client_configs.json",
+        {"[scrubbed]": {"export_folder": "", "display_name": "[scrubbed]"}},
+        mtime=5000,
+    )
+    copied = pull(str(local), str(archive))
+    assert copied == ["client_configs.json"]
+    local_data = json.loads((local / "client_configs.json").read_text())
+    assert "only-local" in local_data
+    assert local_data["only-local"]["export_folder"] == "/local/OnlyLocal"
+
+
+def test_pull_updates_display_name_from_newer_archive(tmp_path):
+    local = tmp_path / "recordings"
+    archive = tmp_path / "archive"
+    _write(
+        local / "client_configs.json",
+        {"[scrubbed]": {"export_folder": "/local/[scrubbed]", "display_name": "[scrubbed]"}},
+        mtime=1000,
+    )
+    _write(
+        archive / "client_configs.json",
+        {"[scrubbed]": {"export_folder": "", "display_name": "[scrubbed] (renamed)"}},
+        mtime=5000,
+    )
+    copied = pull(str(local), str(archive))
+    assert copied == ["client_configs.json"]
+    local_data = json.loads((local / "client_configs.json").read_text())
+    assert local_data["[scrubbed]"]["display_name"] == "[scrubbed] (renamed)"
+    # folder path is still untouched by the (newer) archive
+    assert local_data["[scrubbed]"]["export_folder"] == "/local/[scrubbed]"
+
+
+def test_pull_does_not_update_display_name_from_older_archive(tmp_path):
+    local = tmp_path / "recordings"
+    archive = tmp_path / "archive"
+    _write(
+        local / "client_configs.json",
+        {"[scrubbed]": {"export_folder": "/local/[scrubbed]", "display_name": "[scrubbed]"}},
+        mtime=5000,
+    )
+    _write(
+        archive / "client_configs.json",
+        {"[scrubbed]": {"export_folder": "", "display_name": "Stale Name"}},
+        mtime=1000,
+    )
+    copied = pull(str(local), str(archive))
+    assert copied == []
+    local_data = json.loads((local / "client_configs.json").read_text())
+    assert local_data["[scrubbed]"]["display_name"] == "[scrubbed]"
+
+
+# ── sanitize_local_paths() ──────────────────────────────────────────────
+
+def test_sanitize_clears_windows_drive_letter_path(tmp_path, monkeypatch):
+    monkeypatch.setattr("services.shared_state_sync.os.name", "posix")
+    local = tmp_path / "recordings"
+    _write(
+        local / "client_configs.json",
+        {
+            "[scrubbed]": {
+                "export_folder": r"G:\My Drive\[scrubbed]",
+                "knowledge_folder": r"G:\My Drive\[scrubbed]\Docs",
+                "display_name": "[scrubbed]",
+            }
+        },
+    )
+    cleared = sanitize_local_paths(str(local))
+    assert len(cleared) == 2
+    fields = {c["field"] for c in cleared}
+    assert fields == {"export_folder", "knowledge_folder"}
+    for c in cleared:
+        assert c["client"] == "[scrubbed]"
+        assert c["old_value"] in (r"G:\My Drive\[scrubbed]", r"G:\My Drive\[scrubbed]\Docs")
+    data = json.loads((local / "client_configs.json").read_text())
+    assert data["[scrubbed]"]["export_folder"] == ""
+    assert data["[scrubbed]"]["knowledge_folder"] == ""
+
+
+def test_sanitize_clears_unc_path_on_posix(tmp_path, monkeypatch):
+    monkeypatch.setattr("services.shared_state_sync.os.name", "posix")
+    local = tmp_path / "recordings"
+    _write(
+        local / "client_configs.json",
+        {"[scrubbed]": {"export_folder": r"\\server\share\[scrubbed]", "display_name": "[scrubbed]"}},
+    )
+    cleared = sanitize_local_paths(str(local))
+    assert len(cleared) == 1
+    data = json.loads((local / "client_configs.json").read_text())
+    assert data["[scrubbed]"]["export_folder"] == ""
+
+
+def test_sanitize_leaves_plausible_local_path_alone(tmp_path, monkeypatch):
+    monkeypatch.setattr("services.shared_state_sync.os.name", "posix")
+    local = tmp_path / "recordings"
+    _write(
+        local / "client_configs.json",
+        {"[scrubbed]": {"export_folder": "~/Documents/[scrubbed]", "display_name": "[scrubbed]"}},
+    )
+    cleared = sanitize_local_paths(str(local))
+    assert cleared == []
+    data = json.loads((local / "client_configs.json").read_text())
+    assert data["[scrubbed]"]["export_folder"] == "~/Documents/[scrubbed]"
+
+
+def test_sanitize_leaves_existing_but_currently_missing_local_path_alone(tmp_path, monkeypatch):
+    """An unplugged external drive (a plausible local path that merely
+    doesn't currently resolve) must survive a sanitize pass — only
+    structurally foreign paths are cleared."""
+    monkeypatch.setattr("services.shared_state_sync.os.name", "posix")
+    local = tmp_path / "recordings"
+    _write(
+        local / "client_configs.json",
+        {"[scrubbed]": {"export_folder": "/Volumes/UnpluggedDrive/[scrubbed]", "display_name": "[scrubbed]"}},
+    )
+    cleared = sanitize_local_paths(str(local))
+    assert cleared == []
+    data = json.loads((local / "client_configs.json").read_text())
+    assert data["[scrubbed]"]["export_folder"] == "/Volumes/UnpluggedDrive/[scrubbed]"
+
+
+def test_sanitize_noop_when_no_client_configs_file(tmp_path):
+    local = tmp_path / "recordings"
+    local.mkdir()
+    assert sanitize_local_paths(str(local)) == []
+
+
+def test_sanitize_noop_when_recordings_dir_unset(tmp_path):
+    assert sanitize_local_paths("") == []
+
+
+# NOTE: a Windows-dispatch (os.name == "nt") sanitize test is
+# deliberately not included here — pathlib.Path's class (WindowsPath vs
+# PosixPath) is itself selected from the REAL os.name at class-definition
+# time, so monkeypatching os.name to "nt" while running on this Linux CI
+# venv makes Path() raise NotImplementedError before
+# _is_foreign_local_path ever runs. The Windows branch is exercised by
+# _is_foreign_local_path's own logic (unit-testable in isolation) rather
+# than through sanitize_local_paths' filesystem path here; see
+# test_is_foreign_local_path_windows_dispatch below.
+
+def test_is_foreign_local_path_windows_dispatch(tmp_path, monkeypatch):
+    """Exercise the os.name == "nt" branch of _is_foreign_local_path
+    directly (see the NOTE above for why sanitize_local_paths itself
+    can't be driven through this branch on a POSIX CI host)."""
+    from services.shared_state_sync import _is_foreign_local_path
+
+    monkeypatch.setattr("services.shared_state_sync.os.name", "nt")
+    # A POSIX-style path that can't exist is foreign on "Windows".
+    assert _is_foreign_local_path("~/Documents/[scrubbed]-does-not-exist") is True
+    # A POSIX-style path that DOES resolve (e.g. WSL interop) is left alone.
+    assert _is_foreign_local_path(str(tmp_path)) is False
+    # A plain Windows-style path is never foreign on Windows.
+    assert _is_foreign_local_path(r"C:\\Users\\<you>\Documents\[scrubbed]") is False
+
+
+def test_sanitize_returns_cleared_list_shape(tmp_path, monkeypatch):
+    monkeypatch.setattr("services.shared_state_sync.os.name", "posix")
+    local = tmp_path / "recordings"
+    _write(
+        local / "client_configs.json",
+        {"[scrubbed]": {"export_folder": r"G:\My Drive\[scrubbed]", "display_name": "[scrubbed]"}},
+    )
+    cleared = sanitize_local_paths(str(local))
+    assert cleared == [{
+        "client": "[scrubbed]",
+        "field": "export_folder",
+        "old_value": r"G:\My Drive\[scrubbed]",
+    }]
 
 
 # ── safety: malformed / non-dict archive copies are never pulled ──────
