@@ -358,6 +358,7 @@ from services.client_config_service import ClientConfig, ClientConfigService
 from services.engagement_service import EngagementService
 from services.export_service import ExportService
 from services.export_worker import ExportWorker, resolve_export_folder
+from services import export_reconcile
 from services.recording_service import RecordingService
 from services.retention_service import cleanup as run_retention_cleanup, folder_stats
 from services.recovery_service import recover_orphans
@@ -3199,6 +3200,14 @@ async def patch_session(session_id: str, req: SessionPatchRequest):
     if req.notes is not None:
         session.notes = req.notes
     svc.session_svc.save(session)
+    # Tagging an already-processed meeting to a client is the single most
+    # common way a session acquires a Designated Folder, and until
+    # 2026-08-07 it exported nothing — the artifacts stayed local
+    # forever. display_name matters too: it's the filename stem, so a
+    # rename means a new set of files is owed.
+    if (req.client is not None or req.project is not None
+            or req.display_name is not None):
+        _auto_export_to_client(session)
     return {"ok": True}
 
 
@@ -3672,6 +3681,10 @@ async def bulk_tag_sessions(req: BulkTagRequest):
         if req.project is not None:
             session.project = req.project
         svc.session_svc.save(session)
+        # Bulk-tagging is how a back-catalogue gets filed under a client.
+        # Without this the folder stays empty no matter how many meetings
+        # you tag (2026-08-07 field report).
+        _auto_export_to_client(session)
         updated += 1
     return {"updated": updated}
 
@@ -3851,6 +3864,109 @@ def _auto_export_to_client(session: Session, copy_audio: bool = False) -> None:
     _EXPORT_WORKER.enqueue(session.session_id, copy_audio=copy_audio)
 
 
+def _export_folder_for_client(client: str) -> Optional[str]:
+    """Designated Folder for a client name (no Session needed).
+
+    Same resolution order as _client_export_folder: explicit folder,
+    else <cloud_mirror_dir>/<client>, else None.
+    """
+    client = (client or "").strip()
+    explicit = ""
+    if client and svc.client_cfg_svc:
+        cfg = svc.client_cfg_svc.get(client)
+        if cfg and cfg.export_folder:
+            explicit = cfg.export_folder
+    mirror_root = getattr(svc.settings, "cloud_mirror_dir", "") or ""
+    return resolve_export_folder(explicit, client, mirror_root)
+
+
+def _client_export_report(client: str) -> dict:
+    """Compare what every session tagged to `client` owes its Designated
+    Folder against what is actually on disk.
+
+    Pure inspection — stats files, never copies. Returns per-session
+    detail so the UI can name the meetings that haven't mirrored instead
+    of only showing a count.
+    """
+    folder = _export_folder_for_client(client)
+    summaries = svc.session_svc.list_sessions()
+    mine = export_reconcile.sessions_for_client(summaries, client)
+    folder_present = bool(folder) and Path(folder).expanduser().is_dir()
+
+    pending: list[dict] = []
+    complete = 0
+    for row in mine:
+        expected = export_reconcile.expected_artifacts(row)
+        if not expected:
+            # Nothing processed yet — owes the folder nothing.
+            continue
+        missing = export_reconcile.missing_artifacts(row, folder)
+        if missing:
+            pending.append({
+                "session_id": row.get("session_id", ""),
+                "display_name": row.get("display_name", ""),
+                "missing": missing,
+            })
+        else:
+            complete += 1
+    return {
+        "client": client,
+        "folder": folder or "",
+        "folder_present": folder_present,
+        "total": len(mine),
+        "exportable": complete + len(pending),
+        "mirrored": complete,
+        "pending": pending,
+    }
+
+
+def _reconcile_client(client: str) -> dict:
+    """Enqueue an export for every session of `client` missing artifacts.
+
+    THE CORRECTNESS GUARANTEE (2026-08-07). Enqueue-on-mutation is the
+    fast path; this is what makes a missed trigger a delay rather than a
+    permanent hole. Idempotent — a fully-mirrored client queues nothing,
+    so it is safe to call on folder-set, on rename, on startup, and from
+    the Sync now button.
+    """
+    report = _client_export_report(client)
+    if not report["folder"]:
+        return {**report, "queued": 0}
+    for row in report["pending"]:
+        _EXPORT_WORKER.enqueue(row["session_id"], copy_audio=False)
+    queued = len(report["pending"])
+    if queued:
+        logger.info(
+            f"Reconcile '{client}': queued {queued} session(s) for export "
+            f"to {report['folder']}")
+    return {**report, "queued": queued}
+
+
+def _reconcile_all_clients() -> None:
+    """Background sweep across every configured client. Runs once at
+    startup so a folder set on another device, an interrupted export, or
+    a trigger that predates this machinery heals without the user having
+    to notice and click anything."""
+    try:
+        if not svc.client_cfg_svc:
+            return
+        names = [
+            (cfg.display_name or key)
+            for key, cfg in svc.client_cfg_svc.get_all().items()
+        ]
+    except Exception as e:
+        logger.warning(f"Startup reconcile skipped (config unreadable): {e}")
+        return
+    total = 0
+    for name in names:
+        try:
+            total += _reconcile_client(name).get("queued", 0)
+        except Exception as e:
+            logger.warning(f"Reconcile of '{name}' failed: {e}")
+    if total:
+        logger.info(f"Startup reconcile queued {total} session export(s)")
+
+
 # ── Client configs (per-client designated export folder) ──────────────
 @app.get("/clients/config")
 async def get_client_configs():
@@ -3895,8 +4011,45 @@ async def put_client_config(client_name: str, payload: ClientConfigDTO):
     def _do():
         svc.client_cfg_svc.set(
             client_name, ClientConfig(export_folder=folder))
-    await asyncio.to_thread(_do)
-    return {"ok": True, "export_folder": folder}
+        # Backfill. Setting a Designated Folder used to apply only to
+        # meetings recorded AFTER the change, so a user who filed a
+        # back-catalogue found the folder holding a fraction of it
+        # (2026-08-07). Reconciling here mirrors everything already
+        # tagged to this client. Runs on the worker queue, so a slow or
+        # offline Drive mount never blocks the response.
+        return _reconcile_client(client_name)
+    report = await asyncio.to_thread(_do)
+    return {
+        "ok": True,
+        "export_folder": folder,
+        "queued": report.get("queued", 0),
+        "mirrored": report.get("mirrored", 0),
+        "exportable": report.get("exportable", 0),
+    }
+
+
+@app.get("/clients/{client_name}/export-status")
+async def get_client_export_status(client_name: str):
+    """How much of this client's library has reached its Designated
+    Folder. Powers the "N of M mirrored" readout so a silent export
+    failure can't hide the way it did before 2026-08-07."""
+    svc.load_settings()
+    try:
+        return await asyncio.to_thread(_client_export_report, client_name)
+    except CloudFileNotReadyError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.post("/clients/{client_name}/reconcile")
+async def reconcile_client_exports(client_name: str):
+    """Queue an export for every meeting of this client whose artifacts
+    are missing from the Designated Folder. Idempotent — the Sync now
+    button. Safe to hammer; a fully-mirrored client queues nothing."""
+    svc.load_settings()
+    try:
+        return await asyncio.to_thread(_reconcile_client, client_name)
+    except CloudFileNotReadyError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @app.post("/sessions/{session_id}/export")
@@ -6844,6 +6997,27 @@ async def startup():
         _ensure_auto_record_service()
     except Exception as e:
         logger.warning(f"AutoRecordService bootstrap failed: {e}")
+
+    # Designated-Folder reconciliation sweep. Heals anything the
+    # enqueue-on-mutation fast path missed: a folder set on another
+    # device, an export that exhausted its retries while the mount was
+    # offline, or meetings tagged by a build that predates this. Runs
+    # off the startup path (to_thread) because it stats files on what
+    # may be a cloud mount.
+    async def _startup_reconcile() -> None:
+        # Let the backend finish coming up first — reconciliation is
+        # convergence, not urgency, and the export worker's own retry
+        # schedule already covers the fast path.
+        await asyncio.sleep(20)
+        try:
+            await asyncio.to_thread(_reconcile_all_clients)
+        except Exception as e:
+            logger.warning(f"Startup reconcile failed: {e}")
+
+    try:
+        asyncio.create_task(_startup_reconcile())
+    except Exception as e:
+        logger.warning(f"Startup reconcile bootstrap failed: {e}")
 
     # Automatic old-audio cleanup. Previously the retention_enabled
     # setting was saved but never acted on; this task is what makes it
