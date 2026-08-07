@@ -472,6 +472,12 @@
   ]
  ],
  [
+  "/sessions/diagnostics",
+  [
+   "GET"
+  ]
+ ],
+ [
   "/sessions/import",
   [
    "POST"
