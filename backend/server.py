@@ -362,6 +362,7 @@ from services.export_service import ExportService
 from services.export_worker import ExportWorker, resolve_export_folder
 from services import export_reconcile
 from services import archive_reconcile
+from services import shared_state_sync
 from services.recording_service import RecordingService
 from services.retention_service import cleanup as run_retention_cleanup, folder_stats
 from services.recovery_service import recover_orphans
@@ -4236,8 +4237,56 @@ def _reconcile_client(client: str) -> dict:
     return {**report, "queued": queued}
 
 
+def _reset_shared_state_services() -> None:
+    """Rebuild ClientConfigService / TemplateService against the current
+    recordings dir after shared_state_sync.pull() has overwritten
+    client_configs.json and/or summary_templates.json on disk.
+
+    Neither service caches file contents in memory — every get()/get_all()
+    call re-reads the JSON from disk fresh (see ClientConfigService._read_all
+    / TemplateService._read_all_locked) — so this reconstruction doesn't
+    change what the NEXT call returns; it exists to keep the invalidation
+    explicit at this call site rather than leaning on that as an unstated
+    implementation detail, matching the intent of the recordings_dir-change
+    path in save_settings() (which re-migrates and reconstructs both
+    services on a folder change).
+    Deliberately narrower than that path's "Force reload"
+    (`svc.settings = None; svc.load_settings()`), which also tears down
+    SessionService / RecordingService / the export worker's view of
+    settings — right for a user-initiated Settings save, wrong here: this
+    runs from a background sweep (and from POST /sessions/archive/sync)
+    and must never risk disturbing an in-flight recording just because a
+    config file synced in from another machine (field report 2026-08-07).
+    """
+    if svc.settings is None:
+        return
+    recordings_dir = Path(svc.settings.recordings_dir)
+    svc.client_cfg_svc = ClientConfigService(recordings_dir)
+    svc.template_svc = TemplateService(recordings_dir)
+    # engagement_svc holds a reference to client_cfg_svc (and re-reads
+    # through it on every call rather than caching), but rebuild it too
+    # so it never holds a reference to the OLD ClientConfigService
+    # instance — cheap, and removes any doubt.
+    svc.engagement_svc = EngagementService(
+        svc.session_svc, svc.client_cfg_svc, svc.commitments_svc)
+
+
 def _reconcile_archive() -> int:
-    """Queue every local session that isn't in the roaming archive yet.
+    """Roam client_configs.json / summary_templates.json, then queue
+    every local session that isn't in the roaming archive yet.
+
+    PULL FIRST (field report 2026-08-07): a newer client list or
+    template set sitting in the archive must land locally BEFORE
+    anything else in this sweep (or a request racing it) reads the
+    client roster — otherwise a client that was added, or a template
+    edited, only on the OTHER machine keeps looking absent for one more
+    cycle even after the data is sitting right there in the archive
+    folder. PUSH runs second so a local edit made since the last sweep
+    still goes out promptly. See services/shared_state_sync.py for why
+    client_configs.json / summary_templates.json never rode along with
+    the session-JSON archive copy in the first place, and the JSON/dict
+    safety gate that keeps a half-synced archive file from clobbering a
+    good local one.
 
     Same convergence rule as the Designated Folder reconciler: the
     enqueue-on-process path is the fast lane, this is what makes a
@@ -4254,6 +4303,15 @@ def _reconcile_archive() -> int:
     if not archive:
         return 0
     src_dir = Path(svc.settings.recordings_dir)
+
+    pulled = shared_state_sync.pull(str(src_dir), archive)
+    if pulled:
+        logger.info(f"Shared state pulled from archive: {pulled}")
+        _reset_shared_state_services()
+    pushed = shared_state_sync.push(str(src_dir), archive)
+    if pushed:
+        logger.info(f"Shared state pushed to archive: {pushed}")
+
     pending = archive_reconcile.pending_session_ids(src_dir, archive)
     for sid in pending:
         _EXPORT_WORKER.enqueue(sid, copy_audio=False)
@@ -4286,6 +4344,10 @@ def _archive_status_report() -> dict:
         "sessions_in_archive": sessions_in_archive,
         "sessions_local": sessions_local,
         "pending": pending,
+        # client_configs.json / summary_templates.json roaming status
+        # (field report 2026-08-07) — additive key, existing keys above
+        # are untouched so the frontend's current reads keep working.
+        "shared_state": shared_state_sync.status(str(src_dir), archive),
     }
 
 
