@@ -183,9 +183,18 @@ def _emit_chunk(segs: List[dict]) -> Chunk:
     )
 
 
-def embed_chunks(chunks: List[Chunk]) -> np.ndarray:
-    """Encode chunks → (N, dim) float32 L2-normalized matrix."""
-    if not chunks:
+def embed_texts(texts: List[str]) -> np.ndarray:
+    """Encode arbitrary text strings → (N, dim) float32 L2-normalized
+    matrix.
+
+    Pulled out of embed_chunks() (LMA gap analysis 2026-08-07) so
+    document ingestion (backend/services/document_service.py) can embed
+    plain-text chunks through the exact same lazy singleton model, same
+    normalize/batch settings, as transcript chunks — session and
+    document embeddings must land in the same vector space or cosine
+    similarity between them is meaningless.
+    """
+    if not texts:
         return np.zeros((0, embedding_dim()), dtype=np.float32)
     model = _get_model()
     # MiniLM-L6 has a 256-token limit; sentence-transformers truncates
@@ -194,13 +203,20 @@ def embed_chunks(chunks: List[Chunk]) -> np.ndarray:
     # may get clipped, which is acceptable — the head usually carries
     # enough topical signal for retrieval.
     embeddings = model.encode(
-        [c.text for c in chunks],
+        texts,
         normalize_embeddings=True,
         convert_to_numpy=True,
         show_progress_bar=False,
         batch_size=32,
     )
     return embeddings.astype(np.float32, copy=False)
+
+
+def embed_chunks(chunks: List[Chunk]) -> np.ndarray:
+    """Encode chunks → (N, dim) float32 L2-normalized matrix."""
+    if not chunks:
+        return np.zeros((0, embedding_dim()), dtype=np.float32)
+    return embed_texts([c.text for c in chunks])
 
 
 def embed_query(query: str) -> np.ndarray:
