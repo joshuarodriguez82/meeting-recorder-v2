@@ -126,6 +126,18 @@
   ]
  ],
  [
+  "/clients/{client_name}/export-status",
+  [
+   "GET"
+  ]
+ ],
+ [
+  "/clients/{client_name}/reconcile",
+  [
+   "POST"
+  ]
+ ],
+ [
   "/commitments",
   [
    "GET"
