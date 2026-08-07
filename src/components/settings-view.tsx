@@ -2261,6 +2261,25 @@ function SessionArchiveStatusPanel({ savedAt }: { savedAt: number }) {
     return null;
   }
 
+  // Clients & templates roaming line (field report 2026-08-07):
+  // client_configs.json / summary_templates.json ride along with the
+  // Session Archive too (see backend/services/shared_state_sync.py) but
+  // are a separate, smaller sync with their own last-writer-wins-by-mtime
+  // rule — worth one line so a user whose new client isn't showing up on
+  // the other machine yet can see why, rather than the readout only ever
+  // talking about session counts.
+  const sharedState = status.shared_state ?? {};
+  const sharedRows = Object.values(sharedState);
+  const sharedReasons = sharedRows
+    .map((r) => r.reason)
+    .filter((r): r is string => !!r);
+  let sharedLine = "Clients & templates: in sync";
+  if (sharedRows.some((r) => r.direction === "pull")) {
+    sharedLine = "Clients & templates: will pull from archive";
+  } else if (sharedRows.some((r) => r.direction === "push")) {
+    sharedLine = "Clients & templates: will push to archive";
+  }
+
   return (
     <div className="flex items-center justify-between gap-2 rounded-md border px-3 py-2.5">
       <div className="text-xs min-w-0 space-y-1">
@@ -2274,6 +2293,9 @@ function SessionArchiveStatusPanel({ savedAt }: { savedAt: number }) {
           <strong className="text-foreground">{status.pending}</strong>{" "}
           pending
         </div>
+        {sharedRows.length > 0 && (
+          <div className="text-muted-foreground">{sharedLine}</div>
+        )}
         {!status.folder_present && (
           <div className="text-amber-600 dark:text-amber-500">
             Folder not reachable right now — sync client offline, drive
@@ -2281,6 +2303,11 @@ function SessionArchiveStatusPanel({ savedAt }: { savedAt: number }) {
             back.
           </div>
         )}
+        {sharedReasons.map((reason, i) => (
+          <div key={i} className="text-amber-600 dark:text-amber-500">
+            {reason}
+          </div>
+        ))}
       </div>
       <Button
         size="sm" variant="outline" onClick={syncNow}
