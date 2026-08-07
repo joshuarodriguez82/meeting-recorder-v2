@@ -143,3 +143,49 @@ def test_scan_report_surfaces_unreadable_files(tmp_path):
     assert len(svc.list_sessions()) == 1
     reasons = " ".join(d["reason"] for d in rep["skipped_detail"])
     assert reasons  # each skip carries a reason
+
+
+# ── roaming archive (three-location rule) ─────────────────────────────
+
+def test_archive_root_is_scanned_alongside_local(tmp_path):
+    """A Mac and a Windows box each record locally but share a synced
+    archive folder; both must see one merged library."""
+    local = tmp_path / "local"
+    archive = tmp_path / "synced"
+    _write(local, "LOC01")
+    _write(archive, "MAC01")
+    _write(archive, "MAC02")
+
+    svc = SessionService(str(local), extra_dirs=[str(archive)])
+    ids = {s["session_id"] for s in svc.list_sessions()}
+    assert ids == {"LOC01", "MAC01", "MAC02"}
+
+
+def test_local_copy_wins_when_newer_than_archive(tmp_path):
+    """This machine just processed a session the archive has an older
+    copy of; the local, more-complete one must be what's shown."""
+    local = tmp_path / "local"
+    archive = tmp_path / "synced"
+    _write(archive, "SH01", name="from-archive", summary="", mtime=1_000_000)
+    _write(local, "SH01", name="just-processed", summary="full", mtime=2_000_000)
+
+    svc = SessionService(str(local), extra_dirs=[str(archive)])
+    rows = svc.list_sessions()
+    assert len(rows) == 1
+    assert rows[0]["display_name"] == "just-processed"
+    assert rows[0]["has_summary"] is True
+
+
+def test_archive_copy_wins_when_newer_than_local(tmp_path):
+    """The other machine processed it more recently — its version wins,
+    so a stale local stub can't mask a finished summary."""
+    local = tmp_path / "local"
+    archive = tmp_path / "synced"
+    _write(local, "SH02", name="stale-stub", summary="", mtime=1_000_000)
+    _write(archive, "SH02", name="processed-elsewhere", summary="full", mtime=2_000_000)
+
+    svc = SessionService(str(local), extra_dirs=[str(archive)])
+    rows = svc.list_sessions()
+    assert len(rows) == 1
+    assert rows[0]["display_name"] == "processed-elsewhere"
+    assert rows[0]["has_summary"] is True
