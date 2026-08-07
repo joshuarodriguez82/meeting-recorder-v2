@@ -38,6 +38,10 @@ class SessionService:
         # into subfolders. Writes still go only to _recordings_dir, so the
         # extra roots are strictly an archive view.
         self._extra_dirs = [Path(d) for d in (extra_dirs or []) if str(d).strip()]
+        # Roots that failed during the most recent list_sessions() walk.
+        # Surfaced through scan_report() so an unreachable cloud folder
+        # is visible rather than inferred from a short session list.
+        self._last_root_errors: list = []
 
     @property
     def recordings_dir(self) -> Path:
@@ -51,13 +55,24 @@ class SessionService:
         otherwise double-count under the recursive walk)."""
         roots: List[Path] = []
         seen = set()
+        # Primary first, deliberately: ordering decides whose sessions
+        # survive if a later root misbehaves (see list_sessions()).
         for d in [self._recordings_dir, *self._extra_dirs]:
             try:
                 rd = d.expanduser().resolve()
-            except OSError:
+            except OSError as e:
+                logger.warning(f"Skipping unresolvable root {d}: {e}")
                 continue
             key = str(rd).lower()
-            if key in seen or not rd.is_dir():
+            if key in seen:
+                continue
+            try:
+                if not rd.is_dir():
+                    continue
+            except OSError as e:
+                # An offline network mount can raise rather than return
+                # False. Treat it as absent, never as fatal.
+                logger.warning(f"Root {rd} not reachable ({e}); skipping")
                 continue
             seen.add(key)
             roots.append(rd)
@@ -78,10 +93,22 @@ class SessionService:
         That ambiguity has now caused three separate field reports, so
         the counts are exposed rather than only logged.
         """
-        report = {"roots": [], "total": 0, "skipped": 0, "skipped_detail": []}
+        report = {"roots": [], "total": 0, "skipped": 0,
+                  "skipped_detail": [], "unreachable_roots": []}
         for root in self._scan_roots():
             found = 0
-            for path in root.rglob("session_*.json"):
+            try:
+                candidates = list(root.rglob("session_*.json"))
+            except OSError as e:
+                # Same isolation rule as list_sessions(): report the
+                # failed root, keep scanning the rest.
+                report["unreachable_roots"].append(
+                    {"path": str(root), "error": str(e)})
+                report["roots"].append({"path": str(root),
+                                        "session_files": 0,
+                                        "unreachable": True})
+                continue
+            for path in candidates:
                 if "." in path.stem:
                     continue
                 found += 1
@@ -227,8 +254,35 @@ class SessionService:
         # by file mtime so the app shows the most-processed version.
         seen_ids: dict = {}
         paths = []
+        # ONE BAD ROOT MUST NEVER TAKE DOWN THE WHOLE LIST.
+        #
+        # Field report 2026-08-07: a user configured a Google Drive
+        # folder as their Session Archive and their Windows library
+        # collapsed from 73 sessions to a handful. Nothing was deleted
+        # and the local files were fine — this loop was
+        # `paths.extend(root.rglob(...))` with no error handling, so a
+        # single OSError from the Drive mount (stream hiccup, transient
+        # permission failure, disconnect — routine on cloud filesystems)
+        # propagated straight out of list_sessions(), 500'd GET
+        # /sessions, and took the LOCAL sessions down with it.
+        #
+        # Roots are now isolated: a root that fails contributes nothing
+        # and is recorded, while every other root still returns its
+        # sessions. The primary recordings dir is walked first so a
+        # flaky network root can never cost the user their local
+        # library. archive_reconcile._scan_session_json already had this
+        # guard; this one didn't, and that asymmetry is what shipped.
+        self._last_root_errors = []
         for root in self._scan_roots():
-            paths.extend(root.rglob("session_*.json"))
+            try:
+                paths.extend(root.rglob("session_*.json"))
+            except OSError as e:
+                self._last_root_errors.append({"path": str(root),
+                                               "error": str(e)})
+                logger.error(
+                    f"Session scan of {root} failed ({e}); sessions in "
+                    f"other folders are unaffected. If this is a cloud "
+                    f"folder, check the sync client is running.")
         for path in paths:
             # Skip sidecar files (session_<id>.commitments.json,
             # session_<id>.item_status.json, …) that share the

@@ -290,3 +290,74 @@ def test_archive_copy_wins_when_newer_than_local(tmp_path):
     assert len(rows) == 1
     assert rows[0]["display_name"] == "processed-elsewhere"
     assert rows[0]["has_summary"] is True
+
+
+# ── one bad root must not take down the list ──────────────────────────
+
+def test_failing_root_does_not_lose_local_sessions(tmp_path, monkeypatch):
+    """Field report 2026-08-07: configuring a Google Drive folder as the
+    Session Archive collapsed a 73-session library to a handful. The
+    scan called root.rglob() unguarded, so one OSError from the cloud
+    mount propagated out and took the LOCAL sessions with it."""
+    local = tmp_path / "local"
+    flaky = tmp_path / "cloud"
+    _write(local, "KEEP01")
+    _write(local, "KEEP02")
+    _write(flaky, "CLOUD01")
+
+    svc = SessionService(str(local), extra_dirs=[str(flaky)])
+
+    real_rglob = type(local).rglob
+
+    def boom(self, pattern):
+        if str(self).startswith(str(flaky)):
+            raise OSError(5, "Input/output error")
+        return real_rglob(self, pattern)
+
+    monkeypatch.setattr(type(local), "rglob", boom)
+
+    ids = {s["session_id"] for s in svc.list_sessions()}
+    assert ids == {"KEEP01", "KEEP02"}          # local library survives
+
+
+def test_failing_root_is_reported_not_silent(tmp_path, monkeypatch):
+    """The failure must be visible — a short list that looks like data
+    loss is exactly what made this take a whole evening to find."""
+    local = tmp_path / "local"
+    flaky = tmp_path / "cloud"
+    _write(local, "AA01")
+    flaky.mkdir(parents=True, exist_ok=True)
+
+    svc = SessionService(str(local), extra_dirs=[str(flaky)])
+    real_rglob = type(local).rglob
+
+    def boom(self, pattern):
+        if str(self).startswith(str(flaky)):
+            raise OSError(5, "Input/output error")
+        return real_rglob(self, pattern)
+
+    monkeypatch.setattr(type(local), "rglob", boom)
+
+    svc.list_sessions()
+    assert any(str(flaky) in e["path"] for e in svc._last_root_errors)
+
+    rep = svc.scan_report()
+    assert any(str(flaky) in r["path"] for r in rep["unreachable_roots"])
+
+
+def test_unreadable_root_directory_is_skipped_not_fatal(tmp_path, monkeypatch):
+    """An offline network mount can raise from is_dir() rather than
+    return False."""
+    local = tmp_path / "local"
+    _write(local, "BB01")
+    svc = SessionService(str(local), extra_dirs=[str(tmp_path / "gone")])
+
+    real_is_dir = type(local).is_dir
+
+    def boom(self):
+        if self.name == "gone":
+            raise OSError(5, "Input/output error")
+        return real_is_dir(self)
+
+    monkeypatch.setattr(type(local), "is_dir", boom)
+    assert {s["session_id"] for s in svc.list_sessions()} == {"BB01"}
