@@ -251,6 +251,21 @@ class Settings:
     # / a NAS; recordings_dir itself must stay on LOCAL disk (see the
     # 2026-07-09 Drive-stall incident notes in services/export_worker.py).
     cloud_mirror_dir: str
+    # Roaming folder for session JSONs (the "Session Archive") so a
+    # library shows up on every machine pointed at the same synced
+    # folder. Read from SESSION_ARCHIVE_DIR in config.env. Empty = off.
+    #
+    # Field report 2026-08-07: this setting existed ONLY as an
+    # os.getenv() read in server.py — there was no way to set it short
+    # of hand-editing config.env or the process environment, so a user
+    # who wanted cross-device sync had no discoverable path to it. It's
+    # a first-class Settings field now (with its own Settings-view card)
+    # for exactly that reason; _session_archive_dir() in server.py still
+    # falls back to the raw env var so anyone who was already setting it
+    # by hand keeps working unchanged. See the three-location-rule
+    # docstring on _session_archive_dir() for how this differs from
+    # recordings_dir and cloud_mirror_dir.
+    session_archive_dir: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -376,6 +391,7 @@ class Settings:
             auto_prep_brief_enabled=_get_bool("AUTO_PREP_BRIEF_ENABLED", False),
             auto_prep_brief_lead_min=_get_int("AUTO_PREP_BRIEF_LEAD_MIN", 10),
             cloud_mirror_dir=_get("CLOUD_MIRROR_DIR", ""),
+            session_archive_dir=_get("SESSION_ARCHIVE_DIR", ""),
         )
 
     @property
@@ -454,6 +470,7 @@ class Settings:
         auto_prep_brief_enabled: bool = False,
         auto_prep_brief_lead_min: int = 10,
         cloud_mirror_dir: str = "",
+        session_archive_dir: str = "",
     ) -> None:
         """Write settings back to the .env file.
 
@@ -523,6 +540,7 @@ class Settings:
             f"AUTO_PREP_BRIEF_ENABLED={'true' if auto_prep_brief_enabled else 'false'}\n"
             f"AUTO_PREP_BRIEF_LEAD_MIN={auto_prep_brief_lead_min}\n"
             f"CLOUD_MIRROR_DIR={cloud_mirror_dir}\n"
+            f"SESSION_ARCHIVE_DIR={session_archive_dir}\n"
         )
         # Write to the canonical LOCALAPPDATA location first. In rare cases
         # a Tauri-spawned Python child cannot open files under LOCALAPPDATA

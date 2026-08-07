@@ -217,6 +217,13 @@ export interface Settings {
   // exports (Google Drive / NAS). Empty = off. The recordings folder
   // itself must stay on a LOCAL disk — this is the safe path to cloud.
   cloud_mirror_dir: string;
+  // Session Archive: roaming folder for session JSONs (transcript,
+  // summary, action items — never audio) so one library shows up on
+  // every machine pointed at the same synced folder (iCloud/OneDrive/
+  // Drive). Empty = off. Field report 2026-08-07 — this used to only
+  // be settable via the SESSION_ARCHIVE_DIR env var; it's a first-class
+  // Settings field now with its own card in Settings.
+  session_archive_dir: string;
 }
 
 // A single co-pilot mode (persona) or meeting-type (modifier). Shape
@@ -630,6 +637,18 @@ export interface ClientKnowledgeStatus {
   folder_present: boolean;
   indexed_documents: number;
   total_chunks: number;
+}
+
+// Session Archive: roaming-library status. Mirrors ClientExportStatus's
+// shape (folder / folder_present / counts) since it's the same
+// convergence pattern, one level simpler — one artifact (the session
+// JSON) per session instead of five independently-earned ones.
+export interface ArchiveStatus {
+  folder: string;
+  folder_present: boolean;
+  sessions_in_archive: number;
+  sessions_local: number;
+  pending: number;
 }
 
 export const api = {
@@ -1289,6 +1308,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify(s),
     }),
+
+  // Session Archive: roaming-library status + "Sync now". Status is
+  // polled after Settings loads and after every sync; sync is
+  // idempotent — a fully archived library queues 0.
+  getArchiveStatus: () => request<ArchiveStatus>("/sessions/archive-status"),
+  syncArchive: () =>
+    request<ArchiveStatus & { queued: number }>(
+      "/sessions/archive/sync", { method: "POST" }),
 
   // Audio devices
   getAudioDevices: () =>

@@ -484,6 +484,18 @@
   ]
  ],
  [
+  "/sessions/archive-status",
+  [
+   "GET"
+  ]
+ ],
+ [
+  "/sessions/archive/sync",
+  [
+   "POST"
+  ]
+ ],
+ [
   "/sessions/diagnostics",
   [
    "GET"
