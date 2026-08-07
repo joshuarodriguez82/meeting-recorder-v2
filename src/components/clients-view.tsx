@@ -1,7 +1,10 @@
 "use client";
 
 import { useMemo, useState, useEffect, useCallback } from "react";
-import { api, formatDuration, type SessionSummary, type ClientExportStatus } from "@/lib/api";
+import {
+  api, formatDuration,
+  type SessionSummary, type ClientExportStatus, type ClientKnowledgeStatus,
+} from "@/lib/api";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -11,7 +14,10 @@ import { Badge } from "@/components/ui/badge";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
-import { Plus, Sparkles, Loader2, Tag, Pencil, Trash2, FolderKanban, X, FolderOpen, Check } from "lucide-react";
+import {
+  Plus, Sparkles, Loader2, Tag, Pencil, Trash2, FolderKanban, X, FolderOpen,
+  Check, BookOpen, RefreshCw, AlertTriangle,
+} from "lucide-react";
 
 interface Props {
   sessions: SessionSummary[];
@@ -21,7 +27,11 @@ interface Props {
 
 export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
   // Per-client configs (keyed by normalized name; matches backend).
-  const [clientConfigs, setClientConfigs] = useState<Record<string, { export_folder: string; display_name?: string }>>({});
+  const [clientConfigs, setClientConfigs] = useState<Record<string, {
+    export_folder: string;
+    knowledge_folder?: string;
+    display_name?: string;
+  }>>({});
 
   // Clients with ZERO tagged meetings exist only in client_configs.json
   // and reach this view solely through GET /clients/config. Swallowing a
@@ -330,7 +340,25 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
           onSaved={(folder) => {
             setClientConfigs((prev) => ({
               ...prev,
-              [selected.trim().toLowerCase()]: { export_folder: folder },
+              [selected.trim().toLowerCase()]: {
+                ...prev[selected.trim().toLowerCase()],
+                export_folder: folder,
+              },
+            }));
+          }}
+        />
+
+        <KnowledgeFolderCard
+          client={selected}
+          folder={clientConfigs[selected.trim().toLowerCase()]?.knowledge_folder || ""}
+          onSaved={(folder) => {
+            setClientConfigs((prev) => ({
+              ...prev,
+              [selected.trim().toLowerCase()]: {
+                ...prev[selected.trim().toLowerCase()],
+                export_folder: prev[selected.trim().toLowerCase()]?.export_folder || "",
+                knowledge_folder: folder,
+              },
             }));
           }}
         />
@@ -1255,6 +1283,196 @@ function DesignatedFolderCard({
             >
               {syncing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Sync now"}
             </Button>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function KnowledgeFolderCard({
+  client, folder, onSaved,
+}: {
+  client: string;
+  folder: string;
+  onSaved: (folder: string) => void;
+}) {
+  // Same local-copy-plus-reset pattern as DesignatedFolderCard — typing
+  // shouldn't round-trip through the parent on every keystroke.
+  const [value, setValue] = useState(folder);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { setValue(folder); }, [client, folder]);
+
+  const [status, setStatus] = useState<ClientKnowledgeStatus | null>(null);
+  const [reindexing, setReindexing] = useState(false);
+  const [lastReport, setLastReport] = useState<{
+    indexed: number; unchanged: number; total_chunks: number;
+    skipped: { file: string; reason: string }[];
+  } | null>(null);
+
+  const loadStatus = useCallback(async () => {
+    try {
+      setStatus(await api.getClientKnowledge(client));
+    } catch {
+      setStatus(null);
+    }
+  }, [client]);
+
+  useEffect(() => { void loadStatus(); }, [loadStatus, folder]);
+
+  const dirty = value.trim() !== (folder || "").trim();
+
+  const reindex = useCallback(async () => {
+    setReindexing(true);
+    try {
+      const report = await api.reindexClientKnowledge(client);
+      setLastReport(report);
+      const skippedCount = report.skipped.length;
+      toast.success(
+        `Indexed ${report.indexed} document${report.indexed === 1 ? "" : "s"}`
+        + (report.unchanged ? ` · ${report.unchanged} unchanged` : "")
+        + (skippedCount ? ` · ${skippedCount} skipped` : "")
+      );
+      void loadStatus();
+    } catch (e) {
+      toast.error(`Reindex failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setReindexing(false);
+    }
+  }, [client, loadStatus]);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const res = await api.setClientConfig(client, { knowledge_folder: value.trim() });
+      onSaved(res.knowledge_folder);
+      toast.success(
+        res.knowledge_folder
+          ? `Knowledge folder set for ${client}`
+          : `Cleared knowledge folder for ${client}`
+      );
+      // Setting a non-empty folder for the first time (or pointing it
+      // somewhere new) has nothing searchable yet until it's indexed —
+      // auto-trigger a reindex instead of leaving the user to notice
+      // and click the button themselves.
+      if (res.knowledge_folder) {
+        void reindex();
+      }
+    } catch (e) {
+      toast.error(`Save failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Native folder picker (Tauri dialog plugin), same fallback pattern as
+  // DesignatedFolderCard: silently unavailable outside the packaged app,
+  // the text field still works as a manual fallback.
+  const pickFolder = async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const picked = await open({
+        directory: true,
+        multiple: false,
+        title: `Pick knowledge folder for ${client}`,
+        defaultPath: value || undefined,
+      });
+      if (typeof picked === "string") {
+        setValue(picked);
+      }
+    } catch (e) {
+      console.warn("Folder picker unavailable:", e);
+      toast.error("Folder picker unavailable — paste the path manually");
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader className="py-3">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <BookOpen className="h-4 w-4 text-primary" />
+          Knowledge Folder
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="pt-0 space-y-2">
+        <p className="text-xs text-muted-foreground">
+          Point this at a folder of SOWs, notes, or requirements docs —
+          they become searchable and feed Q&amp;A answers for{" "}
+          <strong>{client}</strong>.
+        </p>
+        <div className="flex gap-2">
+          <Input
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="Click Browse to pick a folder, or paste a path"
+            autoComplete="off"
+          />
+          <Button variant="outline" onClick={pickFolder} title="Browse for folder">
+            Browse…
+          </Button>
+          <Button onClick={save} disabled={!dirty || saving}>
+            {saving ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Check className="h-3.5 w-3.5" />
+            )}
+          </Button>
+        </div>
+        {folder && (
+          <div className="flex items-center justify-between gap-2 rounded-md border px-2.5 py-2">
+            <div className="text-xs min-w-0">
+              {status === null ? (
+                <span className="text-muted-foreground">Loading index status…</span>
+              ) : !status.folder_present ? (
+                <span className="text-amber-600 dark:text-amber-500">
+                  Folder not reachable right now — nothing can be indexed
+                  until it&apos;s back.
+                </span>
+              ) : status.indexed_documents === 0 ? (
+                <span className="text-muted-foreground">
+                  Not indexed yet. Click Reindex to make these documents
+                  searchable.
+                </span>
+              ) : (
+                <span className="text-muted-foreground">
+                  {status.indexed_documents} document
+                  {status.indexed_documents === 1 ? "" : "s"} indexed ·{" "}
+                  {status.total_chunks} chunk
+                  {status.total_chunks === 1 ? "" : "s"}
+                </span>
+              )}
+            </div>
+            <Button
+              size="sm" variant="outline" onClick={reindex}
+              disabled={reindexing || (status ? !status.folder_present : false)}
+              title="Re-scan the folder and (re)index changed documents"
+            >
+              {reindexing ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <>
+                  <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
+                  Reindex
+                </>
+              )}
+            </Button>
+          </div>
+        )}
+        {lastReport && lastReport.skipped.length > 0 && (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-2.5 py-2 space-y-1.5">
+            <div className="flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-500">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              {lastReport.skipped.length} file
+              {lastReport.skipped.length === 1 ? "" : "s"} skipped
+            </div>
+            <ul className="space-y-1">
+              {lastReport.skipped.map((s, i) => (
+                <li key={i} className="text-[11px] leading-snug text-muted-foreground">
+                  <span className="font-mono break-all">{s.file}</span>
+                  {" — "}{s.reason}
+                </li>
+              ))}
+            </ul>
           </div>
         )}
       </CardContent>

@@ -22,6 +22,13 @@ Citations:
   and renders as click-to-jump buttons opening the source session at
   that timestamp. We use IDs (not display names) because IDs are stable
   + short — names can be renamed and contain spaces.
+
+  Knowledge-folder document chunks (LMA gap analysis 2026-08-07) ride
+  along in the same retrieved `sources` list, tagged source="document".
+  They get their own `[DOC: <name>]` citation form instead — a document
+  has no timestamp to jump to, and the frontend's citation regex is
+  deliberately left untouched, so this form renders as plain text
+  rather than a broken link.
 """
 
 from __future__ import annotations
@@ -171,43 +178,65 @@ class QAService:
 
         Claude is instructed to:
           - Use ONLY the supplied excerpts (no outside knowledge)
-          - Cite each claim with [session_id @ mm:ss]
+          - Cite each meeting claim with [session_id @ mm:ss]
+          - Cite each document claim with [DOC: <document name>]
           - Quote exact wording when the excerpt has it
           - Say "not found" rather than speculate
           - Stay concise (most user questions take 2-5 sentences)
+
+        LMA gap analysis 2026-08-07: SearchService now also retrieves
+        knowledge-folder document chunks (source="document") alongside
+        transcript chunks (source="session") in the same `sources` list.
+        Document excerpts get a distinct `DOCUMENT "<name>" excerpt`
+        header and a separate [DOC: name] citation form rather than
+        being coerced into the [session_id @ mm:ss] shape — a document
+        has no timestamp and the frontend's citation regex only
+        linkifies the session form, so [DOC: ...] deliberately renders
+        as plain text for v1 rather than as a broken click-to-jump link.
         """
         excerpts: List[str] = []
         for s in sources:
-            sid = s.get("session_id", "")
-            display = s.get("display_name") or "Untitled meeting"
-            ts = _format_time(float(s.get("start_s", 0.0)))
             text = (s.get("text") or "").strip()
             if not text:
                 continue
+            if s.get("source") == "document":
+                doc_name = s.get("doc_name") or "document"
+                excerpts.append(f'DOCUMENT "{doc_name}" excerpt\n{text}')
+                continue
+            sid = s.get("session_id", "")
+            display = s.get("display_name") or "Untitled meeting"
+            ts = _format_time(float(s.get("start_s", 0.0)))
             excerpts.append(
                 f"[{sid} @ {ts}] (from \"{display}\")\n{text}"
             )
         excerpts_str = "\n\n---\n\n".join(excerpts)
 
         return (
-            "You answer questions about the user's meetings using ONLY the "
-            "excerpts below. The excerpts come from a vector-similarity "
-            "search against their meeting transcripts.\n\n"
+            "You answer questions about the user's meetings and knowledge-"
+            "folder documents using ONLY the excerpts below. Meeting "
+            "excerpts come from a vector-similarity search against "
+            "transcripts; document excerpts come from the same search "
+            "against documents (SOWs, notes, requirements docs) the user "
+            "has indexed for this client.\n\n"
             "Rules:\n"
-            "1. Cite each claim with the inline form [session_id @ mm:ss] "
-            "exactly as it appears in the excerpt headers — don't invent "
-            "new IDs or timestamps. The frontend turns these into "
-            "click-to-jump links so the user can verify each claim "
-            "against the source recording.\n"
-            "2. Quote the exact wording when the excerpt has the answer "
+            "1. Cite each meeting-transcript claim with the inline form "
+            "[session_id @ mm:ss] exactly as it appears in the excerpt "
+            "headers — don't invent new IDs or timestamps. The frontend "
+            "turns these into click-to-jump links so the user can verify "
+            "each claim against the source recording.\n"
+            "2. Cite each document claim with the inline form "
+            "[DOC: <document name>], using the exact name from the "
+            "DOCUMENT header above that excerpt — e.g. "
+            "[DOC: Zorg-SOW.docx]. Don't invent a document name.\n"
+            "3. Quote the exact wording when the excerpt has the answer "
             "verbatim. Paraphrase only when synthesising across excerpts.\n"
-            "3. If the excerpts don't cover the question, say so plainly: "
-            "\"I don't see this in the indexed meetings.\" Do NOT speculate "
-            "or rely on general knowledge.\n"
-            "4. Be concise — 2-5 sentences usually suffices. Use bullet "
+            "4. If the excerpts don't cover the question, say so plainly: "
+            "\"I don't see this in the indexed meetings or documents.\" Do "
+            "NOT speculate or rely on general knowledge.\n"
+            "5. Be concise — 2-5 sentences usually suffices. Use bullet "
             "points only if the user asked for a list.\n"
-            "5. If multiple meetings disagree or evolved over time, say so "
-            "and cite each.\n\n"
+            "6. If multiple sources (meetings, documents, or both) "
+            "disagree or evolved over time, say so and cite each.\n\n"
             f"USER QUESTION: {query}\n\n"
             f"EXCERPTS:\n{excerpts_str}\n\n"
             "ANSWER:"
