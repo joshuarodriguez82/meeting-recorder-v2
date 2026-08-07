@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo, useState, useEffect } from "react";
-import { api, formatDuration, type SessionSummary } from "@/lib/api";
+import { useMemo, useState, useEffect, useCallback } from "react";
+import { api, formatDuration, type SessionSummary, type ClientExportStatus } from "@/lib/api";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -23,26 +23,71 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
   // Per-client configs (keyed by normalized name; matches backend).
   const [clientConfigs, setClientConfigs] = useState<Record<string, { export_folder: string; display_name?: string }>>({});
 
+  // Clients with ZERO tagged meetings exist only in client_configs.json
+  // and reach this view solely through GET /clients/config. Swallowing a
+  // failure here therefore doesn't degrade gracefully — it silently
+  // erases every empty client from the roster, which is exactly the
+  // "I made a ton of clients and they're not in my list" report
+  // (2026-08-07). The backend deliberately raises 503 when the config
+  // is an un-hydrated cloud placeholder; that signal used to be
+  // discarded. Same bug class as the Today-tab briefing in v2.19.3:
+  // a failed read must never render as "nothing there".
+  const [configsFailed, setConfigsFailed] = useState(false);
+
   const refreshClientConfigs = async () => {
     try {
       const cfgs = await api.getClientConfigs();
       setClientConfigs(cfgs);
-    } catch { /* non-fatal */ }
+      setConfigsFailed(false);
+    } catch {
+      setConfigsFailed(true);
+    }
   };
 
   useEffect(() => {
     let cancelled = false;
     api.getClientConfigs()
-      .then((cfgs) => { if (!cancelled) setClientConfigs(cfgs); })
-      .catch(() => { /* non-fatal */ });
+      .then((cfgs) => {
+        if (cancelled) return;
+        setClientConfigs(cfgs);
+        setConfigsFailed(false);
+      })
+      .catch(() => { if (!cancelled) setConfigsFailed(true); });
     return () => { cancelled = true; };
   }, []);
 
-  // Client names actually used on sessions
-  const taggedClients = useMemo(
-    () => Array.from(new Set(sessions.map((s) => s.client).filter(Boolean))).sort(),
-    [sessions]
-  );
+  // Auto-retry while the config load is failing. The backend restarting
+  // (or a Drive file still downloading) is transient; without this the
+  // roster stays truncated until the user happens to switch tabs.
+  useEffect(() => {
+    if (!configsFailed) return;
+    const t = setInterval(() => { void refreshClientConfigs(); }, 5000);
+    return () => clearInterval(t);
+  }, [configsFailed]);
+
+  // Canonical client key. MUST match the backend's
+  // ClientConfigService._normalize (strip + lowercase), which is what
+  // resolves a session's Designated Folder. Before 2026-08-07 the
+  // export path matched case-insensitively while this view compared
+  // `s.client === selected` exactly, so a meeting tagged "ZORG"
+  // exported into the "Zorg" folder yet never appeared under "Zorg".
+  const norm = (v: string | null | undefined) => (v || "").trim().toLowerCase();
+
+  // Client names actually used on sessions, deduped case-insensitively
+  // so "ZORG" and "Zorg" can't become two rows for one real client.
+  const taggedClients = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const raw of sessions.map((s) => s.client).filter(Boolean)) {
+      const key = norm(raw);
+      const prev = seen.get(key);
+      // Prefer a mixed-case spelling over an ALL-CAPS or all-lower one
+      // so the sidebar shows "Zorg" rather than "ZORG" when both exist.
+      if (!prev || (prev === prev.toUpperCase() && raw !== raw!.toUpperCase())) {
+        seen.set(key, raw!);
+      }
+    }
+    return Array.from(seen.values()).sort((a, b) => a.localeCompare(b));
+  }, [sessions]);
   // Additional names the user has created this session that aren't tagged yet
   const [pendingClients, setPendingClients] = useState<string[]>([]);
   // Clients that have been persisted via PUT /clients/config but don't
@@ -117,6 +162,28 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
     refreshClientConfigs();
   };
 
+  // A failed config load must NOT fall through to "No clients yet" —
+  // that's the empty state for a genuinely new user, and rendering it
+  // over a roster we simply couldn't read is what made created clients
+  // look deleted.
+  if (configsFailed && clients.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <div className="text-center max-w-md space-y-3 rounded-lg border border-amber-500/40 bg-amber-500/5 p-6">
+          <h3 className="text-base font-semibold">Couldn&apos;t load your clients</h3>
+          <p className="text-sm text-muted-foreground">
+            Your saved clients couldn&apos;t be read just now — this is a
+            load problem, not missing data. Nothing has been deleted.
+            Retrying automatically…
+          </p>
+          <Button variant="outline" onClick={() => void refreshClientConfigs()}>
+            Retry
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   if (clients.length === 0 && !showNewClient) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -146,7 +213,7 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
     );
   }
 
-  const clientSessions = sessions.filter((s) => s.client === selected);
+  const clientSessions = sessions.filter((s) => norm(s.client) === norm(selected));
   const totalSeconds = clientSessions.reduce((sum, s) => sum + s.duration_s, 0);
 
   // Projects that have been tagged on real meetings for this client …
@@ -189,6 +256,16 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
     <div className="mx-auto max-w-6xl grid grid-cols-1 md:grid-cols-[240px_minmax(0,1fr)] gap-6">
       {/* Client list sidebar */}
       <div className="space-y-2 min-w-0">
+        {/* Partial failure: tagged clients still render from `sessions`,
+            but any client with no meetings lives only in the config we
+            just failed to read. Say so rather than quietly showing a
+            short list. */}
+        {configsFailed && clients.length > 0 && (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-2.5 py-2 text-[11px] leading-snug">
+            <span className="font-medium">Client list may be incomplete.</span>{" "}
+            Clients with no meetings yet couldn&apos;t be loaded. Retrying…
+          </div>
+        )}
         <div className="flex items-center justify-between px-1">
           <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
             Clients ({clients.length})
@@ -203,7 +280,7 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
         </div>
         <div className="space-y-0.5">
           {clients.map((c) => {
-            const count = sessions.filter((s) => s.client === c).length;
+            const count = sessions.filter((s) => norm(s.client) === norm(c)).length;
             return (
               <button
                 key={c}
@@ -1026,6 +1103,42 @@ function DesignatedFolderCard({
   const [saving, setSaving] = useState(false);
   useEffect(() => { setValue(folder); }, [client, folder]);
 
+  // Mirror status. Before 2026-08-07 a session that never reached the
+  // Designated Folder was completely invisible — the export worker
+  // logged "giving up" after its retries and nothing surfaced. This
+  // readout is what makes a gap noticeable instead of discovered months
+  // later by opening the folder in Explorer.
+  const [status, setStatus] = useState<ClientExportStatus | null>(null);
+  const [syncing, setSyncing] = useState(false);
+
+  const loadStatus = useCallback(async () => {
+    try {
+      setStatus(await api.getClientExportStatus(client));
+    } catch {
+      setStatus(null);
+    }
+  }, [client]);
+
+  useEffect(() => { void loadStatus(); }, [loadStatus, folder]);
+
+  const syncNow = async () => {
+    setSyncing(true);
+    try {
+      const res = await api.reconcileClientExports(client);
+      toast.success(
+        res.queued
+          ? `Queued ${res.queued} meeting${res.queued === 1 ? "" : "s"} to copy into the folder`
+          : "Everything is already in the folder"
+      );
+      // Copies run on the background worker; re-check shortly after.
+      setTimeout(() => { void loadStatus(); }, 4000);
+    } catch (e) {
+      toast.error(`Sync failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   const dirty = value.trim() !== (folder || "").trim();
 
   const save = async () => {
@@ -1111,6 +1224,39 @@ function DesignatedFolderCard({
             )}
           </Button>
         </div>
+        {folder && status && (
+          <div className="flex items-center justify-between gap-2 rounded-md border px-2.5 py-2">
+            <div className="text-xs min-w-0">
+              {!status.folder_present ? (
+                <span className="text-amber-600 dark:text-amber-500">
+                  Folder not reachable right now — nothing can be copied
+                  until it&apos;s back.
+                </span>
+              ) : status.exportable === 0 ? (
+                <span className="text-muted-foreground">
+                  No processed meetings to copy yet.
+                </span>
+              ) : status.mirrored === status.exportable ? (
+                <span className="text-muted-foreground">
+                  All {status.exportable} meeting
+                  {status.exportable === 1 ? "" : "s"} copied to this folder.
+                </span>
+              ) : (
+                <span className="text-amber-600 dark:text-amber-500">
+                  {status.mirrored} of {status.exportable} meetings copied —{" "}
+                  {status.exportable - status.mirrored} still missing.
+                </span>
+              )}
+            </div>
+            <Button
+              size="sm" variant="outline" onClick={syncNow}
+              disabled={syncing || !status.folder_present}
+              title="Copy any missing transcripts/summaries into this folder"
+            >
+              {syncing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Sync now"}
+            </Button>
+          </div>
+        )}
       </CardContent>
     </Card>
   );
