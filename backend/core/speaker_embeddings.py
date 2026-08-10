@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -188,6 +188,54 @@ def extract_speaker_centroids(
         f"Computed {len(centroids)}/{len(turns_by_speaker)} speaker "
         f"centroids from {audio_path}")
     return centroids
+
+
+def embed_utterance(
+    pcm: np.ndarray, samplerate: int = 16000,
+) -> Optional[np.ndarray]:
+    """Embed a single short in-memory utterance directly — no WAV file
+    on disk required.
+
+    Field report 2026-08-10 (Zoom notetaker parity): the live speaker
+    tracker (core/live_speakers.py) needs to fingerprint "them"
+    utterances within a second or two of them finishing, to split the
+    live preview's single "Them" bucket into distinct Speaker N labels.
+    extract_speaker_centroids() above is the batch/file-based sibling
+    the canonical post-stop pipeline uses (it reads turns out of a WAV
+    already on disk); this is the same underlying ECAPA call reshaped
+    for a raw numpy array clipped straight out of the live audio buffer,
+    with no intermediate file.
+
+    `samplerate` is accepted for API clarity but not resampled against —
+    callers must already be at whatever rate the ECAPA model expects
+    (16 kHz; this matches TARGET_SR throughout the live-transcription
+    path, so no caller needs to resample before calling this).
+
+    Returns None (never raises) on any failure — the caller degrades to
+    "no fingerprint for this utterance" rather than losing the live
+    transcript over a transient encode error.
+    """
+    if pcm is None or len(pcm) == 0:
+        return None
+    try:
+        import torch
+        classifier = _get_classifier()
+    except Exception as e:
+        logger.debug(f"Could not load ECAPA encoder for live embed: {e}")
+        return None
+    try:
+        tensor = torch.from_numpy(
+            np.ascontiguousarray(pcm, dtype=np.float32)
+        ).unsqueeze(0)
+        with torch.no_grad():
+            emb = classifier.encode_batch(tensor).squeeze().cpu().numpy()
+    except Exception as e:
+        logger.debug(f"Live utterance embed failed: {e}")
+        return None
+    norm = float(np.linalg.norm(emb))
+    if norm < 1e-8:
+        return None
+    return (emb / norm).astype(np.float32)
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
