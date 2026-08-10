@@ -689,6 +689,12 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
             checked={settings.live_transcription_enabled}
             onChange={(v) => update("live_transcription_enabled", v)}
           />
+          <Toggle
+            label="Fast live transcript (speech-boundary chunking)"
+            description="Shows live text within ~1-3 seconds of someone finishing a sentence instead of waiting for a fixed 15-second window to fill. Turn off only if you hit a transcription bug and want to fall back to the older, slower fixed-window behavior."
+            checked={settings.live_vad_enabled}
+            onChange={(v) => update("live_vad_enabled", v)}
+          />
           <div className="space-y-1">
             <Label htmlFor="auto-screenshot-int">Auto-screenshot during recording</Label>
             <div className="flex items-center gap-2">

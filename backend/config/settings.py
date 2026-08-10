@@ -266,6 +266,13 @@ class Settings:
     # docstring on _session_archive_dir() for how this differs from
     # recordings_dir and cloud_mirror_dir.
     session_archive_dir: str
+    # Speech-boundary chunking for the live transcript, instead of the
+    # fixed 15s windows. Default TRUE — VAD chunking is what gets the
+    # live preview down to Zoom-notetaker-ish latency (~1-3s instead of
+    # ~15s); the fixed-window path only exists as an explicit-opt-out /
+    # runtime-failure fallback now. See core/live_transcriber.py and
+    # core/vad.py (field report 2026-08-10, Zoom notetaker parity).
+    live_vad_enabled: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -392,6 +399,7 @@ class Settings:
             auto_prep_brief_lead_min=_get_int("AUTO_PREP_BRIEF_LEAD_MIN", 10),
             cloud_mirror_dir=_get("CLOUD_MIRROR_DIR", ""),
             session_archive_dir=_get("SESSION_ARCHIVE_DIR", ""),
+            live_vad_enabled=_get_bool("LIVE_VAD_ENABLED", True),
         )
 
     @property
@@ -471,6 +479,7 @@ class Settings:
         auto_prep_brief_lead_min: int = 10,
         cloud_mirror_dir: str = "",
         session_archive_dir: str = "",
+        live_vad_enabled: bool = True,
     ) -> None:
         """Write settings back to the .env file.
 
@@ -541,6 +550,7 @@ class Settings:
             f"AUTO_PREP_BRIEF_LEAD_MIN={auto_prep_brief_lead_min}\n"
             f"CLOUD_MIRROR_DIR={cloud_mirror_dir}\n"
             f"SESSION_ARCHIVE_DIR={session_archive_dir}\n"
+            f"LIVE_VAD_ENABLED={'true' if live_vad_enabled else 'false'}\n"
         )
         # Write to the canonical LOCALAPPDATA location first. In rare cases
         # a Tauri-spawned Python child cannot open files under LOCALAPPDATA
