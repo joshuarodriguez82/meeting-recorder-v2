@@ -675,6 +675,46 @@ export interface ArchiveStatus {
   shared_state?: Record<string, SharedStateFileStatus>;
 }
 
+// GET /sessions/diagnostics — mirrors SessionService.scan_report() plus
+// the two fields the endpoint adds (primary_dir, visible_in_app).
+// Field report 2026-08-10: a user with 74 session files on disk saw 24
+// in the app, and the only way anyone found out why was a PowerShell
+// script talked through over an evening — the backend had this exact
+// answer the whole time and nothing in the UI surfaced it.
+export interface SessionsDiagnosticsRoot {
+  path: string;
+  session_files: number;
+  // True only for a root that failed mid-scan (see unreachable_roots
+  // for the error text); healthy roots always carry `false`.
+  unreachable: boolean;
+}
+
+export interface SessionsDiagnosticsSkip {
+  path: string;
+  reason: string;
+}
+
+export interface SessionsDiagnosticsUnreachableRoot {
+  path: string;
+  error: string;
+}
+
+export interface SessionsDiagnostics {
+  roots: SessionsDiagnosticsRoot[];
+  // Session-file candidates found across every root, before any were
+  // skipped for being unreadable/un-hydrated/non-dict.
+  total: number;
+  skipped: number;
+  // Capped server-side at 50 entries — see scan_report()'s docstring.
+  skipped_detail: SessionsDiagnosticsSkip[];
+  unreachable_roots: SessionsDiagnosticsUnreachableRoot[];
+  // The active RECORDINGS_DIR — the one root writes go to.
+  primary_dir: string;
+  // What list_sessions() actually returns right now (post-dedupe,
+  // post-skip) — i.e. what the Sessions list shows the user.
+  visible_in_app: number;
+}
+
 export const api = {
   // Resolve the cached backend base URL. Exposed for non-`request`
   // callers that need the URL directly — most notably the live
@@ -1414,6 +1454,10 @@ export const api = {
   listSessions: () => request<SessionSummary[]>("/sessions"),
   deleteSession: (id: string) =>
     request<{ ok: boolean }>(`/sessions/${id}`, { method: "DELETE" }),
+  // Where the app is looking for sessions, how many files each root
+  // holds, and what it had to skip — see SessionsDiagnostics.
+  getSessionsDiagnostics: () =>
+    request<SessionsDiagnostics>("/sessions/diagnostics"),
 
   // Retention
   getRetentionStats: () =>

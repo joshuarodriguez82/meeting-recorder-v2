@@ -1,10 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { api, formatDuration, type SessionSummary } from "@/lib/api";
+import {
+  api, formatDuration, type SessionSummary, type SessionsDiagnostics,
+} from "@/lib/api";
 import { confirmDialog } from "@/lib/confirm";
 import { toast } from "sonner";
-import { Loader2, Trash2, FolderOpen, Upload, Pencil, Check, X } from "lucide-react";
+import {
+  Loader2, Trash2, FolderOpen, Upload, Pencil, Check, X,
+  RotateCcw, ChevronDown, ChevronRight, ClipboardCopy,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -151,6 +156,200 @@ export function StatusIcons({ session }: { session: SessionSummary }) {
   );
 }
 
+/**
+ * Where the app is looking for sessions and why the count is what it
+ * is. GET /sessions/diagnostics has carried this data since it was
+ * added for exactly this reason, but nothing in the UI ever read it —
+ * field report 2026-08-10: a user with 74 session files on disk saw 24
+ * in the app, and diagnosing it took a whole evening of PowerShell
+ * scripts sent over chat because the backend already knew the answer
+ * and had no way to show it. This renders a compact always-visible
+ * summary line, and escalates to an expandable amber panel the moment
+ * the numbers disagree or anything was skipped/unreachable — the exact
+ * situation that made the count look like silent data loss.
+ */
+function SessionsDiagnosticsPanel() {
+  const [diag, setDiag] = useState<SessionsDiagnostics | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      const d = await api.getSessionsDiagnostics();
+      setDiag(d);
+      setLoadError(false);
+    } catch (e) {
+      setLoadError(true);
+      toast.error(`Session diagnostics failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { refresh(); }, []);
+
+  const copyDetails = () => {
+    if (!diag) return;
+    navigator.clipboard?.writeText(JSON.stringify(diag, null, 2)).then(
+      () => toast.success("Diagnostics copied — paste it into support"),
+      () => toast.error("Couldn't copy"),
+    );
+  };
+
+  if (loadError && !diag) {
+    return null; // sessions-list itself still renders; don't block on this
+  }
+  if (!diag) {
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground px-1">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        Checking session folders…
+      </div>
+    );
+  }
+
+  const folderCount = diag.roots.length;
+  // Same rule the example in the spec uses: the file count found on
+  // disk vs. what the Sessions list actually shows. Skips (unreadable
+  // files) and dedupe-across-roots (same session_id in two folders)
+  // both show up here even though they have different causes — the
+  // point is the two numbers no longer silently agreeing.
+  const mismatched = diag.total !== diag.visible_in_app;
+  const hasUnreachable = diag.unreachable_roots.length > 0;
+  const hasSkips = diag.skipped > 0;
+  const isEmpty = diag.visible_in_app === 0;
+  const needsAttention = mismatched || hasSkips || hasUnreachable || isEmpty;
+
+  const fileWord = diag.total === 1 ? "file" : "files";
+  const folderWord = folderCount === 1 ? "folder" : "folders";
+  const summaryText = isEmpty
+    ? `No sessions showing — looked in ${folderCount} ${folderWord}`
+    : `${diag.total} session ${fileWord} found across ${folderCount} ${folderWord} · ${diag.visible_in_app} shown`;
+
+  const open = expanded || isEmpty;
+
+  if (!needsAttention) {
+    return (
+      <div className="flex items-center justify-between gap-3 px-1 text-xs text-muted-foreground">
+        <span>{summaryText}</span>
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={refresh}
+            disabled={loading}
+            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-muted/60 hover:text-foreground disabled:opacity-50"
+          >
+            {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
+            Refresh
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const unreachableByPath = new Map(
+    diag.unreachable_roots.map((r) => [r.path, r.error]),
+  );
+
+  return (
+    <div
+      className={`rounded-md border text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-900/40 ${isEmpty ? "p-3" : ""}`}
+    >
+      <div className="flex items-center justify-between gap-3 px-3 py-2">
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          disabled={isEmpty}
+          className="flex items-center gap-1.5 text-left text-xs font-medium min-w-0 disabled:cursor-default"
+        >
+          {!isEmpty && (open
+            ? <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+            : <ChevronRight className="h-3.5 w-3.5 shrink-0" />)}
+          <span aria-hidden className="font-bold">⚠</span>
+          <span className="truncate">{summaryText}</span>
+        </button>
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={copyDetails}
+            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] hover:bg-amber-100 dark:hover:bg-amber-900/40"
+            title="Copy full diagnostics JSON for support"
+          >
+            <ClipboardCopy className="h-3 w-3" />
+            Copy details
+          </button>
+          <button
+            type="button"
+            onClick={refresh}
+            disabled={loading}
+            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] hover:bg-amber-100 dark:hover:bg-amber-900/40 disabled:opacity-50"
+          >
+            {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      {open && (
+        <div className="px-3 pb-3 space-y-3 text-xs">
+          <div className="space-y-1">
+            <div className="font-medium">Folders scanned</div>
+            <div className="space-y-1">
+              {diag.roots.map((r) => (
+                <div key={r.path} className="flex items-start gap-1.5 font-mono break-all">
+                  <span className="flex-1">{r.path}</span>
+                  <span className="shrink-0 font-sans text-amber-700 dark:text-amber-400">
+                    {r.unreachable
+                      ? `couldn't be read${unreachableByPath.get(r.path) ? ` (${unreachableByPath.get(r.path)})` : ""}`
+                      : `${r.session_files} file${r.session_files === 1 ? "" : "s"}`}
+                  </span>
+                </div>
+              ))}
+              {diag.roots.length === 0 && (
+                <div className="italic">No folders were reachable at all.</div>
+              )}
+            </div>
+            <div className="text-amber-700 dark:text-amber-400">
+              Primary (write) folder: <span className="font-mono break-all">{diag.primary_dir}</span>
+            </div>
+          </div>
+
+          {hasSkips && (
+            <div className="space-y-1">
+              <div className="font-medium">
+                {diag.skipped} file{diag.skipped === 1 ? "" : "s"} skipped
+              </div>
+              <div className="space-y-0.5">
+                {diag.skipped_detail.slice(0, 8).map((d, i) => (
+                  <div key={i} className="font-mono break-all text-[11px]">
+                    {d.path} — <span className="font-sans">{d.reason}</span>
+                  </div>
+                ))}
+                {diag.skipped > diag.skipped_detail.slice(0, 8).length && (
+                  <div className="italic">
+                    …and {diag.skipped - diag.skipped_detail.slice(0, 8).length} more.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {isEmpty && (
+            <div>
+              No session files were found in any of the folders above. If
+              you expected sessions here, check that the right folder is
+              configured (Settings → Recordings folder) or that a synced
+              archive folder has finished downloading.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
   const [filter, setFilter] = useState("");
   const [bulkRunning, setBulkRunning] = useState(false);
@@ -233,6 +432,8 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
           onOpenSession(id);
         }}
       />
+
+      <SessionsDiagnosticsPanel />
 
       <Card>
         <CardContent className="p-0">

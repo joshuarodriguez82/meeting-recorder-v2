@@ -92,9 +92,22 @@ class SessionService:
         and dropped, which renders identically to "you have no sessions".
         That ambiguity has now caused three separate field reports, so
         the counts are exposed rather than only logged.
+
+        `primary_dir` and `visible_in_app` live here rather than in the
+        /sessions/diagnostics endpoint handler (field report 2026-08-10:
+        a user with 74 session files on disk saw 24 in the app and the
+        only way to find out why was a PowerShell script, because this
+        data existed internally but the endpoint that read it tacked
+        `primary_dir`/`visible_in_app` on after the fact instead of
+        scan_report() owning them — a second call site that could drift
+        out of sync with what list_sessions() actually does). One
+        method computes the full picture; the endpoint is a thin
+        pass-through.
         """
         report = {"roots": [], "total": 0, "skipped": 0,
-                  "skipped_detail": [], "unreachable_roots": []}
+                  "skipped_detail": [], "unreachable_roots": [],
+                  "primary_dir": str(self._recordings_dir),
+                  "visible_in_app": 0}
         for root in self._scan_roots():
             found = 0
             try:
@@ -124,10 +137,15 @@ class SessionService:
                     report["skipped"] += 1
                     report["skipped_detail"].append(
                         {"path": str(path), "reason": str(e)})
-            report["roots"].append({"path": str(root), "session_files": found})
+            report["roots"].append({"path": str(root), "session_files": found,
+                                    "unreachable": False})
             report["total"] += found
         # Keep the payload bounded — the count is what matters.
         report["skipped_detail"] = report["skipped_detail"][:50]
+        # What the user actually sees in the Sessions list, computed the
+        # exact same way the Sessions view does (same dedupe-by-mtime
+        # rule) so this number can never drift from list_sessions()'s.
+        report["visible_in_app"] = len(self.list_sessions())
         return report
 
     def save(self, session: Session) -> str:
