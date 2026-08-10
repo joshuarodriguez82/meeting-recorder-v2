@@ -12,9 +12,12 @@ import { api } from "@/lib/api";
 // scrolled up to read older text.
 //
 // We keep this view distinct from the canonical post-stop transcript:
-// live segments arrive from non-overlapping 15s windows so boundary
-// words sometimes get split between two segments. The "real" transcript
-// produced by /process is what gets persisted on the session.
+// live segments arrive from speech-boundary (VAD) chunks by default —
+// or, when the backend's live_vad_enabled setting is off or VAD fails
+// at runtime, from non-overlapping 15s fixed windows — so boundary
+// words sometimes get split between two segments either way. The "real"
+// transcript produced by /process is what gets persisted on the
+// session.
 //
 // Connection lifecycle:
 //   - Open EventSource when recording starts AND the user hasn't
@@ -41,7 +44,44 @@ type Segment = {
   // Older backends (before dual-stream live transcription) didn't tag
   // segments — those render without a label.
   speaker?: Speaker;
+  // Fine-grained live speaker split (field report 2026-08-10, Zoom
+  // notetaker parity) — set ONLY on "them" segments, when the backend
+  // has speechbrain/torch available AND has accumulated enough audio
+  // to fingerprint the voice. "Speaker 2" for an unrecognized voice, or
+  // a known SpeakerProfile's real display name (e.g. "Maria Chen") when
+  // it matches. Never set on "you"/"room" segments — the speaker
+  // field's existing meaning is unchanged, this is purely additive.
+  // Absent = render the plain "Them" badge exactly as before.
+  speaker_label?: string;
 };
+
+// Small fixed palette for distinct live speakers, cycled by index so a
+// 6th+ concurrent speaker still gets a (repeated) color rather than an
+// unstyled fallback. Chosen to sit alongside the existing "you" (primary)
+// / "room" (amber) / "them" (muted) tokens without colliding with either.
+const SPEAKER_COLORS = [
+  "bg-sky-500/15 text-sky-700 dark:text-sky-400",
+  "bg-violet-500/15 text-violet-700 dark:text-violet-400",
+  "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
+  "bg-rose-500/15 text-rose-700 dark:text-rose-400",
+  "bg-orange-500/15 text-orange-700 dark:text-orange-400",
+  "bg-teal-500/15 text-teal-700 dark:text-teal-400",
+];
+
+// Stable color assignment per distinct speaker_label string, in
+// first-seen order, so "Speaker 2" doesn't change color as more
+// segments arrive. Module-level cache is fine — labels are meaningful
+// only within one recording's live preview, and the panel unmounts
+// (and its segments reset) between recordings.
+const speakerColorCache = new Map<string, string>();
+function colorForSpeakerLabel(label: string): string {
+  let color = speakerColorCache.get(label);
+  if (!color) {
+    color = SPEAKER_COLORS[speakerColorCache.size % SPEAKER_COLORS.length];
+    speakerColorCache.set(label, color);
+  }
+  return color;
+}
 
 export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
   const [segments, setSegments] = useState<Segment[]>([]);
@@ -100,9 +140,13 @@ export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
   useEffect(() => {
     if (!recording) {
       // Fresh recording about to start (or just stopped) — drop the
-      // previous session's segments so they don't bleed into the next.
+      // previous session's segments so they don't bleed into the next,
+      // and forget speaker->color assignments so "Speaker 1" in the
+      // next meeting doesn't inherit a color from an unrelated person
+      // in this one.
       setSegments([]);
       setAutoStick(true);
+      speakerColorCache.clear();
       return;
     }
     let cancelled = false;
@@ -279,7 +323,7 @@ export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
         {segments.length === 0 ? (
           <p className="text-muted-foreground text-xs italic">
             {connected
-              ? "Listening for speech… first words appear ~15 seconds after you start talking."
+              ? "Listening for speech… first words appear a few seconds after you start talking."
               : "Connecting to the backend…"}
           </p>
         ) : (
@@ -297,11 +341,19 @@ export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
                         ? "bg-primary/15 text-primary"
                         : seg.speaker === "room"
                         ? "bg-amber-500/15 text-amber-700 dark:text-amber-400"
+                        // "them" with a fine-grained speaker_label gets
+                        // its own distinct, stable color instead of the
+                        // generic muted "Them" styling — see
+                        // colorForSpeakerLabel above.
+                        : seg.speaker === "them" && seg.speaker_label
+                        ? colorForSpeakerLabel(seg.speaker_label)
                         : "bg-muted-foreground/15 text-foreground/70")
                     }
                   >
                     {seg.speaker === "you" ? "You"
                       : seg.speaker === "room" ? "Room"
+                      : seg.speaker === "them" && seg.speaker_label
+                      ? seg.speaker_label
                       : "Them"}
                   </span>
                 ) : null}
