@@ -145,6 +145,39 @@ def test_scan_report_surfaces_unreadable_files(tmp_path):
     assert reasons  # each skip carries a reason
 
 
+def test_scan_report_carries_primary_dir_and_visible_in_app(tmp_path):
+    """field report 2026-08-10: 74 files on disk, 24 shown in the app,
+    and nothing in the UI could say why. primary_dir + visible_in_app
+    must come from scan_report() itself (single source), and
+    visible_in_app must equal what list_sessions() actually returns —
+    not a separately-counted number that could drift from it."""
+    root = tmp_path / "recordings"
+    _write(root, "JJ01")
+    _write(root, "JJ02")
+    (root / "session_JJ03.json").write_text("{ broken", encoding="utf-8")
+
+    svc = SessionService(str(root))
+    rep = svc.scan_report()
+    assert rep["primary_dir"] == str(root)
+    assert rep["visible_in_app"] == len(svc.list_sessions()) == 2
+    assert rep["total"] == 3
+    assert rep["skipped"] == 1
+
+
+def test_scan_report_marks_healthy_roots_not_unreachable(tmp_path):
+    """A root that scanned fine must carry an explicit unreachable:
+    False so the frontend can key off the flag on every root uniformly,
+    instead of treating "key absent" as also meaning healthy."""
+    root = tmp_path / "recordings"
+    _write(root, "KK01")
+
+    svc = SessionService(str(root))
+    rep = svc.scan_report()
+    assert rep["roots"] == [
+        {"path": str(root), "session_files": 1, "unreachable": False}
+    ]
+
+
 # ── roaming archive (three-location rule) ─────────────────────────────
 
 def test_archive_root_is_scanned_alongside_local(tmp_path):
