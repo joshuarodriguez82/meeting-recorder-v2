@@ -224,6 +224,12 @@ export interface Settings {
   // be settable via the SESSION_ARCHIVE_DIR env var; it's a first-class
   // Settings field now with its own card in Settings.
   session_archive_dir: string;
+  // Speech-boundary (VAD) chunking for the live transcript instead of
+  // fixed 15s windows — the difference between text appearing ~1-3s
+  // after someone finishes talking vs ~15s. Default true; false falls
+  // back to the legacy fixed-window path (field report 2026-08-10,
+  // Zoom notetaker parity).
+  live_vad_enabled: boolean;
 }
 
 // A single co-pilot mode (persona) or meeting-type (modifier). Shape
