@@ -308,6 +308,50 @@ class RecordingService:
     def can_process(self) -> bool:
         return self._transcription is not None and self._diarization is not None
 
+    def _build_live_speaker_tracker(self):
+        """Best-effort construction of the live "them"-speaker splitter.
+
+        Field report 2026-08-10 (Zoom notetaker parity): splits the
+        loopback stream's single "them" bucket into distinct
+        Speaker N labels (or a known SpeakerProfile's real name) inside
+        the live preview, using the same ECAPA encoder the canonical
+        post-stop pipeline already depends on
+        (core/speaker_embeddings.py).
+
+        Progressive enhancement, never a hard dependency: if
+        speechbrain/torch aren't importable (is_available() False —
+        same probe core/speaker_embeddings.py's own callers use), we
+        return None and LiveTranscriber degrades to its pre-existing
+        behavior — every loopback segment stays plain "them" with no
+        speaker_label field. Any import/construction failure is
+        swallowed the same way live transcription itself degrades
+        (see the try/except around this call in start_recording).
+        """
+        try:
+            from core.speaker_embeddings import embed_utterance, is_available
+            if not is_available():
+                return None
+            from core.live_speakers import LiveSpeakerTracker
+
+            profile_service = self._profile_service
+
+            def _profile_lookup(embedding):
+                if profile_service is None:
+                    return None
+                match = profile_service.find_match(embedding)
+                if match is None:
+                    return None
+                profile, similarity = match
+                return profile.display_name, similarity
+
+            return LiveSpeakerTracker(
+                embed_fn=embed_utterance,
+                profile_lookup=_profile_lookup,
+            )
+        except Exception as e:
+            logger.warning(f"Live speaker tracker unavailable: {e}")
+            return None
+
     def start_recording(
         self,
         mic_device_index: Optional[int],
@@ -425,13 +469,17 @@ class RecordingService:
                 if self._live_transcriber is None:
                     self._live_transcriber = LiveTranscriber(
                         engine_provider=lambda: self._transcription,
+                        speaker_tracker=self._build_live_speaker_tracker(),
                     )
                 # In conference room mode the mic is capturing multiple
                 # in-room people, not "you" specifically — pass the room
                 # label so live segments render with a neutral badge
                 # rather than "You".
                 self._live_transcriber.start(
-                    LIVE_SR, conference_room_mode=conference_room_mode)
+                    LIVE_SR, conference_room_mode=conference_room_mode,
+                    vad_enabled=bool(
+                        getattr(self._settings, "live_vad_enabled", True)),
+                )
         except Exception as e:
             # Live transcription failure is never fatal — recording must
             # still proceed even if streaming text doesn't.

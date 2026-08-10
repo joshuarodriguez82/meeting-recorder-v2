@@ -1010,6 +1010,11 @@ class SettingsDTO(BaseModel):
     # Field report 2026-08-07 — see config/settings.py's
     # session_archive_dir docstring and _session_archive_dir() below.
     session_archive_dir: str = ""
+    # Speech-boundary chunking for the live transcript (default on) —
+    # see config/settings.py's field docstring and
+    # core/live_transcriber.py (field report 2026-08-10, Zoom notetaker
+    # parity). False falls back to the legacy fixed-15s-window path.
+    live_vad_enabled: bool = True
 
 
 class StartRecordingRequest(BaseModel):
@@ -1433,6 +1438,7 @@ async def get_settings():
         auto_prep_brief_lead_min=s.auto_prep_brief_lead_min,
         cloud_mirror_dir=s.cloud_mirror_dir,
         session_archive_dir=s.session_archive_dir,
+        live_vad_enabled=s.live_vad_enabled,
     )
 
 
@@ -1539,6 +1545,7 @@ async def save_settings(payload: SettingsDTO):
         auto_prep_brief_lead_min=max(1, min(120, payload.auto_prep_brief_lead_min or 10)),
         cloud_mirror_dir=(payload.cloud_mirror_dir or "").strip(),
         session_archive_dir=new_archive_dir,
+        live_vad_enabled=bool(payload.live_vad_enabled),
     )
     # If the recordings folder changed, migrate client + template state
     # from the previous folder to the new one. Copy, not move, so the
@@ -2787,6 +2794,7 @@ async def set_live_copilot_enabled(payload: dict):
         auto_prep_brief_lead_min=s.auto_prep_brief_lead_min,
         cloud_mirror_dir=s.cloud_mirror_dir,
         session_archive_dir=s.session_archive_dir,
+        live_vad_enabled=s.live_vad_enabled,
     )
     # Update the cached Settings in-place so the change is visible
     # immediately, without going through load_settings() which would
@@ -6636,6 +6644,7 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         auto_prep_brief_lead_min=s.auto_prep_brief_lead_min,
         cloud_mirror_dir=s.cloud_mirror_dir,
         session_archive_dir=s.session_archive_dir,
+        live_vad_enabled=s.live_vad_enabled,
     )
     svc.settings = dataclasses.replace(
         s, live_copilot_mode=new_mode, live_copilot_meeting_type=new_type)
