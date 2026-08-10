@@ -3161,12 +3161,10 @@ async def sessions_diagnostics():
     the numbers are queryable instead of buried in a log file.
     """
     svc.load_settings()
-    def _do():
-        report = svc.session_svc.scan_report()
-        report["primary_dir"] = str(svc.session_svc.recordings_dir)
-        report["visible_in_app"] = len(svc.session_svc.list_sessions())
-        return report
-    return await asyncio.to_thread(_do)
+    # scan_report() is the single source for primary_dir / visible_in_app
+    # (see its docstring, field report 2026-08-10) — this handler is a
+    # thin off-loop pass-through, not a second place that computes them.
+    return await asyncio.to_thread(svc.session_svc.scan_report)
 
 
 # IMPORTANT: declare this BEFORE @app.get("/sessions/{session_id}").
