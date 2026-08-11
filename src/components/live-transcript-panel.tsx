@@ -79,12 +79,24 @@ const SPEAKER_COLORS = [
 // Grouping is display-only — the underlying segments are untouched, so
 // the canonical post-stop transcript and its timings are unaffected.
 //
-// A run is broken by a change of speaker, and ALSO by a long pause
-// (SPLIT_AFTER_SILENCE_S): someone holding the floor for five minutes
-// should still be several paragraphs rather than one unreadable wall.
+// A run is broken by a change of speaker, and ALSO by a pause long
+// enough to read as the end of a thought.
+//
+// Tuning this is the whole game. Chunks arrive on ~400ms of silence —
+// the gap between ordinary sentences — so breaking there is what
+// produced the one-fragment-per-row wall this function exists to fix.
+// Breaking too late (the first cut at this used 20s) merges genuinely
+// separate points into one slab. 3s is a deliberate pause: someone
+// finishing a thought before starting the next, not drawing breath
+// mid-sentence.
+//
+// Grouping costs nothing in latency — a segment still renders the
+// instant it arrives, it just appends to the open block rather than
+// starting a new row, so the paragraph grows live as the person talks.
+//
 // The timestamp shown is the START of the run, which is when that
 // person began talking — the useful number when scrubbing back.
-const SPLIT_AFTER_SILENCE_S = 20;
+const SPLIT_AFTER_SILENCE_S = 3;
 
 function groupBySpeaker(segments: Segment[]): Segment[] {
   const out: Segment[] = [];
