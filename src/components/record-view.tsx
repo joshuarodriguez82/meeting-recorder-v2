@@ -145,6 +145,14 @@ export function RecordView({
 
   const meetingKey = (m: Meeting) => `${m.subject}|${m.start}`;
 
+  // Rows sourced from the Chrome extension's Outlook Web scrape rather
+  // than the local Outlook/EventKit calendar. They exist precisely
+  // BECAUSE the local calendar can't see them, so anything that reaches
+  // back into the local calendar (meeting-detail lookup, auto-record)
+  // has nothing to resolve against — see the badge + disabled controls
+  // below (field report 2026-08-11).
+  const isExtensionSourced = (m: Meeting) => m.source === "extension";
+
   const toggleMeetingDetail = (m: Meeting) => {
     const key = meetingKey(m);
     if (expandedMeeting === key) {
@@ -153,6 +161,24 @@ export function RecordView({
     }
     setExpandedMeeting(key);
     if (meetingDetails[key]?.data || meetingDetails[key]?.loading) return;
+    if (isExtensionSourced(m)) {
+      // /calendar/meeting-detail reads LOCAL Outlook by subject+start.
+      // For an Outlook-Web-only meeting that lookup always misses, so
+      // it would render an empty panel and a pointless round trip.
+      // Show what the scrape actually captured instead.
+      setMeetingDetails((prev) => ({
+        ...prev,
+        [key]: {
+          loading: false,
+          data: {
+            attendees: m.attendees || [],
+            body: "",
+            join_url: m.join_url || null,
+          },
+        },
+      }));
+      return;
+    }
     setMeetingDetails((prev) => ({ ...prev, [key]: { loading: true } }));
     api
       .getMeetingDetail(m.subject, m.start)
@@ -1276,6 +1302,19 @@ export function RecordView({
                           )}
                         </span>
                       </button>
+                      {isExtensionSourced(m) && (
+                        <Badge
+                          variant="outline"
+                          className="shrink-0 text-[10px] font-normal text-muted-foreground"
+                          title={
+                            "Seen by the Chrome extension in Outlook Web, not by the calendar on this machine. " +
+                            "You can still start a recording with Use — but auto-record can't fire for it, " +
+                            "because the auto-record loop reads the local calendar directly."
+                          }
+                        >
+                          From Outlook Web
+                        </Badge>
+                      )}
                       <span className="text-xs text-muted-foreground">{m.duration}m</span>
                       {!past && (
                         <>
@@ -1290,6 +1329,25 @@ export function RecordView({
                             <Sparkles className="h-3.5 w-3.5 mr-1" />
                             Brief
                           </Button>
+                          {/* Auto-record controls are meaningless for an
+                              extension-only row: AutoRecordService polls
+                              calendar_service.get_todays_meetings (the LOCAL
+                              calendar) for its start trigger, so a meeting
+                              only Outlook Web can see will never come up
+                              for auto-start — and therefore blocking it
+                              would be theatre. Say so rather than offering
+                              a control that does nothing. */}
+                          {isExtensionSourced(m) ? (
+                            <span
+                              className="px-2 text-xs text-muted-foreground select-none"
+                              title={
+                                "Auto-record only fires for meetings on this machine's calendar. " +
+                                "This one is visible only in Outlook Web, so start it manually with Use."
+                              }
+                            >
+                              Manual only
+                            </span>
+                          ) : (
                           <Button
                             size="sm"
                             variant="ghost"
@@ -1314,6 +1372,7 @@ export function RecordView({
                                 ? "Auto-record off"
                                 : "No auto"}
                           </Button>
+                          )}
                           <Button size="sm" variant="outline" onClick={() => useMeeting(m)} disabled={recording}>
                             Use
                           </Button>
