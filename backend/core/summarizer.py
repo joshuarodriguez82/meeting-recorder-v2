@@ -1248,7 +1248,8 @@ class Summarizer:
         """Convert a markdown summary to formatted HTML for email."""
         return _markdown_to_html(summary)
 
-    async def parse_daily_briefing(self, raw_text: str) -> dict:
+    async def parse_daily_briefing(self, raw_text: str,
+                                   today_iso: str = "") -> dict:
         """Parse the free-form daily briefing the user pastes from
         their Microsoft 365 Copilot scheduled prompt into the
         structured JSON the Today view consumes.
@@ -1263,11 +1264,26 @@ class Summarizer:
         Output schema:
           top_priority: { title, detail, why } | null
           needs_response: [{ title, detail, who, due, source }]
-          agenda: [{ title, time, duration, role, meeting_type,
+          agenda: [{ title, time, start_iso, end_iso, join_url,
+                     duration, role, meeting_type,
                      client, attendees[], notes, status }]
           schedule_notes: [str]
           fyi: [{ title, detail, category }]
           greeting: str
+
+        ``start_iso`` / ``end_iso`` / ``join_url`` were added so the
+        Chrome-extension import can become a SECOND SOURCE for the
+        Record tab's Upcoming Meetings list. The pre-existing ``time``
+        field is a *display* string ("9:30 AM") with no date and no
+        timezone — enough to render a row on the Today tab, useless for
+        placing an event on a timeline or deduping it against a local
+        Outlook invite (field report 2026-08-11). ``time`` is kept
+        unchanged; the ISO fields are additive, and
+        services/extension_calendar_service.py falls back to
+        date + ``time`` + ``duration`` whenever the model omits them.
+
+        ``today_iso`` (YYYY-MM-DD) anchors the date the model should
+        assume for a bare clock time. Defaults to the local date.
 
         `meeting_type` values should align with the meeting-type tags
         used elsewhere in the app: discovery, sow, status, technical,
@@ -1290,6 +1306,11 @@ class Summarizer:
             f"Parsing daily briefing ({len(text)} chars) "
             f"via {self._provider}/{self._model}")
 
+        anchor_date = (today_iso or "").strip()
+        if not anchor_date:
+            from datetime import date as _date_cls
+            anchor_date = _date_cls.today().isoformat()
+
         instruction = (
             "You are parsing a daily briefing the user receives every "
             "morning from a Microsoft 365 Copilot scheduled prompt. "
@@ -1310,6 +1331,8 @@ class Summarizer:
             '  ],\n'
             '  "agenda": [\n'
             '    { "title": "meeting title", "time": "9:30 AM",\n'
+            '      "start_iso": "YYYY-MM-DDTHH:MM:SS", "end_iso": "YYYY-MM-DDTHH:MM:SS",\n'
+            '      "join_url": "Teams/Zoom/Meet link if one is visible, else empty",\n'
             '      "duration": "30 min", "role": "host | attendee | optional",\n'
             '      "meeting_type": "discovery | sow | status | technical | demo | internal | general",\n'
             '      "client": "client name if applicable, else empty",\n'
@@ -1348,7 +1371,18 @@ class Summarizer:
             "'needs response' literally — your job is to identify which "
             "items NEED a response based on content.\n"
             "- For agenda items, do not omit cancelled / declined ones — "
-            "the user needs to see the schedule change to confirm.\n\n"
+            "the user needs to see the schedule change to confirm.\n"
+            f"- TODAY'S DATE IS {anchor_date} (local time). For every "
+            "agenda item also emit start_iso and end_iso as LOCAL "
+            "wall-clock ISO 8601 with NO timezone suffix "
+            "(e.g. \"2026-08-11T09:30:00\"). Use today's date unless the "
+            "text clearly says otherwise. If you genuinely cannot tell "
+            "the time, emit empty strings — do NOT guess a time. These "
+            "fields place the meeting on the Record tab's timeline, so a "
+            "wrong timestamp is worse than a missing one.\n"
+            "- join_url: copy a Teams / Zoom / Google Meet URL verbatim "
+            "if one appears with the meeting; empty string otherwise. "
+            "Never construct one.\n\n"
             "=== BRIEFING TEXT ===\n"
             f"{text}\n"
             "=== END BRIEFING TEXT ==="

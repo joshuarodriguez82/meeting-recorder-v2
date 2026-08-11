@@ -1,0 +1,327 @@
+"""
+Extension-scraped calendar events as a SECOND source for the Record
+tab's Upcoming Meetings list.
+
+The bug this covers: the Chrome extension's Outlook Web scrape fed only
+the Today tab's daily briefing, while the Record tab read the LOCAL
+calendar (Outlook COM / EventKit). A meeting the extension could see
+and local Outlook could not — the whole reason the extension exists —
+never appeared where you could record it (field report 2026-08-11).
+
+No optional deps: everything under test is pure Python + a JSON file.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from services.extension_calendar_service import (
+    DEDUP_TOLERANCE,
+    ExtensionCalendarService,
+    events_from_briefing,
+    merge_meetings,
+    normalize_subject,
+    parse_clock_time,
+    parse_duration_minutes,
+)
+
+
+def local(subject: str, start: datetime, minutes: int = 30, **extra) -> dict:
+    m = {
+        "subject": subject,
+        "start": start,
+        "end": start + timedelta(minutes=minutes),
+        "location": "Teams",
+        "organizer": "Someone Real",
+        "attendees": ["Real Person"],
+        "duration": minutes,
+    }
+    m.update(extra)
+    return m
+
+
+def ext(subject: str, start: datetime, minutes: int = 30, **extra) -> dict:
+    m = {
+        "subject": subject,
+        "start": start,
+        "end": start + timedelta(minutes=minutes),
+        "location": "",
+        "organizer": "",
+        "attendees": [],
+        "duration": minutes,
+        "join_url": "",
+        "source": "extension",
+    }
+    m.update(extra)
+    return m
+
+
+# ── subject normalization ───────────────────────────────────────────
+
+@pytest.mark.parametrize("raw,expected", [
+    ("AWS Town Hall", "aws town hall"),
+    ("  AWS   Town    Hall  ", "aws town hall"),
+    ("Updated! AWS Town Hall", "aws town hall"),
+    ("Updated: AWS Town Hall", "aws town hall"),
+    ("RE: AWS Town Hall", "aws town hall"),
+    ("FW: AWS Town Hall", "aws town hall"),
+    ("Fwd: AWS Town Hall", "aws town hall"),
+    ("FW: RE: AWS Town Hall", "aws town hall"),
+    ("Canceled: AWS Town Hall", "aws town hall"),
+    ("aws town hall", "aws town hall"),
+])
+def test_normalize_subject(raw, expected):
+    assert normalize_subject(raw) == expected
+
+
+def test_normalize_subject_keeps_distinct_meetings_distinct():
+    assert normalize_subject("Weekly Sync") != normalize_subject("Weekly Standup")
+
+
+# ── dedup / merge ───────────────────────────────────────────────────
+
+def test_dedup_matches_on_normalized_subject_and_prefers_local():
+    t = datetime(2026, 8, 11, 9, 0)
+    merged = merge_meetings(
+        [local("AWS Town Hall", t)],
+        [ext("Updated! AWS Town Hall", t)],
+    )
+    assert len(merged) == 1
+    assert merged[0]["source"] == "outlook"
+    # The local copy's richer data survives — that's the whole point of
+    # preferring it.
+    assert merged[0]["organizer"] == "Someone Real"
+    assert merged[0]["attendees"] == ["Real Person"]
+
+
+def test_dedup_tolerance_is_five_minutes_either_way():
+    t = datetime(2026, 8, 11, 9, 0)
+    for delta in (timedelta(minutes=-5), timedelta(minutes=-1),
+                  timedelta(0), timedelta(minutes=4),
+                  timedelta(minutes=5)):
+        merged = merge_meetings([local("Weekly Sync", t)],
+                                [ext("Weekly Sync", t + delta)])
+        assert len(merged) == 1, f"should dedup at {delta}"
+        assert merged[0]["source"] == "outlook"
+
+
+def test_start_outside_tolerance_is_a_separate_meeting():
+    t = datetime(2026, 8, 11, 9, 0)
+    merged = merge_meetings(
+        [local("Weekly Sync", t)],
+        [ext("Weekly Sync", t + DEDUP_TOLERANCE + timedelta(minutes=1))],
+    )
+    assert len(merged) == 2
+    assert {m["source"] for m in merged} == {"outlook", "extension"}
+
+
+def test_extension_only_events_survive_the_merge():
+    t = datetime(2026, 8, 11, 9, 0)
+    merged = merge_meetings(
+        [local("Weekly Sync", t)],
+        [ext("OWA-only Client Call", t + timedelta(hours=2))],
+    )
+    assert [m["subject"] for m in merged] == [
+        "Weekly Sync", "OWA-only Client Call"]
+    assert merged[1]["source"] == "extension"
+
+
+def test_local_only_event_is_unaffected():
+    t = datetime(2026, 8, 11, 9, 0)
+    original = local("Weekly Sync", t)
+    merged = merge_meetings([original], [])
+    assert len(merged) == 1
+    m = merged[0]
+    # Every pre-existing field keeps its name AND its value — the
+    # frontend and auto_record_service read these.
+    for key in ("subject", "start", "end", "location", "organizer",
+                "attendees", "duration"):
+        assert m[key] == original[key]
+    assert m["source"] == "outlook"
+    # ...and the input dict was not mutated.
+    assert "source" not in original
+
+
+def test_merge_sorts_by_start_across_both_sources():
+    base = datetime(2026, 8, 11, 9, 0)
+    merged = merge_meetings(
+        [local("Third", base + timedelta(hours=3))],
+        [ext("First", base), ext("Second", base + timedelta(hours=1))],
+    )
+    assert [m["subject"] for m in merged] == ["First", "Second", "Third"]
+
+
+def test_merge_accepts_iso_strings_for_start():
+    """Local backends emit datetimes, but the store round-trips through
+    ISO text. Both must dedupe against each other."""
+    merged = merge_meetings(
+        [{"subject": "Weekly Sync", "start": "2026-08-11T09:00:00",
+          "end": "2026-08-11T09:30:00"}],
+        [ext("Weekly Sync", datetime(2026, 8, 11, 9, 2))],
+    )
+    assert len(merged) == 1
+    assert merged[0]["source"] == "outlook"
+
+
+def test_merge_drops_extension_events_with_no_usable_start():
+    merged = merge_meetings([], [{"subject": "Mystery", "start": "not a date"}])
+    assert merged == []
+
+
+# ── briefing → events ───────────────────────────────────────────────
+
+def test_events_from_briefing_uses_start_iso_when_present():
+    briefing = {
+        "date": "2026-08-11",
+        "agenda": [{
+            "title": "Discovery Call",
+            "time": "9:30 AM",
+            "start_iso": "2026-08-11T09:30:00",
+            "end_iso": "2026-08-11T10:15:00",
+            "join_url": "https://teams.microsoft.com/l/meetup-join/abc",
+            "duration": "30 min",
+            "status": "scheduled",
+            "attendees": ["Dana"],
+        }],
+    }
+    events = events_from_briefing(briefing)
+    assert len(events) == 1
+    e = events[0]
+    assert e["start"] == datetime(2026, 8, 11, 9, 30)
+    assert e["end"] == datetime(2026, 8, 11, 10, 15)
+    assert e["duration"] == 45
+    assert e["join_url"].endswith("/abc")
+    assert e["source"] == "extension"
+    assert e["attendees"] == ["Dana"]
+
+
+def test_events_from_briefing_falls_back_to_date_plus_display_time():
+    """Briefings parsed before start_iso existed (and any run where the
+    model omits it) must still place on the timeline."""
+    briefing = {
+        "date": "2026-08-11",
+        "agenda": [{"title": "Weekly Sync", "time": "2:00 PM",
+                    "duration": "1 hr", "status": "scheduled"}],
+    }
+    events = events_from_briefing(briefing)
+    assert len(events) == 1
+    assert events[0]["start"] == datetime(2026, 8, 11, 14, 0)
+    assert events[0]["end"] == datetime(2026, 8, 11, 15, 0)
+
+
+def test_events_from_briefing_skips_untimed_and_cancelled():
+    briefing = {
+        "date": "2026-08-11",
+        "agenda": [
+            {"title": "All-day offsite", "time": "All day"},
+            {"title": "Dropped call", "time": "3:00 PM",
+             "status": "cancelled"},
+            {"title": "", "time": "4:00 PM"},
+            {"title": "Real one", "time": "4:00 PM"},
+        ],
+    }
+    assert [e["subject"] for e in events_from_briefing(briefing)] == ["Real one"]
+
+
+def test_events_from_briefing_converts_aware_iso_to_naive_local():
+    """The model likes appending 'Z'. Mixing aware and naive datetimes
+    would raise on the very first comparison in merge/auto-record."""
+    briefing = {
+        "date": "2026-08-11",
+        "agenda": [{"title": "Sync", "start_iso": "2026-08-11T09:00:00+00:00"}],
+    }
+    e = events_from_briefing(briefing)[0]
+    assert e["start"].tzinfo is None
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("9:30 AM", (9, 30)), ("9 AM", (9, 0)), ("12:15 AM", (0, 15)),
+    ("12:00 PM", (12, 0)), ("1 pm", (13, 0)), ("09:30", (9, 30)),
+    ("14:00", (14, 0)), ("All day", None), ("", None), ("25:00", None),
+])
+def test_parse_clock_time(raw, expected):
+    assert parse_clock_time(raw) == expected
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("30 min", 30), ("45m", 45), ("1 hr", 60), ("1.5 hours", 90),
+    ("2h", 120), ("", 30), ("nonsense", 30),
+])
+def test_parse_duration_minutes(raw, expected):
+    assert parse_duration_minutes(raw) == expected
+
+
+# ── store ───────────────────────────────────────────────────────────
+
+def test_store_round_trips(tmp_path: Path):
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 11, 12, 0)
+    kept = svc.replace_all(
+        [ext("Client Call", now + timedelta(hours=2), join_url="https://x/y")],
+        now=now)
+    assert len(kept) == 1
+
+    back = ExtensionCalendarService(tmp_path).get_events()
+    assert len(back) == 1
+    assert back[0]["subject"] == "Client Call"
+    assert back[0]["start"] == now + timedelta(hours=2)
+    assert back[0]["end"] == now + timedelta(hours=2, minutes=30)
+    assert back[0]["join_url"] == "https://x/y"
+    assert back[0]["source"] == "extension"
+
+
+def test_store_write_is_atomic_and_leaves_no_temp_files(tmp_path: Path):
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 11, 12, 0)
+    svc.replace_all([ext("A", now + timedelta(hours=1))], now=now)
+    svc.replace_all([ext("B", now + timedelta(hours=1))], now=now)
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "extension_calendar.json"]
+    # Replaced wholesale — stale events must not accumulate.
+    assert [e["subject"] for e in svc.get_events()] == ["B"]
+    # And the file on disk is complete, parseable JSON.
+    data = json.loads((tmp_path / "extension_calendar.json").read_text())
+    assert data["events"][0]["subject"] == "B"
+
+
+def test_events_outside_retention_window_are_dropped_on_import(tmp_path: Path):
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 11, 12, 0)
+    kept = svc.replace_all([
+        ext("Too old", now - timedelta(days=2)),
+        ext("Yesterday, still in window", now - timedelta(hours=6)),
+        ext("Soon", now + timedelta(hours=3)),
+        ext("Next week", now + timedelta(days=7)),
+        ext("Too far out", now + timedelta(days=20)),
+    ], now=now)
+    assert [e["subject"] for e in kept] == [
+        "Yesterday, still in window", "Soon", "Next week"]
+    assert len(svc.get_events()) == 3
+
+
+def test_get_events_within_hours_clips_and_keeps_in_progress(tmp_path: Path):
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 11, 12, 0)
+    svc.replace_all([
+        ext("Already finished", now - timedelta(hours=4)),
+        ext("In progress", now - timedelta(minutes=10), minutes=60),
+        ext("Later today", now + timedelta(hours=3)),
+        ext("Beyond horizon", now + timedelta(days=5)),
+    ], now=now)
+
+    got = svc.get_events(within_hours=24, now=now)
+    assert [e["subject"] for e in got] == ["In progress", "Later today"]
+
+
+def test_get_events_tolerates_missing_and_corrupt_store(tmp_path: Path):
+    svc = ExtensionCalendarService(tmp_path)
+    assert svc.get_events() == []
+    (tmp_path / "extension_calendar.json").write_text("{not json",
+                                                      encoding="utf-8")
+    # A corrupt store must never take the local calendar down with it.
+    assert svc.get_events() == []
