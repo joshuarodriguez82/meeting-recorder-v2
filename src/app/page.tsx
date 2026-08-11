@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { toast } from "sonner";
-import { api, formatBytes, openExternal, setRecordingActive, type Meeting, type SessionSummary } from "@/lib/api";
+import { api, formatBytes, openExternal, type Meeting, type SessionSummary } from "@/lib/api";
+import { refreshRecordingStatus, useRecordingStatus } from "@/lib/recording-status";
 import {
   Mic, History, CheckSquare, Target, Search,
   LayoutDashboard, Settings as SettingsIcon, HelpCircle, Loader2,
@@ -237,30 +238,45 @@ export default function Home() {
   const [backendAttempts, setBackendAttempts] = useState(0);
   const [backendError, setBackendError] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<string>("");
-  const [pipelineStatus, setPipelineStatus] = useState<{
-    loading: boolean; text: string;
-  }>({ loading: false, text: "" });
-  // Mirrored from /recording/status so the sidebar can show a
-  // persistent "Recording…" badge on every tab — the previous design
-  // only surfaced recording state inside the Record view, so when
-  // auto-record fired silently the user had no visible cue and ended
-  // up colliding with their own manual Start.
-  const [recordingNow, setRecordingNow] = useState<{
-    isRecording: boolean;
-    sessionId: string | null;
-    startedAt: string | null;
-    autoSubject: string | null;
-  }>({ isRecording: false, sessionId: null, startedAt: null, autoSubject: null });
+  // THE single shared recording poll (src/lib/recording-status.ts).
+  // The sidebar badge below and the Record view read this exact same
+  // object — field report 2026-08-11 was the two of them holding
+  // separate copies and drifting apart after a failed Stop.
+  const { status: recordingStatus, reachable, consecutiveFailures } =
+    useRecordingStatus();
+  // Derived, not stored. There is no local "am I recording" state to
+  // fall out of date: the badge renders whatever the last successful
+  // poll said, full stop.
+  const recordingNow = useMemo(() => ({
+    isRecording: !!recordingStatus?.is_recording,
+    sessionId: recordingStatus?.session_id ?? null,
+    startedAt: recordingStatus?.started_at ?? null,
+    autoSubject: recordingStatus?.auto_record_subject ?? null,
+  }), [recordingStatus]);
+  // Sidebar pipeline line: model warmup on cold start, transcription
+  // progress during processing, or the reconnect notice while a
+  // respawned backend boots. 2+ consecutive failures before we say
+  // anything, so a single dropped request during a normal respawn
+  // doesn't flash a scary banner.
+  const pipelineStatus = useMemo<{ loading: boolean; text: string }>(() => {
+    if (!reachable && consecutiveFailures >= 2) {
+      return {
+        loading: true,
+        text: "Reconnecting to backend… (it restarted — one moment)",
+      };
+    }
+    if (recordingStatus?.models_loading) {
+      return { loading: true, text: "Loading AI models…" };
+    }
+    if (recordingStatus?.current_status && !recordingStatus.is_recording) {
+      return { loading: true, text: recordingStatus.current_status };
+    }
+    return { loading: false, text: "" };
+  }, [recordingStatus, reachable, consecutiveFailures]);
   // Dedup keys: only fire the auto-record toast/notification ONCE per
   // session, and only show each unique skip-reason once.
   const lastAutoSessionRef = useRef<string | null>(null);
   const lastSkipReasonRef = useRef<string | null>(null);
-  // Consecutive failed status-poll ticks — 2+ shows the "Reconnecting"
-  // banner instead of raw fetch errors while a respawned backend boots.
-  const failedTicksRef = useRef(0);
-  // Last recording state pushed down to the Tauri shell, so we only
-  // invoke when it actually changes.
-  const lastRecordingFlagRef = useRef<boolean | null>(null);
   // Live timer for the recording badge. Ticks every second while a
   // recording is active so the badge label shows real elapsed time.
   const [recordingElapsedS, setRecordingElapsedS] = useState(0);
@@ -329,115 +345,69 @@ export default function Home() {
     return () => { cancelled = true; };
   }, []);
 
-  // Poll /recording/status so the sidebar can show what the backend is
-  // currently doing — model warmup on cold start, transcription progress
-  // during processing, etc. The user wanted visible feedback instead of
-  // silent delays where the app looked frozen or unresponsive.
+  // Auto-record announcements, driven off the shared status rather than
+  // a poll of our own. Everything this effect used to do that was about
+  // *tracking* recording state now happens in
+  // src/lib/recording-status.ts (including reconciling the Tauri
+  // shell's RECORDING_ACTIVE flag on every successful poll); what's
+  // left here is purely the one-shot user-facing announcements, which
+  // are page-level concerns.
   useEffect(() => {
-    if (!backendReady) return;
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const s = await api.recordingStatus();
-        if (cancelled) return;
-        if (s.models_loading) {
-          setPipelineStatus({ loading: true, text: "Loading AI models…" });
-        } else if (s.current_status && !s.is_recording) {
-          setPipelineStatus({ loading: true, text: s.current_status });
-        } else {
-          setPipelineStatus({ loading: false, text: "" });
-        }
+    const s = recordingStatus;
+    if (!s) return;
 
-        // Mirror the recording state so the persistent badge can
-        // render on every tab — not just inside the Record view.
-        // Keep the shell's watchdog in sync with reality. This poll is
-        // the authoritative source: it also covers recordings the user
-        // never clicked Start for (calendar auto-record) and ones still
-        // running when the app was reopened. Only push on change so we
-        // aren't invoking Tauri every 2s.
-        if (lastRecordingFlagRef.current !== !!s.is_recording) {
-          lastRecordingFlagRef.current = !!s.is_recording;
-          void setRecordingActive(!!s.is_recording);
-        }
+    // Auto-record start — fire native + in-app notification ONCE
+    // per session_id so the user can't miss that auto-record fired
+    // (the original complaint: it started, no visual cue at all).
+    if (
+      s.is_recording &&
+      s.auto_record_subject &&
+      s.session_id &&
+      lastAutoSessionRef.current !== s.session_id
+    ) {
+      lastAutoSessionRef.current = s.session_id;
+      const subject = s.auto_record_subject;
+      toast.message("Auto-recording started", { description: subject });
+      void (async () => {
+        try {
+          const { sendNotification, isPermissionGranted, requestPermission } =
+            await import("@tauri-apps/plugin-notification");
+          let granted = await isPermissionGranted();
+          if (!granted) granted = (await requestPermission()) === "granted";
+          if (granted) {
+            await sendNotification({
+              title: "Auto-recording started", body: subject,
+            });
+          }
+        } catch { /* not Tauri */ }
+      })();
+    }
 
-        setRecordingNow({
-          isRecording: !!s.is_recording,
-          sessionId: s.session_id ?? null,
-          startedAt: s.started_at ?? null,
-          autoSubject: s.auto_record_subject ?? null,
-        });
-
-        // Auto-record start — fire native + in-app notification ONCE
-        // per session_id so the user can't miss that auto-record fired
-        // (the original complaint: it started, no visual cue at all).
-        if (
-          s.is_recording &&
-          s.auto_record_subject &&
-          s.session_id &&
-          lastAutoSessionRef.current !== s.session_id
-        ) {
-          lastAutoSessionRef.current = s.session_id;
-          const subject = s.auto_record_subject;
-          toast.message("Auto-recording started", { description: subject });
-          void (async () => {
-            try {
-              const { sendNotification, isPermissionGranted, requestPermission } =
-                await import("@tauri-apps/plugin-notification");
-              let granted = await isPermissionGranted();
-              if (!granted) granted = (await requestPermission()) === "granted";
-              if (granted) {
-                await sendNotification({
-                  title: "Auto-recording started", body: subject,
-                });
-              }
-            } catch { /* not Tauri */ }
-          })();
-        }
-
-        // One-shot skip reason (backend clears after one read).
-        // Surfaces "no mic configured" etc. so silent failure can't
-        // happen the way it did before.
-        if (
-          s.auto_record_skip_reason &&
-          s.auto_record_skip_reason !== lastSkipReasonRef.current
-        ) {
-          const reason = s.auto_record_skip_reason;
-          lastSkipReasonRef.current = reason;
-          toast.warning(reason, { duration: 10000 });
-          void (async () => {
-            try {
-              const { sendNotification, isPermissionGranted, requestPermission } =
-                await import("@tauri-apps/plugin-notification");
-              let granted = await isPermissionGranted();
-              if (!granted) granted = (await requestPermission()) === "granted";
-              if (granted) {
-                await sendNotification({
-                  title: "Auto-record skipped", body: reason,
-                });
-              }
-            } catch { /* not Tauri */ }
-          })();
-        }
-      } catch {
-        // Backend unreachable — usually a watchdog respawn after a
-        // backend exit. Tell the user what's happening instead of
-        // letting every view surface raw "failed to fetch" noise; the
-        // next successful tick clears it automatically.
-        failedTicksRef.current += 1;
-        if (failedTicksRef.current >= 2) {
-          setPipelineStatus({
-            loading: true,
-            text: "Reconnecting to backend… (it restarted — one moment)",
-          });
-        }
-        return;
-      }
-      failedTicksRef.current = 0;
-    };
-    tick();
-    const id = setInterval(tick, 2000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [backendReady]);
+    // One-shot skip reason (backend clears after one read).
+    // Surfaces "no mic configured" etc. so silent failure can't
+    // happen the way it did before.
+    if (
+      s.auto_record_skip_reason &&
+      s.auto_record_skip_reason !== lastSkipReasonRef.current
+    ) {
+      const reason = s.auto_record_skip_reason;
+      lastSkipReasonRef.current = reason;
+      toast.warning(reason, { duration: 10000 });
+      void (async () => {
+        try {
+          const { sendNotification, isPermissionGranted, requestPermission } =
+            await import("@tauri-apps/plugin-notification");
+          let granted = await isPermissionGranted();
+          if (!granted) granted = (await requestPermission()) === "granted";
+          if (granted) {
+            await sendNotification({
+              title: "Auto-record skipped", body: reason,
+            });
+          }
+        } catch { /* not Tauri */ }
+      })();
+    }
+  }, [recordingStatus]);
 
   // Drives the elapsed timer next to the persistent "● Recording"
   // badge. 1s tick is plenty for a wall-clock label; the heavy poll
@@ -843,8 +813,28 @@ export default function Home() {
                   await api.stopRecording();
                   toast.success("Recording stopped");
                 } catch (err) {
-                  toast.error(`Couldn't stop: ${err instanceof Error ? err.message : err}`);
+                  // Field report 2026-08-11: Stop pressed while the
+                  // backend was restarting. We deliberately do NOT
+                  // clear the badge here — the backend may still be
+                  // capturing, and guessing is what let the sidebar
+                  // and the Record view disagree. The shared poll
+                  // reconciles to the server's answer as soon as it's
+                  // reachable again, so say that out loud instead of
+                  // leaving the user staring at an indicator they just
+                  // tried to dismiss.
+                  toast.error(
+                    `Couldn't stop: ${err instanceof Error ? err.message : err}`,
+                    {
+                      description:
+                        "The backend didn't answer. If it restarted, the "
+                        + "recording indicator clears itself as soon as the "
+                        + "backend is reachable again.",
+                    },
+                  );
                 }
+                // Either way, ask the server immediately rather than
+                // waiting out the poll interval.
+                refreshRecordingStatus();
               }}
               className={`flex items-center justify-center hover:bg-red-500/25 transition-colors text-red-700 dark:text-red-300 font-medium ${
                 navCollapsed

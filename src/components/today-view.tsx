@@ -23,6 +23,7 @@ import {
   type BriefingAgendaItem,
   type RecordingStatus,
 } from "@/lib/api";
+import { useRecordingStatus } from "@/lib/recording-status";
 import {
   Card, CardContent, CardHeader, CardTitle,
 } from "@/components/ui/card";
@@ -105,7 +106,12 @@ export function TodayView({ onNavigate }: Props) {
   const [pasteText, setPasteText] = useState("");
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
-  const [recordingStatus, setRecordingStatus] = useState<RecordingStatus | null>(null);
+  // Same shared poll the sidebar badge and the Record view read (see
+  // src/lib/recording-status.ts). The "Right Now" card is a third place
+  // recording state is shown, so it was a third place it could drift —
+  // field report 2026-08-11 was two of these disagreeing on screen at
+  // the same time.
+  const { status: recordingStatus } = useRecordingStatus();
   const [nowTick, setNowTick] = useState(0);
   // Outlook Web sync state. `syncing` covers the headless scrape +
   // LLM parse round-trip (typically ~10-25s end-to-end). `signingIn`
@@ -151,21 +157,9 @@ export function TodayView({ onNavigate }: Props) {
     }
   }, []);
 
-  const refreshRecording = useCallback(async () => {
-    try {
-      const s = await api.recordingStatus();
-      setRecordingStatus(s);
-    } catch {
-      /* recording status is optional context — silent fail */
-    }
-  }, []);
-
   useEffect(() => {
     refreshBriefing();
-    refreshRecording();
-    const t = setInterval(refreshRecording, 5_000);
-    return () => clearInterval(t);
-  }, [refreshBriefing, refreshRecording]);
+  }, [refreshBriefing]);
 
   // A failed briefing load is usually transient — the backend is
   // restarting, or the file was momentarily locked. Retry quietly
