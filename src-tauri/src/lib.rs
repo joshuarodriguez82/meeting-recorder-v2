@@ -1029,6 +1029,53 @@ fn rlog(msg: &str) {
     log::info!("{}", msg);
 }
 
+/// Append a loud, greppable end-of-process marker into **backend.log**
+/// the moment the watchdog notices the Python child is gone.
+///
+/// Why this is worth its own function: the backend has been dying with
+/// 3221225477 (0xC0000005, STATUS_ACCESS_VIOLATION) since v2.0.18 and
+/// the exit was only ever recorded in rust.log, while the interesting
+/// context — what the backend was actually doing — lives in
+/// backend.log. Correlating the two meant matching wall-clock times
+/// across two files by eye, which is why five separate hypotheses got
+/// proposed and dismissed on timing guesswork instead of evidence
+/// (field report 2026-08-11). Writing the marker into backend.log
+/// itself means the line immediately above it IS the crash context,
+/// and the Python side's crash.log (utils/crash_log.py, faulthandler)
+/// holds the native traceback for the same instant.
+///
+/// Best-effort by construction: one `OpenOptions::append` + one
+/// `write_all`, every error discarded, nothing that can panic or block
+/// the watchdog loop.
+///
+/// Timestamp deliberately uses `chrono_like_timestamp()` — the same
+/// clock `rlog` stamps rust.log with — so the marker and the
+/// "Backend exited unexpectedly" line read as the same instant. (It's
+/// UTC-derived HH:MM:SS, not true local; matching rust.log matters more
+/// here than matching the wall clock, and adding a chrono dependency
+/// for a crash breadcrumb isn't worth it.)
+fn append_backend_exit_marker(status: &std::process::ExitStatus) {
+    // `ExitStatus::code()` hands back an i32, so a Windows NTSTATUS
+    // like 0xC0000005 arrives as -1073741819. Print the unsigned value
+    // (what Task Manager / the release notes quote) AND the hex, so the
+    // line is greppable either way.
+    let (dec, hex) = match status.code() {
+        Some(c) => (format!("{}", c as u32), format!("0x{:08X}", c as u32)),
+        None => ("unknown".to_string(), "n/a".to_string()),
+    };
+    let line = format!(
+        "\n=== BACKEND EXITED code={} ({}) at {} — everything above this line is the crash context ===\n",
+        dec, hex, chrono_like_timestamp()
+    );
+    if let Ok(mut f) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(backend_log_path())
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 fn chrono_like_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now().duration_since(UNIX_EPOCH)
@@ -1283,6 +1330,11 @@ pub fn run() {
                                     Ok(Some(status)) => {
                                         rlog(&format!(
                                             "Backend exited unexpectedly: {:?}", status));
+                                        // Same event, mirrored into
+                                        // backend.log so the crash context
+                                        // sits directly above the marker.
+                                        // See the fn doc comment.
+                                        append_backend_exit_marker(&status);
                                         *guard = None;
                                         false
                                     }

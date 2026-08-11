@@ -301,6 +301,16 @@ export interface Meeting {
   organizer: string;
   attendees: string[];
   duration: number;
+  // Which pipeline this meeting came from. "outlook" = the local
+  // calendar (Outlook COM / EventKit) — authoritative, has attendees,
+  // body and a resolvable join link. "extension" = scraped out of
+  // Outlook Web by the Chrome extension; the only way a meeting the
+  // local calendar can't see reaches this list at all. Optional
+  // because /calendar/today and older backends don't set it.
+  source?: "outlook" | "extension";
+  // Join link the extension saw in Outlook Web. Local meetings resolve
+  // theirs lazily via /calendar/meeting-detail instead.
+  join_url?: string;
 }
 
 export interface SessionSummary {
@@ -1768,6 +1778,13 @@ export interface DiagnosticCheck {
 export interface Diagnostics {
   checks: DiagnosticCheck[];
   log_tail: string;
+  // Last ~100 lines of crash.log — the faulthandler dump the backend
+  // writes when it dies from a NATIVE fault (Windows 0xC0000005 /
+  // 3221225477). Empty string on a healthy machine, and empty on older
+  // backends that predate the field, hence optional. This is the only
+  // artifact that survives an access violation; backend.log just stops
+  // mid-line (field report 2026-08-11).
+  crash_tail?: string;
 }
 
 export interface Terminology {

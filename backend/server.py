@@ -35,6 +35,40 @@ os.chdir(Path(__file__).resolve().parent)
 # import cleanly even if launched with an odd CWD.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# ── Native-crash capture — MUST be the first thing after sys.path ────
+#
+# The backend has been exiting with 3221225477 (0xC0000005,
+# STATUS_ACCESS_VIOLATION) on Windows since v2.0.18, and it is still
+# undiagnosed in v2.19.3 for one reason: an access violation kills the
+# interpreter before Python can log anything, so backend.log just stops
+# mid-line. Five hypotheses have been proposed and dismissed on the
+# strength of restart-timing guesswork alone (field report 2026-08-11).
+# faulthandler installs an OS-level handler that dumps every thread's
+# Python traceback with a raw write() to a pre-opened fd — it works
+# from inside the fault. Enabling it HERE, before the dependency
+# self-heal and before numpy / torch / faster-whisper / pyannote, means
+# a fault during native library init (the 2026-07-21 "Loading
+# transcription engine" crash loop) is captured too.
+#
+# utils.crash_log is stdlib-only on purpose so this cannot itself be
+# the thing that stops the backend booting.
+try:
+    from utils.crash_log import enable_crash_logging as _enable_crash_logging
+    _CRASH_LOG_PATH = _enable_crash_logging()
+    if _CRASH_LOG_PATH:
+        sys.stderr.write(f"[crash] faulthandler → {_CRASH_LOG_PATH}\n")
+    else:
+        sys.stderr.write(
+            "[crash] crash.log unavailable; faulthandler is on stderr only\n")
+except Exception as _e:  # noqa: BLE001
+    # A backend that won't start because its crash logger failed is
+    # strictly worse than a backend with no crash logger.
+    _CRASH_LOG_PATH = None
+    try:
+        sys.stderr.write(f"[crash] faulthandler setup failed: {_e}\n")
+    except Exception:
+        pass
+
 # Windows-specific hardening to stop pythonw.exe from ever showing a
 # visible window. We hit two distinct problems in the wild:
 #
@@ -341,6 +375,9 @@ from services.daily_briefing_service import (
     BriefingUnreadableError,
     DailyBriefingService,
 )
+from services.extension_calendar_service import (
+    ExtensionCalendarService, events_from_briefing, merge_meetings,
+)
 from services.outlook_web_scraper import (
     OutlookAuthExpired, OutlookScraperError, OutlookScraperUnavailable,
     format_for_briefing_parser, open_signin_window,
@@ -620,6 +657,10 @@ class Services:
         self.copilot_meeting_type_svc: Optional[CoPilotMeetingTypeService] = None
         self.engagement_overlay_svc: Optional[EngagementOverlayService] = None
         self.daily_briefing_svc: Optional[DailyBriefingService] = None
+        # Structured calendar events lifted out of the Chrome
+        # extension's import — the second source behind
+        # /calendar/upcoming. See services/extension_calendar_service.py.
+        self.extension_calendar_svc: Optional[ExtensionCalendarService] = None
         self.terminology_svc: Optional[TerminologyService] = None
         self.prep_brief_cache_svc: Optional[PrepBriefCacheService] = None
         self.recording_svc: Optional[RecordingService] = None
@@ -758,6 +799,12 @@ class Services:
             # per calendar date, populated by user pasting M365 Copilot
             # scheduled-prompt output into the Today tab's Import dialog.
             self.daily_briefing_svc = DailyBriefingService(_recordings_dir)
+            # Calendar events the Chrome extension scraped out of
+            # Outlook Web. Lives next to the other per-user JSON stores
+            # in recordings_dir so it roams with them; replaced
+            # wholesale on each import so stale events age out.
+            self.extension_calendar_svc = ExtensionCalendarService(
+                _recordings_dir)
             # Domain terminology glossary (Whisper bias + mis-hear
             # corrections). Seeds a curated SA/CCaaS/cloud/sales vocab on
             # first launch; user-editable from Settings.
@@ -2001,8 +2048,24 @@ async def get_calendar_upcoming(hours: int = 168, refresh: bool = False):
     the realistic slow case while still bounding a genuine hang. On
     timeout we still return [] (the background thread keeps going and
     populates the 5-min cache, so the next call is instant).
+
+    TWO SOURCES since v2.22.2. The local calendar (Outlook COM /
+    EventKit) stays authoritative; events the Chrome extension scraped
+    out of Outlook Web are merged in on top, deduped by normalized
+    subject + a ±5-minute start-time window, local copy always
+    preferred (it carries attendees, body, organizer, resolved join
+    link — the scrape carries none of that). Every returned meeting now
+    carries a `source` field, "outlook" or "extension"; no pre-existing
+    field changed name or meaning. Rationale: a meeting visible only in
+    Outlook Web previously never reached this panel at all, so it could
+    not be used to start a recording (field report 2026-08-11).
     """
     try:
+        # Idempotent + cheap once loaded; needed here because the
+        # extension-calendar store is only constructed inside
+        # load_settings, and this endpoint used to touch no services at
+        # all.
+        svc.load_settings()
         if refresh:
             from services.calendar_service import invalidate_calendar_cache
             invalidate_calendar_cache()
@@ -2013,10 +2076,25 @@ async def get_calendar_upcoming(hours: int = 168, refresh: bool = False):
             )
         except asyncio.TimeoutError:
             logger.warning(
-                f"Calendar fetch ({hours}h) exceeded 45s — returning empty. "
-                f"Outlook/Exchange likely slow to respond. Retry in a moment.")
-            return []
-        return _serialize_meetings(meetings)
+                f"Calendar fetch ({hours}h) exceeded 45s — local calendar "
+                f"omitted this round. Outlook/Exchange likely slow to "
+                f"respond. Retry in a moment.")
+            meetings = []
+
+        # Extension-sourced events. Wrapped so a broken/unreadable store
+        # degrades to "local calendar only" rather than 500-ing the
+        # panel — this is an additive source, never a dependency.
+        ext_events: List[dict] = []
+        if svc.extension_calendar_svc:
+            try:
+                ext_events = await asyncio.to_thread(
+                    svc.extension_calendar_svc.get_events, hours)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    f"Extension calendar events unavailable ({e}); "
+                    f"showing local calendar only.")
+
+        return _serialize_meetings(merge_meetings(meetings, ext_events))
     except Exception as e:
         logger.exception("Upcoming calendar fetch failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -6822,7 +6900,7 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
                             detail="Briefing too large (>50KB)")
 
     try:
-        parsed = await summ.parse_daily_briefing(blob)
+        parsed = await summ.parse_daily_briefing(blob, req.date or "")
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=f"LLM parse failed: {e}")
 
@@ -6831,13 +6909,35 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
 
     stored = await asyncio.to_thread(
         svc.daily_briefing_svc.save_parsed, parsed, blob, req.date)
+
+    # Second consumer of the same parse: the Record tab's Upcoming
+    # Meetings panel. Until v2.22.2 the extension's calendar data dead-
+    # ended in the Today tab's briefing, so a meeting visible in Outlook
+    # Web but absent from local Outlook (the exact case the extension
+    # exists to cover — IT policy blocks COM/Graph) could never be used
+    # to start a recording. We persist the structured events here and
+    # /calendar/upcoming merges them with the local source (field report
+    # 2026-08-11). Best-effort: a failure to persist must not fail the
+    # briefing import, which is the primary purpose of this endpoint.
+    ext_kept = 0
+    if svc.extension_calendar_svc:
+        try:
+            events = events_from_briefing(stored, stored.get("date"))
+            ext_kept = len(await asyncio.to_thread(
+                svc.extension_calendar_svc.replace_all, events))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"Extension calendar store update failed ({e}); "
+                f"briefing import itself succeeded.")
+
     logger.info(
         f"Chrome-extension import: OWA={len(owa_text)} chars, "
         f"Teams={len(teams_text)} chars, "
         f"Inbox={len(inbox_text)} chars, Chat={len(chat_text)} chars → "
         f"agenda={len(stored.get('agenda', []))}, "
         f"needs_response={len(stored.get('needs_response', []))}, "
-        f"fyi={len(stored.get('fyi', []))}")
+        f"fyi={len(stored.get('fyi', []))}, "
+        f"calendar_events={ext_kept}")
     return stored
 
 
@@ -7234,7 +7334,21 @@ def _gather_diagnostics() -> dict:
     except Exception as e:
         log_tail = f"(could not read backend.log: {e})"
 
-    return {"checks": checks, "log_tail": log_tail}
+    # Crash tail — last ~100 lines of crash.log (faulthandler output).
+    # Separate from log_tail on purpose: this is the ONLY surface that
+    # survives a 0xC0000005 access violation, and it is empty on a
+    # healthy machine. Getting it in front of the user via Settings →
+    # Diagnostics (rather than "open %LOCALAPPDATA% in Explorer") is
+    # what turns the recurring Windows crash into something diagnosable
+    # from a copy-paste (field report 2026-08-11).
+    crash_tail = ""
+    try:
+        from utils.crash_log import read_crash_tail
+        crash_tail = read_crash_tail(max_lines=100)
+    except Exception as e:  # noqa: BLE001
+        crash_tail = f"(could not read crash.log: {e})"
+
+    return {"checks": checks, "log_tail": log_tail, "crash_tail": crash_tail}
 
 
 @app.get("/diagnostics")

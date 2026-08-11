@@ -3107,6 +3107,7 @@ function DiagnosticsCard() {
   const [diag, setDiag] = useState<import("@/lib/api").Diagnostics | null>(null);
   const [loading, setLoading] = useState(false);
   const [showLog, setShowLog] = useState(false);
+  const [showCrash, setShowCrash] = useState(false);
 
   const refresh = async () => {
     setLoading(true);
@@ -3134,6 +3135,21 @@ function DiagnosticsCard() {
     if (!diag?.log_tail) return;
     navigator.clipboard?.writeText(diag.log_tail).then(
       () => toast.success("Log tail copied"),
+      () => toast.error("Couldn't copy"),
+    );
+  };
+
+  // crash.log holds the faulthandler dump from a NATIVE crash (the
+  // Windows 0xC0000005 / 3221225477 exit that's been unexplained since
+  // v2.0.18). It's empty on a healthy machine, so the whole block only
+  // renders when there's something to read — no permanent scary panel.
+  const crashTail = (diag?.crash_tail || "").trim();
+  const hasCrash = crashTail.length > 0;
+
+  const copyCrash = () => {
+    if (!crashTail) return;
+    navigator.clipboard?.writeText(crashTail).then(
+      () => toast.success("Crash log copied"),
       () => toast.error("Couldn't copy"),
     );
   };
@@ -3192,6 +3208,37 @@ function DiagnosticsCard() {
             {showLog && (
               <pre className="max-h-80 overflow-auto rounded-md border bg-muted/40 p-3 text-[11px] leading-relaxed font-mono whitespace-pre-wrap break-words">
                 {diag.log_tail || "(log empty)"}
+              </pre>
+            )}
+          </div>
+        )}
+
+        {hasCrash && (
+          <div className="space-y-2 rounded-md border border-amber-200 bg-amber-50 p-3 dark:border-amber-900 dark:bg-amber-950/40">
+            <div className="text-sm font-medium">
+              The backend crashed at least once
+            </div>
+            <div className="text-xs text-muted-foreground">
+              A native crash dump was captured in <code>crash.log</code>. This
+              is the traceback the backend&apos;s own log can&apos;t hold —
+              copy it into a bug report and it says exactly where the process
+              died.
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setShowCrash((v) => !v)}
+              >
+                {showCrash ? "Hide" : "Show"} crash log
+              </Button>
+              <Button size="sm" variant="ghost" onClick={copyCrash}>
+                Copy crash log
+              </Button>
+            </div>
+            {showCrash && (
+              <pre className="max-h-80 overflow-auto rounded-md border bg-background/60 p-3 text-[11px] leading-relaxed font-mono whitespace-pre-wrap break-words">
+                {crashTail}
               </pre>
             )}
           </div>
