@@ -15,14 +15,17 @@ Design goals, in order:
      than importing core.speaker_embeddings directly. Production wiring
      (recording_service.py) supplies a real embed_fn backed by ECAPA;
      tests supply a fake that returns fixed vectors.
-  2. Never invent a new speaker off a too-short utterance. ECAPA-style
-     embeddings are unreliable under ~1s of audio (see
-     core/speaker_embeddings.py's own MIN_TOTAL_SECONDS), and a live
-     tracker that creates "Speaker 4" every time someone says "yeah"
-     is worse than useless — the field-report precedent that shaped
-     this rule (see MIN_UTTERANCE_SECONDS below) is that a wrong-but-
-     stable label reads as normal conversation lag; a fresh label every
-     few seconds reads as broken software.
+  2. Never invent a new speaker off a too-short or merely-ambiguous
+     utterance. ECAPA-style embeddings are unreliable under ~1s of
+     audio (see core/speaker_embeddings.py's own MIN_TOTAL_SECONDS),
+     and a live tracker that creates "Speaker 4" every time someone
+     says "yeah" is worse than useless — a wrong-but-stable label reads
+     as normal conversation lag; a fresh label every few seconds reads
+     as broken software. Field report 2026-08-11 is the case that
+     proved it: one continuous speaker on a two-person call came out as
+     SPEAKER 1/2/3/4/5/6/7/9. See the long "THE ASYMMETRY THIS MODULE
+     NOW ENCODES" note above the threshold constants below — matching
+     and CREATING are separate decisions with separate bars now.
   3. Bounded drift. A live meeting has no post-hoc correction pass, so
      we cap the number of distinct speakers this tracker will invent
      (MAX_LIVE_SPEAKERS) — past the cap, new voices get folded into
@@ -47,18 +50,99 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# ── Thresholds ───────────────────────────────────────────────────────
+#
+# Field report 2026-08-11 (live speaker over-splitting), the reason
+# every number below moved:
+#
+#   A real 2-person call on v2.23.0 produced SPEAKER 1, 2, 3, 4, 5, 6,
+#   7 and 9 for ONE continuous speaker — a brand-new identity every few
+#   seconds. Before v2.21.0 the same call was labelled a flat "them",
+#   which was less informative but never WRONG. The user called it a
+#   definite regression, and they're right.
+#
+#   Root cause: the old single SIMILARITY_THRESHOLD of 0.75 did double
+#   duty. It decided both "is this the same voice?" AND, by failing,
+#   "should a new speaker be born?". On the 0.6-8s VAD-sized clips this
+#   tracker actually sees, ECAPA-style embeddings are noisy enough that
+#   the SAME voice routinely scores under 0.75 — and every one of those
+#   dips minted a new speaker. MIN_UTTERANCE_SECONDS only ever gated
+#   whether we REUSED the previous label; it never gated creation.
+#
+# THE ASYMMETRY THIS MODULE NOW ENCODES — the design principle behind
+# every constant here:
+#
+#   * Merging two people into one label is MILDLY wrong. The transcript
+#     still reads as a conversation; a human skims it and moves on.
+#   * Splitting one person into nine labels is BADLY wrong. It makes the
+#     transcript unusable — no one can follow who said what.
+#   * A confidently WRONG NAME ("Caleb Johnson" on a female speaker) is
+#     the WORST of all. It doesn't just look broken, it actively
+#     misleads, and it poisons trust in the whole transcript.
+#
+#   Therefore: bias hard toward MERGING and toward FEWER identities.
+#   When in doubt, reuse an existing label. Never mint an identity, and
+#   never attach a real name, off a marginal signal. The post-stop
+#   pyannote pass sees the whole recording and remains the authority;
+#   this live path is a preview and must be conservative.
+
 # Cosine-similarity cutoff for "this is the same voice as an existing
-# live centroid". Tuned conservatively (same order as
-# speaker_profile_service.DEFAULT_MATCH_THRESHOLD's 0.75) — a live
-# tracker has no user confirmation step to correct a wrong merge, so we
-# would rather split one real speaker into two labels occasionally than
-# merge two different speakers into one.
-SIMILARITY_THRESHOLD = 0.75
+# live centroid" — i.e. the MERGE bar.
+#
+# Deliberately LOW (0.55, was 0.75). ECAPA cosine on clean multi-second
+# audio puts the same speaker at 0.75-0.95, but that range collapses on
+# the short, noisy, single-sentence clips the live path works with —
+# same-speaker scores of 0.55-0.70 are routine there, and different
+# speakers still land around 0.20-0.50. 0.55 sits in the gap: it soaks
+# up same-voice jitter (the over-splitting bug) while still sitting
+# above where genuinely different voices score. Per the asymmetry
+# above, an occasional over-merge is the cheap failure; over-splitting
+# is the expensive one.
+MATCH_THRESHOLD = 0.55
+
+# The CREATE bar, and deliberately a SEPARATE, much stricter gate than
+# the merge bar. A new speaker is only born when the clip is *clearly*
+# nobody we've heard so far — best similarity to EVERY existing centroid
+# below this. Between NEW_SPEAKER_THRESHOLD and MATCH_THRESHOLD is the
+# "ambiguous" band: those clips are handed to the best-matching existing
+# speaker rather than minting an identity on a coin flip. That band is
+# exactly where the field report's phantom speakers 2-9 came from.
+NEW_SPEAKER_THRESHOLD = 0.40
+
+# Minimum clip length before a new identity may be created at all, and
+# before ANY known-profile name may be attached. Both gates must pass;
+# duration alone is never enough and similarity alone is never enough.
+#
+# 2.5s is well above MIN_UTTERANCE_SECONDS on purpose: 1s is the floor
+# for "embedding is worth computing", but "confident enough to assert a
+# NEW PERSON exists" (or to assert someone's actual NAME) needs a lot
+# more evidence than that.
+MIN_NEW_SPEAKER_SECONDS = 2.5
 
 # Utterances shorter than this are too short to embed reliably. Below
 # this we return the previous speaker unchanged rather than embedding at
 # all — see design goal #2 above.
 MIN_UTTERANCE_SECONDS = 1.0
+
+# Stickiness margin. When several centroids score within this much of
+# the best score, prefer whoever was ALREADY talking. Consecutive
+# utterances from one person are the overwhelmingly common case in a
+# real call; rapid alternation is not. Without this, a run of
+# near-ties ping-pongs the label between two centroids mid-sentence,
+# which reads as broken even when no new speakers are created.
+STICKY_MARGIN = 0.05
+
+# Cosine cutoff for attaching a KNOWN PROFILE'S REAL NAME in the live
+# path. Much stricter than SpeakerProfileService.DEFAULT_MATCH_THRESHOLD
+# (0.75), which governs the post-stop path where the pipeline has the
+# whole recording to average over and the user gets a confirm/undo step.
+#
+# Field report 2026-08-11: at 0.75 the live transcript labelled a FEMALE
+# speaker "CALEB JOHNSON" — a male colleague whose voiceprint happened
+# to be saved. A wrong Speaker NUMBER is recoverable; a wrong NAME is
+# actively misleading and undermines trust in everything else on screen.
+# Below this bar we fall back to "Speaker N" and never guess a name.
+PROFILE_NAME_THRESHOLD = 0.88
 
 # Distinct live speakers this tracker will invent before it starts
 # folding new voices into the nearest existing centroid instead of
@@ -83,8 +167,12 @@ class LiveSpeakerTracker:
     def __init__(
         self,
         embed_fn: Callable[[np.ndarray, int], Optional[np.ndarray]],
-        similarity_threshold: float = SIMILARITY_THRESHOLD,
+        match_threshold: float = MATCH_THRESHOLD,
+        new_speaker_threshold: float = NEW_SPEAKER_THRESHOLD,
         min_utterance_seconds: float = MIN_UTTERANCE_SECONDS,
+        min_new_speaker_seconds: float = MIN_NEW_SPEAKER_SECONDS,
+        sticky_margin: float = STICKY_MARGIN,
+        profile_name_threshold: float = PROFILE_NAME_THRESHOLD,
         max_speakers: int = MAX_LIVE_SPEAKERS,
         profile_lookup: Optional[
             Callable[[np.ndarray], Optional[Tuple[str, float]]]
@@ -96,8 +184,15 @@ class LiveSpeakerTracker:
         # core.speaker_embeddings.embed_utterance; tests point it at a
         # fixed lookup table.
         self._embed_fn = embed_fn
-        self._threshold = similarity_threshold
+        # Every threshold is injectable so this is retunable from the
+        # call site (and from a test) without editing the module — the
+        # field report 2026-08-11 numbers are defaults, not gospel.
+        self._match_threshold = match_threshold
+        self._new_speaker_threshold = new_speaker_threshold
         self._min_utterance_seconds = min_utterance_seconds
+        self._min_new_speaker_seconds = min_new_speaker_seconds
+        self._sticky_margin = max(0.0, sticky_margin)
+        self._profile_name_threshold = profile_name_threshold
         self._max_speakers = max(1, max_speakers)
         # Optional: profile_lookup(embedding) -> (display_name, similarity)
         # or None. Wraps SpeakerProfileService.find_match() so a known
@@ -160,18 +255,45 @@ class LiveSpeakerTracker:
             # generic one if this is the first utterance of the meeting.
             return self._last_label or self._new_label()
 
-        if self._profile_lookup is not None:
+        # ── Known-profile naming: two gates, both required ────────────
+        #
+        # Field report 2026-08-11: a female speaker was labelled "CALEB
+        # JOHNSON" live. A wrong name is worse than a wrong number — it
+        # reads as a confident assertion about a real person. So a name
+        # is only attached when the clip is long enough to be worth
+        # trusting AND the similarity clears a bar well above the
+        # post-stop one. Anything short of that falls through to the
+        # generic "Speaker N" path below rather than guessing.
+        #
+        # Post-stop diarization (core/diarization.py + the speaker
+        # profile confirm flow) sees the WHOLE recording and remains the
+        # authority for names; this live path is a preview that has one
+        # noisy clip to go on, so it must be conservative.
+        if (self._profile_lookup is not None
+                and duration_s >= self._min_new_speaker_seconds):
             try:
                 match = self._profile_lookup(embedding)
             except Exception as e:
                 logger.debug(f"Live speaker profile lookup failed: {e}")
                 match = None
             if match is not None:
-                name, _similarity = match
-                self._last_label = name
-                return name
+                name, similarity = match
+                try:
+                    sim = float(similarity)
+                except (TypeError, ValueError):
+                    # A lookup that can't tell us how confident it is
+                    # gets treated as not confident enough — see the
+                    # asymmetry note at the top of this module.
+                    sim = -1.0
+                if sim >= self._profile_name_threshold:
+                    self._last_label = name
+                    return name
+                logger.debug(
+                    f"Live profile match '{name}' at {sim:.3f} is below the "
+                    f"live naming bar ({self._profile_name_threshold}); "
+                    f"falling back to a generic Speaker label.")
 
-        label = self._match_or_create(embedding)
+        label = self._match_or_create(embedding, duration_s)
         self._last_label = label
         return label
 
@@ -197,38 +319,92 @@ class LiveSpeakerTracker:
         label = f"Speaker {len(self._centroids) + 1}"
         return label
 
-    def _match_or_create(self, embedding: np.ndarray) -> str:
+    def _match_or_create(
+        self, embedding: np.ndarray, duration_s: float,
+    ) -> str:
+        """Pick a label for one embedded utterance.
+
+        Field report 2026-08-11: the decision order here is the whole
+        fix. Creating a speaker is now a strictly harder thing to do
+        than matching one — it needs its OWN threshold (much lower, i.e.
+        "clearly nobody we know") AND its own duration floor. Every
+        other outcome funnels into "assign the best existing match",
+        because per the asymmetry at the top of this module, an
+        over-merge is a survivable transcript and an over-split is not.
+        """
+        sims = [float(np.dot(embedding, c)) for c in self._centroids]
+
         best_idx = -1
         best_sim = -1.0
-        for i, centroid in enumerate(self._centroids):
-            sim = float(np.dot(embedding, centroid))
+        for i, sim in enumerate(sims):
             if sim > best_sim:
                 best_idx, best_sim = i, sim
 
-        if best_idx >= 0 and best_sim >= self._threshold:
+        # Stickiness: among candidates within STICKY_MARGIN of the best
+        # score, prefer whoever was already talking. Real calls are runs
+        # of consecutive turns, not per-sentence alternation, so a
+        # near-tie should resolve toward continuity rather than flipping
+        # the label mid-thought. A clearly better different-speaker
+        # match (outside the margin) still wins, so this can't pin the
+        # transcript to one label forever.
+        if self._last_label is not None and best_idx >= 0:
+            for i, sim in enumerate(sims):
+                if (self._labels[i] == self._last_label
+                        and sim >= best_sim - self._sticky_margin):
+                    best_idx, best_sim = i, sim
+                    break
+
+        if best_idx >= 0 and best_sim >= self._match_threshold:
+            # Same voice as someone we're already tracking. The common,
+            # boring, correct case — and now MUCH easier to reach than
+            # it was at 0.75.
             self._update_centroid(best_idx, embedding)
             return self._labels[best_idx]
 
-        if len(self._centroids) >= self._max_speakers:
-            # At the cap — fold into the closest existing voice instead
-            # of growing the list further, even though it's below
-            # threshold. Bounds drift on a long call at the cost of
-            # occasionally merging two distinct-but-similar voices,
-            # which is the intended tradeoff (see module docstring
-            # design goal #3).
-            if best_idx >= 0:
-                self._update_centroid(best_idx, embedding)
-                return self._labels[best_idx]
-            # No centroids exist yet but max_speakers was configured to
-            # 0-ish — degenerate config, fall back to a generic label
-            # without tracking it (nothing to compare future turns to).
-            return "Speaker 1"
+        at_cap = len(self._centroids) >= self._max_speakers
+        # "Clearly different" means below the (much lower) create bar
+        # against EVERY existing centroid. best_idx < 0 means there are
+        # no centroids at all yet, which is trivially "clearly
+        # different" — the first real speaker of the meeting.
+        clearly_different = (best_idx < 0) or (
+            best_sim < self._new_speaker_threshold)
+        long_enough = duration_s >= self._min_new_speaker_seconds
 
-        label = self._new_label()
-        self._centroids.append(embedding)
-        self._labels.append(label)
-        self._counts.append(1)
-        return label
+        if not at_cap and clearly_different and long_enough:
+            label = self._new_label()
+            self._centroids.append(embedding)
+            self._labels.append(label)
+            self._counts.append(1)
+            logger.debug(
+                f"Live speaker created: {label} (best existing similarity "
+                f"{best_sim:.3f} < {self._new_speaker_threshold}, "
+                f"{duration_s:.1f}s clip)")
+            return label
+
+        if best_idx >= 0:
+            # Everything that ISN'T a confident create folds into the
+            # closest existing voice:
+            #   * ambiguous similarity (between the two thresholds) —
+            #     the exact band that produced speakers 2-9 in the field
+            #     report;
+            #   * a clip too short to justify a new identity;
+            #   * at the max-speaker cap.
+            #
+            # Deliberately does NOT update the centroid. This sample was
+            # good enough to LABEL from but not good enough to LEARN
+            # from — folding it into the running mean would drag that
+            # centroid toward a voice we're not confident belongs to it,
+            # and a contaminated centroid then mis-sorts every later
+            # utterance. Labels stay cheap to hand out; centroids stay
+            # expensive to change.
+            return self._labels[best_idx]
+
+        # No centroids exist and we weren't allowed to create one (clip
+        # too short, or a degenerate max_speakers<1 config). Hand back a
+        # placeholder WITHOUT tracking it, so the first clip that IS
+        # long enough still gets to create "Speaker 1" from a
+        # trustworthy sample.
+        return "Speaker 1"
 
     def _update_centroid(self, idx: int, embedding: np.ndarray) -> None:
         """Running-mean update of centroid `idx` with a new sample,

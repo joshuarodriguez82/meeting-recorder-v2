@@ -230,6 +230,14 @@ export interface Settings {
   // back to the legacy fixed-window path (field report 2026-08-10,
   // Zoom notetaker parity).
   live_vad_enabled: boolean;
+  // Live per-speaker labelling of the far-end stream — the "Speaker 1 /
+  // Speaker 2" badges in the live transcript preview. Default true.
+  // False keeps every far-end segment on the plain "them" label and
+  // skips all live voice-fingerprinting work. Field report 2026-08-11:
+  // one continuous speaker was split across eight labels and a saved
+  // colleague's name was attached to the wrong person, so there has to
+  // be a way to turn the feature off without giving up live transcription.
+  live_speaker_split_enabled: boolean;
   // Device the speaker-identification (pyannote diarization) pipeline
   // loads on. "auto" (default) preserves existing behavior: prefer your
   // GPU (CUDA, then Apple Silicon MPS), else CPU. "cpu" forces CPU —
