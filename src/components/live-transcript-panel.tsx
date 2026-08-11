@@ -68,6 +68,45 @@ const SPEAKER_COLORS = [
   "bg-teal-500/15 text-teal-700 dark:text-teal-400",
 ];
 
+// Merge consecutive segments from the same speaker into one block.
+//
+// Field report 2026-08-10: with speech-boundary chunking (v2.21.0) a
+// speaker telling a 30-second story produces ten separate rows, each a
+// sentence fragment with its own timestamp and speaker chip. It's fast
+// but it reads like a stack trace. Zoom's notetaker shows one paragraph
+// per turn, which is what people actually want to read back.
+//
+// Grouping is display-only — the underlying segments are untouched, so
+// the canonical post-stop transcript and its timings are unaffected.
+//
+// A run is broken by a change of speaker, and ALSO by a long pause
+// (SPLIT_AFTER_SILENCE_S): someone holding the floor for five minutes
+// should still be several paragraphs rather than one unreadable wall.
+// The timestamp shown is the START of the run, which is when that
+// person began talking — the useful number when scrubbing back.
+const SPLIT_AFTER_SILENCE_S = 20;
+
+function groupBySpeaker(segments: Segment[]): Segment[] {
+  const out: Segment[] = [];
+  for (const seg of segments) {
+    const prev = out[out.length - 1];
+    const sameSpeaker =
+      prev &&
+      prev.speaker === seg.speaker &&
+      (prev.speaker_label || "") === (seg.speaker_label || "");
+    const gap = prev ? seg.start - prev.end : 0;
+    if (sameSpeaker && gap < SPLIT_AFTER_SILENCE_S) {
+      // Join with a space, collapsing any doubled whitespace from
+      // chunk boundaries.
+      prev.text = `${prev.text} ${seg.text}`.replace(/\s+/g, " ").trim();
+      prev.end = seg.end;
+      continue;
+    }
+    out.push({ ...seg });
+  }
+  return out;
+}
+
 // Stable color assignment per distinct speaker_label string, in
 // first-seen order, so "Speaker 2" doesn't change color as more
 // segments arrive. Module-level cache is fine — labels are meaningful
@@ -327,8 +366,8 @@ export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
               : "Connecting to the backend…"}
           </p>
         ) : (
-          <div className="space-y-1.5">
-            {segments.map((seg, i) => (
+          <div className="space-y-2.5">
+            {groupBySpeaker(segments).map((seg, i) => (
               <div key={i} className="flex gap-3">
                 <span className="font-mono text-[10px] text-muted-foreground tabular-nums shrink-0 pt-1">
                   {formatTime(seg.start)}
