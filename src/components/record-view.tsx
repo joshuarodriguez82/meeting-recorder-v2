@@ -889,7 +889,10 @@ export function RecordView({
   };
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6">
+    // space-y-4 (was 6). Design review 2026-08-11: Meeting Details +
+    // Audio Devices carried enough slack between them to push Upcoming
+    // Meetings below the fold on a 1080p window.
+    <div className="mx-auto max-w-5xl space-y-4">
       {/* Recording bar — always visible when recording */}
       {recording && (
         <div className="flex items-center gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 dark:border-red-900 dark:bg-red-950/40">
@@ -983,14 +986,14 @@ export function RecordView({
       <LiveSearchPanel recording={recording} />
 
       {/* Meeting details */}
-      <Card>
+      <Card className="gap-3 py-3.5">
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <Sparkles className="h-4 w-4 text-primary" />
             Meeting Details
           </CardTitle>
         </CardHeader>
-        <CardContent className="space-y-5">
+        <CardContent className="space-y-3.5">
           {/* Row 1: Meeting name (full width) */}
           <div className="space-y-2">
             <Label htmlFor="mtg-name">Meeting Name</Label>
@@ -1024,7 +1027,7 @@ export function RecordView({
           </div>
 
           {/* Row 3: Client + Project side-by-side, equal width */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div className="space-y-2">
               <Label htmlFor="client-input">Client</Label>
               <Input
@@ -1062,14 +1065,14 @@ export function RecordView({
       </Card>
 
       {/* Audio devices */}
-      <Card>
+      <Card className="gap-3 py-3.5">
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <Mic className="h-4 w-4 text-primary" />
             Audio Devices
           </CardTitle>
         </CardHeader>
-        <CardContent className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <CardContent className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div className="space-y-2">
             <Label>Microphone</Label>
             <Select
@@ -1165,8 +1168,11 @@ export function RecordView({
           )}
         </CardContent>
         {!recording && (
-          <div className="px-6 pb-5 pt-1 flex justify-end border-t border-border/50 pt-4 mt-2">
-            <Button size="lg" onClick={start} className="bg-red-600 hover:bg-red-700 text-white px-8 h-11">
+          // Was `px-6 pb-5 pt-1 … pt-4 mt-2` (the duplicate pt- classes
+          // meant pt-4 silently won). Tightened to a slim action band so
+          // Start Recording stops sitting alone in a tall empty strip.
+          <div className="mt-1 flex justify-end border-t border-border/50 px-4 pt-3">
+            <Button size="lg" onClick={start} className="bg-red-600 hover:bg-red-700 text-white px-7 h-10">
               <Play className="h-4 w-4 mr-2 fill-current" />
               Start Recording
             </Button>
