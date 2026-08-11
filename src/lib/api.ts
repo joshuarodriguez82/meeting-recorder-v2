@@ -230,6 +230,14 @@ export interface Settings {
   // back to the legacy fixed-window path (field report 2026-08-10,
   // Zoom notetaker parity).
   live_vad_enabled: boolean;
+  // Device the speaker-identification (pyannote diarization) pipeline
+  // loads on. "auto" (default) preserves existing behavior: prefer your
+  // GPU (CUDA, then Apple Silicon MPS), else CPU. "cpu" forces CPU —
+  // workaround for a field-reported crash where the transcription model
+  // and the diarization model both try to use the GPU at the same time,
+  // a few seconds after a recording stops. "cuda" forces GPU, falling
+  // back to CPU with a warning if no GPU is present.
+  diarization_device: "auto" | "cpu" | "cuda" | string;
 }
 
 // A single co-pilot mode (persona) or meeting-type (modifier). Shape
