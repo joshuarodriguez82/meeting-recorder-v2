@@ -908,7 +908,8 @@ class Services:
             logger.info("Loading transcription engine...")
             self.transcription = TranscriptionEngine(s.whisper_model)
             logger.info("Loading diarization engine...")
-            self.diarization = DiarizationEngine(s.hf_token, s.max_speakers)
+            self.diarization = DiarizationEngine(
+                s.hf_token, s.max_speakers, s.diarization_device)
             self.recording_svc.set_engines(self.transcription, self.diarization)
             self.models_ready = True
             logger.info("Models loaded")
@@ -1015,6 +1016,16 @@ class SettingsDTO(BaseModel):
     # core/live_transcriber.py (field report 2026-08-10, Zoom notetaker
     # parity). False falls back to the legacy fixed-15s-window path.
     live_vad_enabled: bool = True
+    # Device the pyannote speaker-diarization pipeline loads on. "auto"
+    # (default) preserves pre-2026-08-11 behavior (CUDA > MPS > CPU).
+    # "cpu" forces CPU — the workaround for the field-reported
+    # 0xC0000005 crash a few seconds after recording stop, believed
+    # caused by faster-whisper's CUDA/cuDNN runtime and pyannote's
+    # separate CUDA/cuDNN runtime colliding in one process. "cuda" forces
+    # GPU, falling back to CPU with a warning if none is present. See
+    # config/settings.py's diarization_device docstring and
+    # core/diarization.py's _resolve_device.
+    diarization_device: str = "auto"
 
 
 class StartRecordingRequest(BaseModel):
@@ -1439,6 +1450,7 @@ async def get_settings():
         cloud_mirror_dir=s.cloud_mirror_dir,
         session_archive_dir=s.session_archive_dir,
         live_vad_enabled=s.live_vad_enabled,
+        diarization_device=s.diarization_device,
     )
 
 
@@ -1546,6 +1558,7 @@ async def save_settings(payload: SettingsDTO):
         cloud_mirror_dir=(payload.cloud_mirror_dir or "").strip(),
         session_archive_dir=new_archive_dir,
         live_vad_enabled=bool(payload.live_vad_enabled),
+        diarization_device=(payload.diarization_device or "auto").strip().lower(),
     )
     # If the recordings folder changed, migrate client + template state
     # from the previous folder to the new one. Copy, not move, so the
@@ -2795,6 +2808,7 @@ async def set_live_copilot_enabled(payload: dict):
         cloud_mirror_dir=s.cloud_mirror_dir,
         session_archive_dir=s.session_archive_dir,
         live_vad_enabled=s.live_vad_enabled,
+        diarization_device=s.diarization_device,
     )
     # Update the cached Settings in-place so the change is visible
     # immediately, without going through load_settings() which would
@@ -6645,6 +6659,7 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         cloud_mirror_dir=s.cloud_mirror_dir,
         session_archive_dir=s.session_archive_dir,
         live_vad_enabled=s.live_vad_enabled,
+        diarization_device=s.diarization_device,
     )
     svc.settings = dataclasses.replace(
         s, live_copilot_mode=new_mode, live_copilot_meeting_type=new_type)
