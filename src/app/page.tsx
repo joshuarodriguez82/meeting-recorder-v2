@@ -625,9 +625,9 @@ export default function Home() {
         onStart={() => setNav("record")}
       />
       {/* Sidebar */}
-      <aside className="flex h-full w-60 flex-col border-r border-border bg-sidebar">
+      <aside className="flex h-full w-64 flex-col border-r border-border bg-sidebar">
         <div className="flex h-16 items-center gap-2.5 border-b border-border px-4">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm">
             <Mic className="h-4 w-4" />
           </div>
           <div className="flex flex-col leading-tight min-w-0 flex-1">
@@ -709,10 +709,10 @@ export default function Home() {
         )}
 
         <nav className="flex-1 overflow-y-auto p-3">
-          <div className="mb-2 px-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+          <div className="mb-2 px-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
             Workspace
           </div>
-          <ul className="space-y-0.5">
+          <ul className="space-y-1.5">
             {navItems.map((item) => {
               const Icon = item.icon;
               const active = nav === item.id;
@@ -723,7 +723,7 @@ export default function Home() {
                 <li key={item.id}>
                   <button
                     onClick={() => setNav(item.id)}
-                    className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors ${
+                    className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors ${
                       active
                         ? "bg-accent text-accent-foreground font-medium"
                         : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
@@ -732,7 +732,7 @@ export default function Home() {
                       ? `${badge} session${badge === 1 ? "" : "s"} awaiting processing`
                       : undefined}
                   >
-                    <Icon className="h-4 w-4" />
+                    <Icon className="h-5 w-5 shrink-0" />
                     <span className="flex-1 text-left">{item.label}</span>
                     {badge > 0 && (
                       <span className="inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full bg-primary text-primary-foreground text-[10px] font-semibold">
@@ -746,29 +746,35 @@ export default function Home() {
           </ul>
         </nav>
 
-        <div className="border-t border-border p-3 space-y-0.5">
+        {/* Secondary cluster — Settings + Usage Guide sit apart from the
+            workspace nav with their own label + top border so they read
+            as utility items rather than more workflow tabs. */}
+        <div className="border-t border-border px-3 pt-3 pb-3 space-y-1.5">
+          <div className="px-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            Support
+          </div>
           <button
             onClick={() => setNav("settings")}
-            className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors ${
+            className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors ${
               nav === "settings" ? "bg-accent text-accent-foreground font-medium"
                 : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
             }`}
           >
-            <SettingsIcon className="h-4 w-4" />
+            <SettingsIcon className="h-5 w-5 shrink-0" />
             Settings
           </button>
           <button
             onClick={() => setNav("help")}
-            className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors ${
+            className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors ${
               nav === "help" ? "bg-accent text-accent-foreground font-medium"
                 : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
             }`}
           >
-            <HelpCircle className="h-4 w-4" />
+            <HelpCircle className="h-5 w-5 shrink-0" />
             Usage Guide
           </button>
           {storage && (
-            <div className="mt-2 rounded-md bg-muted/60 px-3 py-2 text-[11px] text-muted-foreground">
+            <div className="mt-2 rounded-xl bg-muted/60 px-3.5 py-2.5 text-[11px] text-muted-foreground">
               <div className="flex items-center justify-between">
                 <span>Storage</span>
                 <span className="font-medium text-foreground">{formatBytes(storage.total_bytes)}</span>

@@ -144,14 +144,16 @@ export function StatusIcons({ session }: { session: SessionSummary }) {
   ];
   return (
     <TooltipProvider>
-      {icons.map((i, idx) => i.show && (
-        <Tooltip key={idx}>
-          <TooltipTrigger
-            render={<span className="inline-flex items-center rounded-full border px-1.5 py-0.5 text-[11px] cursor-default">{i.emoji}</span>}
-          />
-          <TooltipContent>{i.label}</TooltipContent>
-        </Tooltip>
-      ))}
+      <div className="flex items-center gap-1.5 flex-wrap">
+        {icons.map((i, idx) => i.show && (
+          <Tooltip key={idx}>
+            <TooltipTrigger
+              render={<span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-border bg-muted/60 text-[11px] cursor-default">{i.emoji}</span>}
+            />
+            <TooltipContent>{i.label}</TooltipContent>
+          </Tooltip>
+        ))}
+      </div>
     </TooltipProvider>
   );
 }
@@ -255,9 +257,9 @@ function SessionsDiagnosticsPanel() {
 
   return (
     <div
-      className={`rounded-md border text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-900/40 ${isEmpty ? "p-3" : ""}`}
+      className={`rounded-2xl border border-amber-500/25 bg-amber-500/10 text-amber-800 dark:text-amber-300 ${isEmpty ? "p-3" : ""}`}
     >
-      <div className="flex items-center justify-between gap-3 px-3 py-2">
+      <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
@@ -274,7 +276,7 @@ function SessionsDiagnosticsPanel() {
           <button
             type="button"
             onClick={copyDetails}
-            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] hover:bg-amber-100 dark:hover:bg-amber-900/40"
+            className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] hover:bg-amber-500/15"
             title="Copy full diagnostics JSON for support"
           >
             <ClipboardCopy className="h-3 w-3" />
@@ -284,7 +286,7 @@ function SessionsDiagnosticsPanel() {
             type="button"
             onClick={refresh}
             disabled={loading}
-            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] hover:bg-amber-100 dark:hover:bg-amber-900/40 disabled:opacity-50"
+            className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] hover:bg-amber-500/15 disabled:opacity-50"
           >
             {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
             Refresh
@@ -435,80 +437,90 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
 
       <SessionsDiagnosticsPanel />
 
-      <Card>
-        <CardContent className="p-0">
-          {filtered.length === 0 ? (
+      {filtered.length === 0 ? (
+        <Card>
+          <CardContent>
             <p className="text-sm text-muted-foreground py-8 text-center">
               {sessions.length === 0 ? "No sessions yet. Hit Record to create one." : "No matches."}
             </p>
-          ) : (
-            <div>
-              {filtered.map((s) => (
-                <div
-                  key={s.session_id}
-                  className="flex items-center gap-4 border-b last:border-b-0 p-4 hover:bg-muted/40 transition-colors cursor-pointer"
-                  onClick={() => onOpenSession(s.session_id)}
-                >
-                  <div className="flex-1 min-w-0">
-                    <RenamableTitle
-                      session={s}
-                      onRenamed={onReload}
-                    />
-                    <div className="text-xs text-muted-foreground flex items-center gap-2 mt-0.5">
-                      <span>
-                        {s.started_at ? new Date(s.started_at).toLocaleString() : "—"}
-                      </span>
-                      <span>·</span>
-                      <span>{formatDuration(s.duration_s)}</span>
-                      {s.client && (<><span>·</span><span>{s.client}</span></>)}
-                      {s.project && (<><span>·</span><span>{s.project}</span></>)}
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="space-y-3">
+          {filtered.map((s) => (
+            <Card
+              key={s.session_id}
+              className="cursor-pointer"
+              onClick={() => onOpenSession(s.session_id)}
+            >
+              <CardContent className="flex items-center gap-4">
+                <div className="flex-1 min-w-0">
+                  <RenamableTitle
+                    session={s}
+                    onRenamed={onReload}
+                  />
+                  <div className="text-xs text-muted-foreground flex items-center gap-2 mt-1">
+                    <span>
+                      {s.started_at ? new Date(s.started_at).toLocaleString() : "—"}
+                    </span>
+                    <span>·</span>
+                    <span>{formatDuration(s.duration_s)}</span>
+                    {s.client && (<><span>·</span><span>{s.client}</span></>)}
+                    {s.project && (<><span>·</span><span>{s.project}</span></>)}
+                  </div>
+                  {s.audio_integrity_warning && (
+                    <div
+                      className="inline-flex items-start gap-1.5 max-w-full rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300 text-[11px] px-2.5 py-1 mt-2"
+                      title="The audio file is shorter than the recording window. Click the session to see details."
+                    >
+                      <span aria-hidden className="font-bold leading-none mt-0.5">⚠</span>
+                      <span className="flex-1">{s.audio_integrity_warning}</span>
                     </div>
-                    {s.audio_integrity_warning && (
-                      <div
-                        className="text-[11px] text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/40 rounded px-2 py-1 mt-1.5 flex items-start gap-1.5"
-                        title="The audio file is shorter than the recording window. Click the session to see details."
-                      >
-                        <span aria-hidden className="font-bold leading-none mt-0.5">⚠</span>
-                        <span className="flex-1">{s.audio_integrity_warning}</span>
-                      </div>
-                    )}
-                    {s.processing_error && (
-                      <div
-                        className="text-[11px] text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900/40 rounded px-2 py-1 mt-1.5 flex items-start gap-1.5"
-                        title="Auto-processing failed after retries. Open the session and click Process to retry."
-                      >
-                        <span aria-hidden className="font-bold leading-none mt-0.5">⚠</span>
-                        <span className="flex-1">
-                          {s.processing_error} — open the session and click Process to retry.
-                        </span>
-                      </div>
-                    )}
-                    {s.sync_warning && (
-                      <div
-                        className="text-[11px] text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/40 rounded px-2 py-1 mt-1.5 flex items-start gap-1.5"
-                        title="Capture sync measurement — the audio/transcript may be slightly misaligned. Informational; no audio was altered."
-                      >
-                        <span aria-hidden className="leading-none mt-0.5">ⓘ</span>
-                        <span className="flex-1">{s.sync_warning}</span>
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1 flex-wrap justify-end">
-                    <StatusIcons session={s} />
-                  </div>
-                  <span
-                    role="button"
-                    onClick={(e) => { e.stopPropagation(); del(s.session_id, s.display_name); }}
-                    className="h-7 w-7 inline-flex items-center justify-center rounded-md hover:bg-destructive/10 text-muted-foreground hover:text-destructive cursor-pointer"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </span>
+                  )}
+                  {s.processing_error && (
+                    <div
+                      className="inline-flex items-start gap-1.5 max-w-full rounded-full border border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300 text-[11px] px-2.5 py-1 mt-2"
+                      title="Auto-processing failed after retries. Open the session and click Process to retry."
+                    >
+                      <span aria-hidden className="font-bold leading-none mt-0.5">⚠</span>
+                      <span className="flex-1">
+                        {s.processing_error} — open the session and click Process to retry.
+                      </span>
+                    </div>
+                  )}
+                  {s.sync_warning && (
+                    <div
+                      className="inline-flex items-start gap-1.5 max-w-full rounded-full border border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300 text-[11px] px-2.5 py-1 mt-2"
+                      title="Capture sync measurement — the audio/transcript may be slightly misaligned. Informational; no audio was altered."
+                    >
+                      <span aria-hidden className="leading-none mt-0.5">ⓘ</span>
+                      <span className="flex-1">{s.sync_warning}</span>
+                    </div>
+                  )}
                 </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+                <StatusIcons session={s} />
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); del(s.session_id, s.display_name); }}
+                          className="h-8 w-8 inline-flex items-center justify-center rounded-full hover:bg-destructive/10 text-muted-foreground hover:text-destructive cursor-pointer shrink-0"
+                          aria-label={`Delete "${s.display_name}"`}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      }
+                    />
+                    <TooltipContent>Delete session</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

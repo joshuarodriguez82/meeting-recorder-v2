@@ -2321,8 +2321,8 @@ function SessionArchiveStatusPanel({ savedAt }: { savedAt: number }) {
   }
 
   return (
-    <div className="flex items-center justify-between gap-2 rounded-md border px-3 py-2.5">
-      <div className="text-xs min-w-0 space-y-1">
+    <div className="flex items-center justify-between gap-2 rounded-2xl border border-border bg-muted/30 px-3.5 py-3">
+      <div className="text-xs min-w-0 space-y-1.5">
         <div className="text-muted-foreground">
           <strong className="text-foreground">{status.sessions_in_archive}</strong>{" "}
           session{status.sessions_in_archive === 1 ? "" : "s"} in shared archive
@@ -2336,24 +2336,29 @@ function SessionArchiveStatusPanel({ savedAt }: { savedAt: number }) {
         {sharedRows.length > 0 && (
           <div className="text-muted-foreground">{sharedLine}</div>
         )}
-        {!status.folder_present && (
-          <div className="text-amber-600 dark:text-amber-500">
-            Folder not reachable right now — sync client offline, drive
-            unmounted, or the path changed. Nothing can copy until it&apos;s
-            back.
-          </div>
-        )}
-        {sharedReasons.map((reason, i) => (
-          <div key={i} className="text-amber-600 dark:text-amber-500">
-            {reason}
-          </div>
-        ))}
-        {sanitizedClearedCount > 0 && (
-          <div className="text-amber-600 dark:text-amber-500">
-            Cleared {sanitizedClearedCount} folder path{sanitizedClearedCount === 1 ? "" : "s"} that
-            belong{sanitizedClearedCount === 1 ? "s" : ""} to another machine
-          </div>
-        )}
+        <div className="flex flex-wrap gap-1.5">
+          {!status.folder_present && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-amber-700 dark:text-amber-300">
+              <span aria-hidden className="font-bold leading-none">⚠</span>
+              Folder not reachable right now — sync client offline, drive
+              unmounted, or the path changed. Nothing can copy until it&apos;s
+              back.
+            </span>
+          )}
+          {sharedReasons.map((reason, i) => (
+            <span key={i} className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-amber-700 dark:text-amber-300">
+              <span aria-hidden className="font-bold leading-none">⚠</span>
+              {reason}
+            </span>
+          ))}
+          {sanitizedClearedCount > 0 && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-amber-700 dark:text-amber-300">
+              <span aria-hidden className="font-bold leading-none">⚠</span>
+              Cleared {sanitizedClearedCount} folder path{sanitizedClearedCount === 1 ? "" : "s"} that
+              belong{sanitizedClearedCount === 1 ? "s" : ""} to another machine
+            </span>
+          )}
+        </div>
       </div>
       <Button
         size="sm" variant="outline" onClick={syncNow}
