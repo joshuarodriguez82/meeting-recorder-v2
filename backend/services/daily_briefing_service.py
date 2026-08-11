@@ -124,6 +124,18 @@ def _normalize_agenda(raw: Dict[str, Any]) -> Dict[str, Any]:
     item = _ensure_id(dict(raw))
     item["title"] = (item.get("title") or "").strip()[:200]
     item["time"] = (item.get("time") or "").strip()[:60]
+    # start_iso / end_iso / join_url are ADDITIVE (v2.22.2). `time` is a
+    # display string with no date and no timezone, which is fine for the
+    # Today tab but can't place a meeting on the Record tab's timeline
+    # or dedupe it against a local Outlook invite. Kept as raw strings —
+    # validation and the date+time fallback live in
+    # services/extension_calendar_service.py, so a malformed LLM value
+    # degrades to "no event" rather than breaking the Today tab.
+    # Missing keys on briefings stored before this change read as ""
+    # (field report 2026-08-11).
+    item["start_iso"] = (item.get("start_iso") or "").strip()[:40]
+    item["end_iso"] = (item.get("end_iso") or "").strip()[:40]
+    item["join_url"] = (item.get("join_url") or "").strip()[:1000]
     item["duration"] = (item.get("duration") or "").strip()[:40]
     item["role"] = (item.get("role") or "").strip().lower()[:30]
     item["meeting_type"] = (item.get("meeting_type") or "").strip().lower()[:30]
