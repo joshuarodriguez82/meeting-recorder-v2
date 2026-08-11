@@ -326,19 +326,42 @@ class RecordingService:
         speaker_label field. Any import/construction failure is
         swallowed the same way live transcription itself degrades
         (see the try/except around this call in start_recording).
+
+        Kill switch: `live_speaker_split_enabled` (default True). When
+        the user turns it off we return None here, which is the same
+        code path as "speechbrain isn't installed" — every loopback
+        segment keeps the plain "them" label and NO embedding work
+        happens at all (LiveTranscriber only calls assign() when a
+        tracker is wired in). Field report 2026-08-11: the live splitter
+        over-split one voice into nine labels, so there has to be a way
+        to switch the whole feature off without downgrading the app.
         """
+        if not bool(getattr(
+                self._settings, "live_speaker_split_enabled", True)):
+            logger.info("Live speaker splitting disabled by user setting; "
+                        "loopback segments stay labelled 'them'.")
+            return None
         try:
             from core.speaker_embeddings import embed_utterance, is_available
             if not is_available():
                 return None
-            from core.live_speakers import LiveSpeakerTracker
+            from core.live_speakers import (
+                LiveSpeakerTracker, PROFILE_NAME_THRESHOLD)
 
             profile_service = self._profile_service
 
             def _profile_lookup(embedding):
                 if profile_service is None:
                     return None
-                match = profile_service.find_match(embedding)
+                # Ask the profile store with the LIVE naming bar, not
+                # its own post-stop default (0.75). Field report
+                # 2026-08-11: at 0.75 a female speaker was labelled
+                # "CALEB JOHNSON" mid-call. LiveSpeakerTracker re-checks
+                # the returned similarity against the same constant —
+                # belt and braces, because a wrong name is the worst
+                # failure mode this feature has.
+                match = profile_service.find_match(
+                    embedding, threshold=PROFILE_NAME_THRESHOLD)
                 if match is None:
                     return None
                 profile, similarity = match

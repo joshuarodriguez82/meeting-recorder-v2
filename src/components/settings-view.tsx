@@ -695,6 +695,12 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
             checked={settings.live_vad_enabled}
             onChange={(v) => update("live_vad_enabled", v)}
           />
+          <Toggle
+            label="Label individual speakers in the live transcript"
+            description="Tags each far-end voice as Speaker 1, Speaker 2, and so on while you record, instead of a single shared label for everyone on the call. It works from very short clips, so it can occasionally split one person across several labels or guess a saved name for the wrong voice. Turn it off if the live labels look wrong — recording, the live transcript, and the full speaker identification that runs after you stop are all unaffected."
+            checked={settings.live_speaker_split_enabled}
+            onChange={(v) => update("live_speaker_split_enabled", v)}
+          />
           <div className="space-y-2">
             <Label htmlFor="diarization-device">Speaker identification device</Label>
             <Select

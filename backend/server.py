@@ -1063,6 +1063,14 @@ class SettingsDTO(BaseModel):
     # core/live_transcriber.py (field report 2026-08-10, Zoom notetaker
     # parity). False falls back to the legacy fixed-15s-window path.
     live_vad_enabled: bool = True
+    # Live "Speaker 1 / Speaker 2" labelling of the far-end stream in
+    # the live transcript preview. Default on. False keeps every
+    # loopback segment on the plain "them" label and skips all live
+    # embedding work — the escape hatch for the over-splitting /
+    # wrong-name behavior in field report 2026-08-11. See
+    # config/settings.py's live_speaker_split_enabled docstring and
+    # core/live_speakers.py's threshold notes.
+    live_speaker_split_enabled: bool = True
     # Device the pyannote speaker-diarization pipeline loads on. "auto"
     # (default) preserves pre-2026-08-11 behavior (CUDA > MPS > CPU).
     # "cpu" forces CPU — the workaround for the field-reported
@@ -1497,6 +1505,7 @@ async def get_settings():
         cloud_mirror_dir=s.cloud_mirror_dir,
         session_archive_dir=s.session_archive_dir,
         live_vad_enabled=s.live_vad_enabled,
+        live_speaker_split_enabled=s.live_speaker_split_enabled,
         diarization_device=s.diarization_device,
     )
 
@@ -1605,6 +1614,7 @@ async def save_settings(payload: SettingsDTO):
         cloud_mirror_dir=(payload.cloud_mirror_dir or "").strip(),
         session_archive_dir=new_archive_dir,
         live_vad_enabled=bool(payload.live_vad_enabled),
+        live_speaker_split_enabled=bool(payload.live_speaker_split_enabled),
         diarization_device=(payload.diarization_device or "auto").strip().lower(),
     )
     # If the recordings folder changed, migrate client + template state
@@ -2886,6 +2896,7 @@ async def set_live_copilot_enabled(payload: dict):
         cloud_mirror_dir=s.cloud_mirror_dir,
         session_archive_dir=s.session_archive_dir,
         live_vad_enabled=s.live_vad_enabled,
+        live_speaker_split_enabled=s.live_speaker_split_enabled,
         diarization_device=s.diarization_device,
     )
     # Update the cached Settings in-place so the change is visible
@@ -6737,6 +6748,7 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         cloud_mirror_dir=s.cloud_mirror_dir,
         session_archive_dir=s.session_archive_dir,
         live_vad_enabled=s.live_vad_enabled,
+        live_speaker_split_enabled=s.live_speaker_split_enabled,
         diarization_device=s.diarization_device,
     )
     svc.settings = dataclasses.replace(

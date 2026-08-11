@@ -1,7 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, openExternal, openSystemSettings, setRecordingActive, type AudioDevice, type AudioSyncRisk, type Meeting, type RecordingStatus, type SessionFull, type SessionSummary } from "@/lib/api";
+import { api, openExternal, openSystemSettings, type AudioDevice, type AudioSyncRisk, type Meeting, type RecordingStatus, type SessionFull, type SessionSummary } from "@/lib/api";
+import {
+  refreshRecordingStatus,
+  suppressWatchdogForNewRecording,
+  useRecordingStatus,
+} from "@/lib/recording-status";
 import { toast } from "sonner";
 import {
   Calendar as CalendarIcon,
@@ -102,8 +107,18 @@ export function RecordView({
   // to start nagging about meeting overrun. null for ad-hoc recordings.
   const [scheduledEndIso, setScheduledEndIso] = useState<string | null>(null);
 
-  const [recording, setRecording] = useState(false);
-  const [duration, setDuration] = useState(0);
+  // Recording state is READ, never stored, from the app-wide shared
+  // poll (src/lib/recording-status.ts) that the sidebar badge also
+  // reads. Field report 2026-08-11: this view and the sidebar each kept
+  // their own copy and drifted apart after a Stop that failed against a
+  // restarting backend — the Record page showed the idle "Start
+  // Recording" form while the sidebar counted "Recording… 20:10"
+  // upward. There is now exactly one answer to "are we recording", and
+  // only the server can change it.
+  const { status: recordingStatus } = useRecordingStatus();
+  const recording = !!recordingStatus?.is_recording;
+  const duration = recordingStatus?.duration_s ?? 0;
+  const modelsLoading = !!recordingStatus?.models_loading;
   // The active recording's session_id, captured from /recording/status.
   // Lets mid-recording form edits PATCH the right session without
   // having to ask the backend again on every keystroke.
@@ -198,12 +213,12 @@ export function RecordView({
         })),
       );
   };
-  const [modelsLoading, setModelsLoading] = useState(false);
-  // Auto-stop watchdog warnings, polled from /recording/status while
-  // recording. Used to render a banner under the recording bar and
-  // to fire native OS notifications (once per code per session, so
-  // we don't spam the user with the same toast every second).
-  const [watchdogWarnings, setWatchdogWarnings] = useState<RecordingStatus["warnings"]>([]);
+  // Auto-stop watchdog warnings, read off the shared /recording/status
+  // poll while recording. Used to render a banner under the recording
+  // bar and to fire native OS notifications (once per code per session,
+  // so we don't spam the user with the same toast every second).
+  const watchdogWarnings: RecordingStatus["warnings"] =
+    recordingStatus?.warnings ?? [];
   const notifiedCodesRef = useRef<Set<string>>(new Set());
 
   const [session, setSession] = useState<SessionFull | null>(null);
@@ -238,10 +253,12 @@ export function RecordView({
     (async () => {
       try {
         // Fast-path: everything local (device list, templates, sessions)
-        const [devices, tpls, status, sessionsList, cfgs] = await Promise.all([
+        // NB: no /recording/status call here — the shared store owns
+        // that endpoint now, so this mount fetch can't race it or land
+        // a staler answer than the poll already has.
+        const [devices, tpls, sessionsList, cfgs] = await Promise.all([
           api.getAudioDevices(),
           api.getTemplates(),
-          api.recordingStatus(),
           api.listSessions().catch(() => []),
           api.getClientConfigs().catch(() => ({} as Record<string, { export_folder: string; display_name?: string }>)),
         ]);
@@ -283,9 +300,9 @@ export function RecordView({
           setOutIdx(devices.output[0].index);
         }
 
-        setRecording(status.is_recording);
-        setDuration(status.duration_s);
-        setModelsLoading(status.models_loading);
+        // No local mirroring of `status` here — recording / duration /
+        // models_loading all come from the shared store above, which
+        // has already polled by the time this mount fetch resolves.
 
         // Deliberately NOT auto-loading models here anymore. Opening
         // the app used to fire /models/load on Record-view mount, which
@@ -487,95 +504,85 @@ export function RecordView({
     return () => clearTimeout(t);
   }, [meetingName, client, project, template, activeSessionId, recording]);
 
-  // Poll recording status ALWAYS — not just when this view thinks
-  // it's recording. Auto-record starts a recording without this view
-  // knowing; without continuous polling the form would stay visible
-  // even though a recording is in progress. CRITICAL for the
-  // 4h17m-orphan scenario where auto-record fired and the user had
-  // no UI signal it was happening.
+  // React to the app-wide /recording/status poll. This view used to run
+  // its OWN 1s interval here and keep its own `recording` boolean; that
+  // second copy of the truth is what diverged from the sidebar's copy
+  // in field report 2026-08-11. The poll itself now lives in
+  // src/lib/recording-status.ts and every consumer reads the same
+  // object; what stays here is only the reactions that belong to the
+  // Record page — watchdog notifications, pulling an auto-record
+  // subject into the form, and explaining an auto-stop.
+  //
+  // Edges are detected against a ref, not against `recording`: that
+  // value is now DERIVED from this very status object, so comparing
+  // them would never fire. The ref records what the PREVIOUS poll said.
+  const prevIsRecordingRef = useRef<boolean | null>(null);
   useEffect(() => {
-    const t = setInterval(async () => {
-      try {
-        const s = await api.recordingStatus();
-        setDuration(s.duration_s);
-        // Auto-stop watchdog warnings — render banners + fire native
-        // notifications. Codes are stable per condition so we only
-        // notify once per code per recording session (the user
-        // doesn't want a beep every second while the meeting runs over).
-        const warns = s.warnings || [];
-        setWatchdogWarnings(warns);
-        for (const w of warns) {
-          if (notifiedCodesRef.current.has(w.code)) continue;
-          notifiedCodesRef.current.add(w.code);
-          fireNativeNotification(w.code, w.message);
-        }
-        // Sync local recording state with backend on EVERY tick.
-        // This handles both:
-        //   - The rising edge: an external trigger (auto-record from
-        //     calendar, /recording/start fired from somewhere else)
-        //     starts a recording without this view initiating it.
-        //   - The falling edge: watchdog auto-stop, parent-PID
-        //     deadman switch, user clicked Stop in sidebar.
-        if (s.is_recording !== recording) {
-          setRecording(s.is_recording);
-          if (s.is_recording) {
-            // Rising edge: auto-record (or other external start)
-            // just fired. Pull the meeting name + scope hints the
-            // backend set when it started this recording so the form
-            // reflects them.
-            if (s.auto_record_subject) {
-              setMeetingName((current) =>
-                current.trim() ? current : s.auto_record_subject!);
-            }
-            if (s.session_id) setActiveSessionId(s.session_id);
-            // Reset notification dedupe + warning history for the
-            // newly-detected recording.
-            notifiedCodesRef.current = new Set();
-            setWatchdogWarnings([]);
-          } else {
-            // Falling edge — clear the captured session id.
-            setActiveSessionId(null);
-          }
-        }
-        // Keep the captured session_id fresh in case we missed the
-        // rising edge (e.g. view mounted after recording was already
-        // in progress).
-        if (s.is_recording && s.session_id && !activeSessionId) {
-          setActiveSessionId(s.session_id);
-        }
-        if (!s.is_recording) {
-          // If the watchdog auto-stopped us, the last poll's warning
-          // is what we want to surface as an explanatory toast — the
-          // user wasn't watching the screen, that's the whole point.
-          const stopWarn = warns.find(
-            (w) => w.code.endsWith("_stop") || w.code === "hard_cap_hit"
-          );
-          if (stopWarn && recording) {
-            toast.warning("Recording auto-stopped", {
-              description: stopWarn.message,
-            });
-            // Auto-stopped sessions still need the post-stop processing
-            // path to kick off (auto_process / refresh sessions list).
-            onSessionsChanged();
-          }
-        }
-      } catch {}
-    }, 1000);
-    return () => clearInterval(t);
-  }, [recording, activeSessionId, onSessionsChanged]);
+    const s = recordingStatus;
+    // Nothing observed yet (first paint, or the backend has been
+    // unreachable since launch). Hold — never assume a state.
+    if (!s) return;
 
-  // Poll for model readiness
-  useEffect(() => {
-    if (!modelsLoading) return;
-    const t = setInterval(async () => {
-      try {
-        const s = await api.recordingStatus();
-        setModelsLoading(s.models_loading);
-        if (!s.models_loading) clearInterval(t);
-      } catch {}
-    }, 3000);
-    return () => clearInterval(t);
-  }, [modelsLoading]);
+    // Auto-stop watchdog warnings — fire native notifications. Codes
+    // are stable per condition so we only notify once per code per
+    // recording session (the user doesn't want a beep every second
+    // while the meeting runs over). The banner itself renders straight
+    // off `watchdogWarnings`, which is derived from this same object.
+    const warns = s.warnings || [];
+    for (const w of warns) {
+      if (notifiedCodesRef.current.has(w.code)) continue;
+      notifiedCodesRef.current.add(w.code);
+      fireNativeNotification(w.code, w.message);
+    }
+
+    const prev = prevIsRecordingRef.current;
+    prevIsRecordingRef.current = s.is_recording;
+
+    if (prev !== s.is_recording) {
+      if (s.is_recording) {
+        // Rising edge: an external trigger (auto-record from calendar,
+        // /recording/start fired from somewhere else) started a
+        // recording without this view initiating it. Pull the meeting
+        // name + scope hints the backend set when it started.
+        if (s.auto_record_subject) {
+          setMeetingName((current) =>
+            current.trim() ? current : s.auto_record_subject!);
+        }
+        if (s.session_id) setActiveSessionId(s.session_id);
+        // Reset notification dedupe for the newly-detected recording.
+        notifiedCodesRef.current = new Set();
+      } else {
+        // Falling edge — watchdog auto-stop, parent-PID deadman switch,
+        // Stop clicked in the sidebar, or a Stop from this view whose
+        // request failed but which the backend actually carried out.
+        // The server said not-recording, so we clear. This is the ONLY
+        // thing that clears recording state anywhere in the app.
+        setActiveSessionId(null);
+        // If the watchdog auto-stopped us, the last poll's warning is
+        // what we want to surface as an explanatory toast — the user
+        // wasn't watching the screen, that's the whole point. `prev`
+        // being true means we actually observed the recording running,
+        // so this can't fire on a cold start.
+        const stopWarn = warns.find(
+          (w) => w.code.endsWith("_stop") || w.code === "hard_cap_hit"
+        );
+        if (stopWarn && prev) {
+          toast.warning("Recording auto-stopped", {
+            description: stopWarn.message,
+          });
+          // Auto-stopped sessions still need the post-stop processing
+          // path to kick off (auto_process / refresh sessions list).
+          onSessionsChanged();
+        }
+      }
+    }
+
+    // Keep the captured session_id fresh in case we missed the rising
+    // edge (e.g. view mounted after recording was already in progress).
+    if (s.is_recording && s.session_id && !activeSessionId) {
+      setActiveSessionId(s.session_id);
+    }
+  }, [recordingStatus, activeSessionId, onSessionsChanged]);
 
   const start = async () => {
     try {
@@ -594,15 +601,18 @@ export function RecordView({
         scheduled_end_iso: scheduledEndIso ?? undefined,
         conference_room_mode: conferenceRoomMode,
       });
-      setRecording(true);
       // Suppress the shell's watchdog kill for the duration of the
       // recording — an unresponsive backend may still be capturing
-      // audio, and this meeting can't be re-run.
-      void setRecordingActive(true);
-      setDuration(0);
+      // audio, and this meeting can't be re-run. Safe to do optimistically
+      // (unlike CLEARING it, which only the server may do): the shared
+      // poll takes ownership of the flag from here on.
+      suppressWatchdogForNewRecording();
+      // `recording` flips on the next poll, which we kick immediately
+      // rather than waiting out the interval. No local setRecording —
+      // the server is the only thing that says whether we're recording.
+      refreshRecordingStatus();
       setScreenshotCount(0);
       setSession(null);
-      setWatchdogWarnings([]);
       notifiedCodesRef.current = new Set();
       toast.success("Recording started", { description: `Session ${res.session_id}` });
 
@@ -634,8 +644,14 @@ export function RecordView({
   const stop = async () => {
     try {
       const res = await api.stopRecording();
-      setRecording(false);
-      void setRecordingActive(false);
+      // Deliberately no setRecording(false) / setRecordingActive(false)
+      // here. Field report 2026-08-11: local optimism on stop is what
+      // let this view show the idle form while the sidebar kept
+      // counting "Recording… 20:10". The next poll (kicked immediately
+      // below) carries the server's answer to BOTH, and the shared
+      // store clears the Tauri shell's RECORDING_ACTIVE flag as part of
+      // the same reconciliation.
+      refreshRecordingStatus();
       toast.success("Recording saved", { description: res.audio_path });
       // Reload the session into the UI
       const s = await api.getSessionFull(res.session_id);
@@ -665,7 +681,29 @@ export function RecordView({
         // Process manually from the session dialog.
       }
     } catch (e) {
-      toast.error(`Stop failed: ${e instanceof Error ? e.message : e}`);
+      // The stop request failed — most often because the backend was
+      // restarting at that exact moment (field report 2026-08-11). Two
+      // rules apply here:
+      //
+      //   1. Do NOT clear recording state. We genuinely don't know
+      //      whether capture stopped, and a live meeting can't be
+      //      re-run; guessing "stopped" is how the UI ended up
+      //      contradicting itself.
+      //   2. Do NOT leave the user stuck either. The shared poll
+      //      reconciles to the server the moment it's reachable, so a
+      //      backend that restarted (and therefore is NOT recording)
+      //      clears the indicator on its own — and clears the shell's
+      //      RECORDING_ACTIVE flag with it, so the watchdog doesn't
+      //      stay suppressed forever.
+      toast.error(`Stop failed: ${e instanceof Error ? e.message : e}`, {
+        description:
+          "The backend didn't answer — it may be restarting. The recording "
+          + "indicator will correct itself automatically within a second of "
+          + "the backend coming back. If it's still showing, the recording "
+          + "really is still running.",
+        duration: 10000,
+      });
+      refreshRecordingStatus();
     }
   };
 
