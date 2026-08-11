@@ -137,6 +137,27 @@ def _normalize_model(model: str) -> str:
     return _DEAD_MODEL_ALIASES.get((model or "").strip(), model)
 
 
+# Field report 2026-08-11 (0xC0000005 after recording stop): the backend
+# process was observed dying with STATUS_ACCESS_VIOLATION 3-4s after a
+# recording stopped, with no Python traceback (native crash). Working
+# hypothesis: during a recording, LiveTranscriber holds a faster-whisper
+# (CTranslate2, its own bundled cuDNN) model resident on CUDA; on stop,
+# auto-process loads pyannote via PyTorch (a *different* bundled cuDNN)
+# and moves it onto CUDA too — two CUDA/cuDNN runtimes alive in one
+# process at once. `diarization_device` makes the pyannote device
+# user-selectable so that hypothesis can be tested/worked around instead
+# of guessed at. Any value outside this set (typo'd config.env, an old
+# build's now-removed option, hand-edited garbage) must fall back to
+# "auto" rather than raise — a corrupt single field must never brick the
+# whole settings load.
+_VALID_DIARIZATION_DEVICES = {"auto", "cpu", "cuda"}
+
+
+def _normalize_diarization_device(value: str) -> str:
+    v = (value or "").strip().lower()
+    return v if v in _VALID_DIARIZATION_DEVICES else "auto"
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable application settings resolved at startup."""
@@ -273,6 +294,13 @@ class Settings:
     # runtime-failure fallback now. See core/live_transcriber.py and
     # core/vad.py (field report 2026-08-10, Zoom notetaker parity).
     live_vad_enabled: bool
+    # Which device the pyannote speaker-diarization pipeline loads on:
+    # "auto" (default, prefer CUDA then MPS then CPU — identical to the
+    # pre-2026-08-11 hardcoded behavior), "cpu" (force CPU, never probe
+    # CUDA/MPS — the workaround for the field report above), or "cuda"
+    # (force CUDA, falling back to CPU with a warning on a machine with
+    # no GPU rather than crashing). See core/diarization.py.
+    diarization_device: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -400,6 +428,8 @@ class Settings:
             cloud_mirror_dir=_get("CLOUD_MIRROR_DIR", ""),
             session_archive_dir=_get("SESSION_ARCHIVE_DIR", ""),
             live_vad_enabled=_get_bool("LIVE_VAD_ENABLED", True),
+            diarization_device=_normalize_diarization_device(
+                _get("DIARIZATION_DEVICE", "auto")),
         )
 
     @property
@@ -480,6 +510,7 @@ class Settings:
         cloud_mirror_dir: str = "",
         session_archive_dir: str = "",
         live_vad_enabled: bool = True,
+        diarization_device: str = "auto",
     ) -> None:
         """Write settings back to the .env file.
 
@@ -551,6 +582,11 @@ class Settings:
             f"CLOUD_MIRROR_DIR={cloud_mirror_dir}\n"
             f"SESSION_ARCHIVE_DIR={session_archive_dir}\n"
             f"LIVE_VAD_ENABLED={'true' if live_vad_enabled else 'false'}\n"
+            # Not validated on write — from_env normalizes any garbage
+            # value back to "auto" on read (see _normalize_diarization_device
+            # above), so a bad value here is self-healing rather than a
+            # crash risk.
+            f"DIARIZATION_DEVICE={diarization_device}\n"
         )
         # Write to the canonical LOCALAPPDATA location first. In rare cases
         # a Tauri-spawned Python child cannot open files under LOCALAPPDATA
