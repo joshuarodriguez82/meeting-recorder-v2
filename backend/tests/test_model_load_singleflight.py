@@ -24,7 +24,7 @@ def _make_services(monkeypatch):
 
     stub_settings = SimpleNamespace(
         is_configured=True, whisper_model="base", hf_token="hf_x",
-        max_speakers=4,
+        max_speakers=4, diarization_device="auto",
     )
 
     def fake_load_settings():
