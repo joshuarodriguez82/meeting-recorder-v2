@@ -179,7 +179,11 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
   if (configsFailed && clients.length === 0) {
     return (
       <div className="flex h-full items-center justify-center">
-        <div className="text-center max-w-md space-y-3 rounded-lg border border-amber-500/40 bg-amber-500/5 p-6">
+        <div className="text-center max-w-md space-y-3 rounded-2xl border border-amber-500/25 bg-amber-500/10 p-6">
+          <div className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/15 px-3 py-1 text-xs font-medium text-amber-700 dark:text-amber-300">
+            <AlertTriangle className="h-3.5 w-3.5" aria-hidden />
+            Load problem
+          </div>
           <h3 className="text-base font-semibold">Couldn&apos;t load your clients</h3>
           <p className="text-sm text-muted-foreground">
             Your saved clients couldn&apos;t be read just now — this is a
