@@ -695,6 +695,31 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
             checked={settings.live_vad_enabled}
             onChange={(v) => update("live_vad_enabled", v)}
           />
+          <div className="space-y-2">
+            <Label htmlFor="diarization-device">Speaker identification device</Label>
+            <Select
+              value={settings.diarization_device || "auto"}
+              onValueChange={(v) => v && update("diarization_device", v)}
+            >
+              <SelectTrigger id="diarization-device" className="w-64">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">Auto (recommended)</SelectItem>
+                <SelectItem value="cpu">CPU (avoids a known GPU conflict)</SelectItem>
+                <SelectItem value="cuda">GPU / CUDA (force)</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Controls what runs speaker identification (who-said-what)
+              after a recording stops. Auto uses your GPU when available
+              and is fastest. CPU is slower but avoids a known crash on
+              some machines where the GPU is used by transcription and
+              speaker identification at the same time, right after you
+              stop recording. If recordings have been silently vanishing
+              a few seconds after you hit Stop, try CPU here.
+            </p>
+          </div>
           <div className="space-y-1">
             <Label htmlFor="auto-screenshot-int">Auto-screenshot during recording</Label>
             <div className="flex items-center gap-2">
