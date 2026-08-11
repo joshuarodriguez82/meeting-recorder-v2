@@ -294,6 +294,20 @@ class Settings:
     # runtime-failure fallback now. See core/live_transcriber.py and
     # core/vad.py (field report 2026-08-10, Zoom notetaker parity).
     live_vad_enabled: bool
+    # Live per-speaker labelling of the far-end ("them") stream — the
+    # "Speaker 1 / Speaker 2" badges in the live transcript preview.
+    # Default TRUE. When False, LiveTranscriber gets no speaker tracker
+    # at all, so loopback segments keep the plain "them" label and zero
+    # embedding work happens during the call.
+    #
+    # Field report 2026-08-11: on a real 2-person call the live splitter
+    # gave ONE continuous speaker eight different identities (SPEAKER
+    # 1,2,3,4,5,6,7,9) and attached a saved colleague's real name to the
+    # wrong person. The thresholds in core/live_speakers.py were retuned
+    # hard toward merging, but a user whose calls still label badly needs
+    # a way to turn the whole thing off and get the old, plain, never-
+    # wrong "them" back — that's this flag.
+    live_speaker_split_enabled: bool
     # Which device the pyannote speaker-diarization pipeline loads on:
     # "auto" (default, prefer CUDA then MPS then CPU — identical to the
     # pre-2026-08-11 hardcoded behavior), "cpu" (force CPU, never probe
@@ -428,6 +442,8 @@ class Settings:
             cloud_mirror_dir=_get("CLOUD_MIRROR_DIR", ""),
             session_archive_dir=_get("SESSION_ARCHIVE_DIR", ""),
             live_vad_enabled=_get_bool("LIVE_VAD_ENABLED", True),
+            live_speaker_split_enabled=_get_bool(
+                "LIVE_SPEAKER_SPLIT_ENABLED", True),
             diarization_device=_normalize_diarization_device(
                 _get("DIARIZATION_DEVICE", "auto")),
         )
@@ -510,6 +526,7 @@ class Settings:
         cloud_mirror_dir: str = "",
         session_archive_dir: str = "",
         live_vad_enabled: bool = True,
+        live_speaker_split_enabled: bool = True,
         diarization_device: str = "auto",
     ) -> None:
         """Write settings back to the .env file.
@@ -582,6 +599,7 @@ class Settings:
             f"CLOUD_MIRROR_DIR={cloud_mirror_dir}\n"
             f"SESSION_ARCHIVE_DIR={session_archive_dir}\n"
             f"LIVE_VAD_ENABLED={'true' if live_vad_enabled else 'false'}\n"
+            f"LIVE_SPEAKER_SPLIT_ENABLED={'true' if live_speaker_split_enabled else 'false'}\n"
             # Not validated on write — from_env normalizes any garbage
             # value back to "auto" on read (see _normalize_diarization_device
             # above), so a bad value here is self-healing rather than a
