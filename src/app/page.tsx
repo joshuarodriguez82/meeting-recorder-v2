@@ -125,6 +125,20 @@ export default function Home() {
   // don't exist — reading storage in the useState initializer (or at
   // module scope) would throw at build time and hydrate-mismatch at
   // runtime. Design review 2026-08-11.
+  // One scroll container is shared by every view — the views swap inside
+  // it rather than each owning its own scroller. That's what keeps the
+  // header fixed, but it also means scrollTop SURVIVES a nav change:
+  // scroll halfway down Record, switch to Sessions, and Sessions opens
+  // halfway down too (field report 2026-08-11).
+  //
+  // Reset on every nav change. Not `behavior: smooth` — a new view
+  // should already be at the top when it paints, not visibly race
+  // upward after it.
+  const mainScrollRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    mainScrollRef.current?.scrollTo({ top: 0 });
+  }, [nav]);
+
   const [navCollapsed, setNavCollapsed] = useState(false);
   useEffect(() => {
     // Deferred to a microtask so this reads as "subscribe to an external
@@ -988,7 +1002,10 @@ export default function Home() {
                 even when a view doesn't overflow, so content never
                 shifts on nav change AND the bar no longer sits flush
                 against the content — pr-8 stays clear of it. */}
-        <div className="flex-1 overflow-y-auto overflow-x-hidden px-8 pt-6 pb-16 min-h-0 [scrollbar-gutter:stable]">
+        <div
+          ref={mainScrollRef}
+          className="flex-1 overflow-y-auto overflow-x-hidden px-8 pt-6 pb-16 min-h-0 [scrollbar-gutter:stable]"
+        >
           {nav === "today" && todayEnabled && <TodayView onNavigate={setNav} />}
           {nav === "record" && (
             <RecordView
