@@ -71,6 +71,10 @@ rather than sitting on every row — still reachable by keyboard.
 **Tighter spacing.** Less empty space above the Today briefing, and the
 Record page fits more without scrolling.
 
+**Each tab starts at the top.** Scrolling down one tab no longer leaves
+the next tab you open scrolled to the same spot — every view opens at
+its beginning, as it should.
+
 ## Unchanged
 
 Every action, tooltip and keyboard shortcut works as before. Dark mode
