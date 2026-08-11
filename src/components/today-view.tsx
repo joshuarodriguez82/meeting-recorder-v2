@@ -326,14 +326,17 @@ export function TodayView({ onNavigate }: Props) {
   }
 
   return (
-    <div className="space-y-6">
+    // space-y-5 (was 6) plus the header's own -mb-1: design review
+    // 2026-08-11 flagged the page as top-heavy — a 24px gap under the
+    // greeting pushed the Top Priority card too far down the fold.
+    <div className="space-y-5">
       {/* Greeting header */}
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex items-start justify-between gap-4 -mb-1">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-foreground">
             Good {timeOfDay()}, Joshua
           </h1>
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="mt-0.5 text-sm text-muted-foreground">
             {todayPretty()} · {timeNow()}
             {briefing && (
               <>

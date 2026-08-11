@@ -133,24 +133,93 @@ function RenamableTitle({
   );
 }
 
+/**
+ * Six-slot pipeline-progress cluster for a session row.
+ *
+ * These are STATUS INDICATORS, not actions. Every one of the six slots
+ * always renders, always in the same order, so a slot's position is
+ * meaningful and the clusters line up in a column down the list —
+ * "3 of 6 present" is readable at a glance instead of countable.
+ *
+ * WHY THIS MATTERS: a partially-processed session is the visible
+ * signature of a backend crash mid-pipeline (audio captured, transcript
+ * written, summary never generated). The user has to be able to spot
+ * "this one didn't finish" without opening it, which is exactly why
+ * absent stages stay in place as faded glyphs instead of vanishing —
+ * and why this cluster must never be collapsed behind an overflow menu.
+ *
+ * Design review 2026-08-11: the previous treatment rendered only the
+ * TRUE stages, each in a bordered circular chip. Variable-length rows
+ * meant nothing lined up, and the chips read as a row of buttons.
+ */
 export function StatusIcons({ session }: { session: SessionSummary }) {
-  const icons = [
-    { show: session.audio_exists, emoji: "🎤", label: "Audio file exists" },
-    { show: session.has_transcript, emoji: "⚙", label: "Transcribed + speakers identified" },
-    { show: session.has_summary, emoji: "✨", label: "Summary generated" },
-    { show: session.has_action_items, emoji: "📋", label: "Action items extracted" },
-    { show: session.has_decisions, emoji: "🎯", label: "Decisions extracted" },
-    { show: session.has_requirements, emoji: "📝", label: "Requirements extracted" },
+  const stages = [
+    {
+      done: session.audio_exists, emoji: "🎤",
+      doneLabel: "Audio file exists",
+      pendingLabel: "Audio — no file on disk",
+    },
+    {
+      done: session.has_transcript, emoji: "⚙",
+      doneLabel: "Transcribed + speakers identified",
+      pendingLabel: "Transcript — not generated yet",
+    },
+    {
+      done: session.has_summary, emoji: "✨",
+      doneLabel: "Summary generated",
+      pendingLabel: "Summary — not generated yet",
+    },
+    {
+      done: session.has_action_items, emoji: "📋",
+      doneLabel: "Action items extracted",
+      pendingLabel: "Action items — not generated yet",
+    },
+    {
+      done: session.has_decisions, emoji: "🎯",
+      doneLabel: "Decisions extracted",
+      pendingLabel: "Decisions — not generated yet",
+    },
+    {
+      done: session.has_requirements, emoji: "📝",
+      doneLabel: "Requirements extracted",
+      pendingLabel: "Requirements — not generated yet",
+    },
   ];
+  const doneCount = stages.filter((s) => s.done).length;
   return (
     <TooltipProvider>
-      <div className="flex items-center gap-1.5 flex-wrap">
-        {icons.map((i, idx) => i.show && (
+      {/* Tight gap + fixed-width slots so the six glyphs read as one
+          progress unit rather than six separate controls. No chip
+          backgrounds — those were what made it look like a button row. */}
+      <div
+        className="flex items-center gap-0.5 shrink-0"
+        role="img"
+        aria-label={`Processing progress: ${doneCount} of ${stages.length} stages complete`}
+      >
+        {stages.map((s, idx) => (
           <Tooltip key={idx}>
             <TooltipTrigger
-              render={<span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-border bg-muted/60 text-[11px] cursor-default">{i.emoji}</span>}
+              render={
+                <span
+                  aria-hidden
+                  className={
+                    "inline-flex h-6 w-6 items-center justify-center text-[15px] leading-none cursor-default transition-opacity "
+                    + (s.done
+                      // Present: full-strength glyph. Bumped a couple of
+                      // px and un-chipped so it holds contrast against a
+                      // white card instead of washing out.
+                      ? "opacity-100"
+                      // Absent: still occupies its slot, but desaturated
+                      // to a faint monochrome ghost so the gap in the
+                      // pipeline is obvious without shouting.
+                      : "opacity-25 grayscale contrast-50")
+                  }
+                >
+                  {s.emoji}
+                </span>
+              }
             />
-            <TooltipContent>{i.label}</TooltipContent>
+            <TooltipContent>{s.done ? s.doneLabel : s.pendingLabel}</TooltipContent>
           </Tooltip>
         ))}
       </div>
@@ -448,12 +517,21 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
       ) : (
         <div className="space-y-3">
           {filtered.map((s) => (
+            // `group/session-row` drives the hover/focus reveal of the
+            // destructive delete control below. Named group (not the
+            // card component's own `group/card`) so this row owns it.
+            // py-3 trims the stock py-4: design review 2026-08-11 found
+            // the cards taller than their content warranted.
             <Card
               key={s.session_id}
-              className="cursor-pointer"
+              className="group/session-row cursor-pointer py-3"
               onClick={() => onOpenSession(s.session_id)}
             >
-              <CardContent className="flex items-center gap-4">
+              {/* items-start, not items-center: the icon cluster and the
+                  delete control now align to the TITLE row instead of
+                  floating in the vertical middle, which left dead space
+                  under the metadata line on every card. */}
+              <CardContent className="flex items-start gap-4">
                 <div className="flex-1 min-w-0">
                   <RenamableTitle
                     session={s}
@@ -503,10 +581,20 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
                   <Tooltip>
                     <TooltipTrigger
                       render={
+                        // Destructive + irreversible, so it's revealed on
+                        // hover/focus rather than sitting armed on every
+                        // row. Deliberately opacity-based, never
+                        // `display:none`/`hidden` — the button stays in
+                        // the tab order and `group-focus-within` +
+                        // `focus-visible` bring it back into view the
+                        // moment it takes keyboard focus. `pointer-events`
+                        // is gated alongside opacity so an invisible
+                        // delete target can never be clicked by accident.
+                        // Design review 2026-08-11.
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); del(s.session_id, s.display_name); }}
-                          className="h-8 w-8 inline-flex items-center justify-center rounded-full hover:bg-destructive/10 text-muted-foreground hover:text-destructive cursor-pointer shrink-0"
+                          className="h-8 w-8 inline-flex items-center justify-center rounded-full hover:bg-destructive/10 text-muted-foreground hover:text-destructive cursor-pointer shrink-0 opacity-0 pointer-events-none transition-opacity group-hover/session-row:opacity-100 group-hover/session-row:pointer-events-auto group-focus-within/session-row:opacity-100 group-focus-within/session-row:pointer-events-auto focus-visible:opacity-100 focus-visible:pointer-events-auto"
                           aria-label={`Delete "${s.display_name}"`}
                         >
                           <Trash2 className="h-3.5 w-3.5" />
