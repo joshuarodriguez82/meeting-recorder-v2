@@ -7,8 +7,11 @@ import {
   Mic, History, CheckSquare, Target, Search,
   LayoutDashboard, Settings as SettingsIcon, HelpCircle, Loader2,
   Sparkles, MessageCircle, Handshake, BarChart3, FileSpreadsheet,
-  Sun,
+  Sun, PanelLeftClose, PanelLeftOpen,
 } from "lucide-react";
+import {
+  Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { InsightsView } from "@/components/insights-view";
 import { TodayView } from "@/components/today-view";
 import { OnboardingTour, onboardingDismissed } from "@/components/onboarding-tour";
@@ -45,9 +48,107 @@ const NAV_ITEMS = [
   { id: "prep-brief", label: "Prep Brief", icon: Sparkles },
 ];
 
+// localStorage key for the nav rail's expanded/collapsed choice.
+const NAV_COLLAPSED_KEY = "navCollapsed";
+
+/**
+ * One row of the nav rail. Extracted so the expanded and collapsed
+ * variants can't drift apart, and defined at module scope (not inside
+ * Home) so it isn't re-created every render — an inline component would
+ * remount the button on each parent render and drop keyboard focus.
+ *
+ * In collapsed/icon mode the label moves into a Tooltip and the
+ * unprocessed-session badge rides the icon's top-right corner instead of
+ * disappearing. The active pill (bg-accent) is identical in both modes,
+ * so "where am I" survives the collapse. Design review 2026-08-11.
+ */
+function RailButton({
+  icon: Icon, label, active, collapsed, badge = 0, hint, onClick,
+}: {
+  icon: React.ElementType;
+  label: string;
+  active: boolean;
+  collapsed: boolean;
+  badge?: number;
+  hint?: string;
+  onClick: () => void;
+}) {
+  const button = (
+    <button
+      onClick={onClick}
+      className={`relative flex w-full items-center rounded-xl text-sm transition-colors ${
+        collapsed ? "justify-center px-0 py-2.5" : "gap-3 px-3 py-2.5"
+      } ${
+        active
+          ? "bg-accent text-accent-foreground font-medium"
+          : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+      }`}
+      // Collapsed mode has no visible text, so the accessible name has
+      // to come from aria-label; expanded mode keeps the original
+      // title-attribute behaviour for the badge explanation.
+      title={collapsed ? undefined : hint}
+      aria-label={collapsed ? label : undefined}
+    >
+      <Icon className="h-5 w-5 shrink-0" />
+      {!collapsed && <span className="flex-1 text-left">{label}</span>}
+      {badge > 0 && (collapsed ? (
+        <span className="absolute top-1 right-1.5 inline-flex items-center justify-center min-w-4 h-4 px-1 rounded-full bg-primary text-primary-foreground text-[9px] font-semibold">
+          {badge}
+        </span>
+      ) : (
+        <span className="inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full bg-primary text-primary-foreground text-[10px] font-semibold">
+          {badge}
+        </span>
+      ))}
+    </button>
+  );
+
+  if (!collapsed) return button;
+  return (
+    <Tooltip>
+      <TooltipTrigger render={button} />
+      <TooltipContent side="right">
+        {hint ? `${label} — ${hint}` : label}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 export default function Home() {
   const [backendReady, setBackendReady] = useState(false);
   const [nav, setNav] = useState<string>("record");
+  // Nav rail expanded (icons + labels) vs. collapsed (icon-only).
+  // Persisted so the choice survives an app restart. The initial state
+  // is hard-coded to `false` and the stored value is applied in an
+  // effect on purpose: this app ships as a Next.js STATIC EXPORT, so the
+  // first render happens during prerender where `window`/`localStorage`
+  // don't exist — reading storage in the useState initializer (or at
+  // module scope) would throw at build time and hydrate-mismatch at
+  // runtime. Design review 2026-08-11.
+  const [navCollapsed, setNavCollapsed] = useState(false);
+  useEffect(() => {
+    // Deferred to a microtask so this reads as "subscribe to an external
+    // system after mount" rather than a synchronous cascading setState
+    // in the effect body (react-hooks/set-state-in-effect).
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (cancelled) return;
+      try {
+        setNavCollapsed(localStorage.getItem(NAV_COLLAPSED_KEY) === "1");
+      } catch {
+        /* storage unavailable (private mode / blocked) — stay expanded */
+      }
+    });
+    return () => { cancelled = true; };
+  }, []);
+  const toggleNavCollapsed = useCallback(() => {
+    setNavCollapsed((v) => {
+      const next = !v;
+      try { localStorage.setItem(NAV_COLLAPSED_KEY, next ? "1" : "0"); }
+      catch { /* storage unavailable — the toggle still works this session */ }
+      return next;
+    });
+  }, []);
   // Opt-in "Today" daily-briefing tab. Hidden + skipped as landing view
   // unless the user enables it in Settings. Persisted server-side.
   const [todayEnabled, setTodayEnabled] = useState(false);
@@ -624,26 +725,44 @@ export default function Home() {
         minutesBefore={notifyMinutes}
         onStart={() => setNav("record")}
       />
-      {/* Sidebar */}
-      <aside className="flex h-full w-64 flex-col border-r border-border bg-sidebar">
-        <div className="flex h-16 items-center gap-2.5 border-b border-border px-4">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm">
+      {/* Sidebar. Width is the only structural difference between the two
+          modes — every control below stays mounted and usable in icon
+          mode, just abbreviated. */}
+      <TooltipProvider>
+      <aside
+        className={`flex h-full shrink-0 flex-col border-r border-border bg-sidebar transition-[width] duration-200 ${
+          navCollapsed ? "w-16" : "w-64"
+        }`}
+      >
+        <div
+          className={`flex h-16 items-center border-b border-border ${
+            navCollapsed ? "justify-center px-2" : "gap-2.5 px-4"
+          }`}
+        >
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm">
             <Mic className="h-4 w-4" />
           </div>
-          <div className="flex flex-col leading-tight min-w-0 flex-1">
-            <span className="text-sm font-semibold">Meeting Recorder</span>
-            <span className="text-[10px] text-muted-foreground">
-              {appVersion ? `v${appVersion}` : "v2"}
-            </span>
-          </div>
+          {!navCollapsed && (
+            <div className="flex flex-col leading-tight min-w-0 flex-1">
+              <span className="text-sm font-semibold">Meeting Recorder</span>
+              <span className="text-[10px] text-muted-foreground">
+                {appVersion ? `v${appVersion}` : "v2"}
+              </span>
+            </div>
+          )}
         </div>
         {pipelineStatus.loading && (
+          // Icon mode drops the status text but keeps the spinner (and
+          // the full text in the title attribute) — the user still sees
+          // that the backend is busy rather than losing the signal.
           <div
-            className="flex items-center gap-2 border-b border-border bg-accent/30 px-4 py-2 text-xs text-foreground"
+            className={`flex items-center border-b border-border bg-accent/30 py-2 text-xs text-foreground ${
+              navCollapsed ? "justify-center px-2" : "gap-2 px-4"
+            }`}
             title={pipelineStatus.text}
           >
             <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0 text-primary" />
-            <span className="truncate">{pipelineStatus.text}</span>
+            {!navCollapsed && <span className="truncate">{pipelineStatus.text}</span>}
           </div>
         )}
 
@@ -655,8 +774,13 @@ export default function Home() {
           // was to navigate to Record view, and a UI-state race could
           // hide the stop button there (the 4h17m orphan-record
           // incident traced partly to this).
+          // Icon mode stacks the two affordances vertically instead of
+          // dropping either one — the Stop button in particular must
+          // stay reachable from every tab in BOTH widths.
           <div
-            className="flex items-stretch border-b border-border bg-red-500/10 text-xs text-foreground"
+            className={`flex border-b border-border bg-red-500/10 text-xs text-foreground ${
+              navCollapsed ? "flex-col items-stretch" : "items-stretch"
+            }`}
             title={recordingNow.autoSubject
               ? `Auto-recording: ${recordingNow.autoSubject}`
               : "Recording in progress"}
@@ -664,19 +788,29 @@ export default function Home() {
             <button
               type="button"
               onClick={() => setNav("record")}
-              className="flex items-center gap-2 px-4 py-2 hover:bg-red-500/15 transition-colors flex-1 min-w-0 text-left"
+              className={`flex items-center hover:bg-red-500/15 transition-colors min-w-0 ${
+                navCollapsed
+                  ? "flex-col justify-center gap-1 px-1 py-2"
+                  : "gap-2 px-4 py-2 flex-1 text-left"
+              }`}
               title="Open the Record view"
             >
               <span className="relative inline-flex h-2.5 w-2.5 shrink-0">
                 <span className="absolute inset-0 inline-flex h-full w-full animate-ping rounded-full bg-red-500 opacity-75" />
                 <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
               </span>
-              <span className="truncate flex-1">
-                {recordingNow.autoSubject
-                  ? `Auto-recording: ${recordingNow.autoSubject}`
-                  : "Recording…"}
-              </span>
-              <span className="font-mono text-[11px] text-muted-foreground shrink-0">
+              {!navCollapsed && (
+                <span className="truncate flex-1">
+                  {recordingNow.autoSubject
+                    ? `Auto-recording: ${recordingNow.autoSubject}`
+                    : "Recording…"}
+                </span>
+              )}
+              <span
+                className={`font-mono text-muted-foreground shrink-0 ${
+                  navCollapsed ? "text-[9px] leading-none" : "text-[11px]"
+                }`}
+              >
                 {(() => {
                   const s = recordingElapsedS;
                   const h = Math.floor(s / 3600);
@@ -698,48 +832,44 @@ export default function Home() {
                   toast.error(`Couldn't stop: ${err instanceof Error ? err.message : err}`);
                 }
               }}
-              className="flex items-center justify-center px-3 border-l border-red-500/30 hover:bg-red-500/25 transition-colors text-red-700 dark:text-red-300 font-medium"
+              className={`flex items-center justify-center hover:bg-red-500/25 transition-colors text-red-700 dark:text-red-300 font-medium ${
+                navCollapsed
+                  ? "border-t border-red-500/30 py-1.5"
+                  : "px-3 border-l border-red-500/30"
+              }`}
               title="Stop recording"
               aria-label="Stop recording"
             >
               <span className="h-2.5 w-2.5 rounded-[2px] bg-red-600 dark:bg-red-400" />
-              <span className="ml-1.5 text-[11px]">Stop</span>
+              {!navCollapsed && <span className="ml-1.5 text-[11px]">Stop</span>}
             </button>
           </div>
         )}
 
-        <nav className="flex-1 overflow-y-auto p-3">
-          <div className="mb-2 px-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-            Workspace
-          </div>
+        <nav className={`flex-1 overflow-y-auto ${navCollapsed ? "p-2" : "p-3"}`}>
+          {!navCollapsed && (
+            <div className="mb-2 px-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+              Workspace
+            </div>
+          )}
           <ul className="space-y-1.5">
             {navItems.map((item) => {
-              const Icon = item.icon;
-              const active = nav === item.id;
               const badge = item.id === "sessions" && unprocessedCount > 0
                 ? unprocessedCount
                 : 0;
               return (
                 <li key={item.id}>
-                  <button
-                    onClick={() => setNav(item.id)}
-                    className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors ${
-                      active
-                        ? "bg-accent text-accent-foreground font-medium"
-                        : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
-                    }`}
-                    title={badge > 0
+                  <RailButton
+                    icon={item.icon}
+                    label={item.label}
+                    active={nav === item.id}
+                    collapsed={navCollapsed}
+                    badge={badge}
+                    hint={badge > 0
                       ? `${badge} session${badge === 1 ? "" : "s"} awaiting processing`
                       : undefined}
-                  >
-                    <Icon className="h-5 w-5 shrink-0" />
-                    <span className="flex-1 text-left">{item.label}</span>
-                    {badge > 0 && (
-                      <span className="inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full bg-primary text-primary-foreground text-[10px] font-semibold">
-                        {badge}
-                      </span>
-                    )}
-                  </button>
+                    onClick={() => setNav(item.id)}
+                  />
                 </li>
               );
             })}
@@ -748,32 +878,62 @@ export default function Home() {
 
         {/* Secondary cluster — Settings + Usage Guide sit apart from the
             workspace nav with their own label + top border so they read
-            as utility items rather than more workflow tabs. */}
-        <div className="border-t border-border px-3 pt-3 pb-3 space-y-1.5">
+            as utility items rather than more workflow tabs. The top
+            border carries that separation into icon mode, where the
+            "Support" caption itself doesn't fit. */}
+        <div
+          className={`border-t border-border pt-3 pb-3 space-y-1.5 ${
+            navCollapsed ? "px-2" : "px-3"
+          }`}
+        >
+          {!navCollapsed && (
           <div className="px-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
             Support
           </div>
-          <button
+          )}
+          <RailButton
+            icon={SettingsIcon}
+            label="Settings"
+            active={nav === "settings"}
+            collapsed={navCollapsed}
             onClick={() => setNav("settings")}
-            className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors ${
-              nav === "settings" ? "bg-accent text-accent-foreground font-medium"
-                : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
-            }`}
-          >
-            <SettingsIcon className="h-5 w-5 shrink-0" />
-            Settings
-          </button>
-          <button
+          />
+          <RailButton
+            icon={HelpCircle}
+            label="Usage Guide"
+            active={nav === "help"}
+            collapsed={navCollapsed}
             onClick={() => setNav("help")}
-            className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors ${
-              nav === "help" ? "bg-accent text-accent-foreground font-medium"
-                : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
-            }`}
-          >
-            <HelpCircle className="h-5 w-5 shrink-0" />
-            Usage Guide
-          </button>
-          {storage && (
+          />
+          {/* Collapse toggle lives in the utility cluster so it reads
+              the same in both widths and never competes with the brand
+              mark for the 64px header. */}
+          <RailButton
+            icon={navCollapsed ? PanelLeftOpen : PanelLeftClose}
+            label={navCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            active={false}
+            collapsed={navCollapsed}
+            onClick={toggleNavCollapsed}
+          />
+          {storage && (navCollapsed ? (
+            // Icon mode keeps the readout usable by abbreviating to the
+            // headline number; the full breakdown stays in the tooltip.
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <div className="mt-2 rounded-xl bg-muted/60 px-1 py-1.5 text-center text-[10px] leading-tight text-muted-foreground">
+                    <div className="font-medium text-foreground truncate">
+                      {formatBytes(storage.total_bytes)}
+                    </div>
+                    <div className="text-[9px]">used</div>
+                  </div>
+                }
+              />
+              <TooltipContent side="right">
+                {`Storage ${formatBytes(storage.total_bytes)} — ${storage.session_count} sessions · ${storage.wav_count} audio`}
+              </TooltipContent>
+            </Tooltip>
+          ) : (
             <div className="mt-2 rounded-xl bg-muted/60 px-3.5 py-2.5 text-[11px] text-muted-foreground">
               <div className="flex items-center justify-between">
                 <span>Storage</span>
@@ -783,13 +943,20 @@ export default function Home() {
                 {storage.session_count} sessions · {storage.wav_count} audio
               </div>
             </div>
-          )}
+          ))}
         </div>
       </aside>
+      </TooltipProvider>
 
       {/* Main */}
       <main className="flex flex-1 flex-col overflow-hidden min-w-0">
-        <header className="flex h-16 items-center justify-between border-b border-border bg-background/80 px-6 backdrop-blur shrink-0">
+        {/* Opaque, not bg-background/80 + backdrop-blur. Design review
+            2026-08-11: the translucent header let the scrolled list show
+            through it, which read as "the first card is clipped under
+            the toolbar". The header is a flex sibling of the scroll
+            container, so with an opaque fill nothing can visually
+            overlap it. */}
+        <header className="flex h-16 items-center justify-between border-b border-border bg-background px-6 shrink-0">
           <div>
             <h1 className="text-lg font-semibold capitalize">{nav.replace("-", " ")}</h1>
             <p className="text-xs text-muted-foreground">
@@ -811,7 +978,17 @@ export default function Home() {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto overflow-x-hidden p-8 min-h-0">
+        {/* Shared scroll shell for EVERY view, so the spacing fixes here
+            land everywhere at once (design review 2026-08-11):
+              • pt-6 keeps a clear gap between the header rule and the
+                first row of any view's toolbar.
+              • pb-16 gives the last card room to breathe instead of
+                butting against the window edge mid-scroll.
+              • scrollbar-gutter:stable reserves the scrollbar's track
+                even when a view doesn't overflow, so content never
+                shifts on nav change AND the bar no longer sits flush
+                against the content — pr-8 stays clear of it. */}
+        <div className="flex-1 overflow-y-auto overflow-x-hidden px-8 pt-6 pb-16 min-h-0 [scrollbar-gutter:stable]">
           {nav === "today" && todayEnabled && <TodayView onNavigate={setNav} />}
           {nav === "record" && (
             <RecordView
