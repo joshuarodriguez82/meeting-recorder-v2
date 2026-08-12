@@ -13,9 +13,9 @@ import datetime
 import re
 import time
 import threading
-import pythoncom            # noqa: F401  Windows-only
 import win32com.client      # noqa: F401  Windows-only
 from typing import List, Optional
+from utils.com_worker import run_com
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -105,8 +105,12 @@ def _get_outlook(retries: int = 3, delay: float = 1.0):
     """
     Connect to Outlook. Tries GetActiveObject first (fast if Outlook is
     already open), falls back to Dispatch (starts Outlook if needed).
+
+    Must be called from inside a run_com() job (utils/com_worker.py) —
+    this only touches win32com, it does not itself initialize COM. The
+    process's single COM worker thread initializes its apartment once,
+    for the life of the process, and never uninitializes it.
     """
-    pythoncom.CoInitialize()
     last_err: Optional[Exception] = None
     for attempt in range(retries):
         try:
@@ -372,54 +376,60 @@ def get_meetings_for_date(target_date: datetime.date) -> List[dict]:
         logger.info(f"Calendar cache hit (date {target_date})")
         return cached
 
-    outlook = _get_outlook()
-    if not outlook:
-        return []
+    # All Outlook COM access happens inside this closure, which runs on
+    # the process's single COM worker thread (utils/com_worker.py) — see
+    # that module for why. Only plain dicts are returned; no COM object
+    # crosses back out of _fetch.
+    def _fetch() -> List[dict]:
+        outlook = _get_outlook()
+        if not outlook:
+            return []
+
+        try:
+            ns = outlook.GetNamespace("MAPI")
+            all_meetings: List[dict] = []
+            seen: set = set()
+
+            # Fast path: default calendar
+            try:
+                default_cal = ns.GetDefaultFolder(OL_FOLDER_CALENDAR)
+                logger.info(f"Reading default calendar for {target_date}: "
+                            f"{default_cal.Name}")
+                for m in _read_appointments(default_cal, target_date):
+                    key = (m["subject"], m["start"].isoformat())
+                    if key not in seen:
+                        seen.add(key)
+                        all_meetings.append(m)
+            except Exception as e:
+                logger.warning(f"Could not read default calendar: {e}")
+
+            # Slow path: scan all stores for shared/resource calendars
+            try:
+                for store in ns.Stores:
+                    try:
+                        root = store.GetRootFolder()
+                        for folder in root.Folders:
+                            _scan_folder_recursively(
+                                folder, target_date, seen, all_meetings)
+                    except Exception as e:
+                        logger.debug(f"Store scan failed: {e}")
+            except Exception as e:
+                logger.debug(f"Could not enumerate stores: {e}")
+
+            all_meetings.sort(key=lambda m: m["start"])
+            logger.info(f"Found {len(all_meetings)} meetings for {target_date}")
+            _cache_put(cache_key, all_meetings, ttl=120)
+            return all_meetings
+
+        except Exception as e:
+            logger.error(f"Failed to read calendar: {e}", exc_info=True)
+            return []
 
     try:
-        ns = outlook.GetNamespace("MAPI")
-        all_meetings: List[dict] = []
-        seen: set = set()
-
-        # Fast path: default calendar
-        try:
-            default_cal = ns.GetDefaultFolder(OL_FOLDER_CALENDAR)
-            logger.info(f"Reading default calendar for {target_date}: "
-                        f"{default_cal.Name}")
-            for m in _read_appointments(default_cal, target_date):
-                key = (m["subject"], m["start"].isoformat())
-                if key not in seen:
-                    seen.add(key)
-                    all_meetings.append(m)
-        except Exception as e:
-            logger.warning(f"Could not read default calendar: {e}")
-
-        # Slow path: scan all stores for shared/resource calendars
-        try:
-            for store in ns.Stores:
-                try:
-                    root = store.GetRootFolder()
-                    for folder in root.Folders:
-                        _scan_folder_recursively(
-                            folder, target_date, seen, all_meetings)
-                except Exception as e:
-                    logger.debug(f"Store scan failed: {e}")
-        except Exception as e:
-            logger.debug(f"Could not enumerate stores: {e}")
-
-        all_meetings.sort(key=lambda m: m["start"])
-        logger.info(f"Found {len(all_meetings)} meetings for {target_date}")
-        _cache_put(cache_key, all_meetings, ttl=120)
-        return all_meetings
-
+        return run_com(_fetch, timeout=90.0)
     except Exception as e:
-        logger.error(f"Failed to read calendar: {e}", exc_info=True)
+        logger.error(f"get_meetings_for_date: COM worker call failed: {e}")
         return []
-    finally:
-        try:
-            pythoncom.CoUninitialize()
-        except Exception:
-            pass
 
 
 # Conference-link extraction for the lazy meeting-detail view: return
@@ -477,96 +487,99 @@ def get_meeting_detail(subject: str, start_iso: str) -> dict:
     if not _OUTLOOK_LOCK.acquire(timeout=30):
         logger.warning("meeting-detail: Outlook lock timeout")
         return empty
-    outlook = _get_outlook()
-    if not outlook:
+
+    # All Outlook COM access happens inside this closure, which runs on
+    # the process's single COM worker thread (utils/com_worker.py). Only
+    # a plain dict is returned; no COM object crosses back out of _fetch.
+    def _fetch() -> dict:
+        outlook = _get_outlook()
+        if not outlook:
+            return empty
         try:
-            _OUTLOOK_LOCK.release()
-        except RuntimeError:
-            pass
-        return empty
-    try:
-        ns = outlook.GetNamespace("MAPI")
-        cal = ns.GetDefaultFolder(OL_FOLDER_CALENDAR)
-        items = cal.Items
-        items.Sort("[Start]")
-        items.IncludeRecurrences = True
-        day = target.date()
-        lo = (day - datetime.timedelta(days=1)).strftime("%m/%d/%Y")
-        hi = (day + datetime.timedelta(days=1)).strftime("%m/%d/%Y")
-        try:
-            items = items.Restrict(
-                f"[Start] >= '{lo} 12:00 AM' AND [Start] <= '{hi} 11:59 PM'")
+            ns = outlook.GetNamespace("MAPI")
+            cal = ns.GetDefaultFolder(OL_FOLDER_CALENDAR)
+            items = cal.Items
             items.Sort("[Start]")
             items.IncludeRecurrences = True
-        except Exception:
-            pass
-
-        count = 0
-        for item in items:
-            count += 1
-            if count > 1000:
-                break
+            day = target.date()
+            lo = (day - datetime.timedelta(days=1)).strftime("%m/%d/%Y")
+            hi = (day + datetime.timedelta(days=1)).strftime("%m/%d/%Y")
             try:
-                s = _to_local_naive(item.Start)
-            except Exception:
-                continue
-            # Recurring instances share a subject; match the occurrence
-            # by start time (90s slack absorbs tz/rounding).
-            if abs((s - target).total_seconds()) > 90:
-                continue
-            if str(getattr(item, "Subject", "") or "").strip().lower() != want_subj:
-                continue
-
-            attendees: List[str] = []
-            try:
-                # Resolve to real names/emails here (per-meeting, on
-                # demand) — worth the COM cost for a usable brief +
-                # attendee panel. Cap so a 200+ person invite can't make
-                # the detail call crawl through hundreds of AddressEntry
-                # lookups.
-                _ATT_CAP = 25
-                idx = 0
-                for r in item.Recipients:
-                    idx += 1
-                    if idx > _ATT_CAP:
-                        attendees.append(f"(+ more attendees not shown)")
-                        break
-                    try:
-                        label = _recipient_label(r, resolve_smtp=True)
-                        if label:
-                            attendees.append(label)
-                    except Exception:
-                        continue
+                items = items.Restrict(
+                    f"[Start] >= '{lo} 12:00 AM' AND [Start] <= '{hi} 11:59 PM'")
+                items.Sort("[Start]")
+                items.IncludeRecurrences = True
             except Exception:
                 pass
 
-            try:
-                body = str(getattr(item, "Body", "") or "").strip()
-            except Exception:
-                body = ""
-            location = str(getattr(item, "Location", "") or "")
-            join_url = _extract_join_url(location, body)
-            if len(body) > _BODY_CAP:
-                body = body[:_BODY_CAP] + "\n…(truncated)"
-            result = {
-                "attendees": attendees,
-                "body": body,
-                "join_url": join_url,
-            }
-            _cache_put(cache_key, result)
-            return result
-        # No match — cache the miss briefly so repeated clicks during a
-        # slow Outlook window don't all pile onto the COM lock.
-        _cache_put(cache_key, empty, ttl=30)
-        return empty
+            count = 0
+            for item in items:
+                count += 1
+                if count > 1000:
+                    break
+                try:
+                    s = _to_local_naive(item.Start)
+                except Exception:
+                    continue
+                # Recurring instances share a subject; match the occurrence
+                # by start time (90s slack absorbs tz/rounding).
+                if abs((s - target).total_seconds()) > 90:
+                    continue
+                if str(getattr(item, "Subject", "") or "").strip().lower() != want_subj:
+                    continue
+
+                attendees: List[str] = []
+                try:
+                    # Resolve to real names/emails here (per-meeting, on
+                    # demand) — worth the COM cost for a usable brief +
+                    # attendee panel. Cap so a 200+ person invite can't
+                    # make the detail call crawl through hundreds of
+                    # AddressEntry lookups.
+                    _ATT_CAP = 25
+                    idx = 0
+                    for r in item.Recipients:
+                        idx += 1
+                        if idx > _ATT_CAP:
+                            attendees.append(f"(+ more attendees not shown)")
+                            break
+                        try:
+                            label = _recipient_label(r, resolve_smtp=True)
+                            if label:
+                                attendees.append(label)
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+                try:
+                    body = str(getattr(item, "Body", "") or "").strip()
+                except Exception:
+                    body = ""
+                location = str(getattr(item, "Location", "") or "")
+                join_url = _extract_join_url(location, body)
+                if len(body) > _BODY_CAP:
+                    body = body[:_BODY_CAP] + "\n…(truncated)"
+                result = {
+                    "attendees": attendees,
+                    "body": body,
+                    "join_url": join_url,
+                }
+                _cache_put(cache_key, result)
+                return result
+            # No match — cache the miss briefly so repeated clicks during a
+            # slow Outlook window don't all pile onto the COM lock.
+            _cache_put(cache_key, empty, ttl=30)
+            return empty
+        except Exception as e:
+            logger.warning(f"meeting-detail failed: {e}")
+            return empty
+
+    try:
+        return run_com(_fetch, timeout=60.0)
     except Exception as e:
-        logger.warning(f"meeting-detail failed: {e}")
+        logger.warning(f"meeting-detail: COM worker call failed: {e}")
         return empty
     finally:
-        try:
-            pythoncom.CoUninitialize()
-        except Exception:
-            pass
         try:
             _OUTLOOK_LOCK.release()
         except RuntimeError:
@@ -621,120 +634,124 @@ def get_upcoming_meetings(hours_ahead: int = 168) -> List[dict]:
         wait_event.set()
         return []
 
-    outlook = _get_outlook()
-    if not outlook:
-        _cache_put(cache_key, [], ttl=30)  # also cache the miss briefly
-        with _CACHE_LOCK:
-            _inflight.pop(cache_key, None)
-        wait_event.set()
-        _OUTLOOK_LOCK.release()
-        return []
+    # All Outlook COM access happens inside this closure, which runs on
+    # the process's single COM worker thread (utils/com_worker.py) — see
+    # that module's docstring for why two COM subsystems sharing the
+    # default asyncio.to_thread pool caused STATUS_ACCESS_VIOLATION
+    # crashes. Only a plain list of dicts (or None for "no Outlook") is
+    # returned; no COM object crosses back out of _fetch.
+    def _fetch() -> Optional[List[dict]]:
+        outlook = _get_outlook()
+        if not outlook:
+            return None
+
+        try:
+            ns = outlook.GetNamespace("MAPI")
+            now = datetime.datetime.now()
+            end = now + datetime.timedelta(hours=hours_ahead)
+            start_date = now.date()
+            end_date = end.date()
+
+            all_meetings: List[dict] = []
+            seen: set = set()
+            scanned_entry_ids: set = set()  # dedup folders across stores
+
+            dropped_past = 0
+            dropped_future = 0
+            dropped_samples: List[str] = []
+
+            def consume(folder):
+                nonlocal dropped_past, dropped_future
+                for m in _read_appointments_range(folder, start_date, end_date):
+                    # Drop meetings whose END is in the past, not whose
+                    # START is in the past. The old "start < now" filter
+                    # made an in-progress meeting invisible the moment it
+                    # started, which collapsed the Upcoming Meetings panel
+                    # to empty while auto-record was actively capturing
+                    # that meeting — the user saw "recording in progress"
+                    # at the top with no entry in the panel below.
+                    # AutoRecordService applies its own `start > now`
+                    # filter for the "next event" hint, so keeping
+                    # in-progress meetings here doesn't double-trigger
+                    # anything.
+                    if m["end"] < now:
+                        dropped_past += 1
+                        if len(dropped_samples) < 5:
+                            dropped_samples.append(
+                                f"PAST: {m['subject']} @ {m['start']} (now={now})")
+                        continue
+                    if m["start"] > end:
+                        dropped_future += 1
+                        if len(dropped_samples) < 5:
+                            dropped_samples.append(
+                                f"FUTURE: {m['subject']} @ {m['start']} (end={end})")
+                        continue
+                    key = (m["subject"], m["start"].isoformat())
+                    if key not in seen:
+                        seen.add(key)
+                        all_meetings.append(m)
+
+            # Default calendar — fast path
+            default_entry_id = None
+            try:
+                default_cal = ns.GetDefaultFolder(OL_FOLDER_CALENDAR)
+                try:
+                    default_entry_id = default_cal.EntryID
+                except Exception:
+                    pass
+                logger.info(f"Reading default calendar: {default_cal.Name}")
+                consume(default_cal)
+                if default_entry_id:
+                    scanned_entry_ids.add(default_entry_id)
+            except Exception as e:
+                logger.warning(f"Default calendar read failed: {e}")
+
+            # Other stores/shared calendars — ONE walk. Skip stores we
+            # don't care about (resource calendars, public folders)
+            # entirely so we don't pay the per-folder Exchange latency
+            # cost.
+            try:
+                for store in ns.Stores:
+                    try:
+                        store_name = getattr(store, "DisplayName", "") or ""
+                        if _should_skip_store(store_name):
+                            logger.info(f"(skip store: {store_name})")
+                            continue
+                        logger.info(f"Walking store: {store_name}")
+                        root = store.GetRootFolder()
+                        for folder in root.Folders:
+                            _scan_folder_recursively_range(
+                                folder, start_date, end_date,
+                                seen, all_meetings, scanned_entry_ids)
+                    except Exception as e:
+                        logger.warning(f"Store scan failed for '{store_name}': {e}")
+            except Exception as e:
+                logger.warning(f"Could not enumerate stores: {e}")
+
+            all_meetings.sort(key=lambda m: m["start"])
+            elapsed = time.time() - t0
+            logger.info(
+                f"Found {len(all_meetings)} upcoming meetings ({hours_ahead}h) "
+                f"in {elapsed:.1f}s  [dropped: {dropped_past} already-started, "
+                f"{dropped_future} beyond {hours_ahead}h]")
+            if dropped_samples:
+                logger.info(f"Filter drop samples: {dropped_samples}")
+            # Log the subjects/starts we're returning so we can see if the
+            # user's just-added meeting made it through.
+            for m in all_meetings:
+                logger.info(f"  UPCOMING: {m['subject']} @ {m['start']}")
+            return all_meetings
+
+        except Exception as e:
+            logger.error(f"Failed to read calendar: {e}", exc_info=True)
+            return []
 
     try:
-        ns = outlook.GetNamespace("MAPI")
-        now = datetime.datetime.now()
-        end = now + datetime.timedelta(hours=hours_ahead)
-        start_date = now.date()
-        end_date = end.date()
-
-        all_meetings: List[dict] = []
-        seen: set = set()
-        scanned_entry_ids: set = set()  # dedup folders across stores
-
-        dropped_past = 0
-        dropped_future = 0
-        dropped_samples: List[str] = []
-
-        def consume(folder):
-            nonlocal dropped_past, dropped_future
-            for m in _read_appointments_range(folder, start_date, end_date):
-                # Drop meetings whose END is in the past, not whose
-                # START is in the past. The old "start < now" filter
-                # made an in-progress meeting invisible the moment it
-                # started, which collapsed the Upcoming Meetings panel
-                # to empty while auto-record was actively capturing
-                # that meeting — the user saw "recording in progress"
-                # at the top with no entry in the panel below.
-                # AutoRecordService applies its own `start > now`
-                # filter for the "next event" hint, so keeping
-                # in-progress meetings here doesn't double-trigger
-                # anything.
-                if m["end"] < now:
-                    dropped_past += 1
-                    if len(dropped_samples) < 5:
-                        dropped_samples.append(
-                            f"PAST: {m['subject']} @ {m['start']} (now={now})")
-                    continue
-                if m["start"] > end:
-                    dropped_future += 1
-                    if len(dropped_samples) < 5:
-                        dropped_samples.append(
-                            f"FUTURE: {m['subject']} @ {m['start']} (end={end})")
-                    continue
-                key = (m["subject"], m["start"].isoformat())
-                if key not in seen:
-                    seen.add(key)
-                    all_meetings.append(m)
-
-        # Default calendar — fast path
-        default_entry_id = None
-        try:
-            default_cal = ns.GetDefaultFolder(OL_FOLDER_CALENDAR)
-            try:
-                default_entry_id = default_cal.EntryID
-            except Exception:
-                pass
-            logger.info(f"Reading default calendar: {default_cal.Name}")
-            consume(default_cal)
-            if default_entry_id:
-                scanned_entry_ids.add(default_entry_id)
-        except Exception as e:
-            logger.warning(f"Default calendar read failed: {e}")
-
-        # Other stores/shared calendars — ONE walk. Skip stores we don't
-        # care about (resource calendars, public folders) entirely so we
-        # don't pay the per-folder Exchange latency cost.
-        try:
-            for store in ns.Stores:
-                try:
-                    store_name = getattr(store, "DisplayName", "") or ""
-                    if _should_skip_store(store_name):
-                        logger.info(f"(skip store: {store_name})")
-                        continue
-                    logger.info(f"Walking store: {store_name}")
-                    root = store.GetRootFolder()
-                    for folder in root.Folders:
-                        _scan_folder_recursively_range(
-                            folder, start_date, end_date,
-                            seen, all_meetings, scanned_entry_ids)
-                except Exception as e:
-                    logger.warning(f"Store scan failed for '{store_name}': {e}")
-        except Exception as e:
-            logger.warning(f"Could not enumerate stores: {e}")
-
-        all_meetings.sort(key=lambda m: m["start"])
-        elapsed = time.time() - t0
-        logger.info(
-            f"Found {len(all_meetings)} upcoming meetings ({hours_ahead}h) "
-            f"in {elapsed:.1f}s  [dropped: {dropped_past} already-started, "
-            f"{dropped_future} beyond {hours_ahead}h]")
-        if dropped_samples:
-            logger.info(f"Filter drop samples: {dropped_samples}")
-        # Log the subjects/starts we're returning so we can see if the
-        # user's just-added meeting made it through.
-        for m in all_meetings:
-            logger.info(f"  UPCOMING: {m['subject']} @ {m['start']}")
-        _cache_put(cache_key, all_meetings)
-        return all_meetings
-
+        result = run_com(_fetch, timeout=120.0)
     except Exception as e:
-        logger.error(f"Failed to read calendar: {e}", exc_info=True)
-        return []
+        logger.error(f"get_upcoming_meetings: COM worker call failed: {e}")
+        result = []
     finally:
-        try:
-            pythoncom.CoUninitialize()
-        except Exception:
-            pass
         # Release any waiting requests — both on success and on error.
         with _CACHE_LOCK:
             _inflight.pop(cache_key, None)
@@ -743,6 +760,12 @@ def get_upcoming_meetings(hours_ahead: int = 168) -> List[dict]:
             _OUTLOOK_LOCK.release()
         except RuntimeError:
             pass  # not held on early-return paths
+
+    if result is None:
+        _cache_put(cache_key, [], ttl=30)  # also cache the "no Outlook" miss briefly
+        return []
+    _cache_put(cache_key, result)
+    return result
 
 
 def _scan_folder_recursively_range(
@@ -790,8 +813,7 @@ def _scan_folder_recursively_range(
 
 def is_outlook_available() -> bool:
     """Quick check — true if we can connect to Outlook COM."""
-    try:
-        pythoncom.CoInitialize()
+    def _check() -> bool:
         try:
             win32com.client.GetActiveObject("Outlook.Application")
             return True
@@ -801,11 +823,12 @@ def is_outlook_available() -> bool:
                 return True
             except Exception:
                 return False
-    finally:
-        try:
-            pythoncom.CoUninitialize()
-        except Exception:
-            pass
+
+    try:
+        return run_com(_check, timeout=30.0)
+    except Exception as e:
+        logger.warning(f"is_outlook_available: COM worker call failed: {e}")
+        return False
 
 
 def make_session_name(meeting: dict) -> str:
