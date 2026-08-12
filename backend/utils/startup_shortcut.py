@@ -19,6 +19,7 @@ import os
 import sys
 from pathlib import Path
 
+from utils.com_worker import run_com
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -66,29 +67,31 @@ def _win_enable() -> bool:
     lnk = _win_shortcut_path()
     lnk.parent.mkdir(parents=True, exist_ok=True)
 
+    # The .lnk write itself is COM (WScript.Shell). Route it through the
+    # process's single COM worker thread (utils/com_worker.py) instead of
+    # initializing/uninitializing COM on whatever thread happens to call
+    # this — see that module's docstring for why mixing a per-call
+    # apartment teardown with pycaw's implicit COM init on a shared
+    # thread pool caused STATUS_ACCESS_VIOLATION crashes. No COM object
+    # crosses back out of _create; the return value is a plain bool.
+    def _create() -> bool:
+        import win32com.client  # type: ignore
+        shell = win32com.client.Dispatch("WScript.Shell")
+        sc = shell.CreateShortcut(str(lnk))
+        sc.TargetPath = str(pyexe)
+        sc.Arguments = f'"{main_py}"'
+        sc.WorkingDirectory = str(app_root)
+        sc.Description = f"Launch {APP_NAME}"
+        if icon.exists():
+            sc.IconLocation = str(icon)
+        sc.Save()
+        return lnk.exists()
+
     try:
-        import pythoncom            # type: ignore
-        import win32com.client      # type: ignore
-        pythoncom.CoInitialize()
-        try:
-            shell = win32com.client.Dispatch("WScript.Shell")
-            sc = shell.CreateShortcut(str(lnk))
-            sc.TargetPath = str(pyexe)
-            sc.Arguments = f'"{main_py}"'
-            sc.WorkingDirectory = str(app_root)
-            sc.Description = f"Launch {APP_NAME}"
-            if icon.exists():
-                sc.IconLocation = str(icon)
-            sc.Save()
-        finally:
-            try:
-                pythoncom.CoUninitialize()
-            except Exception:
-                pass
-        if lnk.exists():
+        ok = run_com(_create)
+        if ok:
             logger.info(f"Startup shortcut installed: {lnk}")
-            return True
-        return False
+        return ok
     except Exception as e:
         logger.warning(f"Startup shortcut creation errored: {e}")
         return False

@@ -22,6 +22,7 @@ import asyncio
 import re
 from typing import Dict, List, Optional, Tuple
 
+from utils.com_worker import run_com
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -158,9 +159,13 @@ def draft_follow_up_emails(svc, session_id: str,
     Returns the number of drafts actually created.
 
     Runs synchronously — callers should invoke via asyncio.to_thread.
-    """
-    import win32com.client  # Windows-only; imported lazily
 
+    Only the actual Outlook COM work (creating + saving the draft items)
+    runs on the process's single COM worker thread (utils/com_worker.py)
+    — the Claude drafting calls above it are plain async network I/O and
+    have no business serializing behind Outlook. Nothing returned from
+    the run_com() closure is a COM object; `created` is a plain int.
+    """
     session_data = svc.session_svc.load(session_id)
     if not session_data:
         raise FileNotFoundError(f"Session not found: {session_id}")
@@ -174,13 +179,6 @@ def draft_follow_up_emails(svc, session_id: str,
     if not owners:
         logger.info(f"Follow-up drafts: no owner-attributed action items in session {session_id}")
         return 0
-
-    # Attach COM to the running Outlook instance (same pattern calendar_service uses)
-    try:
-        outlook = win32com.client.GetActiveObject("Outlook.Application")
-    except Exception:
-        outlook = win32com.client.Dispatch("Outlook.Application")
-    ns = outlook.GetNamespace("MAPI")
 
     meeting_title = session_data.get("display_name") or f"Session {session_id}"
     decisions_md = session_data.get("decisions") or ""
@@ -214,27 +212,41 @@ def draft_follow_up_emails(svc, session_id: str,
             continue
         drafted_bodies.append((owner, tasks, res))
 
-    created = 0
-    for owner, tasks, (subject, body) in drafted_bodies:
+    def _create_drafts() -> int:
+        import win32com.client  # Windows-only; imported lazily
+
+        # Attach COM to the running Outlook instance (same pattern
+        # calendar_service uses).
         try:
-            email_addr = _resolve_email(ns, owner)
-            mail = outlook.CreateItem(0)  # 0 = olMailItem
-            if email_addr:
-                mail.To = email_addr
-            else:
-                # Couldn't resolve — put the name in the To field so SA sees who
-                mail.To = owner
-            mail.Subject = subject
-            mail.HTMLBody = _body_to_html(body)
-            # Save to Drafts (not Send)
-            mail.Save()
-            created += 1
-            logger.info(
-                f"Follow-up draft created for {owner} "
-                f"({email_addr or 'unresolved'})"
-            )
-        except Exception as e:
-            logger.warning(f"Could not create draft for {owner}: {e}")
+            outlook = win32com.client.GetActiveObject("Outlook.Application")
+        except Exception:
+            outlook = win32com.client.Dispatch("Outlook.Application")
+        ns = outlook.GetNamespace("MAPI")
+
+        created = 0
+        for owner, tasks, (subject, body) in drafted_bodies:
+            try:
+                email_addr = _resolve_email(ns, owner)
+                mail = outlook.CreateItem(0)  # 0 = olMailItem
+                if email_addr:
+                    mail.To = email_addr
+                else:
+                    # Couldn't resolve — put the name in the To field so SA sees who
+                    mail.To = owner
+                mail.Subject = subject
+                mail.HTMLBody = _body_to_html(body)
+                # Save to Drafts (not Send)
+                mail.Save()
+                created += 1
+                logger.info(
+                    f"Follow-up draft created for {owner} "
+                    f"({email_addr or 'unresolved'})"
+                )
+            except Exception as e:
+                logger.warning(f"Could not create draft for {owner}: {e}")
+        return created
+
+    created = run_com(_create_drafts, timeout=90.0)
 
     logger.info(
         f"Follow-up drafts: created {created} of {len(owners)} drafts "

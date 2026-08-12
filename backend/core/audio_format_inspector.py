@@ -32,6 +32,7 @@ from __future__ import annotations
 import sys
 from typing import Optional
 
+from utils.com_worker import run_com
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -85,63 +86,78 @@ def get_device_mix_format(
     if not target:
         return None
 
-    try:
-        from pycaw.pycaw import AudioUtilities  # type: ignore
-    except Exception as e:
-        logger.warning(f"pycaw import failed at call time: {e!r}")
-        return None
-
-    # AudioUtilities.GetAllDevices() walks render + capture endpoints in
-    # one shot and returns objects exposing FriendlyName + the device
-    # IMMDevice we can query for the mix format.
-    try:
-        all_devices = AudioUtilities.GetAllDevices()
-    except Exception as e:
-        logger.warning(f"WASAPI device enumeration failed: {e!r}")
-        return None
-
-    # We don't filter by flow direction here — pycaw's AudioDevice
-    # doesn't reliably expose the EDataFlow, and a friendly-name match
-    # against the same physical endpoint is unambiguous in practice
-    # (mics aren't named "Speakers (...)" and vice versa). If a future
-    # collision becomes an issue we can switch to MMDeviceEnumerator's
-    # EnumAudioEndpoints with eRender / eCapture explicitly.
-    _ = (kind or "").lower()  # documents the param; not used for filter
-    for dev in all_devices or []:
+    # Everything below touches comtypes/pycaw COM proxies. Run it on the
+    # process's single COM worker thread (utils/com_worker.py) so pycaw's
+    # implicit CoInitialize never lands on a pool thread that Outlook's
+    # COM code (services/_calendar_outlook.py) might later tear down —
+    # that combination is what caused the STATUS_ACCESS_VIOLATION crashes.
+    # Only plain data (a dict or None) is returned; no comtypes/pycaw
+    # object may cross back out of this function.
+    def _query() -> Optional[dict]:
         try:
-            name = getattr(dev, "FriendlyName", "") or ""
-        except Exception:
-            continue
-        if _canonical_device_name(name) != target:
-            continue
-        # pycaw's AudioDevice carries an IMMDevice we can Activate
-        # IAudioClient on. The mix format is its WAVEFORMATEX.
-        try:
-            from ctypes import POINTER, cast
-            from comtypes import GUID
-            try:
-                from pycaw.api.audioclient import IAudioClient
-                from pycaw.api.audioclient.depend.structures import WAVEFORMATEX  # noqa: F401
-            except Exception:
-                # Older pycaw layout
-                from pycaw.pycaw import IAudioClient  # type: ignore
-            IID_IAudioClient = GUID("{1CB9AD4C-DBFA-4c32-B178-C2F568A703B2}")
-            client = dev._dev.Activate(IID_IAudioClient, 0x17, None)  # CLSCTX_ALL
-            audio_client = cast(client, POINTER(IAudioClient))
-            mix_format_ptr = audio_client.GetMixFormat()
-            wf = mix_format_ptr.contents
-            return {
-                "sample_rate": int(wf.nSamplesPerSec),
-                "bits_per_sample": int(wf.wBitsPerSample),
-                "channels": int(wf.nChannels),
-            }
+            from pycaw.pycaw import AudioUtilities  # type: ignore
         except Exception as e:
-            logger.warning(
-                f"GetMixFormat failed for {name!r}: {e!r}")
+            logger.warning(f"pycaw import failed at call time: {e!r}")
             return None
 
-    logger.info(f"No WASAPI endpoint matched {device_name!r} ({kind})")
-    return None
+        # AudioUtilities.GetAllDevices() walks render + capture endpoints
+        # in one shot and returns objects exposing FriendlyName + the
+        # device IMMDevice we can query for the mix format.
+        try:
+            all_devices = AudioUtilities.GetAllDevices()
+        except Exception as e:
+            logger.warning(f"WASAPI device enumeration failed: {e!r}")
+            return None
+
+        # We don't filter by flow direction here — pycaw's AudioDevice
+        # doesn't reliably expose the EDataFlow, and a friendly-name
+        # match against the same physical endpoint is unambiguous in
+        # practice (mics aren't named "Speakers (...)" and vice versa).
+        # If a future collision becomes an issue we can switch to
+        # MMDeviceEnumerator's EnumAudioEndpoints with eRender / eCapture
+        # explicitly.
+        _ = (kind or "").lower()  # documents the param; not used for filter
+        for dev in all_devices or []:
+            try:
+                name = getattr(dev, "FriendlyName", "") or ""
+            except Exception:
+                continue
+            if _canonical_device_name(name) != target:
+                continue
+            # pycaw's AudioDevice carries an IMMDevice we can Activate
+            # IAudioClient on. The mix format is its WAVEFORMATEX.
+            try:
+                from ctypes import POINTER, cast
+                from comtypes import GUID
+                try:
+                    from pycaw.api.audioclient import IAudioClient
+                    from pycaw.api.audioclient.depend.structures import WAVEFORMATEX  # noqa: F401
+                except Exception:
+                    # Older pycaw layout
+                    from pycaw.pycaw import IAudioClient  # type: ignore
+                IID_IAudioClient = GUID("{1CB9AD4C-DBFA-4c32-B178-C2F568A703B2}")
+                client = dev._dev.Activate(IID_IAudioClient, 0x17, None)  # CLSCTX_ALL
+                audio_client = cast(client, POINTER(IAudioClient))
+                mix_format_ptr = audio_client.GetMixFormat()
+                wf = mix_format_ptr.contents
+                return {
+                    "sample_rate": int(wf.nSamplesPerSec),
+                    "bits_per_sample": int(wf.wBitsPerSample),
+                    "channels": int(wf.nChannels),
+                }
+            except Exception as e:
+                logger.warning(
+                    f"GetMixFormat failed for {name!r}: {e!r}")
+                return None
+
+        logger.info(f"No WASAPI endpoint matched {device_name!r} ({kind})")
+        return None
+
+    try:
+        return run_com(_query)
+    except Exception as e:
+        logger.warning(f"COM worker call failed for {device_name!r}: {e!r}")
+        return None
 
 
 def _canonical_device_name(name: str) -> str:
