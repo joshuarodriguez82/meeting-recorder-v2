@@ -664,6 +664,16 @@ async def _problem_unhandled_handler(request: Request, exc: Exception):
 class Services:
     def __init__(self):
         self.settings: Optional[Settings] = None
+        # False until load_settings() has built EVERY service below.
+        # `self.settings` is assigned on the first line of that method,
+        # so it cannot be used as the "already initialised" guard: any
+        # exception partway through (see the UnboundLocalError that
+        # broke v2.26.0) left settings set, every later service None,
+        # and the guard skipping re-initialisation forever — a backend
+        # that answered /settings but 500'd on /clients/config and
+        # could not record. Gating on completion instead means a failed
+        # init is retried on the next call rather than being permanent.
+        self._services_ready: bool = False
         self.session_svc: Optional[SessionService] = None
         self.export_svc: Optional[ExportService] = None
         self.client_cfg_svc: Optional[ClientConfigService] = None
@@ -805,7 +815,7 @@ class Services:
             logger.info(f"[rec] {display}")
 
     def load_settings(self) -> Settings:
-        if self.settings is None:
+        if self.settings is None or not self._services_ready:
             self.settings = Settings.from_env()
             self.session_svc = SessionService(
                 self.settings.recordings_dir,
@@ -841,7 +851,18 @@ class Services:
             # change) copies the file from the legacy USER_DATA_DIR
             # location, leaving the old copy as a fallback in case the
             # user downgrades.
-            from config.settings import USER_DATA_DIR
+            #
+            # USER_DATA_DIR is imported at MODULE level (see the top of
+            # this file). Do NOT re-import it here: a function-local
+            # `from config.settings import USER_DATA_DIR` makes the name
+            # local to this whole method, so every reference ABOVE that
+            # line raises UnboundLocalError. That is exactly what broke
+            # v2.26.0 — the session-index `index_db_path` argument added
+            # near the top of this method referenced USER_DATA_DIR, blew
+            # up before `client_cfg_svc` was ever assigned, and because
+            # `self.settings` is set on the first line the `is None`
+            # guard then skipped re-initialisation forever. Half-built
+            # Services, no retry, recording impossible.
             from pathlib import Path as _Path
             import shutil as _shutil
             _recordings_dir = _Path(self.settings.recordings_dir)
@@ -1000,6 +1021,9 @@ class Services:
             # reports False and the endpoint emits a clear "not configured"
             # message instead of crashing.
             self.qa_svc = QAService(self.search_svc, self.summarizer)
+            # Only NOW is the object fully built. Set last, on
+            # purpose — see _services_ready in __init__.
+            self._services_ready = True
         return self.settings
 
     def ensure_models_loaded(self):
