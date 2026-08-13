@@ -458,6 +458,26 @@ export interface RecordingStatus {
   // read, so observing a non-null value means "show this to the user
   // once and move on."
   auto_record_skip_reason?: string | null;
+  // ── Capture-confidence meters ────────────────────────────────────
+  // Live per-stream level (0.0-1.0, dB-mapped — see backend
+  // recording_service._rms_to_level) and liveness state, so the UI can
+  // show the truth about whether audio is actually being captured
+  // instead of relying on "the live transcript is still producing
+  // text" as an indirect proxy. All optional: an older backend simply
+  // omits them and the meters degrade to not-rendered.
+  mic_level?: number;
+  system_level?: number;
+  // "flowing" = chunks arriving with real audio recently. "silent" =
+  // chunks arriving but quiet (muted mic, or only the far end talking —
+  // completely normal, NOT a problem). "dead" = no chunks arriving at
+  // all. system_state is null when this recording has no system-audio
+  // device configured (not a failure, just not applicable).
+  mic_state?: "flowing" | "silent" | "dead" | null;
+  system_state?: "flowing" | "silent" | "dead" | null;
+  // Set only when a stream has been genuinely dead long enough to be a
+  // real problem — never for mere silence. See the backend's "silence
+  // is not failure" guard.
+  capture_warning?: string | null;
 }
 
 export interface SessionFull {

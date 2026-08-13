@@ -70,6 +70,13 @@ export interface RecordingStatusSnapshot {
 }
 
 const POLL_INTERVAL_MS = 1000;
+// Capture-confidence meters (record-view.tsx) need a livelier feed than
+// the 1s idle cadence above to read as a smooth, trustworthy "yes,
+// audio is arriving right now" instrument rather than a laggy dial.
+// Raised ONLY while a recording is actually in progress — idle polling
+// (sidebar badge, readiness panel) stays at the original 1s so we don't
+// hammer the backend for no reason when nothing is being captured.
+const RECORDING_POLL_INTERVAL_MS = 300;
 
 let snapshot: RecordingStatusSnapshot = {
   status: null,
@@ -88,7 +95,21 @@ const SERVER_SNAPSHOT: RecordingStatusSnapshot = {
 
 const subscribers = new Set<() => void>();
 let timer: ReturnType<typeof setInterval> | null = null;
+let timerIntervalMs: number = POLL_INTERVAL_MS;
 let inFlight = false;
+
+/**
+ * (Re)start the poll interval at the given cadence, but only if it
+ * actually differs from what's running — called after every poll, so
+ * this must be a no-op in the common case (interval unchanged) to
+ * avoid tearing down and rebuilding a timer every second.
+ */
+function ensurePollInterval(ms: number) {
+  if (timer === null || timerIntervalMs === ms) return;
+  clearInterval(timer);
+  timerIntervalMs = ms;
+  timer = setInterval(() => { void poll(); }, timerIntervalMs);
+}
 
 /**
  * Last value we pushed into the Tauri shell's RECORDING_ACTIVE flag,
@@ -136,6 +157,9 @@ async function poll() {
     // recording is running.
     reconcileShellFlag(!!status.is_recording);
     snapshot = { status, reachable: true, consecutiveFailures: 0 };
+    ensurePollInterval(
+      status.is_recording ? RECORDING_POLL_INTERVAL_MS : POLL_INTERVAL_MS
+    );
   } catch {
     // Backend unreachable — almost always a watchdog respawn. Keep the
     // last known status: a real recording must NOT be cleared just
@@ -155,7 +179,8 @@ function subscribe(cb: () => void): () => void {
   subscribers.add(cb);
   if (timer === null) {
     void poll();
-    timer = setInterval(() => { void poll(); }, POLL_INTERVAL_MS);
+    timerIntervalMs = POLL_INTERVAL_MS;
+    timer = setInterval(() => { void poll(); }, timerIntervalMs);
   }
   return () => {
     subscribers.delete(cb);
