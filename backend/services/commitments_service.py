@@ -13,11 +13,11 @@ metadata to follow up across sessions:
     "what I owe them" filtering)
   - STATUS (awaiting / delivered / overdue / dismissed)
 
-Storage: per-session sidecar JSON next to the session pickle so that
-deleting a session naturally cleans up its commitments. Aggregated
-into a flat list at query time across all session files. Volume here
-is small enough — a busy SA might log a few thousand commitments over
-years — that linear scan is fine.
+Storage: per-session sidecar JSON next to the session's other sidecar
+files so that deleting a session naturally cleans up its commitments.
+Aggregated into a flat list at query time across all session files.
+Volume here is small enough — a busy SA might log a few thousand
+commitments over years — that linear scan is fine.
 
 Detection: commitments are a SUPERSET of action items. We
 intentionally re-extract from the raw transcript with a richer prompt

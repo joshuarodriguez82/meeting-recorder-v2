@@ -42,8 +42,9 @@ TARGET_CHUNK_WORDS = 400
 # bad cosine score. 50 words ≈ 8 seconds.
 OVERLAP_WORDS = 50
 
-# Hugging Face model id (used as a tag in the persisted pickle so we can
-# detect when the user switches models and ignore stale embeddings).
+# Hugging Face model id (used as a tag in the persisted embeddings
+# sidecar so we can detect when the user switches models and ignore
+# stale embeddings).
 MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
 
 _MODEL_LOCK = threading.Lock()

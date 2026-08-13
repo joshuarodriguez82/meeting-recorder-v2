@@ -531,16 +531,42 @@ class Settings:
     ) -> None:
         """Write settings back to the .env file.
 
-        Secrets (Anthropic / HF / OpenAI keys) are mirrored into the OS
-        keychain when available, but ALSO always kept in config.env as
-        the durable source of truth. Earlier builds blanked the env line
-        on a successful keychain write; that lost the key whenever the
-        keychain entry later became unreadable — e.g. an unsigned macOS
-        app rebuilt with a new ad-hoc signature, or a Windows Credential
-        Manager entry written under a different context — producing a
-        hard "401 invalid x-api-key" with no fallback. The plaintext
-        fallback is the lesser evil versus silently losing the key on
-        every upgrade.
+        Secrets (Anthropic / HF / OpenAI / LIVE_* keys) are mirrored into
+        the OS keychain when available, but ALSO always kept in config.env
+        as the durable source of truth. Earlier builds blanked the env
+        line on a successful keychain write; that lost the key whenever
+        the keychain entry later became unreadable — e.g. an unsigned
+        macOS app rebuilt with a new ad-hoc signature, or a Windows
+        Credential Manager entry written under a different context —
+        producing a hard "401 invalid x-api-key" with no fallback. The
+        plaintext fallback is the lesser evil versus silently losing the
+        key on every upgrade.
+
+        REVISITED 2026-08-13 (security review item 1): a later attempt
+        replaced this with keychain-as-sole-copy, blanking config.env
+        only after an immediate `set_secret()` + `get_secret()` read-back
+        confirmed the write actually persisted. That guards against a
+        keychain call that lies about success, but it CANNOT guard
+        against the documented failure mode above — the entry becoming
+        unreadable LATER, on a subsequent upgrade/re-sign, which is
+        exactly what a read-back taken at save time can never observe.
+        For this app specifically that risk is not theoretical: the
+        macOS build is unsigned (see AGENTS.md), the user updates
+        frequently (four releases shipped in a single day is not
+        unusual), and runs both Windows and macOS. config.env lives
+        under %LOCALAPPDATA% / ~/Library/Application Support — it is
+        NOT cloud-synced — so the plaintext copy is local-only and does
+        not enlarge the exposure beyond "readable by anything already
+        running as this OS user," which is the keychain's own threat
+        model too. Given that, silently losing the user's API keys on
+        an ordinary upgrade is worse than keeping a local-only plaintext
+        copy, and the mirror-not-replace behavior below stands.
+        A keychain-only design could be revisited again, but only once
+        two things exist: (a) load-time key-recovery UX — detect an
+        unreadable/missing keychain entry and prompt the user to
+        re-enter the key, instead of a bare 401 — and (b) a signed and
+        notarized macOS build, so entries stop being tied to a
+        per-build ad-hoc signing identity in the first place.
         """
         # Mirror secrets into the keychain best-effort. We no longer
         # blank the file on success — config.env stays authoritative so
@@ -549,9 +575,13 @@ class Settings:
         _secrets.set_secret("ANTHROPIC_API_KEY", anthropic_api_key)
         _secrets.set_secret("HF_TOKEN", hf_token)
         _secrets.set_secret("OPENAI_API_KEY", openai_api_key)
+        _secrets.set_secret("LIVE_OPENAI_API_KEY", live_openai_api_key)
+        _secrets.set_secret("LIVE_ANTHROPIC_API_KEY", live_anthropic_api_key)
         env_anthropic = anthropic_api_key
         env_hf        = hf_token
         env_openai    = openai_api_key
+        env_live_openai_api_key    = live_openai_api_key
+        env_live_anthropic_api_key = live_anthropic_api_key
 
         content = (
             f"ANTHROPIC_API_KEY={env_anthropic}\n"
@@ -582,9 +612,9 @@ class Settings:
             f"LIVE_COPILOT_ENABLED={'true' if live_copilot_enabled else 'false'}\n"
             f"LIVE_AI_PROVIDER={live_ai_provider}\n"
             f"LIVE_CLAUDE_MODEL={live_claude_model}\n"
-            f"LIVE_OPENAI_API_KEY={live_openai_api_key}\n"
+            f"LIVE_OPENAI_API_KEY={env_live_openai_api_key}\n"
             f"LIVE_OPENAI_BASE_URL={live_openai_base_url}\n"
-            f"LIVE_ANTHROPIC_API_KEY={live_anthropic_api_key}\n"
+            f"LIVE_ANTHROPIC_API_KEY={env_live_anthropic_api_key}\n"
             f"LIVE_COPILOT_MODE={live_copilot_mode}\n"
             f"LIVE_COPILOT_MEETING_TYPE={live_copilot_meeting_type}\n"
             f"LIVE_COPILOT_WIDE_INTERVAL_SEC={live_copilot_wide_interval_sec}\n"

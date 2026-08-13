@@ -1,19 +1,35 @@
 """
 Semantic search across all sessions.
 
-Each session's transcript chunks + their embeddings live in a sibling
-pickle file next to the session JSON:
+Each session's transcript chunks + their embeddings live in a pair of
+sibling files next to the session JSON:
 
   recordings/session_<id>.json                 (existing)
-  recordings/session_<id>.embeddings.pkl       (new)
+  recordings/session_<id>.embeddings.npz       (vectors)
+  recordings/session_<id>.embeddings.json      (everything else)
 
-The pickle holds:
+The pair together holds the same information the old pickle sidecar
+did:
   {
     "model_id": str,                # see core.embeddings.MODEL_ID
     "session_id": str,
     "chunks": [{"start_s", "end_s", "text"}, ...],
     "embeddings": np.ndarray (N, dim) float32, L2-normalized
   }
+(embeddings live in the .npz; everything else in the .json — see
+utils/embedding_store.py).
+
+Security note: this used to be a single pickle file, and pickle.loads()
+on an attacker-controlled file is arbitrary code execution. These
+sidecars are not purely local — the recordings directory is synced
+across machines via Google Drive / OneDrive, with an archive folder
+explicitly configured for cross-machine replication — so a compromised
+cloud account or a bad sync could have handed an attacker RCE with no
+local access at all. See utils/embedding_store.py for the full
+rationale. Legacy `.embeddings.pkl` files from before this migration
+are never read, not even to migrate them — encountering one is treated
+identically to "not indexed yet" and the index is rebuilt from the
+session transcript instead.
 
 SearchService keeps a flat in-memory matrix lazy-loaded from those files
 on first query. Query is one numpy dot product over the whole matrix —
@@ -22,13 +38,14 @@ will ever produce on their laptop. invalidate() drops the cache so
 the next query picks up newly-indexed sessions.
 
 LMA gap analysis 2026-08-07: the same matrix now also loads per-client
-document chunks from <recordings_dir>/doc_index/*.pkl (see
-services/document_service.py) — one pickle per indexed document, same
-model_id/embeddings conventions, so a document chunk and a transcript
-chunk are directly comparable by cosine similarity in one dot product.
-Each metadata row carries "source": "session" | "document" so results
-and the client filter can tell them apart; session-hit result dicts
-keep every existing field unchanged (the frontend depends on them).
+document chunks from <recordings_dir>/doc_index/*.npz (see
+services/document_service.py) — one npz+json pair per indexed document,
+same model_id/embeddings conventions, so a document chunk and a
+transcript chunk are directly comparable by cosine similarity in one
+dot product. Each metadata row carries "source": "session" | "document"
+so results and the client filter can tell them apart; session-hit
+result dicts keep every existing field unchanged (the frontend depends
+on them).
 
 When a user runs a session through /process, recording_service triggers
 index_session() to embed + persist that session's chunks. Old sessions
@@ -38,25 +55,36 @@ processed before this feature shipped need a one-time backfill
 
 from __future__ import annotations
 
-import pickle
 import threading
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
 
+from utils.embedding_store import delete_payload, load_payload, save_payload
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-def _embeddings_path(recordings_dir: Path, session_id: str) -> Path:
+def _embeddings_npz_path(recordings_dir: Path, session_id: str) -> Path:
+    return recordings_dir / f"session_{session_id}.embeddings.npz"
+
+
+def _embeddings_json_path(recordings_dir: Path, session_id: str) -> Path:
+    return recordings_dir / f"session_{session_id}.embeddings.json"
+
+
+def _embeddings_legacy_pkl_path(recordings_dir: Path, session_id: str) -> Path:
+    """Pre-migration pickle sidecar. NEVER loaded — see module docstring
+    and utils/embedding_store.py. Only ever checked for existence (to
+    decide "needs backfill") or unlinked (cleanup)."""
     return recordings_dir / f"session_{session_id}.embeddings.pkl"
 
 
 class SearchService:
     """In-memory semantic search index built lazily from per-session
-    pickle sidecar files."""
+    .npz/.json sidecar file pairs."""
 
     def __init__(self, session_service):
         self._session_service = session_service
@@ -80,7 +108,11 @@ class SearchService:
 
     def index_status(self) -> dict:
         """How many sessions are currently in the index, plus the total
-        session count so the UI can show a backfill progress hint."""
+        session count so the UI can show a backfill progress hint.
+
+        A session with only a legacy .embeddings.pkl (no .npz yet)
+        counts as NOT indexed — it needs a rebuild, same as a session
+        that was never indexed at all."""
         try:
             recordings_dir = self._session_service.recordings_dir
         except Exception:
@@ -90,7 +122,7 @@ class SearchService:
         sessions = self._session_service.list_sessions()
         indexed = 0
         for s in sessions:
-            if _embeddings_path(recordings_dir, s["session_id"]).exists():
+            if _embeddings_npz_path(recordings_dir, s["session_id"]).exists():
                 indexed += 1
         from core.embeddings import is_available
         return {
@@ -124,41 +156,44 @@ class SearchService:
             return False
         embeddings = embed_chunks(chunks)
         recordings_dir = self._session_service.recordings_dir
-        out_path = _embeddings_path(recordings_dir, session_id)
-        payload = {
+        npz_path = _embeddings_npz_path(recordings_dir, session_id)
+        json_path = _embeddings_json_path(recordings_dir, session_id)
+        meta = {
             "model_id": MODEL_ID,
             "session_id": session_id,
             "chunks": [c.to_dict() for c in chunks],
-            "embeddings": embeddings,
         }
-        # Atomic-ish write: tmp then rename. A torn pickle file is
-        # noisy at load time (we'd skip it with a warning), but the
-        # next index_session run rewrites it cleanly.
-        tmp_path = out_path.with_suffix(".pkl.tmp")
-        tmp_path.write_bytes(pickle.dumps(payload, protocol=4))
-        tmp_path.replace(out_path)
+        save_payload(npz_path, json_path, embeddings=embeddings, meta=meta)
+        # This session is freshly rebuilt from source — any legacy
+        # pickle sidecar for it is now redundant AND a standing load
+        # hazard if some future code path ever regressed to reading it.
+        # Clean it up rather than leave it lying around.
+        legacy = _embeddings_legacy_pkl_path(recordings_dir, session_id)
+        if legacy.exists():
+            delete_payload(legacy)
+            logger.info(f"Removed legacy pickle sidecar {legacy.name}")
         self.invalidate()
         logger.info(
             f"Indexed session {session_id}: {len(chunks)} chunks "
-            f"× {embeddings.shape[1]}-dim → {out_path.name}")
+            f"× {embeddings.shape[1]}-dim → {npz_path.name}")
         return True
 
     def delete_session_index(self, session_id: str) -> bool:
-        """Remove a session's embedding file. Called by SessionService
-        when a session is deleted."""
+        """Remove a session's embedding sidecar (new format and any
+        leftover legacy pickle). Called by SessionService when a
+        session is deleted."""
         try:
             recordings_dir = self._session_service.recordings_dir
         except Exception:
             return False
-        path = _embeddings_path(recordings_dir, session_id)
-        if path.exists():
-            try:
-                path.unlink()
-                self.invalidate()
-                return True
-            except OSError as e:
-                logger.warning(f"Could not delete {path}: {e}")
-        return False
+        removed = delete_payload(
+            _embeddings_npz_path(recordings_dir, session_id),
+            _embeddings_json_path(recordings_dir, session_id),
+            _embeddings_legacy_pkl_path(recordings_dir, session_id),
+        )
+        if removed:
+            self.invalidate()
+        return removed
 
     # ── Query ───────────────────────────────────────────────────────
 
@@ -264,8 +299,16 @@ class SearchService:
     # ── Internals ───────────────────────────────────────────────────
 
     def _load_index(self) -> None:
-        """Load every per-session embedding pickle, plus every per-document
-        doc_index pickle, into one flat matrix."""
+        """Load every per-session embedding sidecar, plus every
+        per-document doc_index sidecar, into one flat matrix.
+
+        Legacy .pkl sidecars (pre-migration) are never loaded — they're
+        logged and skipped so the gap is visible, and best-effort
+        cleaned up so they stop being a standing hazard. A session or
+        document only reachable via a legacy pickle is effectively
+        unindexed until something re-runs index_session()/index_folder()
+        to rebuild it from source.
+        """
         if self._loaded:
             return
         with self._lock:
@@ -280,14 +323,28 @@ class SearchService:
                 self._loaded = True
                 return
 
-            files = sorted(recordings_dir.glob("session_*.embeddings.pkl"))
             all_vectors: List[np.ndarray] = []
             all_meta: List[dict] = []
-            for f in files:
+
+            legacy_files = sorted(
+                recordings_dir.glob("session_*.embeddings.pkl"))
+            for legacy in legacy_files:
+                logger.warning(
+                    f"Ignoring legacy pickle sidecar {legacy.name} "
+                    f"(never loaded — needs re-indexing from source)")
                 try:
-                    payload = pickle.loads(f.read_bytes())
-                except Exception as e:
-                    logger.warning(f"Could not read {f.name}: {e}")
+                    legacy.unlink()
+                except OSError as e:
+                    logger.warning(f"Could not remove {legacy}: {e}")
+
+            files = sorted(recordings_dir.glob("session_*.embeddings.npz"))
+            for f in files:
+                # "session_<id>.embeddings.npz" -> "session_<id>.embeddings.json"
+                # (with_suffix only touches the final suffix).
+                json_path = f.with_suffix(".json")
+                payload = load_payload(f, json_path)
+                if payload is None:
+                    logger.warning(f"Could not read {f.name} — skipping")
                     continue
                 if payload.get("model_id") != _model_id():
                     # Stale embedding from a different model — silently
@@ -316,11 +373,21 @@ class SearchService:
             doc_count = 0
             doc_dir = recordings_dir / "doc_index"
             if doc_dir.is_dir():
-                for f in sorted(doc_dir.glob("doc_*.pkl")):
+                legacy_doc_files = sorted(doc_dir.glob("doc_*.pkl"))
+                for legacy in legacy_doc_files:
+                    logger.warning(
+                        f"Ignoring legacy pickle sidecar {legacy.name} "
+                        f"(never loaded — needs re-indexing from source)")
                     try:
-                        payload = pickle.loads(f.read_bytes())
-                    except Exception as e:
-                        logger.warning(f"Could not read {f.name}: {e}")
+                        legacy.unlink()
+                    except OSError as e:
+                        logger.warning(f"Could not remove {legacy}: {e}")
+
+                for f in sorted(doc_dir.glob("doc_*.npz")):
+                    json_path = f.with_suffix(".json")
+                    payload = load_payload(f, json_path)
+                    if payload is None:
+                        logger.warning(f"Could not read {f.name} — skipping")
                         continue
                     if payload.get("model_id") != _model_id():
                         continue
@@ -371,8 +438,8 @@ def _model_id() -> str:
 
 
 def _session_id_from_filename(path: Path) -> str:
-    # session_<ID>.embeddings.pkl  →  <ID>
+    # session_<ID>.embeddings.npz  →  <ID>
     name = path.name
-    if name.startswith("session_") and name.endswith(".embeddings.pkl"):
-        return name[len("session_"):-len(".embeddings.pkl")]
+    if name.startswith("session_") and name.endswith(".embeddings.npz"):
+        return name[len("session_"):-len(".embeddings.npz")]
     return ""

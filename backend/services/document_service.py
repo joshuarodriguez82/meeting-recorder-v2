@@ -5,8 +5,9 @@ A client can be pointed at a folder of existing documents (SOWs,
 discovery notes, requirements docs). This module extracts plain text
 from each supported file, chunks it, embeds the chunks with the SAME
 local model the transcript search uses (see core.embeddings), and
-persists one pickle per document so SearchService can fold them into
-the same in-memory search matrix as session transcript chunks.
+persists one .npz/.json sidecar pair per document so SearchService can
+fold them into the same in-memory search matrix as session transcript
+chunks.
 
 LMA gap analysis 2026-08-07: three separate field reports trace back to
 silent skips — a file that couldn't be processed just vanished from the
@@ -17,7 +18,8 @@ extraction) rather than raising or disappearing. extract_text() never
 raises for a bad *input* file; it only raises for genuine programming
 errors.
 
-Pickle schema (one file per document, <recordings_dir>/doc_index/):
+Sidecar schema (one .npz + one .json per document, under
+<recordings_dir>/doc_index/):
     {
         "model_id": str,             # see core.embeddings.MODEL_ID
         "doc_path": str,             # resolved absolute path
@@ -27,23 +29,37 @@ Pickle schema (one file per document, <recordings_dir>/doc_index/):
         "chunks": [{"text": str}, ...],
         "embeddings": np.ndarray,    # (N, dim) float32, L2-normalized
     }
+(embeddings live in the .npz; everything else in the .json — see
+utils/embedding_store.py.)
 
-This intentionally mirrors the session embeddings pickle
+This intentionally mirrors the session embeddings sidecar
 (services/search_service.py) field-for-field where the concepts
 overlap (model_id, chunks, embeddings) so SearchService can merge both
 into one flat matrix with minimal branching.
+
+Security note: this used to be a single pickle file per document, and
+pickle.loads() on an attacker-controlled file is arbitrary code
+execution. doc_index/ lives inside the recordings directory, which is
+synced across machines via Google Drive / OneDrive — so these files are
+not purely local, and a compromised cloud account or bad sync could
+have handed an attacker RCE with no local access at all. See
+utils/embedding_store.py for the full rationale. Legacy `doc_*.pkl`
+files from before this migration are never read, not even to migrate
+them — index_folder() treats one as "not indexed" and rebuilds the
+document's chunks and embeddings straight from the source file.
 """
 
 from __future__ import annotations
 
 import hashlib
-import pickle
+import json
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
 from core.embeddings import MODEL_ID
+from utils.embedding_store import delete_payload, save_payload
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -68,12 +84,26 @@ def _doc_index_dir(recordings_dir) -> Path:
     return Path(recordings_dir) / DOC_INDEX_SUBDIR
 
 
-def _doc_pickle_path(recordings_dir, doc_path: Path) -> Path:
-    """doc_<sha1(resolved path)>.pkl — stable across reindex runs (same
-    file always hashes to the same pickle name), and collision-safe
-    across clients/folders since the hash is over the full path."""
-    digest = hashlib.sha1(str(doc_path.resolve()).encode("utf-8")).hexdigest()
-    return _doc_index_dir(recordings_dir) / f"doc_{digest}.pkl"
+def _doc_digest(doc_path: Path) -> str:
+    return hashlib.sha1(str(doc_path.resolve()).encode("utf-8")).hexdigest()
+
+
+def _doc_npz_path(recordings_dir, doc_path: Path) -> Path:
+    """doc_<sha1(resolved path)>.npz — stable across reindex runs (same
+    file always hashes to the same name), and collision-safe across
+    clients/folders since the hash is over the full path."""
+    return _doc_index_dir(recordings_dir) / f"doc_{_doc_digest(doc_path)}.npz"
+
+
+def _doc_json_path(recordings_dir, doc_path: Path) -> Path:
+    return _doc_index_dir(recordings_dir) / f"doc_{_doc_digest(doc_path)}.json"
+
+
+def _doc_legacy_pkl_path(recordings_dir, doc_path: Path) -> Path:
+    """Pre-migration pickle sidecar for this document. NEVER loaded —
+    see module docstring and utils/embedding_store.py. Only ever checked
+    for existence or unlinked."""
+    return _doc_index_dir(recordings_dir) / f"doc_{_doc_digest(doc_path)}.pkl"
 
 
 def _iter_candidate_files(folder: Path):
@@ -227,8 +257,8 @@ def chunk_text(
 def _normalize_rows(matrix: np.ndarray) -> np.ndarray:
     """L2-normalize each row, defensively. embed_fn is caller-supplied
     (tests inject a fake) — normalizing here, not just trusting the
-    caller, is what keeps the persisted pickle matching the session
-    embeddings pickle's "L2-normalized float32" convention exactly, so
+    caller, is what keeps the persisted sidecar matching the session
+    embeddings sidecar's "L2-normalized float32" convention exactly, so
     SearchService can dot-product session and document vectors in the
     same matrix without a per-source special case."""
     matrix = np.asarray(matrix, dtype=np.float32)
@@ -246,7 +276,7 @@ def index_folder(
     recordings_dir,
 ) -> dict:
     """Extract, chunk, and embed every supported document under
-    `folder`, persisting one pickle per document under
+    `folder`, persisting one .npz/.json sidecar pair per document under
     <recordings_dir>/doc_index/.
 
     embed_fn is injected (callable: List[str] -> ndarray) so callers
@@ -254,9 +284,13 @@ def index_folder(
     can pass a fake embedder — this module never imports
     sentence-transformers itself.
 
-    Re-embedding is skipped ("unchanged") when the existing pickle is
+    Re-embedding is skipped ("unchanged") when the existing sidecar is
     newer than the source file's mtime — a reindex of an unchanged
-    folder should be near-instant.
+    folder should be near-instant. A document reachable only through a
+    legacy .pkl sidecar (pre-migration, never loaded — see module
+    docstring) is NOT "unchanged": it has no readable .npz/.json pair,
+    so it's rebuilt from the source file same as an unindexed document,
+    and the stale .pkl is removed once the rebuild succeeds.
 
     Returns {"indexed": int, "unchanged": int,
              "skipped": [{"file": str, "reason": str}, ...],
@@ -277,7 +311,9 @@ def index_folder(
     doc_dir.mkdir(parents=True, exist_ok=True)
 
     for path in _iter_candidate_files(folder):
-        pkl_path = _doc_pickle_path(recordings_dir, path)
+        npz_path = _doc_npz_path(recordings_dir, path)
+        json_path = _doc_json_path(recordings_dir, path)
+        legacy_pkl_path = _doc_legacy_pkl_path(recordings_dir, path)
         try:
             file_mtime = path.stat().st_mtime
         except OSError as e:
@@ -285,19 +321,21 @@ def index_folder(
                 {"file": str(path), "reason": f"could not stat file: {e}"})
             continue
 
-        if pkl_path.exists():
+        if npz_path.exists() and json_path.exists():
             try:
-                pkl_is_current = pkl_path.stat().st_mtime >= file_mtime
+                sidecar_mtime = min(
+                    npz_path.stat().st_mtime, json_path.stat().st_mtime)
+                sidecar_is_current = sidecar_mtime >= file_mtime
             except OSError:
-                pkl_is_current = False
-            if pkl_is_current:
+                sidecar_is_current = False
+            if sidecar_is_current:
                 report["unchanged"] += 1
                 try:
-                    existing = pickle.loads(pkl_path.read_bytes())
-                    report["total_chunks"] += len(existing.get("chunks") or [])
-                except Exception as e:
+                    meta = json.loads(json_path.read_text(encoding="utf-8"))
+                    report["total_chunks"] += len(meta.get("chunks") or [])
+                except (OSError, ValueError) as e:
                     logger.warning(
-                        f"Unchanged pickle {pkl_path.name} unreadable "
+                        f"Unchanged sidecar {json_path.name} unreadable "
                         f"for chunk count ({e}); count omitted, file kept.")
                 continue
 
@@ -329,32 +367,44 @@ def index_folder(
                      f"for {len(chunks)} chunks")})
             continue
 
-        payload = {
+        meta = {
             "model_id": MODEL_ID,
             "doc_path": str(path.resolve()),
             "doc_name": path.name,
             "client": client,
             "file_mtime": file_mtime,
             "chunks": [{"text": t} for t in chunks],
-            "embeddings": embeddings,
         }
-        tmp_path = pkl_path.with_suffix(".pkl.tmp")
-        tmp_path.write_bytes(pickle.dumps(payload, protocol=4))
-        tmp_path.replace(pkl_path)
+        save_payload(npz_path, json_path, embeddings=embeddings, meta=meta)
+        if legacy_pkl_path.exists():
+            # Freshly rebuilt from source — the legacy pickle for this
+            # document is now redundant and, left in place, is a
+            # standing load hazard if any future code path regressed to
+            # reading it. Clean it up.
+            delete_payload(legacy_pkl_path)
+            logger.info(f"Removed legacy pickle sidecar {legacy_pkl_path.name}")
 
         report["indexed"] += 1
         report["total_chunks"] += len(chunks)
         logger.info(
             f"Indexed document {path.name}: {len(chunks)} chunks "
-            f"({client}) -> {pkl_path.name}")
+            f"({client}) -> {npz_path.name}")
 
     return report
 
 
 def remove_stale(folder, client: str, recordings_dir) -> int:
-    """Delete doc_index pickles for `client` whose source file no
+    """Delete doc_index sidecars for `client` whose source file no
     longer exists on disk — the user deleted or moved a document out of
     the knowledge folder since the last reindex.
+
+    Also opportunistically removes EVERY leftover legacy `doc_*.pkl`
+    sidecar in doc_index/, regardless of client: those files are never
+    loaded (see module docstring) and there's no safe way to read which
+    client or source path one belongs to without unpickling it. They're
+    pure clutter/hazard at this point — deleting one just means the
+    owning document gets rebuilt from source next time its client's
+    folder is reindexed, which is always safe (indexes rebuild lazily).
 
     `folder` isn't used to further scope the scan (client already
     disambiguates within recordings_dir) but is kept in the signature
@@ -367,24 +417,32 @@ def remove_stale(folder, client: str, recordings_dir) -> int:
     if not doc_dir.is_dir():
         return 0
 
-    removed = 0
-    for pkl_path in doc_dir.glob("doc_*.pkl"):
+    for legacy in doc_dir.glob("doc_*.pkl"):
+        logger.warning(
+            f"Ignoring legacy pickle sidecar {legacy.name} "
+            f"(never loaded — removing; owning document will be "
+            f"rebuilt from source on next reindex)")
         try:
-            payload = pickle.loads(pkl_path.read_bytes())
-        except Exception as e:
-            logger.warning(f"Could not read {pkl_path.name}: {e}")
+            legacy.unlink()
+        except OSError as e:
+            logger.warning(f"Could not delete {legacy}: {e}")
+
+    removed = 0
+    for json_path in doc_dir.glob("doc_*.json"):
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            logger.warning(f"Could not read {json_path.name}: {e}")
             continue
         if (payload.get("client") or "") != client:
             continue
         doc_path_str = payload.get("doc_path") or ""
         if doc_path_str and Path(doc_path_str).exists():
             continue
-        try:
-            pkl_path.unlink()
+        npz_path = json_path.with_suffix(".npz")
+        if delete_payload(npz_path, json_path):
             removed += 1
             logger.info(
-                f"Removed stale doc index {pkl_path.name} "
+                f"Removed stale doc index {json_path.stem} "
                 f"(source gone: {doc_path_str})")
-        except OSError as e:
-            logger.warning(f"Could not delete {pkl_path}: {e}")
     return removed
