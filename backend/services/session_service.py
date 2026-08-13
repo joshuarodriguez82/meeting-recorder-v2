@@ -46,8 +46,20 @@ class SessionService:
     @property
     def recordings_dir(self) -> Path:
         """Public read-only accessor — used by SearchService to find
-        per-session embedding sidecar files (session_<id>.embeddings.pkl)."""
+        per-session embedding sidecar files (session_<id>.embeddings.npz
+        / .embeddings.json)."""
         return self._recordings_dir
+
+    def scan_roots(self) -> List[Path]:
+        """Public accessor for the resolved, de-duplicated set of
+        directories sessions are read from (primary + archive roots).
+
+        Used by server.py to confine paths pulled out of a session's
+        JSON (audio_path, screenshot paths) to trusted directories
+        before serving them — session JSON files are synced between
+        machines through cloud storage, so they are not fully trusted
+        local input."""
+        return self._scan_roots()
 
     def _scan_roots(self) -> List[Path]:
         """Every directory sessions are READ from, de-duplicated and
@@ -436,7 +448,7 @@ class SessionService:
         only removed (".json", ".wav", ".log") from self._recordings_dir.
         Two consequences once multi-root discovery landed:
 
-          (a) The .embeddings.pkl / .commitments.json / .item_status.json
+          (a) The .embeddings.* / .commitments.json / .item_status.json
               sidecars were never cleaned up, so a deleted session's
               chunks stayed live in SearchService's in-memory index and
               Q&A kept citing a session_id that now 404s.
@@ -444,12 +456,21 @@ class SessionService:
               survived the delete and resurrected the session in
               list_sessions() the next time it scanned.
 
+        Embedding sidecars used to be a single ".embeddings.pkl"; since
+        the pickle-to-npz/json migration a session may have
+        ".embeddings.npz" + ".embeddings.json" (current format), a
+        leftover ".embeddings.pkl" (pre-migration, never loaded — see
+        services/search_service.py), or both if a rebuild ran before the
+        old file was cleaned up. Delete handles all three so nothing —
+        current or legacy — survives a delete.
+
         Best-effort per file: one locked/unreadable file must not stop
         the rest from being cleaned up.
         """
         primary_suffixes = (
             ".json", ".wav", ".log",
-            ".embeddings.pkl", ".commitments.json", ".item_status.json",
+            ".embeddings.npz", ".embeddings.json", ".embeddings.pkl",
+            ".commitments.json", ".item_status.json",
         )
         for suffix in primary_suffixes:
             p = self._recordings_dir / f"session_{session_id}{suffix}"
@@ -467,6 +488,8 @@ class SessionService:
         sidecar_names = {
             f"session_{session_id}.json",
             f"session_{session_id}.log",
+            f"session_{session_id}.embeddings.npz",
+            f"session_{session_id}.embeddings.json",
             f"session_{session_id}.embeddings.pkl",
             f"session_{session_id}.commitments.json",
             f"session_{session_id}.item_status.json",
