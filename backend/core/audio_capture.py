@@ -194,6 +194,17 @@ def invalidate_device_cache():
     with _DEVICE_CACHE_LOCK:
         _input_cache = None
         _output_cache = None
+    # A device-list change (unplug/replug, default-device switch) can
+    # also stale-out core.audio_format_inspector's per-device mix-
+    # format cache — a cached "no match" for a renamed/removed device
+    # should not outlive the device list that produced it. Deferred
+    # import: keeps this cross-platform module from taking a hard
+    # import-time dependency on the Windows-only pycaw inspector.
+    try:
+        from core.audio_format_inspector import invalidate_mix_format_cache
+        invalidate_mix_format_cache()
+    except Exception:
+        pass
 
 
 def _find_device_alternatives(primary_idx: int) -> List[int]:
