@@ -363,7 +363,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from config.settings import Settings
+from config.settings import Settings, USER_DATA_DIR
 from core.audio_capture import list_input_devices, list_output_devices
 from services.template_service import TemplateService
 from services.copilot_mode_service import CoPilotModeService
@@ -750,6 +750,14 @@ class Services:
             self.session_svc = SessionService(
                 self.settings.recordings_dir,
                 extra_dirs=_archive_recordings_dirs(self.settings.recordings_dir),
+                # SQLite session-list cache, kept next to config.env and
+                # the log files — deliberately NOT inside recordings_dir
+                # or an archive root, either of which can be a
+                # cloud-synced folder (a SQLite file there can corrupt
+                # under sync). See services/session_index.py and
+                # config/settings.py's session_index_enabled docstring.
+                index_enabled=self.settings.session_index_enabled,
+                index_db_path=str(USER_DATA_DIR / "session_index.db"),
             )
             self.export_svc = ExportService(self.settings.recordings_dir)
             # Per-client configs and user-authored templates live ALONGSIDE
@@ -1115,6 +1123,12 @@ class SettingsDTO(BaseModel):
     # never damages the recording. See config/settings.py's
     # echo_cancellation_enabled docstring and utils/aec.py.
     echo_cancellation_enabled: bool = False
+    # Kill switch for the SQLite session-list index. Default True — see
+    # config/settings.py's session_index_enabled docstring and
+    # services/session_index.py. False forces every /sessions read back
+    # onto the old direct-scan path (services/session_service.py's
+    # _list_sessions_direct).
+    session_index_enabled: bool = True
 
 
 class StartRecordingRequest(BaseModel):
@@ -1556,6 +1570,7 @@ async def get_settings():
         diarization_device=s.diarization_device,
         audio_mix_format_lookup_enabled=s.audio_mix_format_lookup_enabled,
         echo_cancellation_enabled=s.echo_cancellation_enabled,
+        session_index_enabled=s.session_index_enabled,
     )
 
 
@@ -1667,6 +1682,7 @@ async def save_settings(payload: SettingsDTO):
         diarization_device=(payload.diarization_device or "auto").strip().lower(),
         audio_mix_format_lookup_enabled=bool(payload.audio_mix_format_lookup_enabled),
         echo_cancellation_enabled=bool(payload.echo_cancellation_enabled),
+        session_index_enabled=bool(payload.session_index_enabled),
     )
     # If the recordings folder changed, migrate client + template state
     # from the previous folder to the new one. Copy, not move, so the
@@ -3037,6 +3053,7 @@ async def set_live_copilot_enabled(payload: dict):
         diarization_device=s.diarization_device,
         audio_mix_format_lookup_enabled=s.audio_mix_format_lookup_enabled,
         echo_cancellation_enabled=s.echo_cancellation_enabled,
+        session_index_enabled=s.session_index_enabled,
     )
     # Update the cached Settings in-place so the change is visible
     # immediately, without going through load_settings() which would
@@ -6954,6 +6971,7 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         diarization_device=s.diarization_device,
         audio_mix_format_lookup_enabled=s.audio_mix_format_lookup_enabled,
         echo_cancellation_enabled=s.echo_cancellation_enabled,
+        session_index_enabled=s.session_index_enabled,
     )
     svc.settings = dataclasses.replace(
         s, live_copilot_mode=new_mode, live_copilot_meeting_type=new_type)
