@@ -1138,6 +1138,19 @@ class RecordingStatus(BaseModel):
     # the frontend to surface so the user isn't left wondering why
     # nothing recorded. Backend clears it after one read.
     auto_record_skip_reason: Optional[str] = None
+    # ── Capture-confidence meters ────────────────────────────────────
+    # Live mic / system-audio level + liveness, from RecordingService.
+    # get_capture_levels(). All optional/defaulted so an older frontend
+    # against a newer backend (missing fields ignored) and a newer
+    # frontend against an older backend (fields default to a benign
+    # "nothing to report" shape) both degrade gracefully — see AGENTS.md
+    # "Diagnose with data, not guesses" for why this feature exists:
+    # capture failures were previously invisible until the next day.
+    mic_level: float = 0.0
+    system_level: float = 0.0
+    mic_state: Optional[str] = None
+    system_state: Optional[str] = None
+    capture_warning: Optional[str] = None
 
 
 # ── Health ───────────────────────────────────────────────────────────
@@ -2194,6 +2207,18 @@ async def recording_status():
     # once and we never spam-notify on every status poll.
     skip_reason = svc.auto_record_skip_reason
     svc.auto_record_skip_reason = None
+
+    # Capture-confidence snapshot — cheap attribute reads, no I/O. Only
+    # meaningful while actually recording; defaults otherwise so the
+    # frontend's "not recording" state never shows a stale meter.
+    levels: dict = {}
+    if is_rec and rec is not None:
+        try:
+            levels = await asyncio.to_thread(rec.get_capture_levels)
+        except Exception as e:
+            logger.exception(f"get_capture_levels failed: {e}")
+            levels = {}
+
     return RecordingStatus(
         is_recording=is_rec,
         session_id=session_id,
@@ -2206,6 +2231,11 @@ async def recording_status():
         warnings=warnings,
         auto_record_subject=(svc.auto_record_subject if is_rec else None),
         auto_record_skip_reason=skip_reason,
+        mic_level=levels.get("mic_level", 0.0),
+        system_level=levels.get("system_level", 0.0),
+        mic_state=levels.get("mic_state"),
+        system_state=levels.get("system_state"),
+        capture_warning=levels.get("capture_warning"),
     )
 
 
