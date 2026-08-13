@@ -132,6 +132,84 @@ def test_timeout_raises_instead_of_hanging_forever(monkeypatch):
 
 
 # ──────────────────────────────────────────────────────────────────────
+# v2.25.1 regression: apartment LIFETIME was not enough — cyclic
+# garbage created inside a job must be collected on the WORKER thread,
+# not wherever Python's GC happens to run next. See com_worker.py's
+# module docstring ("THE FOLLOW-UP FIX") and
+# _collect_cyclic_garbage_after_job's docstring for the full mechanism.
+# ──────────────────────────────────────────────────────────────────────
+
+def test_job_cyclic_garbage_is_collected_on_worker_thread_not_caller(monkeypatch):
+    """This is THE regression test for the bug: a job that creates a
+    reference cycle (unreachable except via the cycle itself, so
+    ordinary refcounting can never free it) must have that cycle
+    collected — __del__ actually invoked — on the COM worker thread,
+    before run_com() returns to the caller. If this ever starts
+    passing with the collected ident equal to the caller's thread (or
+    with no collection happening at all within this test), the
+    apartment-affinity crash is back."""
+    monkeypatch.setattr(cw, "_PYTHONCOM_AVAILABLE", True)
+    caller_ident = threading.get_ident()
+    collected_idents: list[int] = []
+
+    class _Cyclic:
+        def __del__(self):
+            collected_idents.append(threading.get_ident())
+
+    def make_unreachable_cycle():
+        a = _Cyclic()
+        b = _Cyclic()
+        a.other = b
+        b.other = a
+        # `a`/`b` go out of scope when this function returns. Because
+        # they only reference EACH OTHER, refcounting alone can never
+        # free them — only a cyclic-GC pass can. That pass is exactly
+        # what com_worker.py's _run() triggers, on this same thread,
+        # right after this job completes.
+        return None
+
+    cw.run_com(make_unreachable_cycle)
+
+    assert collected_idents, (
+        "cyclic garbage from the job was not collected at all before "
+        "run_com() returned — the worker-thread gc.collect() call is "
+        "missing or not running"
+    )
+    worker_ident = cw.run_com(threading.get_ident)
+    assert all(ident == worker_ident for ident in collected_idents), (
+        "cyclic garbage was collected on a thread other than the COM "
+        "worker thread — this is the exact apartment-affinity bug: "
+        "Release() would be called from outside the owning STA"
+    )
+    assert all(ident != caller_ident for ident in collected_idents), (
+        "cyclic garbage was collected on the CALLER's thread, not the "
+        "worker thread"
+    )
+
+
+def test_gc_collect_failure_does_not_break_job_result(monkeypatch):
+    """A broken/raising gc.collect() call must never take the job's
+    actual result down with it — it's a best-effort safety net, not
+    something that should turn a successful COM call into a failure."""
+    monkeypatch.setattr(cw, "_PYTHONCOM_AVAILABLE", True)
+
+    def boom():
+        raise RuntimeError("gc exploded")
+
+    monkeypatch.setattr(cw, "_collect_cyclic_garbage_after_job", boom)
+
+    assert cw.run_com(lambda: 123) == 123
+
+    # Exceptions from the job itself must still propagate normally even
+    # while gc.collect() is broken.
+    def raise_value_error():
+        raise ValueError("job failed")
+
+    with pytest.raises(ValueError, match="job failed"):
+        cw.run_com(raise_value_error)
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Regression: the invariant that caused the crash must never come back.
 # ──────────────────────────────────────────────────────────────────────
 
