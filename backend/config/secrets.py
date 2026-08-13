@@ -1,6 +1,7 @@
 """
-OS-keychain credential storage for the three sensitive settings:
-ANTHROPIC_API_KEY, HF_TOKEN, OPENAI_API_KEY.
+OS-keychain credential storage for the sensitive settings:
+ANTHROPIC_API_KEY, HF_TOKEN, OPENAI_API_KEY, LIVE_ANTHROPIC_API_KEY,
+LIVE_OPENAI_API_KEY.
 
 Backend per platform (auto-detected by the `keyring` package):
   Windows: Windows Credential Manager
@@ -26,7 +27,13 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 SERVICE_NAME = "MeetingRecorder"
-SECRET_KEYS = ("ANTHROPIC_API_KEY", "HF_TOKEN", "OPENAI_API_KEY")
+SECRET_KEYS = (
+    "ANTHROPIC_API_KEY",
+    "HF_TOKEN",
+    "OPENAI_API_KEY",
+    "LIVE_ANTHROPIC_API_KEY",
+    "LIVE_OPENAI_API_KEY",
+)
 
 try:
     import keyring  # type: ignore

@@ -21,6 +21,7 @@ import pickle
 import time
 
 import numpy as np
+import pytest
 
 from core.embeddings import MODEL_ID
 from services.document_service import (
@@ -31,6 +32,7 @@ from services.document_service import (
 )
 from services.search_service import SearchService
 from services.session_service import SessionService
+from utils.embedding_store import save_payload
 
 
 # ── fake embedder: deterministic, hash-seeded, L2-normalized ──────────
@@ -159,7 +161,7 @@ def test_index_folder_report_counts_and_skip_reasons(tmp_path):
     assert report["total_chunks"] > 0
 
     doc_dir = recordings / "doc_index"
-    assert len(list(doc_dir.glob("doc_*.pkl"))) == 2
+    assert len(list(doc_dir.glob("doc_*.npz"))) == 2
 
 
 def test_index_folder_skips_hidden_dirs(tmp_path):
@@ -225,7 +227,7 @@ def test_index_folder_reembeds_after_file_modified(tmp_path):
     assert r2["unchanged"] == 0
 
 
-def test_remove_stale_removes_orphan_pickle(tmp_path):
+def test_remove_stale_removes_orphan_sidecar(tmp_path):
     folder = tmp_path / "docs"
     folder.mkdir()
     p = folder / "a.txt"
@@ -236,12 +238,12 @@ def test_remove_stale_removes_orphan_pickle(tmp_path):
 
     index_folder(folder, "Zorg", fake_embed, recordings)
     doc_dir = recordings / "doc_index"
-    assert len(list(doc_dir.glob("doc_*.pkl"))) == 1
+    assert len(list(doc_dir.glob("doc_*.npz"))) == 1
 
     p.unlink()
     removed = remove_stale(folder, "Zorg", recordings)
     assert removed == 1
-    assert len(list(doc_dir.glob("doc_*.pkl"))) == 0
+    assert len(list(doc_dir.glob("doc_*.npz"))) == 0
 
 
 def test_remove_stale_leaves_other_clients_alone(tmp_path):
@@ -258,7 +260,7 @@ def test_remove_stale_leaves_other_clients_alone(tmp_path):
     removed = remove_stale(folder, "ClientB", recordings)
     assert removed == 0
     doc_dir = recordings / "doc_index"
-    assert len(list(doc_dir.glob("doc_*.pkl"))) == 1
+    assert len(list(doc_dir.glob("doc_*.npz"))) == 1
 
 
 # ── SearchService merge ─────────────────────────────────────────────
@@ -283,27 +285,34 @@ def test_search_merges_session_and_document_hits(tmp_path, monkeypatch):
     query_vec = np.zeros(_FAKE_DIM, dtype=np.float32)
     query_vec[0] = 1.0
 
-    sess_payload = {
+    sess_meta = {
         "model_id": MODEL_ID,
         "session_id": sid,
         "chunks": [{"start_s": 0.0, "end_s": 5.0, "text": "we discussed pricing on the call"}],
-        "embeddings": query_vec.reshape(1, _FAKE_DIM).copy(),
     }
-    (recordings / f"session_{sid}.embeddings.pkl").write_bytes(
-        pickle.dumps(sess_payload, protocol=4))
+    save_payload(
+        recordings / f"session_{sid}.embeddings.npz",
+        recordings / f"session_{sid}.embeddings.json",
+        embeddings=query_vec.reshape(1, _FAKE_DIM).copy(),
+        meta=sess_meta,
+    )
 
     doc_dir = recordings / "doc_index"
     doc_dir.mkdir()
-    doc_payload = {
+    doc_meta = {
         "model_id": MODEL_ID,
         "doc_path": str(tmp_path / "Zorg-SOW.docx"),
         "doc_name": "Zorg-SOW.docx",
         "client": "Zorg",
         "file_mtime": 0.0,
         "chunks": [{"text": "pricing is $50k per phase per the SOW"}],
-        "embeddings": query_vec.reshape(1, _FAKE_DIM).copy(),
     }
-    (doc_dir / "doc_abc123.pkl").write_bytes(pickle.dumps(doc_payload, protocol=4))
+    save_payload(
+        doc_dir / "doc_abc123.npz",
+        doc_dir / "doc_abc123.json",
+        embeddings=query_vec.reshape(1, _FAKE_DIM).copy(),
+        meta=doc_meta,
+    )
 
     session_svc = SessionService(str(recordings))
     search = SearchService(session_svc)
@@ -343,3 +352,111 @@ def test_search_merges_session_and_document_hits(tmp_path, monkeypatch):
     # project concept to match against.
     results_project = search.search("pricing", top_k=10, project="whatever")
     assert all(r["source"] != "document" for r in results_project)
+
+
+# ── legacy .pkl handling: never loaded, rebuilt from source instead ──
+
+@pytest.fixture
+def _spy_pickle_loads(monkeypatch):
+    """Assert nothing in document_service's indexing/staleness paths
+    ever calls pickle.loads — the whole point of the npz/json
+    migration is that these files stop being unpickled."""
+    calls = []
+    real_loads = pickle.loads
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real_loads(*args, **kwargs)
+
+    monkeypatch.setattr(pickle, "loads", spy)
+    return calls
+
+
+def test_index_folder_ignores_legacy_pickle_and_rebuilds_from_source(
+    tmp_path, _spy_pickle_loads,
+):
+    """A doc_index/*.pkl left over from before the npz/json migration
+    must never be read — index_folder() should treat the document as
+    unindexed and re-extract + re-embed it from the source file."""
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "a.txt").write_text("some content to embed", encoding="utf-8")
+
+    recordings = tmp_path / "recordings"
+    recordings.mkdir()
+    doc_dir = recordings / "doc_index"
+    doc_dir.mkdir()
+
+    # Plant a legacy pickle at the exact path the real doc would hash
+    # to, containing a payload that WOULD look "current" if read.
+    from services.document_service import _doc_legacy_pkl_path
+    legacy_path = _doc_legacy_pkl_path(recordings, folder / "a.txt")
+    legacy_payload = {
+        "model_id": MODEL_ID,
+        "doc_path": str((folder / "a.txt").resolve()),
+        "doc_name": "a.txt",
+        "client": "Zorg",
+        "file_mtime": 0.0,
+        "chunks": [{"text": "stale legacy chunk"}],
+        "embeddings": np.ones((1, _FAKE_DIM), dtype=np.float32),
+    }
+    legacy_path.write_bytes(pickle.dumps(legacy_payload, protocol=4))
+
+    report = index_folder(folder, "Zorg", fake_embed, recordings)
+
+    assert len(_spy_pickle_loads) == 0, "legacy pickle must never be unpickled"
+    # Rebuilt from source, not read from the legacy pickle — indexed,
+    # not unchanged, and the stale legacy file is cleaned up.
+    assert report["indexed"] == 1
+    assert report["unchanged"] == 0
+    assert not legacy_path.exists()
+    assert len(list(doc_dir.glob("doc_*.npz"))) == 1
+    assert len(list(doc_dir.glob("doc_*.json"))) == 1
+
+
+def test_remove_stale_purges_every_legacy_pickle_without_loading_it(
+    tmp_path, _spy_pickle_loads,
+):
+    recordings = tmp_path / "recordings"
+    recordings.mkdir()
+    doc_dir = recordings / "doc_index"
+    doc_dir.mkdir()
+
+    # Two orphaned legacy pickles for two different (nonexistent, from
+    # remove_stale's point of view) clients — remove_stale can't know
+    # which client either belongs to without unpickling, so it purges
+    # all of them regardless of the `client` argument.
+    (doc_dir / "doc_aaaa.pkl").write_bytes(pickle.dumps(
+        {"client": "ClientA", "doc_path": "", "chunks": []}, protocol=4))
+    (doc_dir / "doc_bbbb.pkl").write_bytes(pickle.dumps(
+        {"client": "ClientB", "doc_path": "", "chunks": []}, protocol=4))
+
+    removed = remove_stale(tmp_path / "docs", "ClientA", recordings)
+
+    assert len(_spy_pickle_loads) == 0, "legacy pickles must never be unpickled"
+    assert len(list(doc_dir.glob("doc_*.pkl"))) == 0
+    # remove_stale's return value counts current-format (.json) removals
+    # driven by staleness, not legacy-pickle cleanup — there were none
+    # of the former here.
+    assert removed == 0
+
+
+def test_index_folder_unchanged_skip_never_touches_pickle(
+    tmp_path, _spy_pickle_loads,
+):
+    """The 'unchanged, read existing chunk count' path reads the JSON
+    sidecar only — pickle.loads must never be invoked from it."""
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "a.txt").write_text("some content to embed", encoding="utf-8")
+
+    recordings = tmp_path / "recordings"
+    recordings.mkdir()
+
+    r1 = index_folder(folder, "Zorg", fake_embed, recordings)
+    assert r1["indexed"] == 1
+
+    r2 = index_folder(folder, "Zorg", fake_embed, recordings)
+    assert r2["unchanged"] == 1
+    assert r2["total_chunks"] == r1["total_chunks"]
+    assert len(_spy_pickle_loads) == 0
