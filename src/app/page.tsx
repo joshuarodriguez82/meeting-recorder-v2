@@ -8,7 +8,7 @@ import {
   Mic, History, CheckSquare, Target, Search,
   LayoutDashboard, Settings as SettingsIcon, HelpCircle, Loader2,
   Sparkles, MessageCircle, Handshake, BarChart3, FileSpreadsheet,
-  Sun, PanelLeftClose, PanelLeftOpen,
+  Sun, PanelLeftClose, PanelLeftOpen, CheckCircle2,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
@@ -253,11 +253,67 @@ export default function Home() {
     startedAt: recordingStatus?.started_at ?? null,
     autoSubject: recordingStatus?.auto_record_subject ?? null,
   }), [recordingStatus]);
+  // Sidebar pipeline message: shown WITHOUT a spinner once nothing is
+  // actually in flight, and cleared a few seconds after the backend
+  // goes idle so the sidebar returns to a clean state instead of
+  // parking a stale sentence forever. `current_status` on the backend
+  // is a write-once mailbox that's never cleared (see api.ts), so this
+  // is the thing that makes "Processing complete." eventually go away
+  // — the backend's `is_processing` flag is what stops the SPINNER
+  // immediately (that's the actual bug fix; this is polish on top of
+  // it).
+  //
+  // Implementation note: state is only ever set from inside a
+  // setTimeout callback (never synchronously in the effect body) —
+  // scheduling, not deciding, happens in the effect. `hiddenStatusText`
+  // just remembers "this exact string has already been shown its full
+  // 8s and should fade"; the visible text is derived in `pipelineStatus`
+  // below by comparing the live current_status against it.
+  //
+  // Guarded against clearing a message that belongs to newly-started
+  // work two ways: (1) while `is_processing` is true, pipelineStatus
+  // below reads current_status directly and never consults
+  // `hiddenStatusText` at all, so an in-progress message can never be
+  // faded out from under itself; (2) the instant work starts, any
+  // pending fade timer is cancelled and the memory of what was hidden
+  // is cleared, so a later message can't be mistaken for an
+  // already-faded one just because the text happens to repeat.
+  const [hiddenStatusText, setHiddenStatusText] = useState("");
+  const fadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const text = recordingStatus?.current_status || "";
+    const busy = !!recordingStatus?.is_processing;
+    if (fadeTimerRef.current) {
+      clearTimeout(fadeTimerRef.current);
+      fadeTimerRef.current = null;
+    }
+    if (busy || !text) {
+      // Busy: nothing to fade yet — pipelineStatus shows the live text
+      // unconditionally while is_processing is true. Empty: nothing to
+      // show at all. Either way, forget any stale "hidden" memory so a
+      // later message isn't mistaken for one already faded.
+      fadeTimerRef.current = setTimeout(() => setHiddenStatusText(""), 0);
+      return;
+    }
+    fadeTimerRef.current = setTimeout(() => setHiddenStatusText(text), 8000);
+  }, [recordingStatus?.current_status, recordingStatus?.is_processing]);
+  useEffect(() => () => {
+    if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current);
+  }, []);
+
   // Sidebar pipeline line: model warmup on cold start, transcription
   // progress during processing, or the reconnect notice while a
   // respawned backend boots. 2+ consecutive failures before we say
   // anything, so a single dropped request during a normal respawn
   // doesn't flash a scary banner.
+  //
+  // `loading` (spin the dial) is driven by GENUINE activity only:
+  // backend unreachable, models loading, or the backend's real
+  // `is_processing` in-flight signal. A `current_status` string with no
+  // in-flight work behind it still shows as text (until it fades, via
+  // hiddenStatusText above) but WITHOUT the spinner — that's the fix
+  // for the spinner that used to run forever after "Processing
+  // complete." landed.
   const pipelineStatus = useMemo<{ loading: boolean; text: string }>(() => {
     if (!reachable && consecutiveFailures >= 2) {
       return {
@@ -268,11 +324,15 @@ export default function Home() {
     if (recordingStatus?.models_loading) {
       return { loading: true, text: "Loading AI models…" };
     }
-    if (recordingStatus?.current_status && !recordingStatus.is_recording) {
+    if (recordingStatus?.is_processing && recordingStatus?.current_status) {
       return { loading: true, text: recordingStatus.current_status };
     }
+    const text = recordingStatus?.current_status || "";
+    if (text && text !== hiddenStatusText) {
+      return { loading: false, text };
+    }
     return { loading: false, text: "" };
-  }, [recordingStatus, reachable, consecutiveFailures]);
+  }, [recordingStatus, reachable, consecutiveFailures, hiddenStatusText]);
   // Dedup keys: only fire the auto-record toast/notification ONCE per
   // session, and only show each unique skip-reason once.
   const lastAutoSessionRef = useRef<string | null>(null);
@@ -735,17 +795,27 @@ export default function Home() {
             </div>
           )}
         </div>
-        {pipelineStatus.loading && (
-          // Icon mode drops the status text but keeps the spinner (and
-          // the full text in the title attribute) — the user still sees
-          // that the backend is busy rather than losing the signal.
+        {pipelineStatus.text && (
+          // Icon mode drops the status text but keeps the icon (and the
+          // full text in the title attribute) — the user still sees a
+          // signal rather than losing it entirely. Spinner only while
+          // `loading` is true (genuine backend activity — see
+          // pipelineStatus above); once work finishes this still shows
+          // the last message as plain text with a static checkmark
+          // instead of a spinner that never stops.
           <div
-            className={`flex items-center border-b border-border bg-accent/30 py-2 text-xs text-foreground ${
-              navCollapsed ? "justify-center px-2" : "gap-2 px-4"
-            }`}
+            className={`flex items-center border-b border-border py-2 text-xs ${
+              pipelineStatus.loading
+                ? "bg-accent/30 text-foreground"
+                : "bg-muted/30 text-muted-foreground"
+            } ${navCollapsed ? "justify-center px-2" : "gap-2 px-4"}`}
             title={pipelineStatus.text}
           >
-            <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0 text-primary" />
+            {pipelineStatus.loading ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0 text-primary" />
+            ) : (
+              <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+            )}
             {!navCollapsed && <span className="truncate">{pipelineStatus.text}</span>}
           </div>
         )}

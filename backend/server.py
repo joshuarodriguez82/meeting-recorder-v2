@@ -724,7 +724,67 @@ class Services:
         # see "Transcribing…", "Identifying speakers…" while the long
         # POST /process call is blocking. Previously this signal only
         # went to the log file, so the UI had no way to show progress.
+        #
+        # BUG: this string is a write-once mailbox — _record_status only
+        # ever overwrites it, never clears it. So a TERMINAL message
+        # ("Processing complete.", "Recording saved. Ready to process.",
+        # "Error saving audio: …") stays parked here forever, and the
+        # old frontend logic inferred "still working" from the mere
+        # presence of a non-empty current_status. Once processing
+        # actually finished the sidebar spinner never stopped. Fixed by
+        # NOT inferring busy-ness from this string at all — see
+        # `_processing_count` / `is_processing` below, which track real
+        # work instead of a leftover message.
         self.current_status: str = ""
+        # Real busy signal for /recording/status, replacing the old
+        # "current_status is non-empty" proxy the frontend used to infer
+        # activity from (fragile — it never distinguished "still
+        # working" from "done, here's the last thing that happened").
+        #
+        # A COUNTER, not a bool: pipeline work can genuinely overlap.
+        # process_session (manual /process) and process_full (manual
+        # "process full" AND the backend auto-process-after-stop path)
+        # can run concurrently for DIFFERENT sessions — only the
+        # transcribe/diarize stage is serialized, under
+        # _PROCESSING_LOCK (see its docstring: "two overlapping
+        # processings — e.g. a backend auto-process and a manual
+        # re-process of a different session"). The LLM-extraction stage
+        # of process_full runs entirely outside that lock. A bool would
+        # have job A's finally-clause turn the indicator off while job B
+        # is still genuinely running. Guarded by a plain threading.Lock
+        # (not asyncio.Lock) because the stop/finalize path increments
+        # it from a worker thread via asyncio.to_thread, not just from
+        # coroutines on the event loop.
+        self._processing_lock = threading.Lock()
+        self._processing_count: int = 0
+
+    def _begin_processing(self) -> None:
+        """Mark one unit of pipeline work as started. MUST be paired
+        with `_end_processing()` in a `finally` — see that method's
+        docstring for why."""
+        with self._processing_lock:
+            self._processing_count += 1
+
+    def _end_processing(self) -> None:
+        """Mark one unit of pipeline work as finished. Callers MUST call
+        this from a `finally` block wrapping the work `_begin_processing`
+        started, not just on the success path — an exception, a raised
+        HTTPException, or a mid-processing crash must still release the
+        indicator. Skipping the `finally` here reproduces the exact bug
+        this mechanism exists to fix (current_status never clearing),
+        just one layer down: an in-flight flag stuck true forever after
+        the request that set it blew up.
+
+        Clamped at 0 so a stray extra release (a bug elsewhere, or a
+        test) can't drive the counter negative and make `is_processing`
+        permanently lie True->False for the wrong reason."""
+        with self._processing_lock:
+            self._processing_count = max(0, self._processing_count - 1)
+
+    @property
+    def is_processing(self) -> bool:
+        with self._processing_lock:
+            return self._processing_count > 0
 
     def _record_status(self, msg: str) -> None:
         """Log + stash the status so /recording/status can return it."""
@@ -1167,7 +1227,23 @@ class RecordingStatus(BaseModel):
     # each stage progresses (e.g. "Transcribing…", "Identifying
     # speakers…") so the UI can show progress during the long POST
     # /sessions/{id}/process call. Empty string when idle.
+    #
+    # NOTE: this is a write-once mailbox that is never cleared (see
+    # Services.current_status) — a terminal message like "Processing
+    # complete." stays here indefinitely after work finishes. The
+    # frontend must NOT infer "still busy" from this being non-empty;
+    # use `is_processing` below for that. This field is display text
+    # only.
     current_status: str = ""
+    # True while the backend is genuinely doing pipeline work — transcribe
+    # /diarize, LLM extraction, or finalizing a just-stopped recording.
+    # This is the real busy signal `current_status` was being
+    # (incorrectly) used as a proxy for; see Services._begin_processing /
+    # _end_processing. Defaulted to False so an older frontend (which
+    # doesn't know this field exists) degrades gracefully, and a newer
+    # frontend against an older backend that omits it also degrades
+    # gracefully (optional on the TS side too).
+    is_processing: bool = False
     # Auto-stop / dead-air watchdog warnings, one per active condition.
     # Each entry is a small dict the frontend renders as a banner +
     # native notification. Codes are stable so the frontend can dedupe
@@ -2290,6 +2366,7 @@ async def recording_status():
         models_loading=svc.models_loading,
         models_error=svc.models_error,
         current_status=svc.current_status,
+        is_processing=svc.is_processing,
         warnings=warnings,
         auto_record_subject=(svc.auto_record_subject if is_rec else None),
         auto_record_skip_reason=skip_reason,
@@ -3163,16 +3240,31 @@ async def save_copilot_suggestion(req: CoPilotSaveRequest):
 
 
 def _stop_recording_sync():
-    session = svc.recording_svc.stop_recording()
-    if session:
-        svc.current_session = session
-        svc.session_svc.save(session)
-        # No enqueue here: v2.19+ never copies the raw WAV to the
-        # network folder (that was the Drive-stall culprit). At stop
-        # time there are also no text artifacts yet — those arrive when
-        # process/summarize/extract runs, which enqueue their own
-        # export as each artifact appears.
-    return session
+    # In-flight indicator, same mechanism as process_session/process_full
+    # — see Services._end_processing. This runs off the event loop (via
+    # asyncio.to_thread from every call site), and finalize itself can
+    # take 10-30s for a long meeting (closing streams, resampling,
+    # mixing loopback, writing the WAV — see the callers' comments), so
+    # it's genuine work worth spinning for. It's also where the terminal
+    # "Recording saved. Ready to process." / "Error saving audio: …"
+    # status strings get set (stop_recording -> self._on_status), which
+    # is exactly the class of message that used to leave the spinner
+    # stuck on forever — releasing this in `finally` means the spinner
+    # stops the instant finalize is actually done, whichever way it ends.
+    svc._begin_processing()
+    try:
+        session = svc.recording_svc.stop_recording()
+        if session:
+            svc.current_session = session
+            svc.session_svc.save(session)
+            # No enqueue here: v2.19+ never copies the raw WAV to the
+            # network folder (that was the Drive-stall culprit). At stop
+            # time there are also no text artifacts yet — those arrive when
+            # process/summarize/extract runs, which enqueue their own
+            # export as each artifact appears.
+        return session
+    finally:
+        svc._end_processing()
 
 
 # ── Backend-driven auto-process after stop ──────────────────────────
@@ -5118,78 +5210,89 @@ async def import_session(req: ImportSessionRequest):
 @app.post("/sessions/{session_id}/process")
 async def process_session(session_id: str):
     svc.load_settings()
-    # Fail fast with a helpful message BEFORE trying to load models — if
-    # API keys aren't set, models can't load and the user sees a cryptic
-    # "Process failed" toast. Show them where to fix it instead.
-    if not svc.settings or not svc.settings.is_configured:
-        missing = []
-        if not (svc.settings and svc.settings.anthropic_api_key):
-            missing.append("Anthropic API key (get at console.anthropic.com)")
-        if not (svc.settings and svc.settings.hf_token):
-            missing.append(
-                "HuggingFace token (get at huggingface.co/settings/tokens, "
-                "then accept model terms at huggingface.co/pyannote/speaker-"
-                "diarization-3.1 and huggingface.co/pyannote/segmentation-3.0)"
-            )
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "API keys not configured. Open Settings → paste the "
-                "required tokens → Save. Missing: " + "; ".join(missing)
-            ),
-        )
-    # ensure_models_loaded is blocking (imports torch etc.) — thread it
-    await asyncio.to_thread(svc.ensure_models_loaded)
-    session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    # Serialize the shared-state transcribe/diarize stage — see
-    # _PROCESSING_LOCK. Without this, a manual re-process here racing a
-    # background auto-process cross-contaminates session transcripts.
+    # In-flight indicator for /recording/status — see Services._begin_
+    # processing. `finally` guarantees this releases on every exit path:
+    # the fast 400s below, a 404, the transcribe/diarize failure branch,
+    # AND an exception raised anywhere in between (network blip mid-
+    # export, a crash inside an asyncio.create_task's awaited setup,
+    # etc). Without the `finally` this would be the exact bug it fixes,
+    # just moved from `current_status` to a new flag.
+    svc._begin_processing()
     try:
-        async with _PROCESSING_LOCK:
-            # DATA-LOSS FIX (2026-06-15): pass session EXPLICITLY into
-            # process_session(). The old `set_session(...)` + parameter-
-            # less process_session() pair mutated the shared
-            # recording_svc._session reference, which a concurrent
-            # start_recording would then reassign — and the in-flight
-            # process_session would write segments onto the WRONG
-            # session object. set_session() still exists for legitimate
-            # external-session callers (recovery), but the processing
-            # path doesn't need it now that process_session takes the
-            # session as a parameter. svc.current_session also stays —
-            # it's used by status / live-transcript endpoints that
-            # genuinely want "the actively-recording session".
-            svc.current_session = session
-            result = await svc.recording_svc.process_session(session)
-        # Auto-name speakers from explicit introductions / direct-address
-        # hand-offs and persist their voiceprints to the known-speakers
-        # store so the next meeting auto-matches them. Best-effort — a
-        # failure here must not block saving the processed session.
+        # Fail fast with a helpful message BEFORE trying to load models — if
+        # API keys aren't set, models can't load and the user sees a cryptic
+        # "Process failed" toast. Show them where to fix it instead.
+        if not svc.settings or not svc.settings.is_configured:
+            missing = []
+            if not (svc.settings and svc.settings.anthropic_api_key):
+                missing.append("Anthropic API key (get at console.anthropic.com)")
+            if not (svc.settings and svc.settings.hf_token):
+                missing.append(
+                    "HuggingFace token (get at huggingface.co/settings/tokens, "
+                    "then accept model terms at huggingface.co/pyannote/speaker-"
+                    "diarization-3.1 and huggingface.co/pyannote/segmentation-3.0)"
+                )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "API keys not configured. Open Settings → paste the "
+                    "required tokens → Save. Missing: " + "; ".join(missing)
+                ),
+            )
+        # ensure_models_loaded is blocking (imports torch etc.) — thread it
+        await asyncio.to_thread(svc.ensure_models_loaded)
+        session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        # Serialize the shared-state transcribe/diarize stage — see
+        # _PROCESSING_LOCK. Without this, a manual re-process here racing a
+        # background auto-process cross-contaminates session transcripts.
         try:
-            await _auto_identify_and_save_speakers(result)
+            async with _PROCESSING_LOCK:
+                # DATA-LOSS FIX (2026-06-15): pass session EXPLICITLY into
+                # process_session(). The old `set_session(...)` + parameter-
+                # less process_session() pair mutated the shared
+                # recording_svc._session reference, which a concurrent
+                # start_recording would then reassign — and the in-flight
+                # process_session would write segments onto the WRONG
+                # session object. set_session() still exists for legitimate
+                # external-session callers (recovery), but the processing
+                # path doesn't need it now that process_session takes the
+                # session as a parameter. svc.current_session also stays —
+                # it's used by status / live-transcript endpoints that
+                # genuinely want "the actively-recording session".
+                svc.current_session = session
+                result = await svc.recording_svc.process_session(session)
+            # Auto-name speakers from explicit introductions / direct-address
+            # hand-offs and persist their voiceprints to the known-speakers
+            # store so the next meeting auto-matches them. Best-effort — a
+            # failure here must not block saving the processed session.
+            try:
+                await _auto_identify_and_save_speakers(result)
+            except Exception as e:
+                logger.warning(f"auto speaker identification skipped: {e}")
+            await asyncio.to_thread(svc.session_svc.save, result)
+            _auto_export_to_client(result, copy_audio=False)
+            # Build the semantic-search index entry for this session in the
+            # background. Non-fatal: if sentence-transformers is missing or
+            # the index pass fails, the session is still saved and full-text
+            # search keeps working — only the semantic search "knows" about
+            # one fewer session until the user re-runs the backfill.
+            if svc.search_svc:
+                asyncio.create_task(asyncio.to_thread(
+                    svc.search_svc.index_session, result.session_id))
+            # Extract commitments in the background too (Claude pass over
+            # the transcript). Same fire-and-forget pattern as semantic
+            # indexing — if the LLM is unavailable or the model returns
+            # bad JSON, the commitments tracker just shows fewer entries.
+            asyncio.create_task(_auto_extract_commitments(result))
+            return {"ok": True, "segments": len(result.segments),
+                    "speakers": len(result.speakers)}
         except Exception as e:
-            logger.warning(f"auto speaker identification skipped: {e}")
-        await asyncio.to_thread(svc.session_svc.save, result)
-        _auto_export_to_client(result, copy_audio=False)
-        # Build the semantic-search index entry for this session in the
-        # background. Non-fatal: if sentence-transformers is missing or
-        # the index pass fails, the session is still saved and full-text
-        # search keeps working — only the semantic search "knows" about
-        # one fewer session until the user re-runs the backfill.
-        if svc.search_svc:
-            asyncio.create_task(asyncio.to_thread(
-                svc.search_svc.index_session, result.session_id))
-        # Extract commitments in the background too (Claude pass over
-        # the transcript). Same fire-and-forget pattern as semantic
-        # indexing — if the LLM is unavailable or the model returns
-        # bad JSON, the commitments tracker just shows fewer entries.
-        asyncio.create_task(_auto_extract_commitments(result))
-        return {"ok": True, "segments": len(result.segments),
-                "speakers": len(result.speakers)}
-    except Exception as e:
-        logger.exception("Process failed")
-        raise HTTPException(status_code=500, detail=str(e))
+            logger.exception("Process failed")
+            raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        svc._end_processing()
 
 
 # Exponential-backoff retry for LLM calls that hit 429 / rate-limit
@@ -5500,190 +5603,201 @@ async def process_full(session_id: str, req: ProcessFullRequest):
     stages succeeded so the UI can show a toast with the exact state.
     """
     svc.load_settings()
-    if not svc.settings or not svc.settings.is_configured:
-        raise HTTPException(
-            status_code=400,
-            detail="API keys not configured. Open Settings → save tokens → retry.",
+    # In-flight indicator for /recording/status — see the docstring
+    # on Services._end_processing for why this MUST be released in a
+    # `finally`, not just on the success path. process_full is also
+    # the function the backend auto-process-after-stop path calls
+    # (_auto_process_session -> process_full, with its own retry
+    # loop), so this one indicator covers both the manual "Process
+    # full" button and the automatic post-stop pipeline.
+    svc._begin_processing()
+    try:
+        if not svc.settings or not svc.settings.is_configured:
+            raise HTTPException(
+                status_code=400,
+                detail="API keys not configured. Open Settings → save tokens → retry.",
+            )
+
+        await asyncio.to_thread(svc.ensure_models_loaded)
+
+        stages: dict[str, str] = {}
+
+        # 1. Transcribe + diarize (only if not already done). Serialized
+        # under _PROCESSING_LOCK because this stage mutates the shared
+        # RecordingService._session / svc.current_session — two overlapping
+        # processings would otherwise cross-contaminate each other's
+        # transcripts. Double-checked: re-load inside the lock so we don't
+        # re-transcribe a session another job just finished while we waited.
+        session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if not session.segments:
+            async with _PROCESSING_LOCK:
+                session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+                if not session:
+                    raise HTTPException(status_code=404, detail="Session not found")
+                if not session.segments:
+                    # DATA-LOSS FIX (2026-06-15): see the long-form comment in
+                    # the manual /sessions/{id}/process handler. Pass session
+                    # by parameter so a concurrent start_recording cannot
+                    # alias recording_svc._session out from under us.
+                    svc.current_session = session
+                    try:
+                        session = await svc.recording_svc.process_session(session)
+                        try:
+                            await _auto_identify_and_save_speakers(session)
+                        except Exception as e:
+                            logger.warning(f"auto speaker identification skipped: {e}")
+                        await asyncio.to_thread(svc.session_svc.save, session)
+                        stages["transcribe_diarize"] = "ok"
+                    except Exception as e:
+                        logger.exception("process_full: transcribe/diarize failed")
+                        stages["transcribe_diarize"] = f"failed: {e}"
+                        return {"ok": False, "stages": stages}
+                else:
+                    stages["transcribe_diarize"] = "skipped (already processed)"
+        else:
+            stages["transcribe_diarize"] = "skipped (already processed)"
+
+        # 2-6. Run the Claude extractions against ONE loaded session, then
+        # save ONCE.
+        #
+        # The previous version ran five extractions via asyncio.gather where
+        # each one independently did load_full -> setattr(one field) ->
+        # save(whole session). Because they all loaded the same base
+        # concurrently and each saved the entire object back, they CLOBBERED
+        # each other — the last writer won and silently nulled the other
+        # fields. Observed in the wild: summary/action_items/decisions/
+        # requirements all came back null while only the structured records
+        # survived (it saved last). Now the extractions only COMPUTE; we
+        # apply every result to a single session object and write it once.
+        from models.extraction import STRUCTURED_FIELDS, stamp_records
+
+        session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+        if not session or not session.segments:
+            # No transcript to extract from (transcribe failed/empty).
+            return {"ok": False, "stages": stages}
+        transcript = session.full_transcript()
+        notes = session.notes or ""
+        images = list(session.screenshots or [])
+
+        async def _do_summary():
+            prompt_text = await asyncio.to_thread(
+                svc.template_svc.get_prompt, req.template)
+            return await _llm_call_with_retry(
+                lambda: svc.summarizer.summarize(
+                    transcript, prompt=prompt_text, notes=notes,
+                    template_name=req.template, image_paths=images,
+                    copilot_observations=_copilot_observations_blob(session)),
+                "summarize")
+
+        async def _do_markdown(method_name):
+            method = getattr(svc.summarizer, method_name)
+            return await _llm_call_with_retry(
+                lambda: method(transcript, notes=notes, image_paths=images),
+                method_name)
+
+        async def _do_structured():
+            parsed = await svc.summarizer.extract_structured(
+                transcript, notes=notes, image_paths=images)
+            created_at = session.started_at.isoformat() if session.started_at else ""
+            return stamp_records(parsed, session.session_id, created_at)
+
+        summary_r, ai_r, dec_r, req_r, struct_r = await asyncio.gather(
+            _do_summary(),
+            _do_markdown("extract_action_items"),
+            _do_markdown("extract_decisions"),
+            _do_markdown("extract_requirements"),
+            _do_structured(),
+            return_exceptions=True,
         )
 
-    await asyncio.to_thread(svc.ensure_models_loaded)
-
-    stages: dict[str, str] = {}
-
-    # 1. Transcribe + diarize (only if not already done). Serialized
-    # under _PROCESSING_LOCK because this stage mutates the shared
-    # RecordingService._session / svc.current_session — two overlapping
-    # processings would otherwise cross-contaminate each other's
-    # transcripts. Double-checked: re-load inside the lock so we don't
-    # re-transcribe a session another job just finished while we waited.
-    session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    if not session.segments:
-        async with _PROCESSING_LOCK:
-            session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
-            if not session:
-                raise HTTPException(status_code=404, detail="Session not found")
-            if not session.segments:
-                # DATA-LOSS FIX (2026-06-15): see the long-form comment in
-                # the manual /sessions/{id}/process handler. Pass session
-                # by parameter so a concurrent start_recording cannot
-                # alias recording_svc._session out from under us.
-                svc.current_session = session
-                try:
-                    session = await svc.recording_svc.process_session(session)
-                    try:
-                        await _auto_identify_and_save_speakers(session)
-                    except Exception as e:
-                        logger.warning(f"auto speaker identification skipped: {e}")
-                    await asyncio.to_thread(svc.session_svc.save, session)
-                    stages["transcribe_diarize"] = "ok"
-                except Exception as e:
-                    logger.exception("process_full: transcribe/diarize failed")
-                    stages["transcribe_diarize"] = f"failed: {e}"
-                    return {"ok": False, "stages": stages}
+        def _apply(field: str, value, label: str):
+            if isinstance(value, Exception):
+                logger.warning(f"process_full: {label} failed: {value}")
+                stages[label] = f"failed: {value}"
             else:
-                stages["transcribe_diarize"] = "skipped (already processed)"
-    else:
-        stages["transcribe_diarize"] = "skipped (already processed)"
+                setattr(session, field, value)
+                stages[label] = "ok"
 
-    # 2-6. Run the Claude extractions against ONE loaded session, then
-    # save ONCE.
-    #
-    # The previous version ran five extractions via asyncio.gather where
-    # each one independently did load_full -> setattr(one field) ->
-    # save(whole session). Because they all loaded the same base
-    # concurrently and each saved the entire object back, they CLOBBERED
-    # each other — the last writer won and silently nulled the other
-    # fields. Observed in the wild: summary/action_items/decisions/
-    # requirements all came back null while only the structured records
-    # survived (it saved last). Now the extractions only COMPUTE; we
-    # apply every result to a single session object and write it once.
-    from models.extraction import STRUCTURED_FIELDS, stamp_records
-
-    session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
-    if not session or not session.segments:
-        # No transcript to extract from (transcribe failed/empty).
-        return {"ok": False, "stages": stages}
-    transcript = session.full_transcript()
-    notes = session.notes or ""
-    images = list(session.screenshots or [])
-
-    async def _do_summary():
-        prompt_text = await asyncio.to_thread(
-            svc.template_svc.get_prompt, req.template)
-        return await _llm_call_with_retry(
-            lambda: svc.summarizer.summarize(
-                transcript, prompt=prompt_text, notes=notes,
-                template_name=req.template, image_paths=images,
-                copilot_observations=_copilot_observations_blob(session)),
-            "summarize")
-
-    async def _do_markdown(method_name):
-        method = getattr(svc.summarizer, method_name)
-        return await _llm_call_with_retry(
-            lambda: method(transcript, notes=notes, image_paths=images),
-            method_name)
-
-    async def _do_structured():
-        parsed = await svc.summarizer.extract_structured(
-            transcript, notes=notes, image_paths=images)
-        created_at = session.started_at.isoformat() if session.started_at else ""
-        return stamp_records(parsed, session.session_id, created_at)
-
-    summary_r, ai_r, dec_r, req_r, struct_r = await asyncio.gather(
-        _do_summary(),
-        _do_markdown("extract_action_items"),
-        _do_markdown("extract_decisions"),
-        _do_markdown("extract_requirements"),
-        _do_structured(),
-        return_exceptions=True,
-    )
-
-    def _apply(field: str, value, label: str):
-        if isinstance(value, Exception):
-            logger.warning(f"process_full: {label} failed: {value}")
-            stages[label] = f"failed: {value}"
+        _apply("summary", summary_r, "summary")
+        if not isinstance(summary_r, Exception):
+            session.template = req.template
+        _apply("action_items", ai_r, "action_items")
+        _apply("decisions", dec_r, "decisions")
+        _apply("requirements", req_r, "requirements")
+        if isinstance(struct_r, Exception):
+            logger.warning(f"process_full: structured failed: {struct_r}")
+            stages["structured"] = f"failed: {struct_r}"
         else:
-            setattr(session, field, value)
-            stages[label] = "ok"
+            for key, (_cls, attr) in STRUCTURED_FIELDS.items():
+                setattr(session, attr, struct_r.get(key, []))
+            stages["structured"] = "ok"
 
-    _apply("summary", summary_r, "summary")
-    if not isinstance(summary_r, Exception):
-        session.template = req.template
-    _apply("action_items", ai_r, "action_items")
-    _apply("decisions", dec_r, "decisions")
-    _apply("requirements", req_r, "requirements")
-    if isinstance(struct_r, Exception):
-        logger.warning(f"process_full: structured failed: {struct_r}")
-        stages["structured"] = f"failed: {struct_r}"
-    else:
-        for key, (_cls, attr) in STRUCTURED_FIELDS.items():
-            setattr(session, attr, struct_r.get(key, []))
-        stages["structured"] = "ok"
+        # Single write with every successful field applied.
+        await asyncio.to_thread(svc.session_svc.save, session)
 
-    # Single write with every successful field applied.
-    await asyncio.to_thread(svc.session_svc.save, session)
+        # 6. Optional follow-up email drafts — only when requested explicitly.
+        if req.follow_up_drafts:
+            try:
+                from services.follow_up_email import draft_follow_up_emails
+                count = await asyncio.to_thread(
+                    draft_follow_up_emails, svc, session_id)
+                stages["follow_up_drafts"] = f"ok ({count} drafts)"
+            except Exception as e:
+                logger.exception("process_full: follow_up_drafts failed")
+                stages["follow_up_drafts"] = f"failed: {e}"
 
-    # 6. Optional follow-up email drafts — only when requested explicitly.
-    if req.follow_up_drafts:
+        # Auto-index for semantic search (mirrors what /process does for the
+        # one-shot path). Fire-and-forget; missing semantic index never
+        # blocks the user's main flow. Catches the auto_process_after_stop
+        # path which previously skipped indexing entirely.
+        if svc.search_svc:
+            asyncio.create_task(asyncio.to_thread(
+                svc.search_svc.index_session, session_id))
+        # Same for commitments — auto_process_after_stop now auto-mines
+        # commitments too. Need a fresh session load because the local
+        # `session` variable above may not reflect the latest extractions.
+        if svc.commitments_svc:
+            async def _do_commitments():
+                try:
+                    fresh = await asyncio.to_thread(
+                        svc.session_svc.load_full, session_id)
+                    if fresh:
+                        await _auto_extract_commitments(fresh)
+                except Exception as e:
+                    logger.exception(f"process_full commitments failed: {e}")
+            asyncio.create_task(_do_commitments())
+
+        # Keep the engagement register warm: a freshly processed session
+        # has new structured records, so recompute its client's roll-up.
+        # Fire-and-forget — a stale register never blocks processing.
+        if svc.engagement_svc:
+            async def _do_register():
+                try:
+                    fresh = await asyncio.to_thread(
+                        svc.session_svc.load_full, session_id)
+                    if fresh and (fresh.client or "").strip():
+                        await asyncio.to_thread(
+                            svc.engagement_svc.build_register,
+                            fresh.client, fresh.project or "")
+                except Exception as e:
+                    logger.exception(f"process_full register refresh failed: {e}")
+            asyncio.create_task(_do_register())
+
+        # Clear any prior auto-process failure badge — a successful run (manual
+        # or auto retry) means the session is no longer in a failed state.
         try:
-            from services.follow_up_email import draft_follow_up_emails
-            count = await asyncio.to_thread(
-                draft_follow_up_emails, svc, session_id)
-            stages["follow_up_drafts"] = f"ok ({count} drafts)"
+            fresh = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+            if fresh and fresh.processing_error:
+                fresh.processing_error = None
+                await asyncio.to_thread(svc.session_svc.save, fresh)
         except Exception as e:
-            logger.exception("process_full: follow_up_drafts failed")
-            stages["follow_up_drafts"] = f"failed: {e}"
+            logger.warning(f"could not clear processing_error on {session_id}: {e}")
 
-    # Auto-index for semantic search (mirrors what /process does for the
-    # one-shot path). Fire-and-forget; missing semantic index never
-    # blocks the user's main flow. Catches the auto_process_after_stop
-    # path which previously skipped indexing entirely.
-    if svc.search_svc:
-        asyncio.create_task(asyncio.to_thread(
-            svc.search_svc.index_session, session_id))
-    # Same for commitments — auto_process_after_stop now auto-mines
-    # commitments too. Need a fresh session load because the local
-    # `session` variable above may not reflect the latest extractions.
-    if svc.commitments_svc:
-        async def _do_commitments():
-            try:
-                fresh = await asyncio.to_thread(
-                    svc.session_svc.load_full, session_id)
-                if fresh:
-                    await _auto_extract_commitments(fresh)
-            except Exception as e:
-                logger.exception(f"process_full commitments failed: {e}")
-        asyncio.create_task(_do_commitments())
-
-    # Keep the engagement register warm: a freshly processed session
-    # has new structured records, so recompute its client's roll-up.
-    # Fire-and-forget — a stale register never blocks processing.
-    if svc.engagement_svc:
-        async def _do_register():
-            try:
-                fresh = await asyncio.to_thread(
-                    svc.session_svc.load_full, session_id)
-                if fresh and (fresh.client or "").strip():
-                    await asyncio.to_thread(
-                        svc.engagement_svc.build_register,
-                        fresh.client, fresh.project or "")
-            except Exception as e:
-                logger.exception(f"process_full register refresh failed: {e}")
-        asyncio.create_task(_do_register())
-
-    # Clear any prior auto-process failure badge — a successful run (manual
-    # or auto retry) means the session is no longer in a failed state.
-    try:
-        fresh = await asyncio.to_thread(svc.session_svc.load_full, session_id)
-        if fresh and fresh.processing_error:
-            fresh.processing_error = None
-            await asyncio.to_thread(svc.session_svc.save, fresh)
-    except Exception as e:
-        logger.warning(f"could not clear processing_error on {session_id}: {e}")
-
-    return {"ok": True, "stages": stages}
+        return {"ok": True, "stages": stages}
+    finally:
+        svc._end_processing()
 
 
 async def _extract_and_save(
@@ -7582,7 +7696,31 @@ def _gather_diagnostics() -> dict:
     except Exception as e:  # noqa: BLE001
         crash_tail = f"(could not read crash.log: {e})"
 
-    return {"checks": checks, "log_tail": log_tail, "crash_tail": crash_tail}
+    # Recency, not existence — crash.log is append-only and never
+    # deleted (utils/crash_log.py), so its mere presence would make the
+    # Settings "backend crashed" banner permanent even for a bug fixed
+    # and released weeks ago. Only the timestamp of the MOST RECENT
+    # crash and a threshold decide whether to warn; the raw tail above
+    # stays available regardless so the history is still there to
+    # diagnose from.
+    last_crash_at: Optional[str] = None
+    crash_is_recent = False
+    try:
+        from utils.crash_log import last_crash_time, is_recent_crash
+        crash_ts = last_crash_time()
+        if crash_ts is not None:
+            last_crash_at = crash_ts.isoformat()
+            crash_is_recent = is_recent_crash(crash_ts)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"crash recency check failed: {e}")
+
+    return {
+        "checks": checks,
+        "log_tail": log_tail,
+        "crash_tail": crash_tail,
+        "last_crash_at": last_crash_at,
+        "crash_is_recent": crash_is_recent,
+    }
 
 
 @app.get("/diagnostics")

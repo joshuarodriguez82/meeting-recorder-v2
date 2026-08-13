@@ -276,8 +276,16 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
-      {/* Tab bar — sticky so it stays reachable while a tab's cards scroll */}
-      <div className="sticky top-0 z-10 -mx-6 border-b border-border bg-background/95 px-6 backdrop-blur">
+      {/* Tab bar — sticky so it stays reachable while a tab's cards scroll.
+          -mt-6/pt-6 is a matched pair that cancels out visually (net zero
+          offset for the tab row) but lets the bar's opaque background
+          extend up through the scroll container's `pt-6` in page.tsx —
+          without it, position:sticky can't leave its containing block, so
+          the bar would park 24px below the real top of the scrollport and
+          content would keep scrolling visibly through that gap. Coupled to
+          page.tsx's `pt-6` on the `overflow-y-auto` container: if that
+          padding value ever changes, this offset must change with it. */}
+      <div className="sticky top-0 z-10 -mx-6 -mt-6 border-b border-border bg-background px-6 pt-6">
         <div className="mx-auto flex max-w-3xl flex-wrap gap-1">
           {SETTINGS_TABS.map((t) => (
             <button
@@ -1077,9 +1085,17 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
 
       </>)}
 
-      {/* Save bar */}
-      <div className="sticky bottom-0 -mx-6 border-t border-border bg-background/95 px-6 py-3 backdrop-blur">
-        <div className="mx-auto max-w-3xl flex justify-end gap-2">
+      {/* Save bar — sticky, mirrors the tab bar's fix above. -mb-16/pb-16
+          cancels out visually (the button row keeps its own py-3 in the
+          inner div) but lets the bar's opaque background extend down
+          through the scroll container's `pb-16` in page.tsx, so it's
+          flush with the real bottom of the scrollport instead of parking
+          64px above it with content scrolling visibly underneath.
+          Coupled to page.tsx's `pb-16` on the `overflow-y-auto` container:
+          if that padding value ever changes, this offset must change
+          with it. */}
+      <div className="sticky bottom-0 z-10 -mx-6 -mb-16 border-t border-border bg-background px-6 pb-16">
+        <div className="mx-auto max-w-3xl flex justify-end gap-2 py-3">
           <Button onClick={save} disabled={saving}>
             {saving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
             Save Settings
@@ -3111,6 +3127,17 @@ function CoPilotCadenceCard({
   );
 }
 
+// Human-readable "how long ago" for the crash-recency line — deliberately
+// coarse (days, not hours/minutes): the point is letting the user judge
+// "is this the crash I already fixed" at a glance, not a live-ticking
+// clock.
+function formatDaysAgo(d: Date): string {
+  const days = Math.floor((Date.now() - d.getTime()) / 86_400_000);
+  if (days <= 0) return "today";
+  if (days === 1) return "1 day ago";
+  return `${days} days ago`;
+}
+
 // System health panel. Surfaces the signals we kept having to dig out of
 // backend.log by hand — live-model reachability (the silent Ollama
 // failure), provider config, mic/loopback, recordings-dir writability —
@@ -3153,10 +3180,22 @@ function DiagnosticsCard() {
 
   // crash.log holds the faulthandler dump from a NATIVE crash (the
   // Windows 0xC0000005 / 3221225477 exit that's been unexplained since
-  // v2.0.18). It's empty on a healthy machine, so the whole block only
-  // renders when there's something to read — no permanent scary panel.
+  // v2.0.18). The file is append-only and never deleted, so its mere
+  // presence would make this banner permanent — a crash from weeks ago,
+  // long since fixed, would nag forever. The backend now reports
+  // RECENCY (last_crash_at + a 7-day crash_is_recent threshold), so the
+  // warning banner only shows for a crash that's still likely relevant.
+  // "Show/Copy crash log" stay available whenever there's ANY history —
+  // even an old crash is useful context when diagnosing a new one.
   const crashTail = (diag?.crash_tail || "").trim();
-  const hasCrash = crashTail.length > 0;
+  const hasCrashHistory = crashTail.length > 0;
+  const crashIsRecent = !!diag?.crash_is_recent;
+  const lastCrashAt = diag?.last_crash_at
+    ? new Date(diag.last_crash_at)
+    : null;
+  const lastCrashLabel = lastCrashAt
+    ? `${lastCrashAt.toLocaleString()} (${formatDaysAgo(lastCrashAt)})`
+    : null;
 
   const copyCrash = () => {
     if (!crashTail) return;
@@ -3225,16 +3264,38 @@ function DiagnosticsCard() {
           </div>
         )}
 
-        {hasCrash && (
-          <div className="space-y-2 rounded-md border border-amber-200 bg-amber-50 p-3 dark:border-amber-900 dark:bg-amber-950/40">
+        {hasCrashHistory && (
+          <div
+            className={
+              crashIsRecent
+                ? "space-y-2 rounded-md border border-amber-200 bg-amber-50 p-3 dark:border-amber-900 dark:bg-amber-950/40"
+                : "space-y-2 rounded-md border border-border bg-muted/30 p-3"
+            }
+          >
             <div className="text-sm font-medium">
-              The backend crashed at least once
+              {crashIsRecent
+                ? "The backend crashed recently"
+                : "The backend has crashed before"}
             </div>
             <div className="text-xs text-muted-foreground">
-              A native crash dump was captured in <code>crash.log</code>. This
-              is the traceback the backend&apos;s own log can&apos;t hold —
-              copy it into a bug report and it says exactly where the process
-              died.
+              {crashIsRecent ? (
+                <>
+                  A native crash dump was captured in <code>crash.log</code>.
+                  This is the traceback the backend&apos;s own log can&apos;t
+                  hold — copy it into a bug report and it says exactly where
+                  the process died.
+                </>
+              ) : (
+                <>
+                  No recent crashes — this is history from an earlier build,
+                  kept for reference. <code>crash.log</code> is append-only
+                  and never cleared, so old entries stay available without
+                  keeping this warning up indefinitely.
+                </>
+              )}
+              {lastCrashLabel && (
+                <div className="mt-1">Last crash: {lastCrashLabel}</div>
+              )}
             </div>
             <div className="flex items-center gap-2">
               <Button
