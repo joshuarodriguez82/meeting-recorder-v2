@@ -14,15 +14,34 @@ from typing import List, Optional
 
 from models.session import Session
 from services._cloud_sync import CloudFileNotReadyError, read_text_hydrated
+from services.session_index import SessionIndex
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 class SessionService:
-    """Handles JSON serialization of Session objects."""
+    """Handles JSON serialization of Session objects.
 
-    def __init__(self, recordings_dir: str, extra_dirs=None):
+    list_sessions() perf note: the session_*.json files on disk are the
+    ONLY source of truth. When `index_db_path` is given (and
+    `index_enabled` is True — the default), list_sessions() is served
+    from a disposable SQLite cache (services/session_index.py) that
+    re-stats every file on every call but only re-parses JSON for files
+    whose (mtime, size) changed. Deleting that .db file, running with a
+    corrupt one, or passing index_enabled=False all degrade to exactly
+    the direct-scan behaviour this class has always had — see
+    _list_sessions_direct(). The index is NEVER the only place a piece
+    of session data lives.
+    """
+
+    def __init__(
+        self,
+        recordings_dir: str,
+        extra_dirs=None,
+        index_enabled: bool = True,
+        index_db_path: Optional[str] = None,
+    ):
         self._recordings_dir = Path(recordings_dir)
         self._recordings_dir.mkdir(parents=True, exist_ok=True)
         # Additional roots to READ sessions from (never written to).
@@ -42,6 +61,24 @@ class SessionService:
         # Surfaced through scan_report() so an unreachable cloud folder
         # is visible rather than inferred from a short session list.
         self._last_root_errors: list = []
+
+        # Kill switch (Settings.session_index_enabled, default True) plus
+        # a concrete DB path are both required for the index to engage.
+        # No path -> no index, full stop; nothing here ever guesses a
+        # location on its own (server.py always passes USER_DATA_DIR /
+        # "session_index.db" — next to config.env and the log files,
+        # deliberately NEVER inside a recordings/archive root, which can
+        # be cloud-synced and would corrupt a SQLite file living on it).
+        self._index: Optional[SessionIndex] = None
+        if index_enabled and index_db_path:
+            try:
+                self._index = SessionIndex(index_db_path)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    f"Could not initialize session index at "
+                    f"{index_db_path} ({e}); falling back to direct "
+                    f"disk scans.")
+                self._index = None
 
     @property
     def recordings_dir(self) -> Path:
@@ -256,6 +293,145 @@ class SessionService:
             return None
         return Session.from_dict(data)
 
+    def _build_summary(self, session_id: str, data: dict) -> dict:
+        """The list_sessions() summary shape for one already-parsed
+        session JSON dict. Pure function of (session_id, data) — no I/O
+        — so it's shared verbatim by the direct scan and by the index's
+        parse callback, and both are guaranteed to produce identical
+        summaries for identical file content."""
+        audio_path = data.get("audio_path")
+        audio_exists = bool(audio_path) and Path(audio_path).exists()
+
+        # Duration from started/ended_at
+        duration_s = 0
+        try:
+            started = data.get("started_at")
+            ended = data.get("ended_at")
+            if started and ended:
+                s = datetime.datetime.fromisoformat(started)
+                e = datetime.datetime.fromisoformat(ended)
+                duration_s = max(0, int((e - s).total_seconds()))
+        except Exception:
+            pass
+
+        return {
+            "session_id": session_id,
+            "display_name": data.get("display_name") or f"Session {session_id}",
+            "started_at": data.get("started_at"),
+            "ended_at": data.get("ended_at"),
+            "duration_s": duration_s,
+            "audio_path": audio_path,
+            "audio_exists": audio_exists,
+            "has_transcript": bool(data.get("segments")),
+            "has_summary": bool(data.get("summary")),
+            "has_action_items": bool(data.get("action_items")),
+            "has_requirements": bool(data.get("requirements")),
+            "has_decisions": bool(data.get("decisions")),
+            "client": data.get("client", "") or "",
+            "project": data.get("project", "") or "",
+            "action_items": data.get("action_items", "") or "",
+            "summary": data.get("summary", "") or "",
+            "decisions": data.get("decisions", "") or "",
+            "requirements": data.get("requirements", "") or "",
+            # Attendees are lightweight (email strings) and let the
+            # Record view auto-tag client from the current calendar
+            # meeting's attendees without an extra per-session fetch.
+            "attendees": list(data.get("attendees") or []),
+            # Compact map of speaker_id -> display_name so list-side
+            # consumers (Follow-ups, Commitments) can resolve labels
+            # like "SPEAKER_03" that the LLM extracted into a typed
+            # human name when the user has renamed that speaker.
+            # Omitting empty display_names so the wire is small —
+            # the resolver treats a missing key as "no rename yet".
+            "speakers": {
+                sid: sd.get("display_name", "")
+                for sid, sd in (data.get("speakers") or {}).items()
+                if sd.get("display_name")
+            },
+            # Audio integrity flags — set when WAV duration disagrees
+            # significantly with the recording window. Lets the
+            # Sessions list render a warning chip without loading
+            # the full session JSON.
+            "audio_integrity_warning":
+                data.get("audio_integrity_warning"),
+            "audio_actual_duration_s":
+                data.get("audio_actual_duration_s"),
+            "audio_expected_duration_s":
+                data.get("audio_expected_duration_s"),
+            # Auto-process failure (retries exhausted). Lets the
+            # Sessions list badge a failed session so it doesn't sit
+            # silently unprocessed.
+            "processing_error": data.get("processing_error"),
+            # Read-only sync-integrity finding (mic/loopback drift or
+            # dropped frames vs wall-clock). Surfaced as an info chip.
+            "sync_warning": data.get("sync_warning"),
+        }
+
+    def _read_and_parse(self, path: Path) -> Optional[dict]:
+        """Read + parse one session_*.json into a summary dict (see
+        _build_summary), or None if it couldn't be read this round.
+
+        None deliberately does NOT distinguish "cloud placeholder not
+        hydrated yet" from "corrupt JSON" from "transient I/O error" —
+        callers (direct scan, and the index's parse_fn) both treat every
+        such case identically: skip this file for this pass, log why,
+        never crash the whole listing over one bad file. Does not touch
+        json_path — callers attach that themselves, since the index
+        already tracks it as the row's primary key.
+        """
+        try:
+            data = json.loads(read_text_hydrated(path))
+        except CloudFileNotReadyError as e:
+            # Synced from another device but not downloaded to this
+            # disk yet — the "new session created today doesn't show
+            # up on the Mac" bug. Log loud + actionable instead of a
+            # quiet skip so the cause is obvious.
+            logger.error(
+                f"Session {path.name} is an un-downloaded cloud "
+                f"placeholder; it will appear once the sync client "
+                f"finishes downloading it. {e}")
+            return None
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Skipping unreadable session {path.name}: {e}")
+            return None
+        if not isinstance(data, dict):
+            # Belt-and-braces: anything that loads as valid JSON but
+            # isn't a dict (legacy list-rooted file, future sidecar
+            # we forgot to add to the dotted-stem skip above) gets
+            # skipped instead of 500ing the whole endpoint.
+            logger.warning(
+                f"Skipping non-dict session file {path.name} "
+                f"(root is {type(data).__name__}, expected dict)")
+            return None
+
+        session_id = data.get("session_id") or path.stem.replace("session_", "")
+        return self._build_summary(session_id, data)
+
+    @staticmethod
+    def _dedupe_newest(rows) -> List[dict]:
+        """Same session id can legitimately appear under two roots (an
+        old recordings dir plus a copy in the current one). Keep the
+        newest by file mtime so the app shows the most-processed
+        version. `rows` is an iterable of (summary_dict, mtime)."""
+        results: List[dict] = []
+        seen_ids: dict = {}
+        for summary, mtime in rows:
+            session_id = summary["session_id"]
+            prior = seen_ids.get(session_id)
+            if prior is not None and prior[0] >= mtime:
+                continue
+            if prior is not None:
+                # Same id seen in another root; this copy is newer, so it
+                # replaces the earlier one in place rather than appending
+                # a duplicate row.
+                results[prior[1]] = summary
+                seen_ids[session_id] = (mtime, prior[1])
+            else:
+                seen_ids[session_id] = (mtime, len(results))
+                results.append(summary)
+        results.sort(key=lambda r: r.get("started_at") or "", reverse=True)
+        return results
+
     def list_sessions(self) -> List[dict]:
         """
         Scan every configured root for session_*.json files.
@@ -265,13 +441,25 @@ class SessionService:
         single non-recursive glob over one directory hid every session
         recorded before RECORDINGS_DIR was last changed, and every
         session filed into a subfolder.
+
+        Served from the SQLite index when one is configured (see
+        __init__ / services/session_index.py). Any failure there —
+        missing DB, corrupt file, locked file, schema mismatch it
+        couldn't self-heal — falls back to a full direct disk scan for
+        that call, never to an error or to stale/wrong data.
         """
-        results: List[dict] = []
-        # Same session id can legitimately appear under two roots (an old
-        # recordings dir plus a copy in the current one). Keep the newest
-        # by file mtime so the app shows the most-processed version.
-        seen_ids: dict = {}
-        paths = []
+        if self._index is not None:
+            try:
+                return self._list_sessions_indexed()
+            except Exception as e:  # noqa: BLE001 - the index is best-effort
+                logger.warning(
+                    f"Session index read failed ({e}); falling back to "
+                    f"a direct disk scan for this call.")
+        return self._list_sessions_direct()
+
+    def _list_sessions_direct(self) -> List[dict]:
+        """The original always-correct path: walk every root, parse
+        every session_*.json, build summaries. No caching."""
         # ONE BAD ROOT MUST NEVER TAKE DOWN THE WHOLE LIST.
         #
         # Field report 2026-08-07: a user configured a Google Drive
@@ -291,6 +479,7 @@ class SessionService:
         # library. archive_reconcile._scan_session_json already had this
         # guard; this one didn't, and that asymmetry is what shipped.
         self._last_root_errors = []
+        paths = []
         for root in self._scan_roots():
             try:
                 paths.extend(root.rglob("session_*.json"))
@@ -301,6 +490,8 @@ class SessionService:
                     f"Session scan of {root} failed ({e}); sessions in "
                     f"other folders are unaffected. If this is a cloud "
                     f"folder, check the sync client is running.")
+
+        rows = []
         for path in paths:
             # Skip sidecar files (session_<id>.commitments.json,
             # session_<id>.item_status.json, …) that share the
@@ -309,124 +500,60 @@ class SessionService:
             # means a sidecar suffix.
             if "." in path.stem:
                 continue
-            try:
-                data = json.loads(read_text_hydrated(path))
-            except CloudFileNotReadyError as e:
-                # Synced from another device but not downloaded to this
-                # disk yet — the "new session created today doesn't show
-                # up on the Mac" bug. Log loud + actionable instead of a
-                # quiet skip so the cause is obvious.
-                logger.error(
-                    f"Session {path.name} is an un-downloaded cloud "
-                    f"placeholder; it will appear once the sync client "
-                    f"finishes downloading it. {e}")
+            summary = self._read_and_parse(path)
+            if summary is None:
                 continue
-            except (json.JSONDecodeError, OSError) as e:
-                logger.warning(f"Skipping unreadable session {path.name}: {e}")
-                continue
-            if not isinstance(data, dict):
-                # Belt-and-braces: anything that loads as valid JSON but
-                # isn't a dict (legacy list-rooted file, future sidecar
-                # we forgot to add to the dotted-stem skip above) gets
-                # skipped instead of 500ing the whole endpoint.
-                logger.warning(
-                    f"Skipping non-dict session file {path.name} "
-                    f"(root is {type(data).__name__}, expected dict)")
-                continue
-
-            session_id = data.get("session_id") or path.stem.replace("session_", "")
-
-            # De-dupe across roots. An old recordings dir and the current
-            # one can both hold the same session; prefer the file written
-            # most recently, which is the more-processed copy.
             try:
                 mtime = path.stat().st_mtime
             except OSError:
                 mtime = 0.0
-            prior = seen_ids.get(session_id)
-            if prior is not None and prior[0] >= mtime:
-                continue
-            audio_path = data.get("audio_path")
-            audio_exists = bool(audio_path) and Path(audio_path).exists()
+            summary["json_path"] = str(path)
+            rows.append((summary, mtime))
 
-            # Duration from started/ended_at
-            duration_s = 0
+        return self._dedupe_newest(rows)
+
+    def _list_sessions_indexed(self) -> List[dict]:
+        """Same result as _list_sessions_direct(), but unchanged files
+        are served from the SQLite cache instead of being re-parsed.
+
+        Every call re-enumerates the filesystem (stat only — cheap) so
+        a session created/edited/deleted on disk is reflected on the
+        very next call; there's no separate cache-invalidation path to
+        keep in sync with save()/delete()."""
+        self._last_root_errors = []
+        scanned_roots: List[str] = []
+        candidates: dict = {}
+        for root in self._scan_roots():
+            root_str = str(root)
             try:
-                started = data.get("started_at")
-                ended = data.get("ended_at")
-                if started and ended:
-                    s = datetime.datetime.fromisoformat(started)
-                    e = datetime.datetime.fromisoformat(ended)
-                    duration_s = max(0, int((e - s).total_seconds()))
-            except Exception:
-                pass
+                found = list(root.rglob("session_*.json"))
+            except OSError as e:
+                self._last_root_errors.append({"path": root_str,
+                                               "error": str(e)})
+                logger.error(
+                    f"Session scan of {root} failed ({e}); sessions in "
+                    f"other folders are unaffected. If this is a cloud "
+                    f"folder, check the sync client is running.")
+                continue
+            scanned_roots.append(root_str)
+            for path in found:
+                if "." in path.stem:
+                    continue
+                try:
+                    st = path.stat()
+                except OSError:
+                    # Can't stat it right now (transient) — skip it as a
+                    # candidate this round rather than guessing; any
+                    # cached row for it is left untouched (see
+                    # SessionIndex.refresh_and_query).
+                    continue
+                candidates[str(path)] = (st.st_mtime, st.st_size, root_str)
 
-            summary = {
-                "session_id": session_id,
-                "display_name": data.get("display_name") or f"Session {session_id}",
-                "started_at": data.get("started_at"),
-                "ended_at": data.get("ended_at"),
-                "duration_s": duration_s,
-                "audio_path": audio_path,
-                "audio_exists": audio_exists,
-                "has_transcript": bool(data.get("segments")),
-                "has_summary": bool(data.get("summary")),
-                "has_action_items": bool(data.get("action_items")),
-                "has_requirements": bool(data.get("requirements")),
-                "has_decisions": bool(data.get("decisions")),
-                "client": data.get("client", "") or "",
-                "project": data.get("project", "") or "",
-                "action_items": data.get("action_items", "") or "",
-                "summary": data.get("summary", "") or "",
-                "decisions": data.get("decisions", "") or "",
-                "requirements": data.get("requirements", "") or "",
-                # Attendees are lightweight (email strings) and let the
-                # Record view auto-tag client from the current calendar
-                # meeting's attendees without an extra per-session fetch.
-                "attendees": list(data.get("attendees") or []),
-                # Compact map of speaker_id -> display_name so list-side
-                # consumers (Follow-ups, Commitments) can resolve labels
-                # like "SPEAKER_03" that the LLM extracted into a typed
-                # human name when the user has renamed that speaker.
-                # Omitting empty display_names so the wire is small —
-                # the resolver treats a missing key as "no rename yet".
-                "speakers": {
-                    sid: sd.get("display_name", "")
-                    for sid, sd in (data.get("speakers") or {}).items()
-                    if sd.get("display_name")
-                },
-                # Audio integrity flags — set when WAV duration disagrees
-                # significantly with the recording window. Lets the
-                # Sessions list render a warning chip without loading
-                # the full session JSON.
-                "audio_integrity_warning":
-                    data.get("audio_integrity_warning"),
-                "audio_actual_duration_s":
-                    data.get("audio_actual_duration_s"),
-                "audio_expected_duration_s":
-                    data.get("audio_expected_duration_s"),
-                # Auto-process failure (retries exhausted). Lets the
-                # Sessions list badge a failed session so it doesn't sit
-                # silently unprocessed.
-                "processing_error": data.get("processing_error"),
-                # Read-only sync-integrity finding (mic/loopback drift or
-                # dropped frames vs wall-clock). Surfaced as an info chip.
-                "sync_warning": data.get("sync_warning"),
-                "json_path": str(path),
-            }
-            if prior is not None:
-                # Same id seen in another root; this copy is newer, so it
-                # replaces the earlier one in place rather than appending
-                # a duplicate row.
-                results[prior[1]] = summary
-                seen_ids[session_id] = (mtime, prior[1])
-            else:
-                seen_ids[session_id] = (mtime, len(results))
-                results.append(summary)
-
-        # Sort newest first
-        results.sort(key=lambda r: r.get("started_at") or "", reverse=True)
-        return results
+        rows = self._index.refresh_and_query(
+            candidates, scanned_roots,
+            lambda p: self._read_and_parse(Path(p)),
+        )
+        return self._dedupe_newest(rows)
 
     def delete(self, session_id: str) -> None:
         """Delete a session's JSON, audio, log, and search/derived

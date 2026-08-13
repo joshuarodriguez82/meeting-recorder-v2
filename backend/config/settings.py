@@ -315,6 +315,16 @@ class Settings:
     # (force CUDA, falling back to CPU with a warning on a machine with
     # no GPU rather than crashing). See core/diarization.py.
     diarization_device: str
+    # Kill switch for the SQLite session index (services/session_index.py).
+    # Default ON: list_sessions() (called by nearly every endpoint — see
+    # services/session_service.py's crash-dump docstring) is served from
+    # a disposable SQLite cache instead of re-parsing every session_*.json
+    # on every call. The cache is strictly derived from the JSON files —
+    # deleting it just costs one slow rebuild scan, nothing is lost. Set
+    # False to bypass it entirely and go back to the old always-correct
+    # direct-scan path, e.g. while ruling out the index as a cause of a
+    # sessions-list bug.
+    session_index_enabled: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -446,6 +456,7 @@ class Settings:
                 "LIVE_SPEAKER_SPLIT_ENABLED", True),
             diarization_device=_normalize_diarization_device(
                 _get("DIARIZATION_DEVICE", "auto")),
+            session_index_enabled=_get_bool("SESSION_INDEX_ENABLED", True),
         )
 
     @property
@@ -528,6 +539,7 @@ class Settings:
         live_vad_enabled: bool = True,
         live_speaker_split_enabled: bool = True,
         diarization_device: str = "auto",
+        session_index_enabled: bool = True,
     ) -> None:
         """Write settings back to the .env file.
 
@@ -605,6 +617,7 @@ class Settings:
             # above), so a bad value here is self-healing rather than a
             # crash risk.
             f"DIARIZATION_DEVICE={diarization_device}\n"
+            f"SESSION_INDEX_ENABLED={'true' if session_index_enabled else 'false'}\n"
         )
         # Write to the canonical LOCALAPPDATA location first. In rare cases
         # a Tauri-spawned Python child cannot open files under LOCALAPPDATA
