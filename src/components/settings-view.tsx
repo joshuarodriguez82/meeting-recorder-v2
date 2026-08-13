@@ -276,8 +276,16 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
-      {/* Tab bar — sticky so it stays reachable while a tab's cards scroll */}
-      <div className="sticky top-0 z-10 -mx-6 border-b border-border bg-background/95 px-6 backdrop-blur">
+      {/* Tab bar — sticky so it stays reachable while a tab's cards scroll.
+          -mt-6/pt-6 is a matched pair that cancels out visually (net zero
+          offset for the tab row) but lets the bar's opaque background
+          extend up through the scroll container's `pt-6` in page.tsx —
+          without it, position:sticky can't leave its containing block, so
+          the bar would park 24px below the real top of the scrollport and
+          content would keep scrolling visibly through that gap. Coupled to
+          page.tsx's `pt-6` on the `overflow-y-auto` container: if that
+          padding value ever changes, this offset must change with it. */}
+      <div className="sticky top-0 z-10 -mx-6 -mt-6 border-b border-border bg-background px-6 pt-6">
         <div className="mx-auto flex max-w-3xl flex-wrap gap-1">
           {SETTINGS_TABS.map((t) => (
             <button
@@ -1077,9 +1085,17 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
 
       </>)}
 
-      {/* Save bar */}
-      <div className="sticky bottom-0 -mx-6 border-t border-border bg-background/95 px-6 py-3 backdrop-blur">
-        <div className="mx-auto max-w-3xl flex justify-end gap-2">
+      {/* Save bar — sticky, mirrors the tab bar's fix above. -mb-16/pb-16
+          cancels out visually (the button row keeps its own py-3 in the
+          inner div) but lets the bar's opaque background extend down
+          through the scroll container's `pb-16` in page.tsx, so it's
+          flush with the real bottom of the scrollport instead of parking
+          64px above it with content scrolling visibly underneath.
+          Coupled to page.tsx's `pb-16` on the `overflow-y-auto` container:
+          if that padding value ever changes, this offset must change
+          with it. */}
+      <div className="sticky bottom-0 z-10 -mx-6 -mb-16 border-t border-border bg-background px-6 pb-16">
+        <div className="mx-auto max-w-3xl flex justify-end gap-2 py-3">
           <Button onClick={save} disabled={saving}>
             {saving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
             Save Settings
