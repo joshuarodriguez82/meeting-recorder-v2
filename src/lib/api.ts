@@ -448,7 +448,20 @@ export interface RecordingStatus {
   models_ready: boolean;
   models_loading: boolean;
   models_error: string | null;
+  // Latest status message from the recording/processing pipeline. This
+  // is a write-once mailbox on the backend that is NEVER cleared (see
+  // backend Services.current_status) — a terminal message like
+  // "Processing complete." stays here indefinitely once work finishes.
+  // Do NOT infer "still busy" from this being non-empty; use
+  // `is_processing` below for that. Treat this as display text only.
   current_status?: string;
+  // True while the backend is genuinely doing pipeline work (transcribe
+  // /diarize, LLM extraction, or finalizing a just-stopped recording).
+  // Optional so an older backend that predates this field degrades to
+  // "not busy" rather than breaking — see recordingStatus derivation in
+  // page.tsx, which combines this with models_loading/is_recording/
+  // reachability to decide whether the sidebar spinner should spin.
+  is_processing?: boolean;
   // Auto-stop watchdog: zero or more active warnings. Codes are stable
   // per condition (`dead_air`, `meeting_overrun`, `hard_cap_hit`,
   // `dead_air_stop`, `meeting_overrun_stop`) so the frontend can dedupe
@@ -1823,6 +1836,15 @@ export interface Diagnostics {
   // artifact that survives an access violation; backend.log just stops
   // mid-line (field report 2026-08-11).
   crash_tail?: string;
+  // ISO timestamp of the most recent crash recorded in crash.log, or
+  // null when there's no crash (or none the backend could date). Shown
+  // in the UI regardless of recency so the user can see how old it is.
+  last_crash_at?: string | null;
+  // crash.log is append-only and never deleted, so its existence alone
+  // says nothing about whether the crash it documents still matters —
+  // this is the recency check (backend threshold, currently 7 days)
+  // that decides whether the "backend crashed" banner shows at all.
+  crash_is_recent?: boolean;
 }
 
 export interface Terminology {
