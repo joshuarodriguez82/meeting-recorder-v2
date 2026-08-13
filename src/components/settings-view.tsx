@@ -726,6 +726,12 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
               a few seconds after you hit Stop, try CPU here.
             </p>
           </div>
+          <Toggle
+            label="Echo cancellation (experimental)"
+            description="Cleans up the recording if you use a mic and speakers instead of a headset — normally, unmuting lets the other person's voice come back out of your speakers and get picked up a second time on your mic, duplicating their words in the transcript under your name. Runs after you stop recording, before the transcript is generated; if the cleanup doesn't look safe it's automatically skipped and your original audio is used untouched. Off by default while this is still being validated."
+            checked={settings.echo_cancellation_enabled}
+            onChange={(v) => update("echo_cancellation_enabled", v)}
+          />
           <div className="space-y-1">
             <Label htmlFor="auto-screenshot-int">Auto-screenshot during recording</Label>
             <div className="flex items-center gap-2">
