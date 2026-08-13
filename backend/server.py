@@ -363,7 +363,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from config.settings import Settings
+from config.settings import Settings, USER_DATA_DIR
 from core.audio_capture import list_input_devices, list_output_devices
 from services.template_service import TemplateService
 from services.copilot_mode_service import CoPilotModeService
@@ -750,6 +750,14 @@ class Services:
             self.session_svc = SessionService(
                 self.settings.recordings_dir,
                 extra_dirs=_archive_recordings_dirs(self.settings.recordings_dir),
+                # SQLite session-list cache, kept next to config.env and
+                # the log files — deliberately NOT inside recordings_dir
+                # or an archive root, either of which can be a
+                # cloud-synced folder (a SQLite file there can corrupt
+                # under sync). See services/session_index.py and
+                # config/settings.py's session_index_enabled docstring.
+                index_enabled=self.settings.session_index_enabled,
+                index_db_path=str(USER_DATA_DIR / "session_index.db"),
             )
             self.export_svc = ExportService(self.settings.recordings_dir)
             # Per-client configs and user-authored templates live ALONGSIDE
@@ -1104,6 +1112,23 @@ class SettingsDTO(BaseModel):
     # config/settings.py's audio_mix_format_lookup_enabled docstring
     # and core/audio_format_inspector.py.
     audio_mix_format_lookup_enabled: bool = True
+    # Offline acoustic echo cancellation for the mic channel during
+    # finalize (before the mic+loopback mix). Helps when recording
+    # with an external mic + speakers (not a headset): unmuting lets
+    # the far-end caller's voice come back out of the speakers and get
+    # picked up a second time on the mic, duplicating that speech in
+    # the transcript under the user's own name and degrading speaker
+    # diarization. Default False — off while this is validated; a
+    # rejected/failed attempt always falls back to the untouched mic,
+    # never damages the recording. See config/settings.py's
+    # echo_cancellation_enabled docstring and utils/aec.py.
+    echo_cancellation_enabled: bool = False
+    # Kill switch for the SQLite session-list index. Default True — see
+    # config/settings.py's session_index_enabled docstring and
+    # services/session_index.py. False forces every /sessions read back
+    # onto the old direct-scan path (services/session_service.py's
+    # _list_sessions_direct).
+    session_index_enabled: bool = True
 
 
 class StartRecordingRequest(BaseModel):
@@ -1544,6 +1569,8 @@ async def get_settings():
         live_speaker_split_enabled=s.live_speaker_split_enabled,
         diarization_device=s.diarization_device,
         audio_mix_format_lookup_enabled=s.audio_mix_format_lookup_enabled,
+        echo_cancellation_enabled=s.echo_cancellation_enabled,
+        session_index_enabled=s.session_index_enabled,
     )
 
 
@@ -1654,6 +1681,8 @@ async def save_settings(payload: SettingsDTO):
         live_speaker_split_enabled=bool(payload.live_speaker_split_enabled),
         diarization_device=(payload.diarization_device or "auto").strip().lower(),
         audio_mix_format_lookup_enabled=bool(payload.audio_mix_format_lookup_enabled),
+        echo_cancellation_enabled=bool(payload.echo_cancellation_enabled),
+        session_index_enabled=bool(payload.session_index_enabled),
     )
     # If the recordings folder changed, migrate client + template state
     # from the previous folder to the new one. Copy, not move, so the
@@ -2628,8 +2657,18 @@ class ScreenshotRequest(BaseModel):
 @app.post("/recording/screenshot")
 async def attach_screenshot(req: ScreenshotRequest):
     """Register a screenshot the shell just captured against the active
-    session. It's persisted with the session JSON on stop, then fed to
-    the summarizer as visual context."""
+    session. Fed to the summarizer as visual context once the session is
+    processed.
+
+    Also mirrors the updated screenshot list to disk immediately
+    (best-effort) rather than waiting for stop/process. Field reports of
+    the backend dying mid-recording showed this was silent data loss:
+    the PNG sat on disk but nothing on disk linked it to the session, so
+    a crash between "screenshot taken" and "recording stopped cleanly"
+    orphaned it. The in-memory list on recording_svc stays authoritative
+    for the running session either way — this write is purely a
+    crash-resilience mirror, so a failure here must never fail the
+    attach or interrupt the recording."""
     if not svc.recording_svc or not svc.recording_svc.is_recording:
         raise HTTPException(status_code=409, detail="Not recording")
     ok = await asyncio.to_thread(
@@ -2640,7 +2679,58 @@ async def attach_screenshot(req: ScreenshotRequest):
             detail="Screenshot file not found or no active session")
     sess = svc.recording_svc.current_session
     count = len(sess.screenshots) if sess else 0
+    if sess is not None:
+        try:
+            await asyncio.to_thread(svc.session_svc.save, sess)
+        except Exception as e:
+            logger.warning(
+                "Could not persist screenshot attach for session "
+                "%s (will still be saved on stop): %s",
+                sess.session_id, e)
     return {"ok": True, "count": count}
+
+
+@app.get("/recording/screenshots/{index}")
+async def get_active_recording_screenshot(index: int):
+    """Serve one screenshot from the ACTIVE, in-memory recording.
+
+    Unlike /sessions/{id}/screenshots/{index}, this doesn't depend on
+    the session having reached disk yet — before the persistence added
+    to attach_screenshot() above, screenshots only landed in the session
+    JSON on stop/process, so the live thumbnail strip in the Record view
+    would 404 for the whole recording. Reading straight off
+    recording_svc.current_session (the same object attach_screenshot
+    appends to) means a screenshot is servable moments after capture.
+    There's only ever one active recording, so no session id in the URL.
+
+    Same containment story as the historical endpoint: a screenshot path
+    is not fully trusted input, so it still goes through
+    _resolve_within_scan_roots() rather than being served directly."""
+    from fastapi.responses import FileResponse
+    if not svc.recording_svc or not svc.recording_svc.is_recording:
+        raise HTTPException(status_code=404, detail="No active recording")
+    sess = svc.recording_svc.current_session
+    if sess is None:
+        raise HTTPException(status_code=404, detail="No active recording")
+    shots = list(sess.screenshots or [])
+    if index < 0 or index >= len(shots):
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    raw_path = shots[index]
+    resolved = _resolve_within_scan_roots(raw_path)
+    if resolved is None:
+        logger.warning(
+            "Refusing to serve live screenshot for session %s: %r is "
+            "outside the configured recordings/archive roots",
+            sess.session_id, raw_path)
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    if not resolved.is_file():
+        raise HTTPException(status_code=404,
+                            detail="Screenshot file missing on disk")
+    media = {
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".gif": "image/gif", ".webp": "image/webp",
+    }.get(resolved.suffix.lower(), "application/octet-stream")
+    return FileResponse(str(resolved), media_type=media, filename=resolved.name)
 
 
 @app.get("/recording/transcript/stream")
@@ -2962,6 +3052,8 @@ async def set_live_copilot_enabled(payload: dict):
         live_speaker_split_enabled=s.live_speaker_split_enabled,
         diarization_device=s.diarization_device,
         audio_mix_format_lookup_enabled=s.audio_mix_format_lookup_enabled,
+        echo_cancellation_enabled=s.echo_cancellation_enabled,
+        session_index_enabled=s.session_index_enabled,
     )
     # Update the cached Settings in-place so the change is visible
     # immediately, without going through load_settings() which would
@@ -6878,6 +6970,8 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         live_speaker_split_enabled=s.live_speaker_split_enabled,
         diarization_device=s.diarization_device,
         audio_mix_format_lookup_enabled=s.audio_mix_format_lookup_enabled,
+        echo_cancellation_enabled=s.echo_cancellation_enabled,
+        session_index_enabled=s.session_index_enabled,
     )
     svc.settings = dataclasses.replace(
         s, live_copilot_mode=new_mode, live_copilot_meeting_type=new_type)

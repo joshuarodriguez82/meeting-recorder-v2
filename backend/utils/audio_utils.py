@@ -9,6 +9,7 @@ import numpy as np
 import soundfile as sf
 from scipy.signal import resample_poly
 
+from utils.aec import apply_offline_aec_to_mic_file
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -379,6 +380,7 @@ def finalize_recording_streaming(
     target_sr: int = TARGET_SAMPLE_RATE,
     block_seconds: float = STREAM_BLOCK_SECONDS,
     loopback_start_offset_s: Optional[float] = None,
+    echo_cancellation_enabled: bool = False,
 ) -> Tuple[float, bool]:
     """
     Stream-merge mic + (optional) loopback into a single mono PCM_16 WAV at
@@ -399,6 +401,20 @@ def finalize_recording_streaming(
     diagnostic for long recordings on devices with non-nominal sample
     rates (USB audio, Bluetooth, virtualized inputs).
 
+    Offline echo cancellation (opt-in, off by default): when
+    `echo_cancellation_enabled` is True and a usable loopback track is
+    present, the mic channel is run through an offline NLMS adaptive
+    filter (utils/aec.py) using the loopback as the echo reference,
+    BEFORE the mix below — this is what removes the far-end caller's
+    voice leaking back into the mic through the user's speakers when
+    they're not on a headset. The cleaned mic is written to a NEW temp
+    file; the original mic WAV is never modified. A mandatory sanity
+    check (utils.aec.decide_offline_aec — NaN/Inf, ERLE bounds) decides
+    whether to use it; on any rejection or exception this function
+    silently falls back to the ORIGINAL, unmodified mic signal and
+    finalize proceeds exactly as it would with the flag off. Losing
+    echo cancellation is nothing; losing the recording is everything.
+
     Args:
         mic_wav_path: path to the mic-only temp WAV (any SR, mono float).
         loopback_wav_path: optional loopback WAV. Missing/empty → mic-only.
@@ -408,6 +424,8 @@ def finalize_recording_streaming(
         loopback_start_offset_s: known cross-stream offset (loopback start
             minus mic start, in seconds, ≥0). Pass None to fall back to
             the right-aligned heuristic.
+        echo_cancellation_enabled: run offline AEC on the mic channel
+            before mixing. Default False.
 
     Returns:
         (duration_seconds_written, loopback_mixed_in)
@@ -537,6 +555,61 @@ def finalize_recording_streaming(
     else:
         lb_offset_out = None
 
+    # ── Offline echo cancellation (opt-in, default off) ─────────────
+    # Cleans the mic channel of the far-end caller's voice leaking back
+    # in through the user's speakers, using the already-resampled
+    # loopback (lb_path_16k) as the echo reference, coarse-aligned at
+    # the SAME offset (lb_offset_out) the mixing pass below uses. The
+    # cleaned mic — if and only if it passes decide_offline_aec's
+    # sanity checks — is written to its OWN temp file and substituted
+    # in for the read pass below; the original mic_wav_path is never
+    # touched. On rejection (or any exception) mic_path_for_read /
+    # mic_sr_for_read stay at their original values, so the merge
+    # proceeds byte-for-byte as it would with the flag off.
+    mic_path_for_read = mic_path
+    mic_sr_for_read = mic_sr
+    aec_temp_path: Optional[str] = None
+    if (echo_cancellation_enabled and have_lb and lb_path_16k
+            and lb_offset_out is not None):
+        aec_temp_path = str(
+            _scratch_temp_dir() / f"_aecmic_{out_path.stem}.tmp.wav"
+        )
+        try:
+            aec_decision = apply_offline_aec_to_mic_file(
+                mic_wav_path=str(mic_path),
+                loopback_16k_path=lb_path_16k,
+                target_sr=target_sr,
+                coarse_offset_frames=lb_offset_out,
+                expected_frames=mic_total_out,
+                out_path=aec_temp_path,
+            )
+        except Exception as e:
+            # Belt-and-braces: apply_offline_aec_to_mic_file already
+            # catches its own exceptions, but the finalize path must
+            # NEVER fail because of AEC regardless of what changes
+            # there in the future — losing echo cancellation is
+            # nothing, losing the recording is everything.
+            logger.exception(
+                f"Offline AEC raised unexpectedly — using original mic: {e}"
+            )
+            aec_decision = {"accepted": False, "reason": f"caller_exception:{e!r}",
+                             "erle_db": None, "residual_delay_ms": None}
+        logger.info(
+            "Offline AEC decision: "
+            f"accepted={aec_decision.get('accepted')} "
+            f"reason={aec_decision.get('reason')} "
+            f"erle_db={aec_decision.get('erle_db')} "
+            f"residual_delay_ms={aec_decision.get('residual_delay_ms')} "
+            f"near_energy={aec_decision.get('near_energy')} "
+            f"residual_energy={aec_decision.get('residual_energy')}"
+        )
+        if aec_decision.get("accepted") and aec_decision.get("out_path"):
+            mic_path_for_read = Path(aec_decision["out_path"])
+            mic_sr_for_read = target_sr
+        else:
+            _safe_unlink(aec_temp_path)
+            aec_temp_path = None
+
     written_out = 0
     loopback_mixed = False
     lb_reader: Optional[sf.SoundFile] = None
@@ -545,12 +618,12 @@ def finalize_recording_streaming(
             str(out_path), mode="w",
             samplerate=target_sr, channels=1, subtype="PCM_16",
         ) as writer:
-            with sf.SoundFile(str(mic_path), mode="r") as mic_reader:
+            with sf.SoundFile(str(mic_path_for_read), mode="r") as mic_reader:
                 if have_lb and lb_path_16k:
                     lb_reader = sf.SoundFile(lb_path_16k, mode="r")
 
                 mic_block_frames = max(
-                    int(mic_sr * block_seconds), 1024)
+                    int(mic_sr_for_read * block_seconds), 1024)
 
                 while True:
                     mic_block = mic_reader.read(
@@ -562,7 +635,7 @@ def finalize_recording_streaming(
                     if mic_block.ndim == 2:
                         mic_block = mic_block.mean(axis=1)
 
-                    mic_out = _resample_block(mic_block, mic_sr, target_sr)
+                    mic_out = _resample_block(mic_block, mic_sr_for_read, target_sr)
                     # mic_out is float32 and writable (resample_poly allocates)
 
                     if (have_lb and lb_reader is not None
@@ -607,6 +680,8 @@ def finalize_recording_streaming(
                 pass
         if lb_path_16k:
             _safe_unlink(lb_path_16k)
+        if aec_temp_path:
+            _safe_unlink(aec_temp_path)
 
     duration_s = written_out / target_sr
     if have_lb and loopback_mixed:

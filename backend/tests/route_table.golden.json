@@ -411,6 +411,12 @@
   ]
  ],
  [
+  "/recording/screenshots/{index}",
+  [
+   "GET"
+  ]
+ ],
+ [
   "/recording/start",
   [
    "POST"

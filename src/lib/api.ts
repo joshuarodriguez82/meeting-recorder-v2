@@ -246,6 +246,16 @@ export interface Settings {
   // a few seconds after a recording stops. "cuda" forces GPU, falling
   // back to CPU with a warning if no GPU is present.
   diarization_device: "auto" | "cpu" | "cuda" | string;
+  // Offline acoustic echo cancellation for the mic channel, applied
+  // during finalize (before the mic+loopback mix). Helps when
+  // recording with an external mic + speakers instead of a headset:
+  // unmuting lets the far-end caller's voice come back out of the
+  // speakers and get picked up a second time on the mic, duplicating
+  // that speech in the transcript under your own name. Default false
+  // — off while this is validated; a rejected/failed attempt always
+  // falls back to the untouched mic, so it can never damage a
+  // recording, only fail to help.
+  echo_cancellation_enabled: boolean;
 }
 
 // A single co-pilot mode (persona) or meeting-type (modifier). Shape

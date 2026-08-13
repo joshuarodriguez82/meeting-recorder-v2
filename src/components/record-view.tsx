@@ -28,6 +28,10 @@ import {
   AlertTriangle,
   XCircle,
   Info,
+  Image as ImageIcon,
+  FolderOpen,
+  Copy,
+  Check,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -135,6 +139,37 @@ export function RecordView({
   // fed to the summarizer as visual context.
   const [screenshotBusy, setScreenshotBusy] = useState(false);
   const [screenshotCount, setScreenshotCount] = useState(0);
+  // Thumbnail-strip entries for the current recording, pushed as each
+  // capture completes (manual button or auto-timer) — never polled.
+  // `index` is the screenshot's 0-based position in the session's
+  // `screenshots` list (== attachScreenshot's returned count - 1),
+  // which is what /sessions/{id}/screenshots/{index} expects.
+  const [screenshotEntries, setScreenshotEntries] = useState<
+    { index: number; takenAt: number }[]
+  >([]);
+  // Indices whose image fetch has failed (backend hiccup, file not
+  // finished writing, capture permission revoked mid-meeting, etc.).
+  // Tracked so a failed fetch swaps in a placeholder tile instead of
+  // ever dropping the entry or blanking the strip.
+  const [screenshotLoadFailed, setScreenshotLoadFailed] = useState<Set<number>>(new Set());
+  // Larger view when a thumbnail is clicked; null = closed.
+  const [zoomedScreenshot, setZoomedScreenshot] = useState<number | null>(null);
+  // Destination folder for this recording's screenshots (Part 2 — the
+  // actual pain point). Fetched once per recording, independent of
+  // whether any screenshot has been taken yet, so the folder is
+  // discoverable before the first capture.
+  const [screenshotDirPath, setScreenshotDirPath] = useState<string | null>(null);
+  const [screenshotDirCopied, setScreenshotDirCopied] = useState(false);
+  // Resolved backend origin + auth suffix for the thumbnail/zoom <img>
+  // src — same mechanism the audio player and session Screenshots tab
+  // use (session-detail-dialog.tsx): getBaseUrl() for the dynamic port,
+  // authQuery() because an <img> src can't carry an Authorization header.
+  const [mediaBaseUrl, setMediaBaseUrl] = useState("");
+  const [mediaAuthQuery, setMediaAuthQuery] = useState("");
+  useEffect(() => {
+    api.getBaseUrl().then(setMediaBaseUrl).catch(() => {});
+    api.authQuery().then(setMediaAuthQuery).catch(() => {});
+  }, []);
   // When the user has >1 monitor, clicking Screenshot opens this picker
   // so they choose which display to capture (rather than us guessing).
   const [monitorPicker, setMonitorPicker] = useState<{
@@ -478,9 +513,85 @@ export function RecordView({
     }
   };
 
+  // Fetch the screenshot destination folder once per recording — not
+  // gated on ever taking a screenshot, so the folder is discoverable
+  // (the actual pain point) even before the first capture. The endpoint
+  // 409s when not recording, so this only fires on the rising edge.
+  useEffect(() => {
+    // Deliberately no synchronous setScreenshotDirPath(null) on the
+    // falsy branch here — the whole card that reads this value is
+    // itself gated on `recording`, so there's nothing to blank, and a
+    // stale path from the previous recording is silently overwritten
+    // the moment the next fetch below resolves.
+    if (!recording) return;
+    let cancelled = false;
+    api.getScreenshotDir()
+      .then((r) => { if (!cancelled) setScreenshotDirPath(r.dir); })
+      .catch(() => { /* not recording yet, or backend hiccup — leave unset */ });
+    return () => { cancelled = true; };
+  }, [recording]);
+
   // Look up the currently selected device objects for display.
   const selectedMic = inputDevices.find((d) => d.index === micIdx);
   const selectedOut = outputDevices.find((d) => d.index === outIdx);
+
+  // Build a screenshot's image URL, or null when we don't have enough
+  // to build one yet (base URL hasn't resolved, or — post-recording
+  // only — no active session id). Null renders as the placeholder
+  // tile, same as a failed fetch — see screenshotLoadFailed.
+  //
+  // While recording, this reads from GET /recording/screenshots/{index}
+  // — straight off the backend's in-memory active session, so a
+  // thumbnail is fetchable moments after capture instead of only after
+  // the session JSON reaches disk (which historically only happened on
+  // stop/process; screenshots now also get a best-effort disk mirror on
+  // attach, but the live strip doesn't depend on that mirror landing).
+  // Once stopped, fall back to the historical per-session endpoint —
+  // the strip itself unmounts on stop, but the zoom dialog reuses this
+  // same helper and can still be closing out its last render.
+  const screenshotImgSrc = (index: number): string | null => {
+    if (!mediaBaseUrl) return null;
+    if (recording) {
+      return `${mediaBaseUrl}/recording/screenshots/${index}${mediaAuthQuery}`;
+    }
+    if (!activeSessionId) return null;
+    return `${mediaBaseUrl}/sessions/${activeSessionId}/screenshots/${index}${mediaAuthQuery}`;
+  };
+
+  const markScreenshotLoadFailed = (index: number) => {
+    setScreenshotLoadFailed((prev) => {
+      if (prev.has(index)) return prev;
+      const next = new Set(prev);
+      next.add(index);
+      return next;
+    });
+  };
+
+  // Same copy-to-clipboard fallback used elsewhere in the app
+  // (session-detail-dialog.tsx's CopyButton) — navigator.clipboard
+  // requires a secure context, which an older WebView may not have.
+  const copyScreenshotDir = async () => {
+    if (!screenshotDirPath) return;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(screenshotDirPath);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = screenshotDirPath;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setScreenshotDirCopied(true);
+      toast.success("Folder path copied");
+      setTimeout(() => setScreenshotDirCopied(false), 1500);
+    } catch (e) {
+      toast.error(`Copy failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
 
   // ── Readiness panel (Part 3) ─────────────────────────────────────
   // Derived, not fetched — reuses device lists / backend reachability
@@ -646,6 +757,8 @@ export function RecordView({
       // the server is the only thing that says whether we're recording.
       refreshRecordingStatus();
       setScreenshotCount(0);
+      setScreenshotEntries([]);
+      setScreenshotLoadFailed(new Set());
       setSession(null);
       notifiedCodesRef.current = new Set();
       toast.success("Recording started", { description: `Session ${res.session_id}` });
@@ -762,6 +875,13 @@ export function RecordView({
       });
       const res = await api.attachScreenshot(path);
       setScreenshotCount(res.count);
+      // Drive the strip straight off this capture's result — no polling.
+      // index is 0-based (count - 1), matching the session's screenshots
+      // list position that /sessions/{id}/screenshots/{index} reads.
+      setScreenshotEntries((prev) => [
+        ...prev,
+        { index: res.count - 1, takenAt: Date.now() },
+      ]);
       toast.success("Screenshot captured", {
         description: `${res.count} attached — included in the summary to Claude`,
       });
@@ -1095,6 +1215,103 @@ export function RecordView({
               state={recordingStatus?.system_state ?? null}
               kind="system"
             />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Screenshot strip — thumbnails appear as each capture completes
+          (manual button or auto-timer both funnel through
+          captureMonitor, which pushes here directly; no polling), plus
+          the destination folder up front so "where did that go" never
+          comes up. Matches the capture-meters card above it: same
+          Card/CardContent shell, same muted/border tokens. */}
+      {recording && (
+        <Card className="gap-2 py-3.5">
+          <CardHeader>
+            <CardTitle className="flex flex-wrap items-center justify-between gap-2 text-base">
+              <span className="flex items-center gap-2">
+                <Camera className="h-4 w-4 text-primary" />
+                Screenshots {screenshotEntries.length > 0 && `(${screenshotEntries.length})`}
+              </span>
+              {screenshotDirPath && (
+                <div className="flex min-w-0 items-center gap-1.5 text-xs font-normal text-muted-foreground">
+                  <FolderOpen className="h-3.5 w-3.5 shrink-0" />
+                  <span className="max-w-[280px] truncate" title={screenshotDirPath}>
+                    {screenshotDirPath}
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={copyScreenshotDir}
+                    title="Copy folder path — no in-app 'open folder' command exists yet, so copy and paste it into your file manager"
+                    className="shrink-0"
+                  >
+                    {screenshotDirCopied ? (
+                      <Check className="h-3.5 w-3.5" />
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                  </Button>
+                </div>
+              )}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {screenshotEntries.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                No screenshots yet — click Screenshot above to capture one.
+              </p>
+            ) : (
+              // Single row, horizontal scroll: caps the strip's height
+              // and keeps the DOM flat (no wrapping/virtualization
+              // needed) even with dozens of captures in a long meeting.
+              <div className="flex gap-2 overflow-x-auto pb-1">
+                {[...screenshotEntries]
+                  .sort((a, b) => a.index - b.index)
+                  .map((s) => {
+                    const src = screenshotLoadFailed.has(s.index) ? null : screenshotImgSrc(s.index);
+                    return (
+                      <button
+                        key={s.index}
+                        type="button"
+                        onClick={() => setZoomedScreenshot(s.index)}
+                        className="group relative h-16 w-24 shrink-0 overflow-hidden rounded-md border border-border bg-muted/40 transition hover:ring-2 hover:ring-primary"
+                        title={`Screenshot ${s.index + 1}${s.takenAt ? " · " + new Date(s.takenAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}`}
+                      >
+                        {src ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={src}
+                            alt={`Screenshot ${s.index + 1}`}
+                            className="h-full w-full object-cover"
+                            loading="lazy"
+                            onError={() => markScreenshotLoadFailed(s.index)}
+                          />
+                        ) : (
+                          // Neutral placeholder — a screenshot that was
+                          // taken must never render as one that wasn't.
+                          // Expected to be rare now that the strip reads
+                          // from the live in-memory session (see
+                          // screenshotImgSrc), but a request can still
+                          // fail — screen-locked capture, a backend
+                          // hiccup, the file not finished writing yet.
+                          <div className="flex h-full w-full flex-col items-center justify-center gap-0.5 text-muted-foreground">
+                            <ImageIcon className="h-4 w-4" />
+                          </div>
+                        )}
+                        <span className="absolute bottom-0.5 right-0.5 rounded bg-black/60 px-1 py-0.5 text-[9px] leading-none text-white">
+                          {s.index + 1}
+                        </span>
+                        {s.takenAt && (
+                          <span className="absolute left-0.5 top-0.5 rounded bg-black/60 px-1 py-0.5 text-[9px] leading-none text-white">
+                            {new Date(s.takenAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
@@ -1750,6 +1967,58 @@ export function RecordView({
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Screenshot zoom view — reuses the same Dialog primitive as the
+          monitor picker above rather than a bespoke lightbox. Falls
+          back to the same neutral placeholder as the strip thumbnail
+          when the image can't be fetched yet. */}
+      {(() => {
+        const zoomedIndex = zoomedScreenshot;
+        const zoomedEntry = zoomedIndex !== null
+          ? screenshotEntries.find((s) => s.index === zoomedIndex)
+          : undefined;
+        const zoomedSrc = zoomedIndex !== null && !screenshotLoadFailed.has(zoomedIndex)
+          ? screenshotImgSrc(zoomedIndex)
+          : null;
+        return (
+          <Dialog
+            open={zoomedIndex !== null}
+            onOpenChange={(open) => { if (!open) setZoomedScreenshot(null); }}
+          >
+            <DialogContent className="sm:max-w-2xl">
+              <DialogHeader>
+                <DialogTitle>
+                  Screenshot {zoomedIndex !== null ? zoomedIndex + 1 : ""}
+                </DialogTitle>
+                <DialogDescription>
+                  {zoomedEntry
+                    ? `Captured at ${new Date(zoomedEntry.takenAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`
+                    : "Captured during this recording."}
+                </DialogDescription>
+              </DialogHeader>
+              <div className="flex min-h-[16rem] items-center justify-center rounded-lg bg-muted/30 p-2">
+                {zoomedSrc ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={zoomedSrc}
+                    alt={`Screenshot ${(zoomedIndex ?? 0) + 1}`}
+                    className="max-h-[70vh] w-full rounded-md object-contain"
+                    onError={() => zoomedIndex !== null && markScreenshotLoadFailed(zoomedIndex)}
+                  />
+                ) : (
+                  <div className="flex flex-col items-center gap-2 py-10 text-muted-foreground">
+                    <ImageIcon className="h-8 w-8" />
+                    <p className="max-w-xs text-center text-sm">
+                      Couldn&apos;t load this image right now — it&apos;s
+                      still attached to the recording either way.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </DialogContent>
+          </Dialog>
+        );
+      })()}
     </div>
   );
 }

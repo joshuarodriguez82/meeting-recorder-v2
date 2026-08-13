@@ -328,6 +328,30 @@ class Settings:
     # is deliberately no third option that runs pycaw in-process — see
     # the module docstring for why that must never come back.
     audio_mix_format_lookup_enabled: bool
+    # Offline acoustic echo cancellation (AEC) for the mic channel,
+    # applied during finalize (before the mic+loopback mix) — see
+    # utils/aec.py and utils/audio_utils.py's finalize_recording_
+    # streaming. Helps a specific setup: recording with an external
+    # mic + SPEAKERS (not a headset), where unmuting lets the far-end
+    # caller's voice come back out of the speakers and get picked up a
+    # second time on the mic, producing a duplicate transcript entry
+    # mis-attributed to the user and degrading speaker diarization.
+    # Default False — this is a new, offline-only, opt-in feature
+    # while it's validated against real recordings; a rejected/failed
+    # AEC attempt always falls back to the original mic untouched, but
+    # the toggle stays off by default until there's field evidence it
+    # helps more than it costs (extra finalize time on long meetings).
+    echo_cancellation_enabled: bool
+    # Kill switch for the SQLite session index (services/session_index.py).
+    # Default ON: list_sessions() (called by nearly every endpoint — see
+    # services/session_service.py's crash-dump docstring) is served from
+    # a disposable SQLite cache instead of re-parsing every session_*.json
+    # on every call. The cache is strictly derived from the JSON files —
+    # deleting it just costs one slow rebuild scan, nothing is lost. Set
+    # False to bypass it entirely and go back to the old always-correct
+    # direct-scan path, e.g. while ruling out the index as a cause of a
+    # sessions-list bug.
+    session_index_enabled: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -461,6 +485,9 @@ class Settings:
                 _get("DIARIZATION_DEVICE", "auto")),
             audio_mix_format_lookup_enabled=_get_bool(
                 "AUDIO_MIX_FORMAT_LOOKUP_ENABLED", True),
+            echo_cancellation_enabled=_get_bool(
+                "ECHO_CANCELLATION_ENABLED", False),
+            session_index_enabled=_get_bool("SESSION_INDEX_ENABLED", True),
         )
 
     @property
@@ -544,6 +571,8 @@ class Settings:
         live_speaker_split_enabled: bool = True,
         diarization_device: str = "auto",
         audio_mix_format_lookup_enabled: bool = True,
+        echo_cancellation_enabled: bool = False,
+        session_index_enabled: bool = True,
     ) -> None:
         """Write settings back to the .env file.
 
@@ -653,6 +682,9 @@ class Settings:
             f"DIARIZATION_DEVICE={diarization_device}\n"
             f"AUDIO_MIX_FORMAT_LOOKUP_ENABLED="
             f"{'true' if audio_mix_format_lookup_enabled else 'false'}\n"
+            f"ECHO_CANCELLATION_ENABLED="
+            f"{'true' if echo_cancellation_enabled else 'false'}\n"
+            f"SESSION_INDEX_ENABLED={'true' if session_index_enabled else 'false'}\n"
         )
         # Write to the canonical LOCALAPPDATA location first. In rare cases
         # a Tauri-spawned Python child cannot open files under LOCALAPPDATA
