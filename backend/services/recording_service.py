@@ -380,9 +380,14 @@ class RecordingService:
         return d
 
     def add_screenshot(self, path: str) -> bool:
-        """Attach a captured screenshot to the active session. The path
-        is persisted with the session JSON on stop/process. Returns
-        False if there's no session or the file doesn't exist."""
+        """Attach a captured screenshot to the active session's
+        in-memory list, which stays authoritative for the running
+        recording. The full session (including this list) is written
+        to the session JSON on stop/process as always; server.py's
+        /recording/screenshot handler additionally mirrors it to disk
+        right away, best-effort, so a mid-recording crash doesn't
+        orphan a screenshot that was already taken. Returns False if
+        there's no session or the file doesn't exist."""
         if self._session is None:
             return False
         if not path or not Path(path).is_file():
@@ -734,6 +739,9 @@ class RecordingService:
                     output_wav_path=final_path,
                     target_sr=TARGET_SR,
                     loopback_start_offset_s=loopback_start_offset_s,
+                    echo_cancellation_enabled=bool(
+                        getattr(self._settings,
+                                "echo_cancellation_enabled", False)),
                 )
                 session.audio_path = final_path
                 session.ended_at = datetime.now()
@@ -1666,6 +1674,7 @@ class RecordingService:
         output_wav_path: str,
         target_sr: int,
         loopback_start_offset_s: Optional[float],
+        echo_cancellation_enabled: bool = False,
     ) -> tuple[float, bool]:
         """Run the WAV merge in a subprocess instead of in-process.
 
@@ -1709,6 +1718,8 @@ class RecordingService:
             "" if loopback_start_offset_s is None
                 else f"{loopback_start_offset_s:.6f}",
         ]
+        if echo_cancellation_enabled:
+            argv.append("--echo-cancellation")
         logger.info(
             f"[finalize-subprocess] spawn {' '.join(argv[1:])}"
         )

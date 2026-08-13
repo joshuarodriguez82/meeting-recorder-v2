@@ -126,6 +126,38 @@ def test_subprocess_exits_1_on_missing_mic(tmp_path: Path):
     assert _parse_result(proc.stdout) == {}
 
 
+def test_subprocess_accepts_echo_cancellation_flag(recordings_dir: Path):
+    """--echo-cancellation is opt-in and threaded all the way from
+    _run_finalize_subprocess's argv through to finalize_recording_
+    streaming's echo_cancellation_enabled param. This just proves the
+    flag is accepted and the subprocess still succeeds end-to-end with
+    it set — the AEC decision logic itself is covered in test_aec.py."""
+    mic = write_sine_wav(
+        recordings_dir / "_recording_subD.wav",
+        duration_s=2.0, samplerate=16000,
+    )
+    loopback = write_sine_wav(
+        recordings_dir / "_loopback_subD.wav",
+        duration_s=2.0, samplerate=16000,
+    )
+    out = recordings_dir / "session_subD.wav"
+
+    proc = _run([
+        "--mic", str(mic),
+        "--loopback", str(loopback),
+        "--output", str(out),
+        "--target-sr", "16000",
+        "--offset", "0.0",
+        "--echo-cancellation",
+    ])
+
+    assert proc.returncode == 0, (
+        f"unexpected exit {proc.returncode}; stderr={proc.stderr}")
+    result = _parse_result(proc.stdout)
+    assert result["loopback_mixed"] == "true"
+    assert float(result["duration_s"]) == pytest.approx(2.0, abs=0.05)
+
+
 def test_subprocess_exits_2_on_bad_offset(tmp_path: Path):
     """Argparse-level / wrapper-level misuse exits 2 — distinct from
     finalize failure (1) and native crash (other). Lets the parent
