@@ -1,17 +1,29 @@
-"""Keychain-vs-config.env plaintext hardening (security review item 1 & 2).
+"""Keychain-mirror-plus-plaintext behaviour for secrets (security review
+items 1 & 2, item 1 REVISED 2026-08-13).
 
-save_to_env() now prefers the OS keychain for ANTHROPIC_API_KEY, HF_TOKEN,
-OPENAI_API_KEY, LIVE_ANTHROPIC_API_KEY and LIVE_OPENAI_API_KEY: when the
-keychain accepts (and verifiably holds) the value, config.env gets a blank
-line for that key instead of the plaintext. When the keychain is
-unavailable, config.env keeps the plaintext as a fallback so a key is
-never silently lost.
+save_to_env() mirrors ANTHROPIC_API_KEY, HF_TOKEN, OPENAI_API_KEY,
+LIVE_ANTHROPIC_API_KEY and LIVE_OPENAI_API_KEY into the OS keychain
+best-effort, but ALWAYS also keeps the plaintext value in config.env —
+it never blanks the env line, even when the keychain write succeeds.
 
-These tests fake the keychain with an in-memory dict (real `keyring` isn't
-installed in the CI venv — see requirements*.txt vs this repo's CI venv,
-which intentionally only carries `numpy scipy soundfile pytest fastapi`)
-so the round trip can be exercised deterministically without a real OS
-credential store.
+This is a deliberate reversal of an earlier attempt (still visible in
+save_to_env()'s docstring) that blanked config.env once a keychain write
+was verified: that version could still lose a user's key permanently if
+the keychain entry became unreadable on a LATER app upgrade/re-sign — a
+real risk for this app's unsigned, frequently-updated macOS build. See
+save_to_env()'s docstring for the full reasoning and what would need to
+be true (signed/notarized build + load-time key-recovery UX) before
+keychain-as-sole-copy could be attempted again.
+
+Item 2 (LIVE_* keys getting keychain treatment at all) stands as
+originally scoped — they just get the same mirror-plus-plaintext
+treatment as the other three keys now, instead of blank-on-success.
+
+These tests fake the keychain with an in-memory dict (real `keyring`
+isn't installed in the CI venv — see requirements*.txt vs this repo's CI
+venv, which intentionally only carries `numpy scipy soundfile pytest
+fastapi`) so the round trip can be exercised deterministically without a
+real OS credential store.
 """
 
 from __future__ import annotations
@@ -123,9 +135,9 @@ def _make_kwargs(**overrides) -> dict:
     return base
 
 
-# ── item 1: primary secrets prefer the keychain, blank config.env ──────
+# ── item 1 (revised): keychain mirror, plaintext ALWAYS retained ───────
 
-def test_keychain_round_trip_blanks_env_and_still_loads(tmp_path, monkeypatch):
+def test_keychain_mirrors_but_plaintext_stays_in_env(tmp_path, monkeypatch):
     _patch_dotenv(monkeypatch)
     env_path = _isolate_env_path(monkeypatch, tmp_path)
     fake = _install_fake_keychain(monkeypatch)
@@ -136,20 +148,20 @@ def test_keychain_round_trip_blanks_env_and_still_loads(tmp_path, monkeypatch):
         recordings_dir=str(tmp_path / "recordings"),
     ))
 
-    # config.env must not contain the plaintext value anywhere.
+    # config.env keeps the plaintext — no blanking, even though the
+    # keychain write succeeded.
     raw = env_path.read_text(encoding="utf-8")
-    assert secret_value not in raw
-    assert "ANTHROPIC_API_KEY=\n" in raw
+    assert f"ANTHROPIC_API_KEY={secret_value}" in raw
 
-    # The keychain actually has it.
+    # The keychain also got a mirror copy.
     assert fake.store["ANTHROPIC_API_KEY"] == secret_value
 
-    # And the value still loads correctly through the normal path.
+    # And it still loads correctly (from the file, which is authoritative).
     loaded = settings_mod.Settings.from_env()
     assert loaded.anthropic_api_key == secret_value
 
 
-def test_keychain_round_trip_all_primary_secret_keys(tmp_path, monkeypatch):
+def test_all_primary_secret_keys_mirrored_and_plaintext_retained(tmp_path, monkeypatch):
     """HF_TOKEN and OPENAI_API_KEY get the same treatment as
     ANTHROPIC_API_KEY."""
     _patch_dotenv(monkeypatch)
@@ -164,8 +176,12 @@ def test_keychain_round_trip_all_primary_secret_keys(tmp_path, monkeypatch):
     ))
 
     raw = env_path.read_text(encoding="utf-8")
-    for secret in ("anthropic-secret", "hf-secret", "openai-secret"):
-        assert secret not in raw
+    assert "ANTHROPIC_API_KEY=anthropic-secret" in raw
+    assert "HF_TOKEN=hf-secret" in raw
+    assert "OPENAI_API_KEY=openai-secret" in raw
+    assert fake.store["ANTHROPIC_API_KEY"] == "anthropic-secret"
+    assert fake.store["HF_TOKEN"] == "hf-secret"
+    assert fake.store["OPENAI_API_KEY"] == "openai-secret"
 
     loaded = settings_mod.Settings.from_env()
     assert loaded.anthropic_api_key == "anthropic-secret"
@@ -173,9 +189,29 @@ def test_keychain_round_trip_all_primary_secret_keys(tmp_path, monkeypatch):
     assert loaded.openai_api_key == "openai-secret"
 
 
-# ── item 2: LIVE_* keys go through the same keychain path ──────────────
+def test_file_value_wins_over_a_stale_keychain_entry(tmp_path, monkeypatch):
+    """Plaintext-in-file-is-authoritative (from_env()'s _get()) must still
+    hold: a stale/different keychain entry can never shadow the real,
+    just-saved key."""
+    _patch_dotenv(monkeypatch)
+    _isolate_env_path(monkeypatch, tmp_path)
+    fake = _install_fake_keychain(monkeypatch)
 
-def test_live_keys_round_trip_through_keychain(tmp_path, monkeypatch):
+    settings_mod.Settings.save_to_env(**_make_kwargs(
+        anthropic_api_key="current-key",
+        recordings_dir=str(tmp_path / "recordings"),
+    ))
+    # Simulate the keychain entry drifting out of sync after the save
+    # (e.g. edited via another tool, or a stale entry from a prior key).
+    fake.store["ANTHROPIC_API_KEY"] = "stale-different-value"
+
+    loaded = settings_mod.Settings.from_env()
+    assert loaded.anthropic_api_key == "current-key"
+
+
+# ── item 2: LIVE_* keys get the same mirror-plus-plaintext treatment ───
+
+def test_live_keys_mirrored_and_plaintext_retained(tmp_path, monkeypatch):
     _patch_dotenv(monkeypatch)
     env_path = _isolate_env_path(monkeypatch, tmp_path)
     fake = _install_fake_keychain(monkeypatch)
@@ -187,8 +223,8 @@ def test_live_keys_round_trip_through_keychain(tmp_path, monkeypatch):
     ))
 
     raw = env_path.read_text(encoding="utf-8")
-    assert "live-openai-secret" not in raw
-    assert "live-anthropic-secret" not in raw
+    assert "LIVE_OPENAI_API_KEY=live-openai-secret" in raw
+    assert "LIVE_ANTHROPIC_API_KEY=live-anthropic-secret" in raw
     assert fake.store["LIVE_OPENAI_API_KEY"] == "live-openai-secret"
     assert fake.store["LIVE_ANTHROPIC_API_KEY"] == "live-anthropic-secret"
 
@@ -202,9 +238,9 @@ def test_live_keys_are_in_secret_keys_tuple():
     assert "LIVE_ANTHROPIC_API_KEY" in secrets_mod.SECRET_KEYS
 
 
-# ── keychain-unavailable fallback (item 1) ──────────────────────────────
+# ── keychain-unavailable: plaintext still persists (item 1) ────────────
 
-def test_keychain_unavailable_falls_back_to_plaintext(tmp_path, monkeypatch):
+def test_keychain_unavailable_still_persists_plaintext(tmp_path, monkeypatch):
     _patch_dotenv(monkeypatch)
     env_path = _isolate_env_path(monkeypatch, tmp_path)
 
@@ -226,15 +262,15 @@ def test_keychain_unavailable_falls_back_to_plaintext(tmp_path, monkeypatch):
     assert loaded.anthropic_api_key == secret_value
 
 
-def test_keychain_write_failure_falls_back_to_plaintext(tmp_path, monkeypatch):
-    """set_secret() reporting failure (or a readback mismatch) must not
-    lose the key — config.env keeps the plaintext copy."""
+def test_keychain_write_failure_does_not_affect_plaintext_persistence(tmp_path, monkeypatch):
+    """The plaintext write must not depend on the keychain mirror
+    succeeding — a broken/failing keychain must never cost the user
+    their key."""
     _patch_dotenv(monkeypatch)
     env_path = _isolate_env_path(monkeypatch, tmp_path)
 
     monkeypatch.setattr(settings_mod._secrets, "available", lambda: True)
     monkeypatch.setattr(settings_mod._secrets, "set_secret", lambda k, v: False)
-    monkeypatch.setattr(settings_mod._secrets, "get_secret", lambda k: None)
     monkeypatch.setattr(settings_mod._secrets, "migrate_from_env", lambda ev: {})
 
     secret_value = "sk-ant-write-failed"

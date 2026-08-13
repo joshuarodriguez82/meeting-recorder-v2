@@ -12,7 +12,6 @@ user's profile:
   Linux:   $XDG_CONFIG_HOME/MeetingRecorder (or ~/.config/MeetingRecorder)
 """
 
-import logging
 import os
 import sys
 from pathlib import Path
@@ -20,8 +19,6 @@ from dataclasses import dataclass
 from dotenv import dotenv_values, load_dotenv
 
 from . import secrets as _secrets
-
-log = logging.getLogger(__name__)
 
 
 def _user_data_dir() -> Path:
@@ -534,70 +531,57 @@ class Settings:
     ) -> None:
         """Write settings back to the .env file.
 
-        Secrets (Anthropic / HF / OpenAI / LIVE_* keys) are written to the
-        OS keychain when it is available. When the keychain accepts (and,
-        immediately after, can read back) the write, config.env gets a
-        blank line for that key so the keychain is the sole copy of the
-        plaintext — a stale/tampered config.env can no longer leak a live
-        key. `_get()` in `from_env()` already falls back to the keychain
-        for any key in `secrets.SECRET_KEYS` whenever the file value is
-        empty, so this blanking cannot cause a configured key to read back
-        as empty.
+        Secrets (Anthropic / HF / OpenAI / LIVE_* keys) are mirrored into
+        the OS keychain when available, but ALSO always kept in config.env
+        as the durable source of truth. Earlier builds blanked the env
+        line on a successful keychain write; that lost the key whenever
+        the keychain entry later became unreadable — e.g. an unsigned
+        macOS app rebuilt with a new ad-hoc signature, or a Windows
+        Credential Manager entry written under a different context —
+        producing a hard "401 invalid x-api-key" with no fallback. The
+        plaintext fallback is the lesser evil versus silently losing the
+        key on every upgrade.
 
-        NOTE on a previously-reverted version of this same change: an
-        earlier build blanked the env line unconditionally on a
-        successful `set_secret()` call, and that caused a hard
-        "401 invalid x-api-key" for some users when the keychain entry
-        later became unreadable — e.g. an unsigned macOS app rebuilt with
-        a new ad-hoc signature, or a Windows Credential Manager entry
-        written under a different context. Reading the value back right
-        after writing it (below) guards against a `set_secret()` call
-        that reports success but didn't actually persist, but it CANNOT
-        detect the entry becoming unreadable later (e.g. on the next
-        app upgrade / re-sign) — that residual risk is inherent to
-        keychain-as-sole-copy and is called out here for whoever revisits
-        this next.
-
-        If the keychain is unavailable (`secrets.available()` is False —
-        e.g. `keyring` isn't installed, or its backend is broken) the
-        plaintext fallback is kept in config.env, because losing the
-        user's key outright is worse than storing it in cleartext. That
-        fallback is explicit and logged below.
+        REVISITED 2026-08-13 (security review item 1): a later attempt
+        replaced this with keychain-as-sole-copy, blanking config.env
+        only after an immediate `set_secret()` + `get_secret()` read-back
+        confirmed the write actually persisted. That guards against a
+        keychain call that lies about success, but it CANNOT guard
+        against the documented failure mode above — the entry becoming
+        unreadable LATER, on a subsequent upgrade/re-sign, which is
+        exactly what a read-back taken at save time can never observe.
+        For this app specifically that risk is not theoretical: the
+        macOS build is unsigned (see AGENTS.md), the user updates
+        frequently (four releases shipped in a single day is not
+        unusual), and runs both Windows and macOS. config.env lives
+        under %LOCALAPPDATA% / ~/Library/Application Support — it is
+        NOT cloud-synced — so the plaintext copy is local-only and does
+        not enlarge the exposure beyond "readable by anything already
+        running as this OS user," which is the keychain's own threat
+        model too. Given that, silently losing the user's API keys on
+        an ordinary upgrade is worse than keeping a local-only plaintext
+        copy, and the mirror-not-replace behavior below stands.
+        A keychain-only design could be revisited again, but only once
+        two things exist: (a) load-time key-recovery UX — detect an
+        unreadable/missing keychain entry and prompt the user to
+        re-enter the key, instead of a bare 401 — and (b) a signed and
+        notarized macOS build, so entries stop being tied to a
+        per-build ad-hoc signing identity in the first place.
         """
-        def _store_secret(key: str, value: str) -> str:
-            """Persist `value` for `key`, preferring the OS keychain.
-
-            Returns the string to write into config.env: "" when the
-            keychain now holds the value (verified by an immediate
-            read-back), otherwise the plaintext `value` itself.
-            """
-            if not value:
-                # Nothing to store; clear any stale keychain entry too.
-                if _secrets.available():
-                    _secrets.set_secret(key, "")
-                return ""
-            if not _secrets.available():
-                log.info(
-                    "%s: OS keychain unavailable, keeping plaintext in "
-                    "config.env as fallback", key)
-                return value
-            if _secrets.set_secret(key, value) and _secrets.get_secret(key) == value:
-                log.info(
-                    "%s: stored in OS keychain, blanking config.env copy",
-                    key)
-                return ""
-            log.warning(
-                "%s: keychain write/verify failed, keeping plaintext in "
-                "config.env as fallback", key)
-            return value
-
-        env_anthropic = _store_secret("ANTHROPIC_API_KEY", anthropic_api_key)
-        env_hf        = _store_secret("HF_TOKEN", hf_token)
-        env_openai    = _store_secret("OPENAI_API_KEY", openai_api_key)
-        env_live_openai_api_key = _store_secret(
-            "LIVE_OPENAI_API_KEY", live_openai_api_key)
-        env_live_anthropic_api_key = _store_secret(
-            "LIVE_ANTHROPIC_API_KEY", live_anthropic_api_key)
+        # Mirror secrets into the keychain best-effort. We no longer
+        # blank the file on success — config.env stays authoritative so
+        # the key survives the keychain entry becoming unreadable across
+        # an upgrade / re-sign / different-user context.
+        _secrets.set_secret("ANTHROPIC_API_KEY", anthropic_api_key)
+        _secrets.set_secret("HF_TOKEN", hf_token)
+        _secrets.set_secret("OPENAI_API_KEY", openai_api_key)
+        _secrets.set_secret("LIVE_OPENAI_API_KEY", live_openai_api_key)
+        _secrets.set_secret("LIVE_ANTHROPIC_API_KEY", live_anthropic_api_key)
+        env_anthropic = anthropic_api_key
+        env_hf        = hf_token
+        env_openai    = openai_api_key
+        env_live_openai_api_key    = live_openai_api_key
+        env_live_anthropic_api_key = live_anthropic_api_key
 
         content = (
             f"ANTHROPIC_API_KEY={env_anthropic}\n"
