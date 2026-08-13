@@ -40,11 +40,32 @@ import numpy as np
 import soundfile as sf
 from scipy import signal as sps
 
+# Make `utils` importable when this script is invoked directly (not as
+# `python -m backend.scripts.measure_aec`) — mirrors the sys.path setup
+# in scripts/finalize_audio.py.
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+# The NLMS filter, ERLE metric, and alignment helpers live in
+# utils/aec.py so the production offline-AEC path (finalize_recording_
+# streaming, gated by Settings.echo_cancellation_enabled) reuses the
+# exact same math this dev tool validates — no second implementation
+# to keep in sync. See utils/aec.py's module docstring for the full
+# design rationale.
+from utils.aec import (  # noqa: E402
+    ERLE_WINDOW_S,
+    FILTER_TAPS,
+    NLMS_REGULARIZER,
+    NLMS_STEP,
+    align_by_xcorr as _align_by_xcorr_sr,
+    compute_erle as _compute_erle_sr,
+    energy as _energy,
+    nlms_filter,
+    shift as _shift,
+)
+
 TARGET_SR = 16000
-FILTER_TAPS = 1024              # 64 ms tail at 16 kHz
-NLMS_STEP = 0.5
-NLMS_REGULARIZER = 1e-6
-ERLE_WINDOW_S = 1.0
 
 
 def _load_mono_16k(path: str) -> np.ndarray:
@@ -65,69 +86,10 @@ def _load_mono_16k(path: str) -> np.ndarray:
 
 def _align_by_xcorr(near: np.ndarray, far: np.ndarray,
                     max_lag_samples: int = TARGET_SR) -> int:
-    """Estimate the echo-path delay: how many samples after `far` is played
-    does it appear in `near`. Caps search at ±1 second.
-
-    A positive return value means the echo lags the reference by N samples,
-    so the filter sees the echo most efficiently if `far` is *delayed* by N
-    samples before being fed in (puts the echo arrival at tap 0 of the
-    adaptive filter, keeps the required tap count down to the tail length).
-    """
-    n = min(len(near), len(far), TARGET_SR * 30)  # 30s correlation cap
-    if n < TARGET_SR:
-        return 0
-    a = near[:n] - near[:n].mean()
-    b = far[:n] - far[:n].mean()
-    # FFT-based cross-correlation
-    nfft = 1 << (int(np.log2(2 * n - 1)) + 1)
-    A = np.fft.rfft(a, nfft)
-    B = np.fft.rfft(b, nfft)
-    xc = np.fft.irfft(A * np.conj(B), nfft)
-    # lag k in xc[k] means: near[t] correlates with far[t-k] (far delayed by k)
-    # Restrict search to ±max_lag
-    pos = xc[:max_lag_samples + 1]
-    neg = xc[-max_lag_samples:]
-    full = np.concatenate([neg, pos])
-    lag = int(np.argmax(np.abs(full))) - max_lag_samples
-    return lag
-
-
-def _shift(x: np.ndarray, n: int) -> np.ndarray:
-    """Shift x by n samples; positive n = delay (pad front), negative = advance."""
-    if n == 0:
-        return x
-    if n > 0:
-        return np.concatenate([np.zeros(n, dtype=x.dtype), x])[:len(x)]
-    n = -n
-    return np.concatenate([x[n:], np.zeros(n, dtype=x.dtype)])
-
-
-def nlms_filter(near: np.ndarray, far: np.ndarray,
-                taps: int = FILTER_TAPS,
-                mu: float = NLMS_STEP,
-                eps: float = NLMS_REGULARIZER) -> np.ndarray:
-    """Run NLMS adaptive filter. Returns the residual (echo-cancelled near-end).
-
-    Both inputs must be the same length, mono float32, time-aligned.
-    """
-    assert len(near) == len(far), "near and far must be equal length"
-    n = len(near)
-    h = np.zeros(taps, dtype=np.float32)
-    out = np.zeros(n, dtype=np.float32)
-    far = far.astype(np.float32, copy=False)
-    near = near.astype(np.float32, copy=False)
-    # Pre-pad far so we can index x_ref[i-taps+1 : i+1] safely
-    pad = np.zeros(taps - 1, dtype=np.float32)
-    far_padded = np.concatenate([pad, far])
-    for i in range(n):
-        # Windowed reference, newest sample last → flip for convolution-style dot
-        x = far_padded[i:i + taps][::-1]
-        y_hat = float(np.dot(h, x))
-        e = float(near[i]) - y_hat
-        out[i] = e
-        norm = float(np.dot(x, x)) + eps
-        h += (mu * e / norm) * x
-    return out
+    """Thin wrapper over utils.aec.align_by_xcorr keeping this script's
+    original samples-based signature (dev tool / self-test callers)."""
+    return _align_by_xcorr_sr(
+        near, far, TARGET_SR, max_lag_s=max_lag_samples / TARGET_SR)
 
 
 def webrtc_filter(near: np.ndarray, far: np.ndarray) -> np.ndarray:
@@ -157,25 +119,11 @@ def webrtc_filter(near: np.ndarray, far: np.ndarray) -> np.ndarray:
     return (out.astype(np.float32) / 32767.0)
 
 
-def _energy(x: np.ndarray) -> float:
-    return float(np.mean(x.astype(np.float64) ** 2)) + 1e-20
-
-
 def compute_erle(near: np.ndarray, residual: np.ndarray,
                  win_s: float = ERLE_WINDOW_S) -> Tuple[float, np.ndarray]:
-    """Return (overall_ERLE_dB, per_window_ERLE_dB).
-
-    ERLE = 10 log10(E[near^2] / E[residual^2])."""
-    win = int(win_s * TARGET_SR)
-    n = min(len(near), len(residual))
-    n_win = n // win
-    per = np.zeros(n_win, dtype=np.float64)
-    for i in range(n_win):
-        s = i * win
-        per[i] = 10.0 * np.log10(_energy(near[s:s + win]) /
-                                 _energy(residual[s:s + win]))
-    overall = 10.0 * np.log10(_energy(near[:n]) / _energy(residual[:n]))
-    return float(overall), per
+    """Thin wrapper over utils.aec.compute_erle at this script's fixed
+    TARGET_SR (16 kHz)."""
+    return _compute_erle_sr(near, residual, TARGET_SR, win_s=win_s)
 
 
 def _resolve_paths(args: argparse.Namespace) -> Tuple[str, str]:
