@@ -315,6 +315,19 @@ class Settings:
     # (force CUDA, falling back to CPU with a warning on a machine with
     # no GPU rather than crashing). See core/diarization.py.
     diarization_device: str
+    # Kill switch for the WASAPI mix-format lookup behind /audio/sync-
+    # risk (core/audio_format_inspector.get_device_mix_format). That
+    # lookup uses pycaw/comtypes, the confirmed sole source (10/10
+    # captured crash dumps) of the STATUS_ACCESS_VIOLATION crashes
+    # tracked across v2.23.2 / v2.25.0 — see utils/com_worker.py and
+    # core/audio_format_inspector.py for the full diagnosis. As of
+    # v2.25.1 the lookup always runs in an isolated child process, so
+    # pycaw never runs in the backend regardless of this setting; True
+    # (default) means "run the subprocess-isolated lookup", False
+    # means "skip it entirely and report sync-risk as unknown". There
+    # is deliberately no third option that runs pycaw in-process — see
+    # the module docstring for why that must never come back.
+    audio_mix_format_lookup_enabled: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -446,6 +459,8 @@ class Settings:
                 "LIVE_SPEAKER_SPLIT_ENABLED", True),
             diarization_device=_normalize_diarization_device(
                 _get("DIARIZATION_DEVICE", "auto")),
+            audio_mix_format_lookup_enabled=_get_bool(
+                "AUDIO_MIX_FORMAT_LOOKUP_ENABLED", True),
         )
 
     @property
@@ -528,6 +543,7 @@ class Settings:
         live_vad_enabled: bool = True,
         live_speaker_split_enabled: bool = True,
         diarization_device: str = "auto",
+        audio_mix_format_lookup_enabled: bool = True,
     ) -> None:
         """Write settings back to the .env file.
 
@@ -635,6 +651,8 @@ class Settings:
             # above), so a bad value here is self-healing rather than a
             # crash risk.
             f"DIARIZATION_DEVICE={diarization_device}\n"
+            f"AUDIO_MIX_FORMAT_LOOKUP_ENABLED="
+            f"{'true' if audio_mix_format_lookup_enabled else 'false'}\n"
         )
         # Write to the canonical LOCALAPPDATA location first. In rare cases
         # a Tauri-spawned Python child cannot open files under LOCALAPPDATA

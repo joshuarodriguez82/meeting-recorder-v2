@@ -1097,6 +1097,13 @@ class SettingsDTO(BaseModel):
     # config/settings.py's diarization_device docstring and
     # core/diarization.py's _resolve_device.
     diarization_device: str = "auto"
+    # Kill switch for the pycaw-backed WASAPI mix-format lookup behind
+    # /audio/sync-risk. Default True — the lookup runs subprocess-
+    # isolated (never in-process) as of v2.25.1. False skips it
+    # entirely (sync-risk reports "unknown"). See
+    # config/settings.py's audio_mix_format_lookup_enabled docstring
+    # and core/audio_format_inspector.py.
+    audio_mix_format_lookup_enabled: bool = True
 
 
 class StartRecordingRequest(BaseModel):
@@ -1536,6 +1543,7 @@ async def get_settings():
         live_vad_enabled=s.live_vad_enabled,
         live_speaker_split_enabled=s.live_speaker_split_enabled,
         diarization_device=s.diarization_device,
+        audio_mix_format_lookup_enabled=s.audio_mix_format_lookup_enabled,
     )
 
 
@@ -1645,6 +1653,7 @@ async def save_settings(payload: SettingsDTO):
         live_vad_enabled=bool(payload.live_vad_enabled),
         live_speaker_split_enabled=bool(payload.live_speaker_split_enabled),
         diarization_device=(payload.diarization_device or "auto").strip().lower(),
+        audio_mix_format_lookup_enabled=bool(payload.audio_mix_format_lookup_enabled),
     )
     # If the recordings folder changed, migrate client + template state
     # from the previous folder to the new one. Copy, not move, so the
@@ -2038,12 +2047,20 @@ async def get_audio_sync_risk(mic: str = "", loopback: str = ""):
             "mic_format": None, "loopback_format": None, "fix_hint": None,
         }
 
+    # Kill switch: Settings.audio_mix_format_lookup_enabled (default
+    # True). False skips the lookup entirely — no subprocess spawn, no
+    # pycaw involvement anywhere. See core/audio_format_inspector.py's
+    # module docstring for why this is the only degraded mode offered.
+    lookup_enabled = bool(
+        getattr(svc.settings, "audio_mix_format_lookup_enabled", True))
+
     def _do():
         from core.audio_format_inspector import (
             compare_formats, get_device_mix_format,
         )
-        mic_fmt = get_device_mix_format(mic, "input")
-        loop_fmt = get_device_mix_format(loopback, "output")
+        mic_fmt = get_device_mix_format(mic, "input", enabled=lookup_enabled)
+        loop_fmt = get_device_mix_format(
+            loopback, "output", enabled=lookup_enabled)
         return compare_formats(mic_fmt, loop_fmt)
     return await asyncio.to_thread(_do)
 
@@ -2944,6 +2961,7 @@ async def set_live_copilot_enabled(payload: dict):
         live_vad_enabled=s.live_vad_enabled,
         live_speaker_split_enabled=s.live_speaker_split_enabled,
         diarization_device=s.diarization_device,
+        audio_mix_format_lookup_enabled=s.audio_mix_format_lookup_enabled,
     )
     # Update the cached Settings in-place so the change is visible
     # immediately, without going through load_settings() which would
@@ -6859,6 +6877,7 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         live_vad_enabled=s.live_vad_enabled,
         live_speaker_split_enabled=s.live_speaker_split_enabled,
         diarization_device=s.diarization_device,
+        audio_mix_format_lookup_enabled=s.audio_mix_format_lookup_enabled,
     )
     svc.settings = dataclasses.replace(
         s, live_copilot_mode=new_mode, live_copilot_meeting_type=new_type)
