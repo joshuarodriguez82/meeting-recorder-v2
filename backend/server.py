@@ -480,21 +480,37 @@ app.add_middleware(
 #   - ?token=<token>                  (EventSource and <audio>/<img>
 #                                      src URLs, which can't set headers)
 #
-# When the env var is absent (manual `python server.py` for debugging,
-# same convention as MEETING_RECORDER_PORT) auth is disabled with a
-# loud warning rather than locking the developer out.
+# Fails CLOSED: if MEETING_RECORDER_TOKEN is absent, every non-exempt
+# request gets 401 rather than sailing through unauthenticated. The
+# packaged app always injects the token (see lib.rs::generate_backend_token
+# / the single spawn call site that sets MEETING_RECORDER_TOKEN before
+# starting server.py) so this can never lock the shipped app out.
+#
+# For the one legitimate case where there IS no token — running
+# `python server.py` standalone for debugging — set
+# MEETING_RECORDER_AUTH_DISABLED=1 explicitly. That is an opt-in dev
+# escape hatch, never a default: an unset token no longer silently
+# disables auth on its own.
 #
 # /health stays open: it's the liveness probe and carries nothing
 # sensitive — same reasoning as exposing a dial-tone test number.
 
 _AUTH_TOKEN = os.environ.get("MEETING_RECORDER_TOKEN", "").strip()
+_AUTH_DISABLED = os.environ.get(
+    "MEETING_RECORDER_AUTH_DISABLED", "").strip() == "1"
 _AUTH_EXEMPT_PATHS = frozenset({"/health"})
 
-if not _AUTH_TOKEN:
+if _AUTH_DISABLED:
     logger.warning(
-        "MEETING_RECORDER_TOKEN is not set — API auth is DISABLED. "
-        "Expected only when running server.py standalone for debugging; "
-        "the packaged app always injects the token.")
+        "MEETING_RECORDER_AUTH_DISABLED=1 — API auth is DISABLED. Only "
+        "ever set this for standalone `python server.py` debugging; the "
+        "packaged app never sets it and always injects a real token.")
+elif not _AUTH_TOKEN:
+    logger.warning(
+        "MEETING_RECORDER_TOKEN is not set — failing closed: every "
+        "non-exempt request will get 401 until it is set. Set "
+        "MEETING_RECORDER_TOKEN for authenticated standalone use, or "
+        "MEETING_RECORDER_AUTH_DISABLED=1 to explicitly run without auth.")
 
 
 def _request_presents_token(request: Request) -> bool:
@@ -512,9 +528,9 @@ def _request_presents_token(request: Request) -> bool:
 
 @app.middleware("http")
 async def require_backend_token(request: Request, call_next):
-    if not _AUTH_TOKEN or request.method == "OPTIONS" \
+    if _AUTH_DISABLED or request.method == "OPTIONS" \
             or request.url.path in _AUTH_EXEMPT_PATHS \
-            or _request_presents_token(request):
+            or (_AUTH_TOKEN and _request_presents_token(request)):
         return await call_next(request)
     # RFC 7807 body, matching every other error path in this file.
     return JSONResponse(
@@ -3410,29 +3426,71 @@ async def delete_session(session_id: str):
     return {"ok": True}
 
 
+def _resolve_within_scan_roots(raw_path: Optional[str]) -> Optional[Path]:
+    """Resolve `raw_path` and confirm it sits under one of the session
+    service's configured roots (recordings dir, default user-data dir,
+    ARCHIVE_RECORDINGS_DIRS entries, session archive dir).
+
+    Session JSON files are synced between machines through cloud
+    storage, so a path pulled out of one (audio_path, a screenshot
+    entry) is not fully trusted local input — a tampered or
+    cross-machine-stale JSON must never be able to make these endpoints
+    serve an arbitrary file from elsewhere on disk. Returns the resolved
+    Path on success, None on any failure or containment violation.
+    """
+    if not raw_path:
+        return None
+    try:
+        resolved = Path(raw_path).expanduser().resolve()
+    except OSError:
+        return None
+    for root in svc.session_svc.scan_roots():
+        try:
+            resolved.relative_to(root)
+            return resolved
+        except ValueError:
+            continue
+    return None
+
+
 @app.get("/sessions/{session_id}/audio")
 async def get_session_audio(session_id: str):
     """Stream the session's WAV file so the UI can play it in an <audio> element."""
     from fastapi.responses import FileResponse
-    from pathlib import Path as _P
     svc.load_settings()
     data = svc.session_svc.load(session_id)
     if not data:
         raise HTTPException(status_code=404, detail="Session not found")
     audio_path = data.get("audio_path")
-    if not audio_path or not _P(audio_path).exists():
+    resolved = _resolve_within_scan_roots(audio_path)
+    if resolved is None:
+        if audio_path:
+            logger.warning(
+                "Refusing to serve audio for session %s: %r is outside "
+                "the configured recordings/archive roots",
+                session_id, audio_path)
         raise HTTPException(status_code=404, detail="Audio file not found")
-    return FileResponse(audio_path, media_type="audio/wav", filename=_P(audio_path).name)
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="Audio file not found")
+    return FileResponse(str(resolved), media_type="audio/wav", filename=resolved.name)
 
 
 @app.get("/sessions/{session_id}/screenshots/{index}")
 async def get_session_screenshot(session_id: str, index: int):
     """Serve one screenshot the user captured during this session, by
-    its position in the session's screenshots list. Serving by index
-    (rather than an arbitrary path) means we only ever hand back files
-    the session actually recorded — no path-traversal surface."""
+    its position in the session's screenshots list.
+
+    Serving by index (rather than accepting an arbitrary path from the
+    client) only stops the CALLER from choosing an arbitrary index —
+    it does NOT by itself prevent path traversal, because the path at
+    that index still comes from the session's JSON file, and those
+    files are synced between machines through cloud storage (so a
+    tampered or corrupted JSON is not fully trusted input). Containment
+    under a configured recordings/archive root is what actually closes
+    the traversal surface; the index just narrows which of the
+    session's own entries can be requested.
+    """
     from fastapi.responses import FileResponse
-    from pathlib import Path as _P
     svc.load_settings()
     data = svc.session_svc.load(session_id)
     if not data:
@@ -3440,15 +3498,22 @@ async def get_session_screenshot(session_id: str, index: int):
     shots = list(data.get("screenshots") or [])
     if index < 0 or index >= len(shots):
         raise HTTPException(status_code=404, detail="Screenshot not found")
-    path = _P(shots[index])
-    if not path.is_file():
+    raw_path = shots[index]
+    resolved = _resolve_within_scan_roots(raw_path)
+    if resolved is None:
+        logger.warning(
+            "Refusing to serve screenshot for session %s: %r is outside "
+            "the configured recordings/archive roots",
+            session_id, raw_path)
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    if not resolved.is_file():
         raise HTTPException(status_code=404,
                             detail="Screenshot file missing on disk")
     media = {
         ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
         ".gif": "image/gif", ".webp": "image/webp",
-    }.get(path.suffix.lower(), "application/octet-stream")
-    return FileResponse(str(path), media_type=media, filename=path.name)
+    }.get(resolved.suffix.lower(), "application/octet-stream")
+    return FileResponse(str(resolved), media_type=media, filename=resolved.name)
 
 
 class SessionPatchRequest(BaseModel):
