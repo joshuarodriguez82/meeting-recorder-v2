@@ -57,8 +57,9 @@ from __future__ import annotations
 
 import faulthandler
 import os
+import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -243,3 +244,88 @@ def read_crash_tail(log_dir: Optional[Path] = None,
         return "\n".join(lines).strip()
     except Exception as e:  # noqa: BLE001
         return f"(could not read crash.log: {e})"
+
+
+# ── Crash recency ─────────────────────────────────────────────────────
+#
+# crash.log is append-only by design (constraint 2 above) and is never
+# deleted, so its mere *existence* says nothing about whether the crash
+# it documents is still relevant — a single crash on day one leaves the
+# Settings panel warning forever, even after the bug that caused it has
+# long since been fixed and released. What the UI actually needs is
+# "did this crash recently", which means finding the most recent crash
+# *inside* the file and comparing its timestamp against a threshold.
+#
+# faulthandler's fatal-error output has no timestamp of its own — only
+# the per-enable header (_header() above) does, and that header is
+# written on EVERY backend start, crash or not (constraint 3). So a
+# "crash" is recognized as: a header line followed by any non-blank
+# content before the next header (or EOF). That content is the
+# traceback faulthandler dumped when this process's fatal signal fired.
+# The header's own timestamp is used as the crash's timestamp — a slight
+# underestimate (the crash happened at some point during that process's
+# lifetime, not necessarily right at boot), but it is the only
+# timestamp the file contains and it errs toward calling an old crash
+# "not recent" rather than the reverse.
+_HEADER_RE = re.compile(
+    r"^=== faulthandler enabled (\S+) pid=\d+.*===\s*$")
+
+# How long a crash keeps the Settings panel warning. Long enough to
+# cover "I filed a bug report and I'm still investigating it this week",
+# short enough that a fixed crash from weeks ago stops nagging on its
+# own without anyone having to remember to clear anything.
+DEFAULT_CRASH_RECENCY_DAYS = 7.0
+
+
+def last_crash_time(log_dir: Optional[Path] = None) -> Optional[datetime]:
+    """Timestamp of the most recent crash recorded in crash.log, or None
+    if the file is missing, holds no crash (only clean-shutdown headers),
+    or can't be parsed. Never raises — see module docstring constraint 4;
+    the same applies to reading, not just writing, this file."""
+    path = crash_log_path(log_dir)
+    try:
+        if not path.exists():
+            return None
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return None
+
+    last_ts: Optional[datetime] = None
+    current_ts: Optional[datetime] = None
+    has_content = False
+
+    def _close_segment():
+        nonlocal last_ts
+        if current_ts is not None and has_content:
+            last_ts = current_ts
+
+    try:
+        for line in text.splitlines():
+            m = _HEADER_RE.match(line)
+            if m:
+                _close_segment()
+                try:
+                    current_ts = datetime.fromisoformat(m.group(1))
+                except ValueError:
+                    current_ts = None
+                has_content = False
+                continue
+            if line.strip():
+                has_content = True
+        _close_segment()  # EOF may end mid-segment
+    except Exception:  # noqa: BLE001 — malformed/truncated file
+        return None
+    return last_ts
+
+
+def is_recent_crash(
+    ts: Optional[datetime],
+    now: Optional[datetime] = None,
+    threshold_days: float = DEFAULT_CRASH_RECENCY_DAYS,
+) -> bool:
+    """Whether a crash timestamped ``ts`` is recent enough to warn about.
+    ``ts=None`` (no crash, or one we couldn't date) never warns."""
+    if ts is None:
+        return False
+    now = now or datetime.now()
+    return (now - ts) <= timedelta(days=threshold_days)
