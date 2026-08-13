@@ -86,6 +86,12 @@ def main(argv: list[str] | None = None) -> int:
               "string means no wallclock anchor — finalize falls back "
               "to right-aligning loopback against mic length."),
     )
+    parser.add_argument(
+        "--echo-cancellation", action="store_true",
+        help=("Run offline AEC on the mic channel (using loopback as "
+              "reference) before mixing. Default off — see "
+              "Settings.echo_cancellation_enabled / utils/aec.py."),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -116,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
             output_wav_path=args.output,
             target_sr=args.target_sr,
             loopback_start_offset_s=offset,
+            echo_cancellation_enabled=args.echo_cancellation,
         )
     except RuntimeError as e:
         # Expected, raisable error (missing mic, empty WAV, etc.) —
