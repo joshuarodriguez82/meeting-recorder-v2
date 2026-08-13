@@ -2628,8 +2628,18 @@ class ScreenshotRequest(BaseModel):
 @app.post("/recording/screenshot")
 async def attach_screenshot(req: ScreenshotRequest):
     """Register a screenshot the shell just captured against the active
-    session. It's persisted with the session JSON on stop, then fed to
-    the summarizer as visual context."""
+    session. Fed to the summarizer as visual context once the session is
+    processed.
+
+    Also mirrors the updated screenshot list to disk immediately
+    (best-effort) rather than waiting for stop/process. Field reports of
+    the backend dying mid-recording showed this was silent data loss:
+    the PNG sat on disk but nothing on disk linked it to the session, so
+    a crash between "screenshot taken" and "recording stopped cleanly"
+    orphaned it. The in-memory list on recording_svc stays authoritative
+    for the running session either way — this write is purely a
+    crash-resilience mirror, so a failure here must never fail the
+    attach or interrupt the recording."""
     if not svc.recording_svc or not svc.recording_svc.is_recording:
         raise HTTPException(status_code=409, detail="Not recording")
     ok = await asyncio.to_thread(
@@ -2640,7 +2650,58 @@ async def attach_screenshot(req: ScreenshotRequest):
             detail="Screenshot file not found or no active session")
     sess = svc.recording_svc.current_session
     count = len(sess.screenshots) if sess else 0
+    if sess is not None:
+        try:
+            await asyncio.to_thread(svc.session_svc.save, sess)
+        except Exception as e:
+            logger.warning(
+                "Could not persist screenshot attach for session "
+                "%s (will still be saved on stop): %s",
+                sess.session_id, e)
     return {"ok": True, "count": count}
+
+
+@app.get("/recording/screenshots/{index}")
+async def get_active_recording_screenshot(index: int):
+    """Serve one screenshot from the ACTIVE, in-memory recording.
+
+    Unlike /sessions/{id}/screenshots/{index}, this doesn't depend on
+    the session having reached disk yet — before the persistence added
+    to attach_screenshot() above, screenshots only landed in the session
+    JSON on stop/process, so the live thumbnail strip in the Record view
+    would 404 for the whole recording. Reading straight off
+    recording_svc.current_session (the same object attach_screenshot
+    appends to) means a screenshot is servable moments after capture.
+    There's only ever one active recording, so no session id in the URL.
+
+    Same containment story as the historical endpoint: a screenshot path
+    is not fully trusted input, so it still goes through
+    _resolve_within_scan_roots() rather than being served directly."""
+    from fastapi.responses import FileResponse
+    if not svc.recording_svc or not svc.recording_svc.is_recording:
+        raise HTTPException(status_code=404, detail="No active recording")
+    sess = svc.recording_svc.current_session
+    if sess is None:
+        raise HTTPException(status_code=404, detail="No active recording")
+    shots = list(sess.screenshots or [])
+    if index < 0 or index >= len(shots):
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    raw_path = shots[index]
+    resolved = _resolve_within_scan_roots(raw_path)
+    if resolved is None:
+        logger.warning(
+            "Refusing to serve live screenshot for session %s: %r is "
+            "outside the configured recordings/archive roots",
+            sess.session_id, raw_path)
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    if not resolved.is_file():
+        raise HTTPException(status_code=404,
+                            detail="Screenshot file missing on disk")
+    media = {
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".gif": "image/gif", ".webp": "image/webp",
+    }.get(resolved.suffix.lower(), "application/octet-stream")
+    return FileResponse(str(resolved), media_type=media, filename=resolved.name)
 
 
 @app.get("/recording/transcript/stream")

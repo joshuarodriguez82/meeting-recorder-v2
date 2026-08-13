@@ -147,11 +147,10 @@ export function RecordView({
   const [screenshotEntries, setScreenshotEntries] = useState<
     { index: number; takenAt: number }[]
   >([]);
-  // Indices whose image fetch has failed (session not yet persisted —
-  // screenshots only land in the session JSON on stop, so this is the
-  // normal state for the whole recording — file missing, or a request
-  // error). Tracked so a failed fetch swaps in a placeholder tile
-  // instead of ever dropping the entry or blanking the strip.
+  // Indices whose image fetch has failed (backend hiccup, file not
+  // finished writing, capture permission revoked mid-meeting, etc.).
+  // Tracked so a failed fetch swaps in a placeholder tile instead of
+  // ever dropping the entry or blanking the strip.
   const [screenshotLoadFailed, setScreenshotLoadFailed] = useState<Set<number>>(new Set());
   // Larger view when a thumbnail is clicked; null = closed.
   const [zoomedScreenshot, setZoomedScreenshot] = useState<number | null>(null);
@@ -537,11 +536,25 @@ export function RecordView({
   const selectedOut = outputDevices.find((d) => d.index === outIdx);
 
   // Build a screenshot's image URL, or null when we don't have enough
-  // to build one yet (no active session id, or the base URL hasn't
-  // resolved). Null renders as the placeholder tile, same as a failed
-  // fetch — see screenshotLoadFailed.
+  // to build one yet (base URL hasn't resolved, or — post-recording
+  // only — no active session id). Null renders as the placeholder
+  // tile, same as a failed fetch — see screenshotLoadFailed.
+  //
+  // While recording, this reads from GET /recording/screenshots/{index}
+  // — straight off the backend's in-memory active session, so a
+  // thumbnail is fetchable moments after capture instead of only after
+  // the session JSON reaches disk (which historically only happened on
+  // stop/process; screenshots now also get a best-effort disk mirror on
+  // attach, but the live strip doesn't depend on that mirror landing).
+  // Once stopped, fall back to the historical per-session endpoint —
+  // the strip itself unmounts on stop, but the zoom dialog reuses this
+  // same helper and can still be closing out its last render.
   const screenshotImgSrc = (index: number): string | null => {
-    if (!activeSessionId || !mediaBaseUrl) return null;
+    if (!mediaBaseUrl) return null;
+    if (recording) {
+      return `${mediaBaseUrl}/recording/screenshots/${index}${mediaAuthQuery}`;
+    }
+    if (!activeSessionId) return null;
     return `${mediaBaseUrl}/sessions/${activeSessionId}/screenshots/${index}${mediaAuthQuery}`;
   };
 
@@ -1277,11 +1290,11 @@ export function RecordView({
                         ) : (
                           // Neutral placeholder — a screenshot that was
                           // taken must never render as one that wasn't.
-                          // The most common cause here is simply that
-                          // the session hasn't been persisted to disk
-                          // yet (screenshots are written into the
-                          // session JSON on stop), so this is the
-                          // expected look for most of the recording.
+                          // Expected to be rare now that the strip reads
+                          // from the live in-memory session (see
+                          // screenshotImgSrc), but a request can still
+                          // fail — screen-locked capture, a backend
+                          // hiccup, the file not finished writing yet.
                           <div className="flex h-full w-full flex-col items-center justify-center gap-0.5 text-muted-foreground">
                             <ImageIcon className="h-4 w-4" />
                           </div>
@@ -1996,8 +2009,8 @@ export function RecordView({
                   <div className="flex flex-col items-center gap-2 py-10 text-muted-foreground">
                     <ImageIcon className="h-8 w-8" />
                     <p className="max-w-xs text-center text-sm">
-                      Not viewable yet — screenshots are saved with the
-                      recording and become viewable once it stops.
+                      Couldn&apos;t load this image right now — it&apos;s
+                      still attached to the recording either way.
                     </p>
                   </div>
                 )}

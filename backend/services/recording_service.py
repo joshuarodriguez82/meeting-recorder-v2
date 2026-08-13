@@ -380,9 +380,14 @@ class RecordingService:
         return d
 
     def add_screenshot(self, path: str) -> bool:
-        """Attach a captured screenshot to the active session. The path
-        is persisted with the session JSON on stop/process. Returns
-        False if there's no session or the file doesn't exist."""
+        """Attach a captured screenshot to the active session's
+        in-memory list, which stays authoritative for the running
+        recording. The full session (including this list) is written
+        to the session JSON on stop/process as always; server.py's
+        /recording/screenshot handler additionally mirrors it to disk
+        right away, best-effort, so a mid-recording crash doesn't
+        orphan a screenshot that was already taken. Returns False if
+        there's no session or the file doesn't exist."""
         if self._session is None:
             return False
         if not path or not Path(path).is_file():
