@@ -1,0 +1,264 @@
+# Dependency vulnerability scanning across all three ecosystems this repo
+# ships: Python (backend sidecar), Node (frontend + mobile companion app),
+# and Rust (the Tauri shell). Runs on every PR, on push to main, and weekly
+# so newly-published CVEs against otherwise-unchanged pinned dependencies
+# still get caught.
+#
+# NON-BLOCKING BY DESIGN. Every job below reports findings to the run's
+# job summary and always exits 0 — nothing here can fail a check or block
+# a merge. Two reasons:
+#
+#   1. This repo pins heavy, hard-to-move dependencies for documented
+#      compatibility reasons — see the comments in backend/requirements-
+#      cpu.txt / requirements-mac.txt (torch==2.6.0, pyannote.audio==
+#      3.3.2, huggingface_hub<1.0, transformers<5, ...). A pip-audit run
+#      against those pins already turns up two dozen+ known advisories in
+#      torch/transformers/lightning alone (verified while building this
+#      workflow) that the maintainer cannot act on without breaking
+#      transcription/diarization — bumping past the compatibility pins is
+#      its own project, not a same-day fix. A blocking gate on those
+#      advisories would be red from the day this workflow lands and would
+#      train everyone to ignore (or disable) it — the exact
+#      boy-who-cried-wolf failure mode this workflow must avoid.
+#   2. release.yml ships from a workflow_dispatch off main. A required
+#      check here — or any wiring into release.yml — would let a
+#      transitive advisory in a dependency nobody can quickly patch block
+#      a release outright. This workflow is intentionally NOT referenced
+#      anywhere in release.yml or android.yml.
+#
+# If a future need arises to hard-fail on something, the sharpest tool
+# already available per-scanner without reintroducing blanket blocking is
+# an explicit ignore-list-by-default, allow-list-in the opposite
+# direction (e.g. pip-audit --ignore-vuln / cargo-audit's advisory
+# ignore file) scoped to specific advisory IDs the team has actually
+# triaged — not a bare pass/fail on severity, which these tools don't
+# uniformly expose anyway (npm audit does; pip-audit's default `pypi`
+# vulnerability source and cargo-audit's RUSTSEC advisories don't always
+# carry a normalized severity).
+
+name: Dependency Audit
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Mondays at 06:00 UTC. New advisories land against unchanged code —
+    # a periodic scan is the only way to catch those between PRs.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-audit-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Python backend deps. The app has THREE requirements files but only two
+  # are real: requirements-cpu.txt (Windows) and requirements-mac.txt
+  # (macOS/Linux) are what src-tauri/src/lib.rs's bootstrap_app_venv()
+  # actually pip-installs into the app's venv at first launch, and the
+  # only two zip-bundle.py ships inside the release bundle. Plain
+  # backend/requirements.txt is a stale, unbundled fallback that
+  # server.py only reaches for if a platform-specific file goes missing
+  # from an already-broken install — it's missing torch/torchaudio/
+  # pyannote.audio/speechbrain/lightning entirely, so auditing it alone
+  # would silently skip everything ML-related and under-report risk. We
+  # audit the two real files instead.
+  #
+  # Those two files also don't resolve on the same OS: requirements-
+  # cpu.txt lists pywin32 and pyaudiowpatch with NO environment marker
+  # (only the neighboring pycaw line is marked `sys_platform == "win32"`),
+  # so pip's resolver can't find a distribution for either on a Linux or
+  # macOS runner and pip-audit hard-fails before auditing anything. That
+  # file is matched to windows-latest below, where both packages resolve
+  # normally. requirements-mac.txt's only platform-conditional lines
+  # (pyobjc-*) DO carry a `sys_platform == "darwin"` marker, so it
+  # resolves cleanly cross-platform and runs on ubuntu-latest.
+  python-audit:
+    name: Python audit (pip-audit · ${{ matrix.label }})
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - requirements: backend/requirements-cpu.txt
+            platform: windows-latest
+            label: requirements-cpu.txt / Windows
+          - requirements: backend/requirements-mac.txt
+            platform: ubuntu-latest
+            label: requirements-mac.txt / macOS+Linux
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install pip-audit
+        shell: bash
+        run: pip install --disable-pip-version-check pip-audit
+      - name: Run pip-audit
+        shell: bash
+        run: |
+          set +e
+          OUT="$(pip-audit -r "${{ matrix.requirements }}" --format markdown 2>pip-audit-stderr.log)"
+          RC=$?
+          {
+            echo "### Python — \`${{ matrix.requirements }}\` (${{ matrix.platform }})"
+            echo
+            if [ $RC -eq 0 ]; then
+              echo "No known vulnerabilities found."
+            elif [ -n "$OUT" ]; then
+              echo "$OUT"
+            else
+              # RC != 0 with empty stdout means pip-audit couldn't complete
+              # the scan at all (resolver failure, network error, ...) —
+              # distinct from "found vulnerabilities" and worth flagging
+              # loudly even though the job still exits 0.
+              echo "**pip-audit did not complete (exit $RC) — this manifest was NOT scanned.**"
+              echo
+              echo '```'
+              tail -n 25 pip-audit-stderr.log
+              echo '```'
+            fi
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+
+  # Node deps: the root Next.js/Tauri app and the mobile/ Capacitor
+  # companion app each carry their own package.json + package-lock.json
+  # (see mobile/ and .github/workflows/android.yml). Both are real,
+  # independently-shipped dependency trees, so both get audited.
+  node-audit:
+    name: Node audit (npm audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # npm audit reads package-lock.json directly; it doesn't need
+      # node_modules installed first.
+      - name: Audit root app dependencies
+        shell: bash
+        run: |
+          set +e
+          npm audit --json > npm-audit-root.json 2>npm-audit-root.err
+          TOTAL=$(jq -r '.metadata.vulnerabilities.total // empty' npm-audit-root.json)
+          {
+            echo "### Node — root \`package.json\`"
+            echo
+            if [ -z "$TOTAL" ]; then
+              echo "\`npm audit\` did not return parseable output. Raw stderr:"
+              echo
+              echo '```'
+              cat npm-audit-root.err
+              echo '```'
+            elif [ "$TOTAL" = "0" ]; then
+              echo "No known vulnerabilities found."
+            else
+              CRIT=$(jq -r '.metadata.vulnerabilities.critical // 0' npm-audit-root.json)
+              HIGH=$(jq -r '.metadata.vulnerabilities.high // 0' npm-audit-root.json)
+              MOD=$(jq -r '.metadata.vulnerabilities.moderate // 0' npm-audit-root.json)
+              LOW=$(jq -r '.metadata.vulnerabilities.low // 0' npm-audit-root.json)
+              echo "**$TOTAL** vulnerabilities — critical: $CRIT, high: $HIGH, moderate: $MOD, low: $LOW."
+              echo
+              echo '<details><summary>Full npm audit report</summary>'
+              echo
+              echo '```'
+              npm audit 2>&1
+              echo '```'
+              echo '</details>'
+            fi
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+      - name: Audit mobile app dependencies
+        shell: bash
+        working-directory: mobile
+        run: |
+          set +e
+          npm audit --json > npm-audit-mobile.json 2>npm-audit-mobile.err
+          TOTAL=$(jq -r '.metadata.vulnerabilities.total // empty' npm-audit-mobile.json)
+          {
+            echo "### Node — \`mobile/package.json\`"
+            echo
+            if [ -z "$TOTAL" ]; then
+              echo "\`npm audit\` did not return parseable output. Raw stderr:"
+              echo
+              echo '```'
+              cat npm-audit-mobile.err
+              echo '```'
+            elif [ "$TOTAL" = "0" ]; then
+              echo "No known vulnerabilities found."
+            else
+              CRIT=$(jq -r '.metadata.vulnerabilities.critical // 0' npm-audit-mobile.json)
+              HIGH=$(jq -r '.metadata.vulnerabilities.high // 0' npm-audit-mobile.json)
+              MOD=$(jq -r '.metadata.vulnerabilities.moderate // 0' npm-audit-mobile.json)
+              LOW=$(jq -r '.metadata.vulnerabilities.low // 0' npm-audit-mobile.json)
+              echo "**$TOTAL** vulnerabilities — critical: $CRIT, high: $HIGH, moderate: $MOD, low: $LOW."
+              echo
+              echo '<details><summary>Full npm audit report</summary>'
+              echo
+              echo '```'
+              npm audit 2>&1
+              echo '```'
+              echo '</details>'
+            fi
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+
+  # Rust deps for the Tauri shell (src-tauri/Cargo.lock). cargo-audit is
+  # installed from prebuilt binaries via taiki-e/install-action instead
+  # of `cargo install cargo-audit` — building it from source takes ~3.5
+  # minutes on a cold runner (verified while building this workflow);
+  # taiki-e/install-action fetches a release binary in seconds. This is
+  # the same install-action used widely across Rust project CI for
+  # exactly this reason.
+  rust-audit:
+    name: Rust audit (cargo audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Run cargo audit
+        shell: bash
+        run: |
+          set +e
+          cargo audit --file src-tauri/Cargo.lock --json > cargo-audit.json 2>cargo-audit.err
+          FOUND=$(jq -r '.vulnerabilities.found' cargo-audit.json 2>/dev/null)
+          COUNT=$(jq -r '.vulnerabilities.list | length' cargo-audit.json 2>/dev/null)
+          {
+            echo "### Rust — \`src-tauri/Cargo.lock\`"
+            echo
+            if [ -z "$FOUND" ]; then
+              echo "\`cargo audit\` did not return parseable output. Raw stderr:"
+              echo
+              echo '```'
+              cat cargo-audit.err
+              echo '```'
+            elif [ "$FOUND" = "false" ]; then
+              echo "No known vulnerabilities found."
+            else
+              echo "**$COUNT** known vulnerabilities found."
+              echo
+              echo '| Advisory | Package | Title |'
+              echo '| --- | --- | --- |'
+              jq -r '.vulnerabilities.list[] | "| [\(.advisory.id)](\(.advisory.url)) | \(.advisory.package) | \(.advisory.title) |"' cargo-audit.json
+              echo
+              echo '<details><summary>Full cargo audit report</summary>'
+              echo
+              echo '```'
+              cargo audit --file src-tauri/Cargo.lock 2>&1
+              echo '```'
+              echo '</details>'
+            fi
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
