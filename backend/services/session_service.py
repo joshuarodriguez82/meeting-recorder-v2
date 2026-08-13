@@ -49,6 +49,17 @@ class SessionService:
         per-session embedding sidecar files (session_<id>.embeddings.pkl)."""
         return self._recordings_dir
 
+    def scan_roots(self) -> List[Path]:
+        """Public accessor for the resolved, de-duplicated set of
+        directories sessions are read from (primary + archive roots).
+
+        Used by server.py to confine paths pulled out of a session's
+        JSON (audio_path, screenshot paths) to trusted directories
+        before serving them — session JSON files are synced between
+        machines through cloud storage, so they are not fully trusted
+        local input."""
+        return self._scan_roots()
+
     def _scan_roots(self) -> List[Path]:
         """Every directory sessions are READ from, de-duplicated and
         with nested roots collapsed (a root inside another root would
