@@ -262,8 +262,13 @@ def test_load_matches_list_sessions_newest_wins_archive_newer(tmp_path):
 # ── delete: sidecars + every root ──────────────────────────────────────
 
 def _touch_sidecars(d, sid, *, wav=False, log=False):
+    """Both the current embedding sidecar format (.embeddings.npz +
+    .embeddings.json) and a leftover legacy .embeddings.pkl — a real
+    deployment can have either, or both if a rebuild ran before the old
+    file was cleaned up, so delete() must handle all three."""
     d.mkdir(parents=True, exist_ok=True)
-    for suffix in (".embeddings.pkl", ".commitments.json", ".item_status.json"):
+    for suffix in (".embeddings.npz", ".embeddings.json", ".embeddings.pkl",
+                   ".commitments.json", ".item_status.json"):
         (d / f"session_{sid}{suffix}").write_text("x", encoding="utf-8")
     if wav:
         (d / f"session_{sid}.wav").write_bytes(b"\x00")
@@ -283,7 +288,8 @@ def test_delete_removes_json_and_all_sidecars_from_primary_and_extra_root(tmp_pa
     svc.delete("DEL01")
 
     for d in (local, archive):
-        for suffix in (".json", ".embeddings.pkl", ".commitments.json",
+        for suffix in (".json", ".embeddings.npz", ".embeddings.json",
+                       ".embeddings.pkl", ".commitments.json",
                        ".item_status.json"):
             assert not (d / f"session_DEL01{suffix}").exists(), (
                 f"{d / f'session_DEL01{suffix}'} was not removed")
@@ -306,6 +312,8 @@ def test_delete_removes_copy_that_only_exists_in_extra_root(tmp_path):
     svc.delete("DEL02")
 
     assert not (archive / "session_DEL02.json").exists()
+    assert not (archive / "session_DEL02.embeddings.npz").exists()
+    assert not (archive / "session_DEL02.embeddings.json").exists()
     assert not (archive / "session_DEL02.embeddings.pkl").exists()
     assert svc.list_sessions() == []
 

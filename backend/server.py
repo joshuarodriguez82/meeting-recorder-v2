@@ -777,8 +777,8 @@ class Services:
             self.client_cfg_svc = ClientConfigService(_recordings_dir)
             # CommitmentsService is built BEFORE the engagement service
             # because the engagement register pulls open / outstanding
-            # commitment counts via it. Sidecar JSONs next to session
-            # pickles; no state of its own.
+            # commitment counts via it. Sidecar JSONs next to the
+            # session's other sidecar files; no state of its own.
             self.commitments_svc = CommitmentsService(self.session_svc)
             # Pure aggregator over session JSONs + client configs +
             # commitments — no state of its own, so it's safe to build
@@ -3355,16 +3355,16 @@ async def delete_session(session_id: str):
     # exists.
     #
     # Field report 2026-08-07 (bug 2b): SessionService.delete() now
-    # removes session_<id>.embeddings.pkl itself (across every root, not
-    # just the primary dir — see SessionService.delete's docstring), so
-    # by the time delete_session_index() ran here its file-exists check
-    # always failed and it silently skipped invalidate(). The pickle was
-    # correctly gone from disk, but the OLD in-memory matrix stayed
-    # loaded until something else happened to invalidate it — the search
-    # index kept answering with citations that 404'd. invalidate() is
-    # unconditional and cheap (it only drops a cache, index_session()
-    # rebuilds it lazily on next query), so call it regardless of
-    # whether a file happened to still be there to delete.
+    # removes the session's embedding sidecar itself (across every root,
+    # not just the primary dir — see SessionService.delete's docstring),
+    # so by the time delete_session_index() ran here its file-exists
+    # check always failed and it silently skipped invalidate(). The
+    # sidecar was correctly gone from disk, but the OLD in-memory matrix
+    # stayed loaded until something else happened to invalidate it — the
+    # search index kept answering with citations that 404'd.
+    # invalidate() is unconditional and cheap (it only drops a cache,
+    # index_session() rebuilds it lazily on next query), so call it
+    # regardless of whether a file happened to still be there to delete.
     if svc.search_svc:
         await asyncio.to_thread(svc.search_svc.invalidate)
     # And the commitments sidecar — same reasoning. Stale commitments
@@ -4069,6 +4069,14 @@ def _archive_session(session_id: str) -> None:
 
     Skips the copy when the destination already holds a same-or-newer
     file, so two machines syncing the same folder don't fight.
+
+    Only ever copies the CURRENT embeddings sidecar format
+    (.embeddings.npz / .embeddings.json), never a legacy
+    ".embeddings.pkl" — this archive dir is exactly the cross-machine
+    cloud-sync path that made unpickling those files a real remote code
+    execution risk in the first place (see services/search_service.py),
+    so a leftover legacy pickle is deliberately NOT propagated to other
+    machines through it.
     """
     archive = _session_archive_dir()
     if not archive:
@@ -4077,7 +4085,8 @@ def _archive_session(session_id: str) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     src_dir = Path(svc.settings.recordings_dir)
     names = [f"session_{session_id}.json"]
-    for suffix in (".embeddings.pkl", ".commitments.json", ".item_status.json"):
+    for suffix in (".embeddings.npz", ".embeddings.json",
+                   ".commitments.json", ".item_status.json"):
         names.append(f"session_{session_id}{suffix}")
     copied = 0
     for name in names:
@@ -4736,7 +4745,9 @@ async def reindex_client_knowledge(client_name: str):
 async def get_client_knowledge_status(client_name: str):
     """Status without reindexing — configured folder, whether it's
     currently reachable, and how much of this client's document index
-    is on disk. Cheap: reads doc_index pickle headers, no embedding."""
+    is on disk. Cheap: reads doc_index JSON sidecars, no embedding, and
+    never touches a legacy .pkl (see services/document_service.py) —
+    those are ignored here exactly like anywhere else in the app."""
     svc.load_settings()
     cfg = svc.client_cfg_svc.get(client_name) if svc.client_cfg_svc else None
     folder = (cfg.knowledge_folder if cfg else "") or ""
@@ -4747,11 +4758,11 @@ async def get_client_knowledge_status(client_name: str):
         if svc.session_svc:
             doc_dir = Path(svc.session_svc.recordings_dir) / "doc_index"
             if doc_dir.is_dir():
-                import pickle as _pickle
-                for f in doc_dir.glob("doc_*.pkl"):
+                import json as _json
+                for f in doc_dir.glob("doc_*.json"):
                     try:
-                        payload = _pickle.loads(f.read_bytes())
-                    except Exception:
+                        payload = _json.loads(f.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
                         continue
                     if (payload.get("client") or "") != client_name:
                         continue
@@ -5617,7 +5628,7 @@ async def search_index_status():
 async def embed_session(session_id: str):
     """Embed (or re-embed) one session's transcript for semantic search.
     Idempotent — running twice produces the same result, the second
-    write just overwrites the existing pickle. Used by the backfill
+    write just overwrites the existing sidecar. Used by the backfill
     UI in Settings to walk every session that's missing an index entry."""
     svc.load_settings()
     if not svc.search_svc:
@@ -5659,7 +5670,10 @@ async def search_index_backfill(limit: int = 50):
         candidates = [
             s for s in all_sessions
             if s.get("has_transcript")
-            and not (recordings_dir / f"session_{s['session_id']}.embeddings.pkl").exists()
+            # A session with only a legacy .embeddings.pkl (pre-migration,
+            # never loaded — see services/search_service.py) has no .npz
+            # here and is correctly treated as still needing a rebuild.
+            and not (recordings_dir / f"session_{s['session_id']}.embeddings.npz").exists()
         ]
         embedded: list[str] = []
         for s in candidates[:limit]:
@@ -8004,7 +8018,11 @@ async def startup():
             missing = [
                 s for s in all_sessions
                 if s.get("has_transcript")
-                and not (recordings_dir / f"session_{s['session_id']}.embeddings.pkl").exists()
+                # A session with only a legacy .embeddings.pkl
+                # (pre-migration, never loaded — see
+                # services/search_service.py) has no .npz here and is
+                # correctly treated as still needing a rebuild.
+                and not (recordings_dir / f"session_{s['session_id']}.embeddings.npz").exists()
             ]
             if not missing:
                 return
