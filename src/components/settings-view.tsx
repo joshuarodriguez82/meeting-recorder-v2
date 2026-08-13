@@ -285,7 +285,15 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
           content would keep scrolling visibly through that gap. Coupled to
           page.tsx's `pt-6` on the `overflow-y-auto` container: if that
           padding value ever changes, this offset must change with it. */}
-      <div className="sticky top-0 z-10 -mx-6 -mt-6 border-b border-border bg-background px-6 pt-6">
+      {/* Sticky offsets are NEGATIVE on purpose. `top: 0` sticks to the
+          scroll container's CONTENT box, i.e. below its pt-6 — measured
+          in a real browser: viewport top 64px, bar top 88px. -top-6
+          cancels that padding so the bar pins flush to the viewport
+          edge; -mt-6/pt-6 then extend its background over the same
+          band so nothing can scroll visibly above it. Both values
+          mirror page.tsx's pt-6 on the shared scroll container — change
+          one and you must change the other. */}
+      <div className="sticky -top-6 z-10 -mx-6 -mt-6 border-b border-border bg-background px-6 pt-6">
         <div className="mx-auto flex max-w-3xl flex-wrap gap-1">
           {SETTINGS_TABS.map((t) => (
             <button
@@ -1094,7 +1102,12 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
           Coupled to page.tsx's `pb-16` on the `overflow-y-auto` container:
           if that padding value ever changes, this offset must change
           with it. */}
-      <div className="sticky bottom-0 z-10 -mx-6 -mb-16 border-t border-border bg-background px-6 pb-16">
+      {/* Mirror of the tab bar above: -bottom-16 cancels page.tsx's
+          pb-16 so the bar pins flush to the bottom of the scroll
+          viewport (measured: viewport bottom 880px, bar bottom 816px
+          before this), and -mb-16/pb-16 extend the background across
+          that band. */}
+      <div className="sticky -bottom-16 z-10 -mx-6 -mb-16 border-t border-border bg-background px-6 pb-16">
         <div className="mx-auto max-w-3xl flex justify-end gap-2 py-3">
           <Button onClick={save} disabled={saving}>
             {saving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
