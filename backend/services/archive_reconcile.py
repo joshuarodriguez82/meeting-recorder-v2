@@ -42,8 +42,8 @@ def local_session_ids(src_dir) -> List[str]:
     """Every real session id found under the primary recordings dir.
 
     Recursive (matches SessionService.list_sessions()'s post-2026-08-07
-    behavior). Sidecars — session_<id>.embeddings.pkl doesn't match the
-    glob, but session_<id>.commitments.json and
+    behavior). Sidecars — session_<id>.embeddings.npz / .embeddings.json
+    don't match the glob, but session_<id>.commitments.json and
     session_<id>.item_status.json do; both have a "." in their stem
     (`session_<id>.commitments`) and are skipped, same rule
     list_sessions() and _reconcile_archive() have always used.
