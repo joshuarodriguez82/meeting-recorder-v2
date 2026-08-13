@@ -154,6 +154,89 @@ DUCK_SMOOTHING = 0.4          # EMA blend of new-chunk RMS into running
 # talking, the room is NOT dead and the watchdog must not auto-stop.
 SILENCE_RMS_FLOOR = 0.003
 
+# ── Live capture-confidence meters (mic_level / system_level) ──────────
+#
+# RMS → 0..1 mapping for the frontend meter bars. Raw linear RMS reads
+# terribly on a meter: normal conversational speech (roughly -30 to
+# -20 dBFS in this app's float32 capture) would sit at 3-10% width and
+# look broken/dead even when capture is perfectly healthy, because
+# human hearing (and speech level) is logarithmic. We convert to a
+# dB-ish scale and clamp to a fixed window, so:
+#
+#   LEVEL_FLOOR_DB (-60 dBFS) → 0.0   (at/below the noise floor)
+#   LEVEL_CEIL_DB  (-12 dBFS) → 1.0   (loud / approaching clipping)
+#
+# Anchor points against the constants already used elsewhere in this
+# file, so the meter's "this counts as real audio" reading lines up
+# with what the watchdog considers real audio:
+#   SILENCE_RMS_FLOOR  (-50 dBFS, "someone is talking" floor) → ~0.17
+#   DUCK_LEVEL_THRESHOLD (-34 dBFS, "quiet speech band")      → ~0.54
+# i.e. quiet-but-real speech lands right around the middle of the
+# meter, not pinned near zero — the failure mode this feature exists
+# to prevent is a meter so compressed toward zero that "flowing" and
+# "dead" look identical at a glance.
+LEVEL_FLOOR_DB = -60.0
+LEVEL_CEIL_DB = -12.0
+
+def _rms_to_level(rms: float) -> float:
+    """Map a linear-amplitude RMS value to a 0.0-1.0 meter width using
+    the dB window documented above. Never raises — feeds directly into
+    a UI meter, so a bad input degrades to 0.0 rather than crashing the
+    status endpoint."""
+    try:
+        if rms <= 0.0 or not np.isfinite(rms):
+            return 0.0
+        db = 20.0 * np.log10(max(rms, 1e-9))
+        level = (db - LEVEL_FLOOR_DB) / (LEVEL_CEIL_DB - LEVEL_FLOOR_DB)
+        return float(min(1.0, max(0.0, level)))
+    except Exception:
+        return 0.0
+
+
+# Stream-state thresholds (per mic / system-audio stream independently).
+#
+#   flowing — chunks are arriving AND a recent one cleared the "real
+#             audio" floor (SILENCE_RMS_FLOOR for mic, DUCK_LEVEL_
+#             THRESHOLD for system — the same floors the existing
+#             dead-air watchdog already uses for each stream).
+#   silent  — chunks are arriving but nothing has cleared that floor
+#             recently. NORMAL: a muted mic, or a meeting where only
+#             the far end is talking. Must never produce a warning.
+#   dead    — no chunks have arrived at all recently. This is the
+#             failure mode this feature exists to catch: the recording
+#             is "running" but the capture path silently broke.
+#
+# STREAM_DEAD_S is intentionally short (chunks land at ~10 Hz per the
+# capture-stall detector above) so the meter itself flips to "dead"
+# quickly — the meter's job is fast, honest feedback. CAPTURE_WARNING_
+# DEAD_S is deliberately longer: it gates the actionable banner text,
+# so a single dropped chunk or a brief device hiccup doesn't cry wolf
+# and train the user to ignore the banner when it matters. 45s mirrors
+# "the next morning" horror story this feature exists to prevent, while
+# still surfacing well within the meeting instead of after it.
+STREAM_DEAD_S = 3.0
+STREAM_FLOWING_RECENCY_S = 2.0
+CAPTURE_WARNING_DEAD_S = 45.0
+CAPTURE_WARNING_GRACE_S = 5.0  # spin-up grace, mirrors capture_stalled above
+
+
+def _stream_state(
+    last_chunk_at: Optional[datetime],
+    last_audio_at: Optional[datetime],
+    now: datetime,
+) -> str:
+    """Classify one stream (mic or system) as flowing/silent/dead from
+    its two tracked timestamps. Pure function — no I/O, easy to unit
+    test with injected timestamps instead of real sleeps."""
+    if last_chunk_at is None:
+        return "dead"
+    if (now - last_chunk_at).total_seconds() >= STREAM_DEAD_S:
+        return "dead"
+    if (last_audio_at is not None
+            and (now - last_audio_at).total_seconds() <= STREAM_FLOWING_RECENCY_S):
+        return "flowing"
+    return "silent"
+
 
 def _resample_for_live(audio: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
     """Resample a mono float32 chunk for the live transcriber.
@@ -229,6 +312,13 @@ class RecordingService:
         # is untouched — full fidelity preserved for the canonical
         # post-stop transcript / processing.
         self._loopback_level_ema: float = 0.0
+        # Mirrors _loopback_level_ema above but for the mic stream — same
+        # EMA smoothing approach (DUCK_SMOOTHING blend), fed from the RMS
+        # _on_audio_chunk already computes for the silence-floor check
+        # (no new RMS math on the audio path). Surfaced on /recording/
+        # status as mic_level so the frontend can render a live meter —
+        # see the "capture confidence" feature this whole block supports.
+        self._mic_level_ema: float = 0.0
         # Auto-stop watchdog state. The audio callback updates
         # _last_speech_at whenever a chunk's RMS clears the silence
         # threshold; the watchdog periodically reads that timestamp to
@@ -252,6 +342,16 @@ class RecordingService:
         # know IMMEDIATELY rather than discovering 30 min of silence
         # after the meeting.
         self._last_chunk_at: Optional[datetime] = None
+        # Per-stream capture-confidence bookkeeping (mic side reuses
+        # _last_chunk_at above as "last chunk received at all"; loopback
+        # gets its own since it wasn't previously tracked independently).
+        # The "_audio_at" timestamps below are narrower than "_chunk_at":
+        # only chunks that clear that stream's real-audio floor bump
+        # them, so flowing vs. silent can be told apart from chunks vs.
+        # no-chunks. See _stream_state() near the top of this module.
+        self._last_mic_audio_at: Optional[datetime] = None
+        self._last_loopback_chunk_at: Optional[datetime] = None
+        self._last_loopback_audio_at: Optional[datetime] = None
 
     @property
     def current_session(self) -> Optional[Session]:
@@ -414,6 +514,10 @@ class RecordingService:
         self._chunk_count = 0
         self._last_chunk_at = None
         self._loopback_level_ema = 0.0
+        self._mic_level_ema = 0.0
+        self._last_mic_audio_at = None
+        self._last_loopback_chunk_at = None
+        self._last_loopback_audio_at = None
         recordings_dir = Path(self._settings.recordings_dir)
         recordings_dir.mkdir(parents=True, exist_ok=True)
         # Active-capture temp WAVs go to a LOCAL-only dir, never under
@@ -1017,6 +1121,97 @@ class RecordingService:
         with self._watchdog_lock:
             return [dict(w) for w in self._watchdog_warnings]
 
+    # ── Capture-confidence meters ───────────────────────────────────
+    #
+    # Cheap, pure read of state that _on_audio_chunk / _on_loopback_chunk
+    # already maintain — no locks beyond a plain attribute read (these
+    # are simple float/datetime assignments from a single producer
+    # thread each; torn reads would at worst show one stale tick, never
+    # a crash). Server.py's /recording/status calls this on every poll,
+    # same pattern as watchdog_tick().
+    #
+    # IMPORTANT: silence is not failure. A muted mic, or a meeting where
+    # only the far end is talking, is the "silent" state and must NEVER
+    # produce capture_warning — only genuine absence of chunks (the
+    # stream stopped arriving entirely) does. Getting this wrong trains
+    # the user to ignore the warning that actually matters.
+    def get_capture_levels(self) -> dict:
+        """Return the live mic/system capture-confidence snapshot:
+
+            {
+              "mic_level": float,             # 0.0-1.0 meter width
+              "system_level": float,          # 0.0-1.0 meter width
+              "mic_state": "flowing"|"silent"|"dead",
+              "system_state": "flowing"|"silent"|"dead"|None,
+              "capture_warning": str | None,
+            }
+
+        system_state/system_level are None/0.0 when this recording has
+        no system-audio device configured at all (self._loopback_temp_path
+        is None) — that's a deliberate choice not to record, not a
+        capture failure, so it must read as "not applicable", never as
+        "dead".
+        """
+        if not self._recording:
+            return {
+                "mic_level": 0.0,
+                "system_level": 0.0,
+                "mic_state": "dead",
+                "system_state": None,
+                "capture_warning": None,
+            }
+
+        now = datetime.now()
+        system_configured = getattr(self, "_loopback_temp_path", None) is not None
+
+        mic_state = _stream_state(self._last_chunk_at, self._last_mic_audio_at, now)
+        mic_level = _rms_to_level(self._mic_level_ema)
+
+        if system_configured:
+            system_state = _stream_state(
+                self._last_loopback_chunk_at, self._last_loopback_audio_at, now)
+            system_level = _rms_to_level(self._loopback_level_ema)
+        else:
+            system_state = None
+            system_level = 0.0
+
+        # capture_warning: only for a stream that is genuinely dead (no
+        # chunks at all) for longer than the actionable threshold, past
+        # the post-start grace period. Deliberately independent of
+        # mic_state/system_state's shorter STREAM_DEAD_S so the meter
+        # itself is responsive while the banner stays conservative.
+        capture_warning: Optional[str] = None
+        started_at = self._session.started_at if self._session else None
+        elapsed_s = (now - started_at).total_seconds() if started_at else 0.0
+        if elapsed_s > CAPTURE_WARNING_GRACE_S:
+            mic_dead_s = (
+                (now - self._last_chunk_at).total_seconds()
+                if self._last_chunk_at else elapsed_s
+            )
+            if mic_dead_s >= CAPTURE_WARNING_DEAD_S:
+                capture_warning = (
+                    f"No microphone audio for {int(mic_dead_s)} seconds — "
+                    f"capture may have stopped. Consider stopping and "
+                    f"restarting the recording.")
+            elif system_configured:
+                sys_dead_s = (
+                    (now - self._last_loopback_chunk_at).total_seconds()
+                    if self._last_loopback_chunk_at else elapsed_s
+                )
+                if sys_dead_s >= CAPTURE_WARNING_DEAD_S:
+                    capture_warning = (
+                        f"No system audio for {int(sys_dead_s)} seconds — "
+                        f"capture may have stopped. Consider stopping and "
+                        f"restarting the recording.")
+
+        return {
+            "mic_level": mic_level,
+            "system_level": system_level,
+            "mic_state": mic_state,
+            "system_state": system_state,
+            "capture_warning": capture_warning,
+        }
+
     def watchdog_tick(self) -> dict:
         """Re-evaluate every watchdog condition against the current
         recording state + Settings, update the cached warning list,
@@ -1226,8 +1421,19 @@ class RecordingService:
         # user is still talking.
         try:
             rms = float(np.sqrt(np.mean(mono * mono))) if len(mono) else 0.0
+            now = datetime.now()
             if rms > SILENCE_RMS_FLOOR:
-                self._last_speech_at = datetime.now()
+                self._last_speech_at = now
+                self._last_mic_audio_at = now
+            # Capture-confidence meter: same EMA smoothing as the
+            # existing loopback level (_loopback_level_ema), fed from
+            # the RMS we already computed above — no extra RMS math on
+            # the audio path. Kept inside this same try/except so a
+            # bad chunk degrades the meter, never the recording.
+            self._mic_level_ema = (
+                DUCK_SMOOTHING * rms
+                + (1.0 - DUCK_SMOOTHING) * self._mic_level_ema
+            )
         except Exception:
             # Don't let RMS math kill the audio path
             pass
@@ -1263,6 +1469,11 @@ class RecordingService:
         capture hasn't opened the loopback stream yet."""
         if not self._recording:
             return
+        # Capture-confidence bookkeeping: this chunk arrived at all,
+        # regardless of its level — mirrors _last_chunk_at on the mic
+        # side. Outside the try/except below so a downstream RMS bug
+        # can never make the system stream look "dead" when it isn't.
+        self._last_loopback_chunk_at = datetime.now()
         try:
             mono = chunk.mean(axis=1) if chunk.ndim > 1 else chunk
             # Update the rolling level estimate that the mic-duck gate
@@ -1285,9 +1496,13 @@ class RecordingService:
             # typically carries low-level codec hiss / keepalive noise
             # even after the meeting ends. The lower mic floor is right
             # for whispered speech; the higher loopback floor only
-            # counts actual far-end speech.
+            # counts actual far-end speech. Same floor used by
+            # _stream_state() to decide flowing vs. silent for the
+            # system-audio meter.
             if chunk_rms > DUCK_LEVEL_THRESHOLD:
-                self._last_speech_at = datetime.now()
+                now = datetime.now()
+                self._last_speech_at = now
+                self._last_loopback_audio_at = now
         except Exception:
             # Never let RMS math kill the audio path.
             pass

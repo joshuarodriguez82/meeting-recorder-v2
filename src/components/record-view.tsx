@@ -15,12 +15,19 @@ import {
   Square,
   Play,
   Mic,
+  MicOff,
+  Volume2,
+  VolumeX,
   FileText,
   Camera,
   Ban,
   ChevronRight,
   ChevronDown,
   ExternalLink,
+  CheckCircle2,
+  AlertTriangle,
+  XCircle,
+  Info,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -115,7 +122,7 @@ export function RecordView({
   // Recording" form while the sidebar counted "Recording… 20:10"
   // upward. There is now exactly one answer to "are we recording", and
   // only the server can change it.
-  const { status: recordingStatus } = useRecordingStatus();
+  const { status: recordingStatus, reachable: backendReachable } = useRecordingStatus();
   const recording = !!recordingStatus?.is_recording;
   const duration = recordingStatus?.duration_s ?? 0;
   const modelsLoading = !!recordingStatus?.models_loading;
@@ -247,6 +254,13 @@ export function RecordView({
   } | null>(null);
   const [autoRecordSaving, setAutoRecordSaving] = useState<boolean>(false);
 
+  // Readiness panel (Part 3): whether a calendar is connected at all.
+  // null = not checked yet. Informational only — see the render below —
+  // a disconnected calendar is never a reason recording can't start, so
+  // this never gates "Ready to record". Fetched once on mount alongside
+  // the other one-shot local data below; not a new polling loop.
+  const [calendarAvailable, setCalendarAvailable] = useState<boolean | null>(null);
+
   // Load initial data. Calendar data is owned by the parent (page.tsx)
   // so it survives nav switches; we only load local things here.
   useEffect(() => {
@@ -256,12 +270,17 @@ export function RecordView({
         // NB: no /recording/status call here — the shared store owns
         // that endpoint now, so this mount fetch can't race it or land
         // a staler answer than the poll already has.
-        const [devices, tpls, sessionsList, cfgs] = await Promise.all([
+        const [devices, tpls, sessionsList, cfgs, calAvail] = await Promise.all([
           api.getAudioDevices(),
           api.getTemplates(),
           api.listSessions().catch(() => []),
           api.getClientConfigs().catch(() => ({} as Record<string, { export_folder: string; display_name?: string }>)),
+          // Readiness panel's "Calendar connected" row. Never a blocker
+          // (see calendarAvailable's doc comment) — a failed fetch just
+          // means "unknown", shown the same as "not connected".
+          api.isCalendarAvailable().catch(() => ({ available: false })),
         ]);
+        setCalendarAvailable(!!calAvail.available);
         setClientConfigs(cfgs);
         setInputDevices(devices.input);
         setOutputDevices(devices.output);
@@ -462,6 +481,21 @@ export function RecordView({
   // Look up the currently selected device objects for display.
   const selectedMic = inputDevices.find((d) => d.index === micIdx);
   const selectedOut = outputDevices.find((d) => d.index === outIdx);
+
+  // ── Readiness panel (Part 3) ─────────────────────────────────────
+  // Derived, not fetched — reuses device lists / backend reachability
+  // already held in state, plus the one-shot calendar check above. No
+  // new polling loops or endpoints.
+  const micReady = micIdx !== null && !!selectedMic;
+  // System audio is never a hard requirement — conference room mode is
+  // a deliberate, legitimate choice to skip it, and even outside that
+  // mode a mic-only recording is allowed (you just lose the far end).
+  // So this can only ever reach "pass" or "warn", never "fail".
+  const systemAudioReady = conferenceRoomMode || (outIdx !== null && !!selectedOut);
+  // "Ready to record" only cares about hard requirements: a mic and a
+  // reachable backend. System audio and calendar are surfaced for
+  // awareness but never block the summary line — see AGENTS.md Part 3.
+  const readyToRecord = micReady && backendReachable;
 
   // Detect mic↔loopback shared-mode mix-format mismatch. The Windows
   // audio engine resamples each side independently; if the two
@@ -1014,6 +1048,57 @@ export function RecordView({
         </div>
       )}
 
+      {/* Capture-confidence warning — the single most important banner
+          on this page. This is NOT a toast: a toast can be missed while
+          the user is looking at the other participants' screen share,
+          and by the time they look back the meeting is over and the
+          audio is gone. This is why this feature exists in the first
+          place — see AGENTS.md "Why this exists". Rendered ABOVE the
+          watchdog banner below since "capture may have stopped" is the
+          most urgent thing this app can tell you. Reserved red, per the
+          design constraints, exactly because this IS the recording-
+          failure state. */}
+      {recording && recordingStatus?.capture_warning && (
+        <div
+          role="alert"
+          className="flex items-start gap-3 rounded-lg border-2 border-red-500 bg-red-50 px-4 py-3 shadow-card dark:border-red-500 dark:bg-red-950/50"
+        >
+          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 animate-pulse text-red-600 dark:text-red-400" />
+          <div className="flex-1">
+            <div className="text-sm font-semibold text-red-900 dark:text-red-100">
+              Capture problem detected
+            </div>
+            <div className="mt-0.5 text-sm text-red-800 dark:text-red-200">
+              {recordingStatus.capture_warning}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Live capture meters — the instrument this feature exists to
+          build. Legible at a glance: labelled bars + a plain-language
+          state per stream, so "is it actually recording" never again
+          depends on watching whether the live transcript is still
+          producing text. */}
+      {recording && (
+        <Card className="gap-2 py-3.5">
+          <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <CaptureMeter
+              label="Microphone"
+              level={recordingStatus?.mic_level ?? 0}
+              state={recordingStatus?.mic_state ?? null}
+              kind="mic"
+            />
+            <CaptureMeter
+              label="System Audio"
+              level={recordingStatus?.system_level ?? 0}
+              state={recordingStatus?.system_state ?? null}
+              kind="system"
+            />
+          </CardContent>
+        </Card>
+      )}
+
       {/* Auto-stop watchdog warning banner — appears underneath the
           recording bar when the backend detects dead air, meeting
           overrun, or imminent hard cap. Render order is "most recent
@@ -1137,6 +1222,75 @@ export function RecordView({
           </CardTitle>
         </CardHeader>
         <CardContent className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {/* Readiness checklist (Part 3) — replaces "watch the live
+              transcript and hope" with an explicit pre-flight check.
+              Reuses device lists / backend reachability / the calendar
+              endpoint already fetched above; no new polling. */}
+          {!recording && (
+            <div className="md:col-span-2 space-y-1 rounded-lg border border-border bg-muted/30 p-3">
+              <div className="flex items-center gap-2 pb-1.5">
+                {readyToRecord ? (
+                  <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                ) : (
+                  <XCircle className="h-4 w-4 text-red-600 dark:text-red-400" />
+                )}
+                <span
+                  className={
+                    "text-sm font-semibold " +
+                    (readyToRecord
+                      ? "text-emerald-700 dark:text-emerald-400"
+                      : "text-red-700 dark:text-red-400")
+                  }
+                >
+                  {readyToRecord ? "Ready to record" : "Not ready to record"}
+                </span>
+              </div>
+              <div className="divide-y divide-border/60">
+                <ReadinessRow
+                  status={micReady ? "pass" : "fail"}
+                  title="Microphone"
+                  detail={
+                    micReady
+                      ? (selectedMic?.name ?? "Selected")
+                      : micIdx === null
+                        ? "No microphone selected"
+                        : "Selected microphone not found"
+                  }
+                  hint="Choose a microphone below before recording."
+                />
+                <ReadinessRow
+                  status={conferenceRoomMode ? "pass" : systemAudioReady ? "pass" : "warn"}
+                  title="System audio"
+                  detail={
+                    conferenceRoomMode
+                      ? "Skipped — conference room mode"
+                      : systemAudioReady
+                        ? (selectedOut?.name ?? "Selected")
+                        : "No system-audio device selected"
+                  }
+                  hint="Select a system-audio device below, or turn on conference room mode for a room setup. Recording still works with mic only — you'll just miss the other side."
+                />
+                <ReadinessRow
+                  status={backendReachable ? "pass" : "fail"}
+                  title="Backend"
+                  detail={backendReachable ? "Connected" : "Unreachable"}
+                  hint="The app automatically restarts a crashed backend — wait a few seconds and this should clear on its own."
+                />
+                <ReadinessRow
+                  status={calendarAvailable ? "pass" : "info"}
+                  title="Calendar"
+                  detail={
+                    calendarAvailable === null
+                      ? "Checking…"
+                      : calendarAvailable
+                        ? "Connected"
+                        : "Not connected"
+                  }
+                  hint="Optional — connect a calendar in Settings for upcoming meetings and auto-record. Recording works fine without it."
+                />
+              </div>
+            </div>
+          )}
           <div className="space-y-2">
             <Label>Microphone</Label>
             <Select
@@ -1617,6 +1771,128 @@ function formatDur(seconds: number): string {
   const s = seconds % 60;
   if (h) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+/**
+ * One live capture-confidence meter (Part 2). Reads mic_level/mic_state
+ * or system_level/system_state straight off the shared /recording/
+ * status poll — no local state, no separate timer. The bar's width
+ * transitions smoothly between polls (see the RECORDING_POLL_INTERVAL_MS
+ * comment in recording-status.ts for why the poll itself is fast enough
+ * that this reads as "live" rather than laggy).
+ *
+ * Color carries real meaning, not decoration: emerald only while audio
+ * is actually flowing, a neutral/muted tone for silence (NOT a
+ * failure — a muted mic or a one-sided conversation is normal), and
+ * red is reserved for "dead" — chunks have stopped arriving entirely,
+ * which is the one state this whole feature exists to catch.
+ */
+function CaptureMeter({
+  label,
+  level,
+  state,
+  kind,
+}: {
+  label: string;
+  level: number;
+  state: "flowing" | "silent" | "dead" | null;
+  kind: "mic" | "system";
+}) {
+  const pct = Math.max(0, Math.min(1, level || 0)) * 100;
+  const FlowIcon = kind === "mic" ? Mic : Volume2;
+  const QuietIcon = kind === "mic" ? MicOff : VolumeX;
+
+  let barClass = "bg-muted-foreground/25";
+  let StatusIcon = QuietIcon;
+  let iconClass = "text-muted-foreground";
+  let stateText =
+    kind === "system" ? "Not captured for this recording" : "Waiting for audio…";
+  let stateClass = "text-muted-foreground";
+
+  if (state === "flowing") {
+    barClass = "bg-emerald-500 dark:bg-emerald-400";
+    StatusIcon = FlowIcon;
+    iconClass = "text-emerald-600 dark:text-emerald-400";
+    stateText = "Flowing";
+    stateClass = "text-emerald-700 dark:text-emerald-400";
+  } else if (state === "silent") {
+    barClass = "bg-muted-foreground/40";
+    StatusIcon = QuietIcon;
+    iconClass = "text-muted-foreground";
+    stateText = "Silent — quiet or muted";
+    stateClass = "text-muted-foreground";
+  } else if (state === "dead") {
+    barClass = "bg-red-500";
+    StatusIcon = AlertTriangle;
+    iconClass = "text-red-600 dark:text-red-400";
+    stateText = "Not receiving audio";
+    stateClass = "text-red-700 dark:text-red-400 font-medium";
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 text-sm font-medium">
+          <StatusIcon className={`h-4 w-4 shrink-0 ${iconClass}`} />
+          {label}
+        </div>
+        <span className={`text-xs whitespace-nowrap ${stateClass}`}>{stateText}</span>
+      </div>
+      {/* The meter itself — deliberately large enough (h-3) to read at
+          a glance from across a desk, per the design constraints. */}
+      <div className="h-3 w-full overflow-hidden rounded-full bg-muted">
+        <div
+          className={`h-full rounded-full transition-[width] duration-200 ease-out ${barClass}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+type ReadinessStatus = "pass" | "warn" | "fail" | "info";
+
+/**
+ * One row of the pre-recording readiness checklist (Part 3). `status`
+ * drives both the icon and color; `hint` (the "here's what to do" line)
+ * only renders for anything short of a clean pass, per the design spec.
+ */
+function ReadinessRow({
+  status,
+  title,
+  detail,
+  hint,
+}: {
+  status: ReadinessStatus;
+  title: string;
+  detail: string;
+  hint?: string;
+}) {
+  const cfg: Record<ReadinessStatus, { Icon: typeof CheckCircle2; cls: string }> = {
+    pass: { Icon: CheckCircle2, cls: "text-emerald-600 dark:text-emerald-400" },
+    warn: { Icon: AlertTriangle, cls: "text-amber-600 dark:text-amber-400" },
+    fail: { Icon: XCircle, cls: "text-red-600 dark:text-red-400" },
+    // Calendar-disconnected lands here, never on "fail" — degrading
+    // gracefully means it must never read as something blocking
+    // recording. See AGENTS.md Part 3.
+    info: { Icon: Info, cls: "text-muted-foreground" },
+  };
+  const { Icon, cls } = cfg[status];
+
+  return (
+    <div className="flex items-start gap-2.5 py-1.5">
+      <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${cls}`} />
+      <div className="min-w-0 flex-1">
+        <div className="text-sm">
+          <span className="font-medium">{title}</span>
+          <span className="text-muted-foreground"> — {detail}</span>
+        </div>
+        {hint && status !== "pass" && (
+          <div className="mt-0.5 text-xs text-muted-foreground">{hint}</div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 /**
