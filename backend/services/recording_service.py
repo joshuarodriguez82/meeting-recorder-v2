@@ -734,6 +734,9 @@ class RecordingService:
                     output_wav_path=final_path,
                     target_sr=TARGET_SR,
                     loopback_start_offset_s=loopback_start_offset_s,
+                    echo_cancellation_enabled=bool(
+                        getattr(self._settings,
+                                "echo_cancellation_enabled", False)),
                 )
                 session.audio_path = final_path
                 session.ended_at = datetime.now()
@@ -1666,6 +1669,7 @@ class RecordingService:
         output_wav_path: str,
         target_sr: int,
         loopback_start_offset_s: Optional[float],
+        echo_cancellation_enabled: bool = False,
     ) -> tuple[float, bool]:
         """Run the WAV merge in a subprocess instead of in-process.
 
@@ -1709,6 +1713,8 @@ class RecordingService:
             "" if loopback_start_offset_s is None
                 else f"{loopback_start_offset_s:.6f}",
         ]
+        if echo_cancellation_enabled:
+            argv.append("--echo-cancellation")
         logger.info(
             f"[finalize-subprocess] spawn {' '.join(argv[1:])}"
         )

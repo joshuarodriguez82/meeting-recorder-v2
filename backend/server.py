@@ -1104,6 +1104,17 @@ class SettingsDTO(BaseModel):
     # config/settings.py's audio_mix_format_lookup_enabled docstring
     # and core/audio_format_inspector.py.
     audio_mix_format_lookup_enabled: bool = True
+    # Offline acoustic echo cancellation for the mic channel during
+    # finalize (before the mic+loopback mix). Helps when recording
+    # with an external mic + speakers (not a headset): unmuting lets
+    # the far-end caller's voice come back out of the speakers and get
+    # picked up a second time on the mic, duplicating that speech in
+    # the transcript under the user's own name and degrading speaker
+    # diarization. Default False — off while this is validated; a
+    # rejected/failed attempt always falls back to the untouched mic,
+    # never damages the recording. See config/settings.py's
+    # echo_cancellation_enabled docstring and utils/aec.py.
+    echo_cancellation_enabled: bool = False
 
 
 class StartRecordingRequest(BaseModel):
@@ -1544,6 +1555,7 @@ async def get_settings():
         live_speaker_split_enabled=s.live_speaker_split_enabled,
         diarization_device=s.diarization_device,
         audio_mix_format_lookup_enabled=s.audio_mix_format_lookup_enabled,
+        echo_cancellation_enabled=s.echo_cancellation_enabled,
     )
 
 
@@ -1654,6 +1666,7 @@ async def save_settings(payload: SettingsDTO):
         live_speaker_split_enabled=bool(payload.live_speaker_split_enabled),
         diarization_device=(payload.diarization_device or "auto").strip().lower(),
         audio_mix_format_lookup_enabled=bool(payload.audio_mix_format_lookup_enabled),
+        echo_cancellation_enabled=bool(payload.echo_cancellation_enabled),
     )
     # If the recordings folder changed, migrate client + template state
     # from the previous folder to the new one. Copy, not move, so the
@@ -2962,6 +2975,7 @@ async def set_live_copilot_enabled(payload: dict):
         live_speaker_split_enabled=s.live_speaker_split_enabled,
         diarization_device=s.diarization_device,
         audio_mix_format_lookup_enabled=s.audio_mix_format_lookup_enabled,
+        echo_cancellation_enabled=s.echo_cancellation_enabled,
     )
     # Update the cached Settings in-place so the change is visible
     # immediately, without going through load_settings() which would
@@ -6878,6 +6892,7 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         live_speaker_split_enabled=s.live_speaker_split_enabled,
         diarization_device=s.diarization_device,
         audio_mix_format_lookup_enabled=s.audio_mix_format_lookup_enabled,
+        echo_cancellation_enabled=s.echo_cancellation_enabled,
     )
     svc.settings = dataclasses.replace(
         s, live_copilot_mode=new_mode, live_copilot_meeting_type=new_type)
