@@ -83,6 +83,18 @@ def body_for(path: str) -> dict | list:
     if path == "/diagnostics":
         return {"checks": [], "crash_is_recent": False, "last_crash_at": None}
 
+    # Record view's extension-calendar-source empty state (2026-08
+    # change): needs a non-default /calendar/available shape to render
+    # at all, since the plain "no meetings" message is the default.
+    if path == "/calendar/available":
+        return {
+            "available": False,
+            "source": "extension",
+            "last_capture_at": "2026-08-13T13:00:00",
+            "event_count": 1,
+            "future_event_count": 0,
+        }
+
     return {}
 
 

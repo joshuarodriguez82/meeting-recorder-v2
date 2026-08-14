@@ -312,30 +312,46 @@ def test_available_never_calls_outlook_fetch_when_off(monkeypatch):
     _wire(monkeypatch, calendar_source="off")
     monkeypatch.setattr(server, "is_outlook_available", _failing_spy("is_outlook_available"))
     result = asyncio.run(server.calendar_available())
-    assert result == {"available": False}
+    assert result == {"available": False, "source": "off"}
 
 
 def test_available_reports_extension_data_not_outlook(monkeypatch):
     """The point of "extension" mode: /calendar/available answers from
-    whether the extension has synced anything, never from Outlook."""
+    whether the extension has synced anything, never from Outlook. Also
+    carries last_capture_at / event_count so the Record tab's empty
+    state can be honest about a stale/empty extension store rather than
+    rendering identically to a genuinely free calendar (field report
+    2026-08-13)."""
     _wire(monkeypatch, calendar_source="extension", extension_svc=SimpleNamespace(
-        has_events=lambda: True))
+        capture_status=lambda: {
+            "updated_at": "2026-08-13T13:00:00", "event_count": 3,
+            "future_event_count": 2,
+        }))
     monkeypatch.setattr(server, "is_outlook_available", _failing_spy("is_outlook_available"))
     result = asyncio.run(server.calendar_available())
-    assert result == {"available": True}
+    assert result == {
+        "available": True, "source": "extension",
+        "last_capture_at": "2026-08-13T13:00:00",
+        "event_count": 3, "future_event_count": 2,
+    }
 
     _wire(monkeypatch, calendar_source="extension", extension_svc=SimpleNamespace(
-        has_events=lambda: False))
+        capture_status=lambda: {
+            "updated_at": None, "event_count": 0, "future_event_count": 0,
+        }))
     monkeypatch.setattr(server, "is_outlook_available", _failing_spy("is_outlook_available"))
     result = asyncio.run(server.calendar_available())
-    assert result == {"available": False}
+    assert result == {
+        "available": False, "source": "extension",
+        "last_capture_at": None, "event_count": 0, "future_event_count": 0,
+    }
 
 
 def test_available_uses_outlook_when_auto(monkeypatch):
     _wire(monkeypatch, calendar_source="auto")
     monkeypatch.setattr(server, "is_outlook_available", lambda: True)
     result = asyncio.run(server.calendar_available())
-    assert result == {"available": True}
+    assert result == {"available": True, "source": "auto"}
 
 
 def test_off_consults_neither_source_and_returns_empty_without_error(monkeypatch):
