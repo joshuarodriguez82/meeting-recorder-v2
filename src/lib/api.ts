@@ -256,6 +256,14 @@ export interface Settings {
   // falls back to the untouched mic, so it can never damage a
   // recording, only fail to help.
   echo_cancellation_enabled: boolean;
+  // Which calendar source(s) the backend may consult for the Record
+  // tab's Upcoming Meetings panel. "auto" (default) merges the local
+  // calendar (Outlook COM / macOS EventKit) with Chrome-extension
+  // events. "outlook" is local calendar only. "extension" NEVER
+  // touches Outlook COM / EventKit — for tenants where that throws a
+  // Microsoft sign-in prompt every time the app opens the Record tab.
+  // "off" disables calendar data entirely.
+  calendar_source: "auto" | "outlook" | "extension" | "off" | string;
 }
 
 // A single co-pilot mode (persona) or meeting-type (modifier). Shape

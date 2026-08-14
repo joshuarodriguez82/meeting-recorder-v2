@@ -1,0 +1,9 @@
+{
+  "name": "ui-harness",
+  "private": true,
+  "description": "Screenshot/geometry harness for verifying real-browser layout changes. See README.md.",
+  "type": "module",
+  "dependencies": {
+    "playwright-core": "^1.62.1"
+  }
+}
