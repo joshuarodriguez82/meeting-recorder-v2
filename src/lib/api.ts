@@ -1514,8 +1514,20 @@ export const api = {
       `/calendar/meeting-detail?subject=${encodeURIComponent(subject)}`
       + `&start=${encodeURIComponent(start)}`
     ),
+  // `source`/`last_capture_at`/`event_count`/`future_event_count` are
+  // only meaningfully populated when calendar_source is "extension" —
+  // see backend/server.py's calendar_available docstring. The Record
+  // tab's empty state uses these so an empty/stale extension capture
+  // never renders identically to a genuinely free calendar (field
+  // report 2026-08-13).
   isCalendarAvailable: () =>
-    request<{ available: boolean }>("/calendar/available"),
+    request<{
+      available: boolean;
+      source?: string;
+      last_capture_at?: string | null;
+      event_count?: number;
+      future_event_count?: number;
+    }>("/calendar/available"),
 
   // Auto-record loop status. `enabled` mirrors Settings.auto_record_enabled;
   // `running` confirms the backend loop is actually live (they can briefly

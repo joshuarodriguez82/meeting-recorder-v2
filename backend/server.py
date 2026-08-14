@@ -26,7 +26,7 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 
 # Set CWD to this file's directory so relative paths (like "recordings/")
 # resolve consistently regardless of how the server was launched.
@@ -376,7 +376,8 @@ from services.daily_briefing_service import (
     DailyBriefingService,
 )
 from services.extension_calendar_service import (
-    ExtensionCalendarService, events_from_briefing, merge_meetings,
+    ExtensionCalendarService, events_from_briefing, events_from_structured,
+    merge_meetings,
 )
 from services.outlook_web_scraper import (
     OutlookAuthExpired, OutlookScraperError, OutlookScraperUnavailable,
@@ -2357,21 +2358,37 @@ async def calendar_available():
         extension has ever synced events, NOT on Outlook — probing
         Outlook here would defeat the entire point of this mode (never
         touching Outlook COM / EventKit; see config/settings.py's
-        calendar_source docstring).
+        calendar_source docstring). Also includes `last_capture_at` and
+        `event_count` (from ExtensionCalendarService.capture_status) so
+        the Record tab's empty state can say plainly "no meetings from
+        the extension, last checked at X" instead of rendering
+        identically to a genuinely free calendar (field report
+        2026-08-13 — that ambiguity is how a whole day of meetings
+        went missing without the user realizing the mode was at fault).
       - "auto" / "outlook" preserve the original behavior: probe the
         local calendar backend.
     """
     svc.load_settings()
     source = _calendar_source()
     if source == "off":
-        return {"available": False}
+        return {"available": False, "source": source}
     if source == "extension":
-        available = bool(
-            svc.extension_calendar_svc
-            and await asyncio.to_thread(svc.extension_calendar_svc.has_events))
-        return {"available": available}
+        status = {"updated_at": None, "event_count": 0, "future_event_count": 0}
+        if svc.extension_calendar_svc:
+            try:
+                status = await asyncio.to_thread(
+                    svc.extension_calendar_svc.capture_status)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Extension calendar status unavailable: {e}")
+        return {
+            "available": status["event_count"] > 0,
+            "source": source,
+            "last_capture_at": status["updated_at"],
+            "event_count": status["event_count"],
+            "future_event_count": status["future_event_count"],
+        }
     available = await asyncio.to_thread(is_outlook_available)
-    return {"available": bool(available)}
+    return {"available": bool(available), "source": source}
 
 
 @app.get("/calendar/meeting-detail")
@@ -7302,6 +7319,24 @@ class ExtensionImportRequest(BaseModel):
     inbox_text: Optional[str] = ""
     chat_text: Optional[str] = ""
     date: Optional[str] = None  # YYYY-MM-DD; defaults to today
+    # v1.2: structured calendar events the extension parsed CLIENT-SIDE
+    # out of Outlook Web's own aria-label accessibility strings (week
+    # view, current + next — see chrome-extension/background.js
+    # parseMeetingLabel / extractEventsFromCandidates). No LLM on this
+    # path. Each item: {subject, start, end, location?, organizer?,
+    # join_url?, attendees?}. When present this is the PREFERRED source
+    # for the Record tab's calendar store (see below); an un-upgraded
+    # extension simply never sends it and the old owa_text -> LLM ->
+    # events_from_briefing path is used exactly as before.
+    calendar_events: Optional[List[Dict[str, Any]]] = None
+    # Last-resort fallback text for the calendar ONLY, sent when the
+    # extension's structured DOM scan found nothing (Outlook Web
+    # redesign, etc). Distinct from owa_text (which is the DAY view,
+    # feeds the Today-tab narrative, and is always LLM-parsed +
+    # persisted as today's briefing) — calendar_text is the WEEK
+    # view's raw text and, when used, is parsed WITHOUT touching the
+    # saved briefing (see the calendar-only branch below).
+    calendar_text: Optional[str] = ""
 
 
 @app.post("/briefing/extension-import")
@@ -7314,7 +7349,18 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
     automation detection doesn't fire there — so the request lands
     with real, populated content. If both blobs are empty we 400; if
     only Teams is empty we publish an OWA-only brief (same fallback
-    shape the v2.15.x Playwright path used)."""
+    shape the v2.15.x Playwright path used).
+
+    v1.2: also accepts `calendar_events` (structured, client-parsed —
+    see ExtensionImportRequest) as a THIRD, preferred input alongside
+    the four narrative text fields. A request carrying ONLY calendar
+    data (the periodic calendar-refresh alarm in background.js — see
+    its header comment) takes a fast path below that updates the
+    Record tab's calendar store and returns WITHOUT touching today's
+    saved briefing or spending an LLM call — that alarm fires every
+    30 minutes and must not silently overwrite the day's real greeting
+    / top_priority / needs_response with a partial calendar-only
+    parse."""
     svc.load_settings()
     if not svc.daily_briefing_svc:
         raise HTTPException(status_code=503,
@@ -7324,7 +7370,57 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
     teams_text = (req.teams_text or "").strip()
     inbox_text = (req.inbox_text or "").strip()
     chat_text = (req.chat_text or "").strip()
-    if not any((owa_text, teams_text, inbox_text, chat_text)):
+    calendar_events_in = [e for e in (req.calendar_events or [])
+                          if isinstance(e, dict)]
+    calendar_text = (req.calendar_text or "").strip()
+    narrative_present = any((owa_text, teams_text, inbox_text, chat_text))
+
+    # ── Calendar-only fast path ──────────────────────────────────────
+    # No narrative text at all: this is the calendar-refresh alarm, not
+    # a full "Capture & Send". Update ONLY the calendar store.
+    if not narrative_present and (calendar_events_in or calendar_text):
+        if not svc.extension_calendar_svc:
+            raise HTTPException(status_code=503,
+                                detail="Calendar store not initialized")
+        if calendar_events_in:
+            events = events_from_structured(calendar_events_in)
+            path = "structured"
+        else:
+            # Structured extraction found nothing client-side — last-
+            # resort LLM fallback, but scoped to events only: we parse
+            # it the same way a real briefing would be parsed, then
+            # discard everything except the agenda. Today's saved
+            # briefing (greeting/top_priority/needs_response/fyi) is
+            # never touched by this branch.
+            summ = svc.summarizer or svc.live_summarizer
+            if summ is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=("No AI provider configured. Set an API key + "
+                            "model in Settings before importing a briefing."))
+            try:
+                parsed_fallback = await summ.parse_daily_briefing(
+                    calendar_text, req.date or "")
+            except RuntimeError as e:
+                raise HTTPException(status_code=502,
+                                    detail=f"LLM parse failed: {e}")
+            events = events_from_briefing(
+                parsed_fallback, req.date or parsed_fallback.get("date"))
+            path = "text-fallback"
+
+        kept = await asyncio.to_thread(
+            svc.extension_calendar_svc.replace_all, events)
+        logger.info(
+            f"Calendar-only extension capture ({path}): "
+            f"{len(events)} parsed -> {len(kept)} kept")
+        return {
+            "ok": True,
+            "path": path,
+            "parsed_events": len(events),
+            "kept_events": len(kept),
+        }
+
+    if not (narrative_present or calendar_events_in or calendar_text):
         raise HTTPException(status_code=400,
                             detail="No content sent from extension")
 
@@ -7375,7 +7471,7 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
     stored = await asyncio.to_thread(
         svc.daily_briefing_svc.save_parsed, parsed, blob, req.date)
 
-    # Second consumer of the same parse: the Record tab's Upcoming
+    # Second consumer of the same request: the Record tab's Upcoming
     # Meetings panel. Until v2.22.2 the extension's calendar data dead-
     # ended in the Today tab's briefing, so a meeting visible in Outlook
     # Web but absent from local Outlook (the exact case the extension
@@ -7384,10 +7480,19 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
     # /calendar/upcoming merges them with the local source (field report
     # 2026-08-11). Best-effort: a failure to persist must not fail the
     # briefing import, which is the primary purpose of this endpoint.
+    #
+    # v1.2: prefer the extension's own structured events (no LLM, no
+    # regex-over-text-blob) whenever a manual "Capture & Send" included
+    # them alongside the narrative capture. Only fall back to deriving
+    # events from the LLM-parsed briefing agenda for an un-upgraded
+    # extension that never sends calendar_events at all.
     ext_kept = 0
     if svc.extension_calendar_svc:
         try:
-            events = events_from_briefing(stored, stored.get("date"))
+            if calendar_events_in:
+                events = events_from_structured(calendar_events_in)
+            else:
+                events = events_from_briefing(stored, stored.get("date"))
             ext_kept = len(await asyncio.to_thread(
                 svc.extension_calendar_svc.replace_all, events))
         except Exception as e:  # noqa: BLE001
