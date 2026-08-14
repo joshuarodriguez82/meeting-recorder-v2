@@ -619,3 +619,159 @@ def test_status_no_archive_configured(tmp_path):
     row = st["client_configs.json"]
     assert row["archive_present"] is False
     assert row["direction"] == "in-sync"
+
+
+# ── owner_aliases.json roaming ──────────────────────────────────────
+#
+# Added alongside client_configs.json / summary_templates.json so a
+# user curating owner-name merges (e.g. Josh's spelling variants) on
+# one machine sees the same grouping on their other machine against
+# the same shared session library — otherwise the two machines would
+# silently disagree about who owns what from identical underlying
+# data. Like summary_templates.json, this carries no filesystem paths
+# (see services/owner_service.py's OwnerAliasStore: just alias ids,
+# canonical names, member keys, and rejected-pair bookkeeping), so it
+# gets the plain whole-file, newest-wins copy — NOT the field-aware
+# merge client_configs.json needs. These tests confirm that by reading
+# the module's actual dispatch rather than assuming it.
+
+def test_owner_aliases_is_in_shared_files():
+    assert "owner_aliases.json" in SHARED_FILES
+
+
+def test_owner_aliases_push_copies_plain_whole_file(tmp_path):
+    local = tmp_path / "recordings"
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    payload = {
+        "aliases": {"a1": {"canonical": "Josh",
+                            "members": ["josh", "joshua"],
+                            "created_at": "2026-08-01T00:00:00"}},
+        "rejected": [["dan", "mark"]],
+    }
+    _write(local / "owner_aliases.json", payload, mtime=2000)
+
+    copied = push(str(local), str(archive))
+    assert "owner_aliases.json" in copied
+    assert json.loads((archive / "owner_aliases.json").read_text()) == payload
+
+
+def test_owner_aliases_round_trip_push_then_pull_identical_bytes(tmp_path):
+    """Machine A curates a merge and pushes; machine B (fresh local
+    dir, same shared archive) pulls and ends up with the exact same
+    grouping — the actual acceptance criterion: aliases made on one
+    machine must not be silently absent on the other."""
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    machine_a = tmp_path / "machine_a"
+    machine_b = tmp_path / "machine_b"
+    machine_b.mkdir()
+
+    payload = {
+        "aliases": {"a1": {"canonical": "Josh",
+                            "members": ["josh", "joshua", "josh rodriguez"],
+                            "created_at": "2026-08-01T00:00:00"}},
+        "rejected": [],
+    }
+    _write(machine_a / "owner_aliases.json", payload, mtime=9999)
+
+    pushed = push(str(machine_a), str(archive))
+    assert "owner_aliases.json" in pushed
+    pulled = pull(str(machine_b), str(archive))
+    assert "owner_aliases.json" in pulled
+
+    a_bytes = (machine_a / "owner_aliases.json").read_bytes()
+    b_bytes = (machine_b / "owner_aliases.json").read_bytes()
+    assert a_bytes == b_bytes
+
+
+def test_owner_aliases_round_trip_through_the_real_store(tmp_path):
+    """End-to-end through OwnerAliasStore itself, not just raw JSON:
+    an alias created on machine A resolves owners correctly on machine
+    B after a push+pull, using nothing but the public store API on
+    each side."""
+    from services.owner_service import OwnerAliasStore, load_alias_index, resolve_owners
+
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    machine_a = tmp_path / "machine_a"
+    machine_b = tmp_path / "machine_b"
+    machine_b.mkdir()
+
+    store_a = OwnerAliasStore(machine_a)
+    store_a.create("Josh", ["Josh", "Joshua", "Josh Rodriguez"])
+
+    pushed = push(str(machine_a), str(archive))
+    assert "owner_aliases.json" in pushed
+    pulled = pull(str(machine_b), str(archive))
+    assert "owner_aliases.json" in pulled
+
+    store_b = OwnerAliasStore(machine_b)
+    idx_b = load_alias_index(store_b)
+    assert resolve_owners("Joshua", idx_b) == ["Josh"]
+    assert resolve_owners("Josh Rodriguez", idx_b) == ["Josh"]
+
+
+def test_owner_aliases_pull_refuses_corrupt_archive_copy(tmp_path):
+    """A corrupt/truncated archive copy must not overwrite a good
+    local file — same JSON/dict safety gate every other SHARED_FILES
+    entry gets — and reading through OwnerAliasStore afterwards must
+    degrade to no grouping, never raise."""
+    from services.owner_service import OwnerAliasStore, load_alias_index, resolve_owners
+
+    local = tmp_path / "recordings"
+    archive = tmp_path / "archive"
+    good = {
+        "aliases": {"a1": {"canonical": "Josh", "members": ["josh", "joshua"],
+                            "created_at": ""}},
+        "rejected": [],
+    }
+    _write(local / "owner_aliases.json", good, mtime=1000)
+    _write_raw(archive / "owner_aliases.json", '{"aliases": {"a1": {"cano', mtime=9000)
+
+    copied = pull(str(local), str(archive))
+    assert "owner_aliases.json" not in copied
+    assert json.loads((local / "owner_aliases.json").read_text()) == good
+
+    store = OwnerAliasStore(local)
+    idx = load_alias_index(store)
+    assert resolve_owners("Joshua", idx) == ["Josh"]  # local alias intact
+
+
+def test_owner_aliases_missing_on_both_sides_degrades_to_no_grouping(tmp_path):
+    """Neither machine has curated any aliases yet — sync is a no-op,
+    and reading the (absent) file locally must resolve owners
+    unaliased rather than raising."""
+    from services.owner_service import OwnerAliasStore, load_alias_index, resolve_owners
+
+    local = tmp_path / "recordings"
+    archive = tmp_path / "archive"
+    archive.mkdir()
+
+    assert push(str(local), str(archive)) == []
+    assert pull(str(local), str(archive)) == []
+
+    store = OwnerAliasStore(local)
+    assert store.list_all() == []
+    idx = load_alias_index(store)
+    assert resolve_owners("Joshua", idx) == ["Joshua"]  # no grouping applied
+
+
+def test_owner_aliases_corrupt_local_file_does_not_block_push_of_others(tmp_path):
+    """A locally-corrupt owner_aliases.json must not raise out of
+    push() and must not take summary_templates.json down with it —
+    each SHARED_FILES entry is handled independently."""
+    local = tmp_path / "recordings"
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    _write_raw(local / "owner_aliases.json", "not json at all {{{", mtime=5000)
+    _write(local / "summary_templates.json", {"General": {"prompt": "x"}}, mtime=5000)
+
+    copied = push(str(local), str(archive))
+    # owner_aliases.json has no source-side JSON validation (same as
+    # summary_templates.json — see push()'s docstring: only
+    # client_configs.json gets that extra guard), so the raw bytes are
+    # copied through; the receiving side's pull() is what refuses a
+    # malformed copy. The key behavior this test locks is that push()
+    # never raises and other files still go out.
+    assert "summary_templates.json" in copied

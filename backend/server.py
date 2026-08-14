@@ -411,6 +411,9 @@ from services.commitments_service import (
 from services.item_status_service import (
     ItemStatusService, VALID_DECISION_STATUSES,
 )
+from services.owner_service import (
+    OwnerAliasStore, aggregate_raw_owners, load_alias_index, suggest_groups,
+)
 from services.qa_service import QAService
 from services.auto_record_blocklist_service import AutoRecordBlocklistService
 from services.search_service import SearchService
@@ -678,6 +681,10 @@ class Services:
         self.session_svc: Optional[SessionService] = None
         self.export_svc: Optional[ExportService] = None
         self.client_cfg_svc: Optional[ClientConfigService] = None
+        # Confirmed owner-name merges (e.g. "Joshua" -> "Josh"). Same
+        # directory, same lifecycle as client_cfg_svc — see
+        # services/owner_service.py's OwnerAliasStore docstring.
+        self.owner_alias_store: Optional[OwnerAliasStore] = None
         self.engagement_svc: Optional[EngagementService] = None
         self.template_svc: Optional[TemplateService] = None
         self.copilot_mode_svc: Optional[CoPilotModeService] = None
@@ -881,6 +888,7 @@ class Services:
                             f"Migration of {_filename} failed ({_e}); "
                             f"reading from legacy USER_DATA_DIR location.")
             self.client_cfg_svc = ClientConfigService(_recordings_dir)
+            self.owner_alias_store = OwnerAliasStore(_recordings_dir)
             # CommitmentsService is built BEFORE the engagement service
             # because the engagement register pulls open / outstanding
             # commitment counts via it. Sidecar JSONs next to the
@@ -1808,7 +1816,10 @@ async def save_settings(payload: SettingsDTO):
             and prev_recordings_dir != new_recordings_dir):
         import shutil as _shutil
         from pathlib import Path as _Path
-        for _filename in ("client_configs.json", "summary_templates.json"):
+        for _filename in (
+            "client_configs.json", "summary_templates.json",
+            "owner_aliases.json",
+        ):
             _old = _Path(prev_recordings_dir) / _filename
             _new = _Path(new_recordings_dir) / _filename
             if _old.exists() and not _new.exists():
@@ -4812,6 +4823,7 @@ def _reset_shared_state_services() -> None:
     recordings_dir = Path(svc.settings.recordings_dir)
     svc.client_cfg_svc = ClientConfigService(recordings_dir)
     svc.template_svc = TemplateService(recordings_dir)
+    svc.owner_alias_store = OwnerAliasStore(recordings_dir)
     # engagement_svc holds a reference to client_cfg_svc (and re-reads
     # through it on every call rather than caching), but rebuild it too
     # so it never holds a reference to the OLD ClientConfigService
@@ -6171,6 +6183,9 @@ async def list_commitments(
         [s.strip() for s in status.split(",") if s.strip()]
         if status else None
     )
+    # owner filtering resolves multi-owner strings ("Mark/Josh") and
+    # confirmed aliases ("Joshua" -> "Josh") — see owner_service.py.
+    alias_index = load_alias_index(svc.owner_alias_store)
     items = await asyncio.to_thread(
         svc.commitments_svc.list_all,
         client or None,
@@ -6178,6 +6193,7 @@ async def list_commitments(
         status_list,
         owner or None,
         side or None,
+        alias_index,
     )
     return {"commitments": items}
 
@@ -6237,6 +6253,184 @@ async def extract_session_commitments(session_id: str):
         svc.commitments_svc.replace_session_commitments,
         session_id, commits)
     return {"ok": True, "extracted": len(commits)}
+
+
+# ── Owner grouping (Follow Ups + Commitments owner normalisation) ────
+#
+# See services/owner_service.py for the split/normalise/suggest rules.
+# This section is the HTTP surface over its OwnerAliasStore: list /
+# create / edit / delete confirmed merges, plus the suggestion feed the
+# management UI shows for the judgement-call tier the user must
+# explicitly accept.
+#
+# Decisions also carry an "Owner" bullet field (decisions-view.tsx),
+# but confirmed aliases apply uniformly to any raw owner string passed
+# through resolve_owners() regardless of which view reads it — nothing
+# here is Follow-Ups-specific. Only the *suggestion* feed below is
+# scoped to Follow Ups + Commitments (the two item types explicitly in
+# scope for this pass); Decisions' owner field isn't scanned for new
+# suggestions yet.
+
+
+def _gather_raw_owner_strings() -> List[str]:
+    """Collect every raw owner string across Follow Ups (action-item
+    markdown) and Commitments, for suggest_groups()/aggregate_raw_owners().
+    One entry per item, exactly as extracted — splitting/normalising
+    happens downstream in owner_service.py, not here."""
+    from services.insights_service import InsightsService
+    out: List[str] = []
+    try:
+        sessions = svc.session_svc.list_sessions() if svc.session_svc else []
+    except Exception as e:
+        logger.warning(f"Owner suggestions: session list failed: {e}")
+        sessions = []
+    for s in sessions:
+        md = s.get("action_items") or ""
+        if not md:
+            continue
+        for item in InsightsService._parse_follow_ups(md):
+            owner = (item.get("owner") or "").strip()
+            if owner:
+                out.append(owner)
+    try:
+        commitments = svc.commitments_svc.list_all() if svc.commitments_svc else []
+    except Exception as e:
+        logger.warning(f"Owner suggestions: commitments list failed: {e}")
+        commitments = []
+    for c in commitments:
+        owner = (c.get("owner") or "").strip()
+        if owner:
+            out.append(owner)
+    return out
+
+
+def _alias_to_dict(a) -> dict:
+    return {"id": a.id, "canonical": a.canonical, "members": a.members}
+
+
+@app.get("/owners/aliases")
+async def list_owner_aliases():
+    """Confirmed owner merges — the tier-3 groups the user has already
+    accepted (or created manually). Each `members` entry is a tier-2
+    normalised key (lowercase, org-suffix/punctuation stripped)."""
+    svc.load_settings()
+    if not svc.owner_alias_store:
+        return {"aliases": []}
+    aliases = await asyncio.to_thread(svc.owner_alias_store.list_all)
+    return {"aliases": [_alias_to_dict(a) for a in aliases]}
+
+
+class OwnerAliasCreate(BaseModel):
+    canonical: str
+    members: List[str]
+
+
+@app.post("/owners/aliases")
+async def create_owner_alias(req: OwnerAliasCreate):
+    """Manual merge, or accepting a suggested group. `members` may be
+    raw display strings or tier-2 keys — the store lowercases them, so
+    the frontend can pass whatever it already has on hand."""
+    svc.load_settings()
+    if not svc.owner_alias_store:
+        raise HTTPException(status_code=500,
+                             detail="Owner alias store unavailable")
+    try:
+        alias = await asyncio.to_thread(
+            svc.owner_alias_store.create, req.canonical, req.members)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _alias_to_dict(alias)
+
+
+class OwnerAliasUpdate(BaseModel):
+    canonical: Optional[str] = None
+    add_members: Optional[List[str]] = None
+    remove_members: Optional[List[str]] = None
+
+
+@app.patch("/owners/aliases/{alias_id}")
+async def update_owner_alias(alias_id: str, req: OwnerAliasUpdate):
+    """Rename a group, merge more names into it, or split (remove) a
+    member out of it — removing the last member deletes the group,
+    which is how a full split back to "ungrouped" is expressed."""
+    svc.load_settings()
+    if not svc.owner_alias_store:
+        raise HTTPException(status_code=500,
+                             detail="Owner alias store unavailable")
+    alias = await asyncio.to_thread(
+        svc.owner_alias_store.update, alias_id,
+        req.canonical, req.add_members, req.remove_members,
+    )
+    if alias is None:
+        return {"deleted": True, "id": alias_id}
+    return _alias_to_dict(alias)
+
+
+@app.delete("/owners/aliases/{alias_id}")
+async def delete_owner_alias(alias_id: str):
+    """Fully ungroup — reverses create() exactly, restoring every
+    member to its own unaliased (tier-2-normalised) entry."""
+    svc.load_settings()
+    if not svc.owner_alias_store:
+        raise HTTPException(status_code=500,
+                             detail="Owner alias store unavailable")
+    deleted = await asyncio.to_thread(svc.owner_alias_store.delete, alias_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Alias not found")
+    return {"ok": True}
+
+
+@app.get("/owners/suggestions")
+async def get_owner_suggestions():
+    """Judgement-call merge candidates (first-token match, nickname/
+    prefix relationships) across every raw owner string seen in Follow
+    Ups + Commitments — advisory only, never applied without the user
+    accepting via POST /owners/aliases."""
+    svc.load_settings()
+
+    def _do():
+        raw_strings = _gather_raw_owner_strings()
+        counts, display = aggregate_raw_owners(raw_strings)
+        grouped_keys = (
+            svc.owner_alias_store.member_keys()
+            if svc.owner_alias_store else set()
+        )
+        rejected = (
+            svc.owner_alias_store.rejected_pairs()
+            if svc.owner_alias_store else []
+        )
+        groups = suggest_groups(counts, display, grouped_keys, rejected)
+        return {
+            "groups": [
+                {
+                    "group_id": g.group_id,
+                    "suggested_canonical": g.suggested_canonical,
+                    "members": [
+                        {"key": m.key, "display": m.display, "count": m.count}
+                        for m in g.members
+                    ],
+                }
+                for g in groups
+            ]
+        }
+    return await asyncio.to_thread(_do)
+
+
+class OwnerSuggestionReject(BaseModel):
+    a: str
+    b: str
+
+
+@app.post("/owners/suggestions/reject")
+async def reject_owner_suggestion(req: OwnerSuggestionReject):
+    """Dismiss a suggested pair so it stops resurfacing. Bookkeeping
+    only — never groups anything, only suppresses future suggestions."""
+    svc.load_settings()
+    if not svc.owner_alias_store:
+        raise HTTPException(status_code=500,
+                             detail="Owner alias store unavailable")
+    await asyncio.to_thread(svc.owner_alias_store.reject, req.a, req.b)
+    return {"ok": True}
 
 
 # ── Item status overlays (follow-up done, decision lifecycle) ────────
