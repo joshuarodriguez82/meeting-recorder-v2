@@ -1,6 +1,25 @@
 """
 Headless import of the FastAPI app for structural tests.
 
+WARNING — real trap, cost a debugging session (2026-08): never run
+`python -c "import server"` (or anything else that imports server.py)
+directly in a shell, ad hoc, without MEETING_RECORDER_SKIP_DEP_REPAIR=1
+set. server.py self-heals its venv at import time by shelling out to
+`pip install -r requirements.txt` — the FULL ML requirements (torch,
+faster-whisper, pyannote deps, …), not the lightweight test set. Run
+that against the minimal CI venv (numpy/scipy/soundfile/pytest/fastapi/
+httpx only) and it happily installs several GB of packages into it,
+including a `torch` whose C-extension download can truncate if the
+command is killed/times out mid-install — which then breaks unrelated
+tests (audio finalize, recovery) in every LATER pytest run in that venv
+with confusing `AttributeError: module 'torch' has no attribute
+'Tensor'` failures, because `import torch` "succeeds" against the
+broken partial install. There is no in-process fix once this happens —
+the venv itself is contaminated; rebuilding it from scratch is the only
+way back. ALWAYS import server.py through `import_app()` below (or with
+MEETING_RECORDER_SKIP_DEP_REPAIR=1 set yourself) instead of importing
+it raw.
+
 server.py can't normally be imported outside the packaged app: at import
 time it runs `pip install` to self-heal the venv, and its transitive
 imports touch platform/ML modules (sounddevice, faster_whisper, …) that

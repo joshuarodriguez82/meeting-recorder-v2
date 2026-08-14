@@ -260,6 +260,18 @@
   ]
  ],
  [
+  "/extension/info",
+  [
+   "GET"
+  ]
+ ],
+ [
+  "/extension/install",
+  [
+   "POST"
+  ]
+ ],
+ [
   "/ghost-sessions",
   [
    "DELETE"
@@ -318,6 +330,42 @@
   [
    "GET",
    "HEAD"
+  ]
+ ],
+ [
+  "/owners/aliases",
+  [
+   "GET"
+  ]
+ ],
+ [
+  "/owners/aliases",
+  [
+   "POST"
+  ]
+ ],
+ [
+  "/owners/aliases/{alias_id}",
+  [
+   "DELETE"
+  ]
+ ],
+ [
+  "/owners/aliases/{alias_id}",
+  [
+   "PATCH"
+  ]
+ ],
+ [
+  "/owners/suggestions",
+  [
+   "GET"
+  ]
+ ],
+ [
+  "/owners/suggestions/reject",
+  [
+   "POST"
   ]
  ],
  [

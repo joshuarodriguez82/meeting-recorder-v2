@@ -2,15 +2,21 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
-  api, computeItemHash, type ItemStatusDoc, type SessionSummary,
+  api, computeItemHash, type ItemStatusDoc, type OwnerAlias,
+  type SessionSummary,
 } from "@/lib/api";
+import { buildAliasIndex, canonicalId } from "@/lib/owner-grouping";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
-import { ChevronDown, ChevronRight, ExternalLink } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { OwnerGroupingDialog } from "@/components/owner-grouping-dialog";
+import {
+  ChevronDown, ChevronRight, ExternalLink, Users,
+} from "lucide-react";
 
 interface ActionItem {
   done: boolean;        // effective state — markdown OR override applied
@@ -107,8 +113,28 @@ interface Props {
 export function FollowUpsView({ sessions, onOpenSession }: Props) {
   const [statusFilter, setStatusFilter] = useState("Open");
   const [clientFilter, setClientFilter] = useState("All");
+  // Stores a canonical owner id (see src/lib/owner-grouping.ts —
+  // either "key:<tier-2 key>" for an unaliased name or an alias id),
+  // not the raw owner text, so a merge changes what the filter matches
+  // without the user having to reselect anything.
   const [ownerFilter, setOwnerFilter] = useState("All");
   const [search, setSearch] = useState("");
+  const [ownerDialogOpen, setOwnerDialogOpen] = useState(false);
+
+  // Confirmed owner-name merges. Fetched once and re-fetched after any
+  // change made in the management dialog; degrades to "no grouping"
+  // (every spelling stays separate) if the fetch fails, same as the
+  // backend's own corrupt-file fallback.
+  const [ownerAliases, setOwnerAliases] = useState<OwnerAlias[]>([]);
+  const loadOwnerAliases = () => {
+    api.getOwnerAliases()
+      .then((res) => setOwnerAliases(res.aliases || []))
+      .catch(() => setOwnerAliases([]));
+  };
+  useEffect(() => { loadOwnerAliases(); }, []);
+  const ownerAliasIndex = useMemo(
+    () => buildAliasIndex(ownerAliases), [ownerAliases]
+  );
 
   // Per-session item-status overlay. Keyed by session_id, then by item
   // hash. We fetch all of these once on mount because there are usually
@@ -177,16 +203,51 @@ export function FollowUpsView({ sessions, onOpenSession }: Props) {
     () => ["All", ...Array.from(new Set(itemsWithOverrides.map((i) => i.client).filter(Boolean))).sort()],
     [itemsWithOverrides]
   );
-  const owners = useMemo(
-    () => ["All", ...Array.from(new Set(itemsWithOverrides.map((i) => i.owner).filter(Boolean))).sort()],
+
+  // Each item's raw owner string resolved to the canonical person/people
+  // it belongs to — split on multi-owner separators, safe-normalised,
+  // and merged through any confirmed alias. A "Mark/Josh" item carries
+  // BOTH ids, so it counts under (and is findable under) either person.
+  const itemsWithOwnerIds = useMemo(
+    () => itemsWithOverrides.map((i) => ({
+      ...i,
+      ownerIds: canonicalId(i.owner, ownerAliasIndex),
+    })),
+    [itemsWithOverrides, ownerAliasIndex]
+  );
+
+  // Canonical owner filter options with item counts. A person is
+  // counted once per item they own (directly or via a multi-owner
+  // string) — NOT summed with other people's counts, so these numbers
+  // legitimately don't add up to the total item count when items have
+  // several owners.
+  const ownerOptions = useMemo(() => {
+    const byId = new Map<string, { display: string; count: number }>();
+    for (const it of itemsWithOwnerIds) {
+      for (const o of it.ownerIds) {
+        const entry = byId.get(o.id);
+        if (entry) entry.count += 1;
+        else byId.set(o.id, { display: o.display, count: 1 });
+      }
+    }
+    return Array.from(byId.entries())
+      .map(([id, v]) => ({ id, ...v }))
+      .sort((a, b) => a.display.localeCompare(b.display));
+  }, [itemsWithOwnerIds]);
+
+  // Raw owner strings for the management dialog's manual-merge picker
+  // — see OwnerGroupingDialog's Props doc for why this is Follow-Ups-
+  // only, not the full cross-session picture.
+  const rawOwnerStrings = useMemo(
+    () => itemsWithOverrides.map((i) => i.owner).filter(Boolean),
     [itemsWithOverrides]
   );
 
-  const filtered = itemsWithOverrides.filter((i) => {
+  const filtered = itemsWithOwnerIds.filter((i) => {
     if (statusFilter === "Open" && i.done) return false;
     if (statusFilter === "Done" && !i.done) return false;
     if (clientFilter !== "All" && i.client !== clientFilter) return false;
-    if (ownerFilter !== "All" && i.owner !== ownerFilter) return false;
+    if (ownerFilter !== "All" && !i.ownerIds.some((o) => o.id === ownerFilter)) return false;
     if (search) {
       const q = search.toLowerCase();
       const blob = [i.description, i.owner, i.meeting, i.client, i.due].join(" ").toLowerCase();
@@ -262,11 +323,23 @@ export function FollowUpsView({ sessions, onOpenSession }: Props) {
           </SelectContent>
         </Select>
         <Select value={ownerFilter} onValueChange={(v) => v && setOwnerFilter(v)}>
-          <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
           <SelectContent>
-            {owners.map((o) => <SelectItem key={o} value={o}>{o}</SelectItem>)}
+            <SelectItem value="All">All</SelectItem>
+            {ownerOptions.map((o) => (
+              <SelectItem key={o.id} value={o.id}>
+                {o.display} ({o.count})
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
+        <Button
+          variant="outline" size="sm"
+          onClick={() => setOwnerDialogOpen(true)}
+          title="Merge or split owner spellings"
+        >
+          <Users className="h-3.5 w-3.5" /> Manage owners
+        </Button>
         <Input
           placeholder="Search follow-ups..."
           value={search}
@@ -278,6 +351,14 @@ export function FollowUpsView({ sessions, onOpenSession }: Props) {
       <p className="text-xs text-muted-foreground">
         {filtered.length} shown · {openCount} open of {itemsWithOverrides.length} total
       </p>
+
+      <OwnerGroupingDialog
+        open={ownerDialogOpen}
+        onOpenChange={setOwnerDialogOpen}
+        rawOwnerStrings={rawOwnerStrings}
+        aliases={ownerAliases}
+        onAliasesChanged={loadOwnerAliases}
+      />
 
       {/* Split-pane layout matches Decisions and Commitments: list of
           rows on the left, detail panel + status dropdown on the right.

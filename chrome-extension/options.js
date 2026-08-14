@@ -41,10 +41,18 @@ function renderCalendarStatus(ts, result) {
   const agoStr = ago < 60 ? `${ago} min ago` : `${Math.floor(ago / 60)}h ${ago % 60}m ago`;
   if (result?.ok) {
     const n = result.eventCount ?? 0;
-    const layerLabel = result.layer === "aria-label" ? "structured extraction"
-      : result.layer === "generic-node" ? "structured extraction (fallback nodes)"
-      : "⚠ text fallback — structured extraction found nothing";
-    el.textContent = `Calendar: ${agoStr} · ${n} event${n === 1 ? "" : "s"} · ${layerLabel}`;
+    if (n === 0) {
+      // See popup.js's renderCalendarStatus for why this matters:
+      // "no candidates" / "still rendering" / "candidates but no
+      // parseable time" point at different fixes and were previously
+      // indistinguishable (field report 2026-08-14).
+      el.textContent = `Calendar: ${agoStr} · 0 events (${result.zeroReason || "reason unknown"}) — try Diagnose calendar capture below`;
+    } else {
+      const layerLabel = result.layer === "aria-label" ? "structured extraction"
+        : result.layer === "generic-node" ? "structured extraction (fallback nodes)"
+        : "⚠ text fallback — structured extraction found nothing";
+      el.textContent = `Calendar: ${agoStr} · ${n} event${n === 1 ? "" : "s"} · ${layerLabel}`;
+    }
   } else if (result) {
     el.textContent = `Calendar: ${agoStr} · ✗ ${result.error || "failed"}`;
   } else {
@@ -162,11 +170,14 @@ $("captureNowBtn").addEventListener("click", async () => {
     });
     if (result?.ok) {
       const c = result.counts || {};
+      const calN = c.calendar ?? 0;
+      const calSuffix = (calN === 0 && result.calendarZeroReason)
+        ? ` (${result.calendarZeroReason})` : "";
       showStatus("ok",
         `✓ Sent to Meeting Recorder. ` +
         `OWA: ${c.owa || 0}, Teams: ${c.teams || 0}, ` +
         `Inbox: ${c.inbox || 0}, Chat: ${c.chat || 0}, ` +
-        `Calendar: ${c.calendar ?? 0} event${c.calendar === 1 ? "" : "s"}.`);
+        `Calendar: ${calN} event${calN === 1 ? "" : "s"}${calSuffix}.`);
     } else {
       showStatus("error", `✗ ${result?.error || "Unknown error"}`);
     }
@@ -181,6 +192,54 @@ $("captureNowBtn").addEventListener("click", async () => {
     showStatus("error", `✗ ${e.message || String(e)}`);
   } finally {
     $("captureNowBtn").disabled = false;
+  }
+});
+
+// ── Diagnose calendar capture (v1.3) ──────────────────────────────
+//
+// No DevTools, no pasted console script: this opens the calendar tab
+// in the background, runs a read-only DOM probe against it, and
+// prints exactly what it found. The result is meant to be copied and
+// shared to get a correct selector written without ever seeing the
+// tenant — see the v1.3 header comment in background.js.
+
+function formatDiagnosticReport(report) {
+  return JSON.stringify(report, null, 2);
+}
+
+$("diagnoseBtn").addEventListener("click", async () => {
+  const out = $("diagnosticOutput");
+  const copyBtn = $("copyDiagnosticBtn");
+  $("diagnoseBtn").disabled = true;
+  out.style.display = "block";
+  copyBtn.style.display = "none";
+  out.textContent = "Running… opens the calendar page in the background and " +
+    "samples it at 2s / 5s / 10s / 15s. Takes about 15-20 seconds.";
+  try {
+    const report = await chrome.runtime.sendMessage({ type: "diagnose-calendar" });
+    if (report?.ok === false && !report.finalUrl) {
+      out.textContent = `Diagnostic failed: ${report.error || "unknown error"}`;
+      return;
+    }
+    out.textContent = formatDiagnosticReport(report);
+    copyBtn.style.display = "inline-block";
+  } catch (e) {
+    out.textContent = `Diagnostic failed: ${e.message || String(e)}`;
+  } finally {
+    $("diagnoseBtn").disabled = false;
+  }
+});
+
+$("copyDiagnosticBtn").addEventListener("click", async () => {
+  const out = $("diagnosticOutput");
+  try {
+    await navigator.clipboard.writeText(out.textContent || "");
+    const btn = $("copyDiagnosticBtn");
+    const original = btn.textContent;
+    btn.textContent = "Copied!";
+    setTimeout(() => { btn.textContent = original; }, 1500);
+  } catch (e) {
+    showStatus("error", `Couldn't copy: ${e.message || String(e)}`);
   }
 });
 

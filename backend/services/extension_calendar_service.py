@@ -503,6 +503,45 @@ class ExtensionCalendarService:
             "source": SOURCE_EXTENSION,
         }
 
+    def record_extension_version(self, version: Optional[str],
+                                 now: Optional[datetime] = None) -> None:
+        """Record the extension version that just POSTed, plus when.
+
+        Called on EVERY extension POST — narrative capture, the
+        calendar-only refresh alarm, or a manual Capture & Send — from
+        `/briefing/extension-import`, independent of whether that POST
+        also carried usable events/text. That's deliberate: a stale
+        extension that fails to produce anything useful is exactly the
+        case we most need reflected here, not the one case to skip.
+
+        ``version`` absent or blank (an extension older than 1.2.0 —
+        background.js only started sending
+        ``chrome.runtime.getManifest().version`` in 1.2.0) is recorded
+        as ``None``, never coerced to "current". The whole point of
+        this bookkeeping is telling "definitely current" apart from
+        "we don't actually know" — see ``extension_bundle_service.
+        extension_version_status``.
+
+        Best-effort: an un-downloaded cloud placeholder degrades to a
+        skipped write (logged), never an exception — this must not be
+        able to fail the POST it's piggybacking on.
+        """
+        ref = now or datetime.now()
+        v = str(version).strip() if version not in (None, "") else None
+        v = v or None
+        with self._lock:
+            try:
+                raw = self._read_locked()
+            except CloudFileNotReadyError:
+                logger.warning(
+                    f"{STORE_FILENAME} is an un-downloaded cloud placeholder; "
+                    f"skipping extension-version bookkeeping for this POST")
+                return
+            raw = dict(raw or {})
+            raw["last_seen_version"] = v
+            raw["last_seen_version_at"] = ref.isoformat()
+            self._write_locked(raw)
+
     def replace_all(self, events: Iterable[dict],
                     now: Optional[datetime] = None) -> List[dict]:
         """Replace the store with ``events`` clipped to the retention
@@ -548,7 +587,11 @@ class ExtensionCalendarService:
             kept.append(item)
 
         with self._lock:
-            prior_kept = self._prior_kept_in_window_locked(lo, hi)
+            try:
+                raw_before = self._read_locked()
+            except CloudFileNotReadyError:
+                raw_before = {}
+            prior_kept = self._prior_kept_from_raw(raw_before, lo, hi)
             if len(kept) < len(prior_kept):
                 merged = merge_meetings(kept, prior_kept)
                 logger.warning(
@@ -564,6 +607,13 @@ class ExtensionCalendarService:
             payload = {
                 "updated_at": ref.isoformat(),
                 "events": [self._serialize(e) for e in kept],
+                # Preserve extension-version bookkeeping (see
+                # `record_extension_version`) across a calendar-only
+                # write — this method owns "events"/"updated_at", not
+                # "last_seen_version*", and must not clobber whichever
+                # POST last recorded it.
+                "last_seen_version": (raw_before or {}).get("last_seen_version"),
+                "last_seen_version_at": (raw_before or {}).get("last_seen_version_at"),
             }
             self._write_locked(payload)
         logger.info(
@@ -571,23 +621,18 @@ class ExtensionCalendarService:
             f"dropped {dropped} outside {lo.date()}..{hi.date()}")
         return kept
 
-    def _prior_kept_in_window_locked(self, lo: datetime,
-                                     hi: datetime) -> List[dict]:
-        """What the CURRENT store would contribute to a capture with
-        window [lo, hi] — used only by ``replace_all``'s shrink guard.
-        Caller already holds ``self._lock``. Never raises: a corrupt or
-        cloud-placeholder store here must not block a fresh capture
-        from being written (unlike ``get_events``, which propagates
-        ``CloudFileNotReadyError`` to the Record tab)."""
-        try:
-            raw = self._read_locked()
-        except CloudFileNotReadyError:
-            return []
+    @staticmethod
+    def _prior_kept_from_raw(raw: Dict[str, Any], lo: datetime,
+                             hi: datetime) -> List[dict]:
+        """What ``raw`` (an already-read store dict) would contribute
+        to a capture with window [lo, hi] — used only by
+        ``replace_all``'s shrink guard. Pure: no I/O, no locking (the
+        caller already holds ``self._lock`` and already did the read)."""
         out: List[dict] = []
         for entry in (raw or {}).get("events") or []:
             if not isinstance(entry, dict):
                 continue
-            item = self._deserialize(entry)
+            item = ExtensionCalendarService._deserialize(entry)
             if item is None or not item["subject"]:
                 continue
             if lo <= item["start"] <= hi:
@@ -659,6 +704,15 @@ class ExtensionCalendarService:
             imported anything.
           event_count: total events currently retained (any time).
           future_event_count: events still ahead of ``now``.
+          last_seen_version: the extension version string from the most
+            recent POST (see ``record_extension_version``), or None if
+            either nothing has ever posted or the extension that posted
+            was older than 1.2.0 and never sent one.
+          last_seen_version_at: ISO string of when that version was
+            last recorded, or None if nothing has ever posted. Distinct
+            from ``last_seen_version`` being None so "never posted" and
+            "posted but pre-1.2.0" don't collapse into the same state —
+            see ``extension_bundle_service.extension_version_status``.
 
         Never raises — mirrors ``get_events``/``has_events``: a
         cloud-placeholder or corrupt store degrades to "nothing yet"
@@ -669,7 +723,10 @@ class ExtensionCalendarService:
             with self._lock:
                 raw = self._read_locked()
         except CloudFileNotReadyError:
-            return {"updated_at": None, "event_count": 0, "future_event_count": 0}
+            return {
+                "updated_at": None, "event_count": 0, "future_event_count": 0,
+                "last_seen_version": None, "last_seen_version_at": None,
+            }
         events = (raw or {}).get("events") or []
         future = 0
         for entry in events:
@@ -682,4 +739,6 @@ class ExtensionCalendarService:
             "updated_at": (raw or {}).get("updated_at") or None,
             "event_count": len(events),
             "future_event_count": future,
+            "last_seen_version": (raw or {}).get("last_seen_version") or None,
+            "last_seen_version_at": (raw or {}).get("last_seen_version_at") or None,
         }
