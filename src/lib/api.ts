@@ -1714,6 +1714,36 @@ export const api = {
       `/insights/summary${qs ? `?${qs}` : ""}`);
   },
 
+  // Owner grouping (Follow Ups + Commitments owner normalisation) —
+  // see src/lib/owner-grouping.ts for the split/normalise rules these
+  // aliases layer on top of, and backend/services/owner_service.py for
+  // the source of truth both mirror.
+  getOwnerAliases: () =>
+    request<{ aliases: OwnerAlias[] }>("/owners/aliases"),
+  createOwnerAlias: (canonical: string, members: string[]) =>
+    request<OwnerAlias>("/owners/aliases", {
+      method: "POST",
+      body: JSON.stringify({ canonical, members }),
+    }),
+  updateOwnerAlias: (
+    id: string,
+    patch: { canonical?: string; add_members?: string[]; remove_members?: string[] },
+  ) =>
+    request<OwnerAlias | { deleted: true; id: string }>(
+      `/owners/aliases/${encodeURIComponent(id)}`,
+      { method: "PATCH", body: JSON.stringify(patch) },
+    ),
+  deleteOwnerAlias: (id: string) =>
+    request<{ ok: boolean }>(
+      `/owners/aliases/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  getOwnerSuggestions: () =>
+    request<{ groups: OwnerSuggestionGroup[] }>("/owners/suggestions"),
+  rejectOwnerSuggestion: (a: string, b: string) =>
+    request<{ ok: boolean }>("/owners/suggestions/reject", {
+      method: "POST",
+      body: JSON.stringify({ a, b }),
+    }),
+
   // Engagement register: structured records rolled up across every
   // session for a client (optionally one project), deduped.
   engagementRegister: (client: string, project = "") => {
@@ -2021,6 +2051,29 @@ export interface OpenActionItem {
   description: string;
   due: string;
   item_hash: string;
+}
+
+// A confirmed owner-name merge (e.g. "Joshua" -> "Josh"). `members` are
+// tier-2 normalised keys (see src/lib/owner-grouping.ts). Backend:
+// services/owner_service.py's OwnerAliasStore.
+export interface OwnerAlias {
+  id: string;
+  canonical: string;
+  members: string[];
+}
+
+export interface OwnerSuggestionMember {
+  key: string;
+  display: string;
+  count: number;
+}
+
+// A judgement-call merge candidate the user must accept before it
+// takes effect — see owner_service.py's suggest_groups().
+export interface OwnerSuggestionGroup {
+  group_id: string;
+  suggested_canonical: string;
+  members: OwnerSuggestionMember[];
 }
 export interface InsightsSummary {
   window: {
