@@ -1003,13 +1003,47 @@ function _dateAtomToParts(atom, fallbackYear) {
   return { year, month, day };
 }
 
-// Date resolution order (explicit, per spec): (1) an explicit date in
-// the label itself, (2) the columnDateIso the DOM layer resolved from
-// ancestor/column context, (3) nothing — the caller drops the event
-// rather than guess.
-function resolveDateParts(dateAtom, columnDateIso, fallbackYear) {
+// A date atom ANYWHERE in the label, not just immediately hugging a
+// time. Outlook Web writes the date AFTER the time range:
+//
+//   "[scrubbed], 8:30 AM to 9:00 AM, Friday, August 14, 2026, ..."
+//
+// TIME_RANGE_RE only captures a date atom directly preceding each time
+// atom, so on a real week view it matched the times and saw no date at
+// all — every one of the 28 meetings on the page then fell through to
+// columnDateIso, and Outlook Web's week grid exposes no
+// `role="columnheader"` elements to resolve one from. Result: 47
+// "unresolved date/time" candidates carrying a fully-qualified date in
+// their own text. Searching the whole label recovers it.
+const DATE_ANYWHERE_RE = new RegExp(_DATE_ATOM_RE_SRC, "i");
+
+// Tries each text in order and returns the first date atom found.
+// Callers pass the text AFTER the time range first, because that's
+// where Outlook Web puts the real date — searching the whole label
+// first would let a month name inside a subject ("August Planning
+// Review, 9:00 AM to 10:00 AM, Monday, August 10, 2026") win over the
+// event's actual date.
+function dateAtomAnywhere(texts) {
+  for (const t of texts) {
+    if (!t) continue;
+    const m = DATE_ANYWHERE_RE.exec(t);
+    if (m) return { month: m[1], day: m[2], year: m[3] };
+  }
+  return null;
+}
+
+// Date resolution order (explicit, per spec): (1) an explicit date
+// atom captured beside the time, (2) a date atom anywhere else in the
+// same label — the label is describing this one event, so its own date
+// outranks any ancestor guess, (3) the columnDateIso the DOM layer
+// resolved from ancestor/column context, (4) nothing — the caller
+// drops the event rather than guess.
+function resolveDateParts(dateAtom, columnDateIso, fallbackYear, labelTexts) {
   const fromLabel = _dateAtomToParts(dateAtom, fallbackYear);
   if (fromLabel) return fromLabel;
+  const fromAnywhere = _dateAtomToParts(
+    dateAtomAnywhere(labelTexts || []), fallbackYear);
+  if (fromAnywhere) return fromAnywhere;
   if (columnDateIso) {
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(columnDateIso);
     if (m) return { year: +m[1], month: +m[2] - 1, day: +m[3] };
@@ -1058,7 +1092,11 @@ function parseMeetingLabel(label, columnDateIso, fallbackYear) {
   if (!subject) return { kind: "not-meeting-shaped" };
 
   const year = fallbackYear || new Date().getFullYear();
-  const startDateParts = resolveDateParts(parts.date1, columnDateIso, year);
+  // Where to look for a date the time-range match didn't capture: the
+  // text after the range first (Outlook Web's own position for it),
+  // then the whole label as a last resort.
+  const dateTexts = [raw.slice(parts.index + m[0].length), raw];
+  const startDateParts = resolveDateParts(parts.date1, columnDateIso, year, dateTexts);
   // An end date only falls back to the *start* date (never straight
   // to columnDateIso) when the label named its own start date — that
   // label is telling us the event isn't just "today", so borrowing
@@ -1066,7 +1104,8 @@ function parseMeetingLabel(label, columnDateIso, fallbackYear) {
   // span back down to one day.
   const endDateParts = parts.date2
     ? _dateAtomToParts(parts.date2, year)
-    : (parts.date1 ? startDateParts : resolveDateParts(null, columnDateIso, year));
+    : (parts.date1 ? startDateParts
+      : resolveDateParts(null, columnDateIso, year, dateTexts));
 
   const startTime = parseClockAtom(parts.time1);
   const endTime = parseClockAtom(parts.time2);
