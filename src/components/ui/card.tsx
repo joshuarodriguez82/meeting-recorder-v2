@@ -12,7 +12,10 @@ function Card({
       data-slot="card"
       data-size={size}
       className={cn(
-        "group/card flex flex-col gap-4 overflow-hidden rounded-xl border border-border bg-card py-4 text-sm text-card-foreground shadow-card transition-shadow duration-200 hover:shadow-card-hover has-data-[slot=card-footer]:pb-0 has-[>img:first-child]:pt-0 data-[size=sm]:gap-3 data-[size=sm]:py-3 data-[size=sm]:has-data-[slot=card-footer]:pb-0 *:[img:first-child]:rounded-t-xl *:[img:last-child]:rounded-b-xl",
+        // py-4→py-3.5: card padding audit 2026-08-14 (design review) —
+        // a modest trim, not a squeeze; data-[size=sm] keeps its own
+        // tighter rhythm below.
+        "group/card flex flex-col gap-3.5 overflow-hidden rounded-xl border border-border bg-card py-3.5 text-sm text-card-foreground shadow-card transition-shadow duration-200 hover:shadow-card-hover has-data-[slot=card-footer]:pb-0 has-[>img:first-child]:pt-0 data-[size=sm]:gap-3 data-[size=sm]:py-3 data-[size=sm]:has-data-[slot=card-footer]:pb-0 *:[img:first-child]:rounded-t-xl *:[img:last-child]:rounded-b-xl",
         className
       )}
       {...props}
@@ -37,8 +40,12 @@ function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="card-title"
+      // Typographic scale (design review 2026-08-14): section/card
+      // headings sit at 18px semibold so they visibly anchor the eye
+      // above field labels (13px) and help text (12px) — previously all
+      // three sat within a couple of px of each other.
       className={cn(
-        "font-heading text-base leading-snug font-medium group-data-[size=sm]/card:text-sm",
+        "font-heading text-lg leading-snug font-semibold group-data-[size=sm]/card:text-base",
         className
       )}
       {...props}
@@ -50,7 +57,7 @@ function CardDescription({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="card-description"
-      className={cn("text-sm text-muted-foreground", className)}
+      className={cn("text-xs text-muted-foreground", className)}
       {...props}
     />
   )

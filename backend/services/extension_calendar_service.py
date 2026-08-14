@@ -494,3 +494,23 @@ class ExtensionCalendarService:
 
         out.sort(key=lambda m: m["start"])
         return out
+
+    def has_events(self) -> bool:
+        """True if the extension has ever reported at least one
+        (still-retained) event. Used by GET /calendar/available when
+        `calendar_source` is "extension" — with Outlook COM off the
+        table entirely, "is the calendar available" has to mean "has
+        the extension actually synced something" instead of "can we
+        reach Outlook". Deliberately NOT time-windowed (unlike
+        `get_events`): a user whose next meeting is tomorrow morning
+        should still see the calendar as configured/available today.
+        Never raises — mirrors `get_events`'s corrupt/absent-file
+        tolerance.
+        """
+        try:
+            return len(self.get_events()) > 0
+        except CloudFileNotReadyError:
+            # An un-downloaded cloud placeholder means we can't tell —
+            # treat as "available" so the user isn't told to reconnect
+            # a store that's actually fine, just not synced down yet.
+            return True

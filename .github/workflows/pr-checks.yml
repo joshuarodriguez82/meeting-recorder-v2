@@ -80,10 +80,13 @@ jobs:
       # installs and runs in well under a minute. `fastapi` is added for
       # the route-parity guard, which imports the app headlessly to
       # assert the route table (heavy ML deps stay lazy — see
-      # tests/_app_import.py). Heavier integration tests belong in a
+      # tests/_app_import.py). `httpx` is added for the boot smoke test
+      # (test_boot_smoke.py), which drives the app through FastAPI's
+      # TestClient — that requires httpx even though the app itself
+      # never imports it. Heavier integration tests belong in a
       # separate, optional job when they exist.
       - name: Install test dependencies
-        run: pip install numpy scipy soundfile pytest fastapi
+        run: pip install numpy scipy soundfile pytest fastapi httpx
       - name: Run backend tests
         run: python -m pytest backend/tests -q
 

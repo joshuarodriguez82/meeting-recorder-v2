@@ -31,6 +31,7 @@ import { UsageGuideView } from "@/components/usage-guide-view";
 import { CalendarMonitor } from "@/components/calendar-monitor";
 import { SessionDetailDialog } from "@/components/session-detail-dialog";
 import { useUnprocessedSessions } from "@/lib/useUnprocessedSessions";
+import { ViewErrorBoundary } from "@/components/view-error-boundary";
 
 // "today" is opt-in (Settings → Daily Briefing). It's prepended to the
 // nav at render time only when today_view_enabled is true, so it's not
@@ -1066,45 +1067,89 @@ export default function Home() {
           ref={mainScrollRef}
           className="flex-1 overflow-y-auto overflow-x-hidden px-8 pt-6 pb-16 min-h-0 [scrollbar-gutter:stable]"
         >
-          {nav === "today" && todayEnabled && <TodayView onNavigate={setNav} />}
+          {nav === "today" && todayEnabled && (
+            <ViewErrorBoundary viewName="Today">
+              <TodayView onNavigate={setNav} />
+            </ViewErrorBoundary>
+          )}
           {nav === "record" && (
-            <RecordView
-              onSessionsChanged={reloadSessions}
-              onOpenSession={openSession}
-              meetings={meetings}
-              meetingsLoading={meetingsLoading}
-              onRefreshCalendar={(silent) => reloadCalendar({
-                force: true,
-                announce: !silent,
-                silent: !!silent,
-              })}
-            />
+            <ViewErrorBoundary viewName="Record">
+              <RecordView
+                onSessionsChanged={reloadSessions}
+                onOpenSession={openSession}
+                meetings={meetings}
+                meetingsLoading={meetingsLoading}
+                onRefreshCalendar={(silent) => reloadCalendar({
+                  force: true,
+                  announce: !silent,
+                  silent: !!silent,
+                })}
+              />
+            </ViewErrorBoundary>
           )}
           {nav === "sessions" && (
-            <SessionsView sessions={sessions} onReload={reloadSessions} onOpenSession={openSession} />
+            <ViewErrorBoundary viewName="Sessions">
+              <SessionsView sessions={sessions} onReload={reloadSessions} onOpenSession={openSession} />
+            </ViewErrorBoundary>
           )}
           {nav === "follow-ups" && (
-            <FollowUpsView sessions={sessions} onOpenSession={openSession} />
+            <ViewErrorBoundary viewName="Follow-Ups">
+              <FollowUpsView sessions={sessions} onOpenSession={openSession} />
+            </ViewErrorBoundary>
           )}
-          {nav === "commitments" && <CommitmentsView onOpenSession={openSession} />}
+          {nav === "commitments" && (
+            <ViewErrorBoundary viewName="Commitments">
+              <CommitmentsView onOpenSession={openSession} />
+            </ViewErrorBoundary>
+          )}
           {nav === "decisions" && (
-            <DecisionsView sessions={sessions} onOpenSession={openSession} />
+            <ViewErrorBoundary viewName="Decisions">
+              <DecisionsView sessions={sessions} onOpenSession={openSession} />
+            </ViewErrorBoundary>
           )}
-          {nav === "search" && <SearchView onOpenSession={openSession} />}
-          {nav === "qa" && <QAView onOpenSession={openSession} />}
+          {nav === "search" && (
+            <ViewErrorBoundary viewName="Search">
+              <SearchView onOpenSession={openSession} />
+            </ViewErrorBoundary>
+          )}
+          {nav === "qa" && (
+            <ViewErrorBoundary viewName="Ask">
+              <QAView onOpenSession={openSession} />
+            </ViewErrorBoundary>
+          )}
           {nav === "clients" && (
-            <ClientsView sessions={sessions} onReload={reloadSessions} onOpenSession={openSession} />
+            <ViewErrorBoundary viewName="Clients">
+              <ClientsView sessions={sessions} onReload={reloadSessions} onOpenSession={openSession} />
+            </ViewErrorBoundary>
           )}
-          {nav === "engagements" && <EngagementView sessions={sessions} />}
+          {nav === "engagements" && (
+            <ViewErrorBoundary viewName="Engagements">
+              <EngagementView sessions={sessions} />
+            </ViewErrorBoundary>
+          )}
           {nav === "insights" && (
-            <InsightsView
-              onOpenSession={openSession}
-              existingClients={existingClients}
-            />
+            <ViewErrorBoundary viewName="Insights">
+              <InsightsView
+                onOpenSession={openSession}
+                existingClients={existingClients}
+              />
+            </ViewErrorBoundary>
           )}
-          {nav === "prep-brief" && <PrepBriefView sessions={sessions} meetings={meetings} />}
-          {nav === "settings" && <SettingsView onSaved={reloadSessions} />}
-          {nav === "help" && <UsageGuideView onLaunchSetup={() => setOnboardingOpen(true)} />}
+          {nav === "prep-brief" && (
+            <ViewErrorBoundary viewName="Prep Brief">
+              <PrepBriefView sessions={sessions} meetings={meetings} />
+            </ViewErrorBoundary>
+          )}
+          {nav === "settings" && (
+            <ViewErrorBoundary viewName="Settings">
+              <SettingsView onSaved={reloadSessions} />
+            </ViewErrorBoundary>
+          )}
+          {nav === "help" && (
+            <ViewErrorBoundary viewName="Usage Guide">
+              <UsageGuideView onLaunchSetup={() => setOnboardingOpen(true)} />
+            </ViewErrorBoundary>
+          )}
         </div>
       </main>
 
