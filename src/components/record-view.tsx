@@ -296,6 +296,18 @@ export function RecordView({
   // this never gates "Ready to record". Fetched once on mount alongside
   // the other one-shot local data below; not a new polling loop.
   const [calendarAvailable, setCalendarAvailable] = useState<boolean | null>(null);
+  // Full response from /calendar/available — carries `source` and,
+  // when calendar_source is "extension", the last-capture time and
+  // event counts the empty state below uses so an empty/stale
+  // extension capture never looks identical to a genuinely free
+  // calendar (field report 2026-08-13).
+  const [calendarStatus, setCalendarStatus] = useState<{
+    available?: boolean;
+    source?: string;
+    last_capture_at?: string | null;
+    event_count?: number;
+    future_event_count?: number;
+  } | null>(null);
 
   // Load initial data. Calendar data is owned by the parent (page.tsx)
   // so it survives nav switches; we only load local things here.
@@ -317,6 +329,7 @@ export function RecordView({
           api.isCalendarAvailable().catch(() => ({ available: false })),
         ]);
         setCalendarAvailable(!!calAvail.available);
+        setCalendarStatus(calAvail);
         setClientConfigs(cfgs);
         setInputDevices(devices.input);
         setOutputDevices(devices.output);
@@ -1668,9 +1681,35 @@ export function RecordView({
         )}
         <CardContent>
           {meetings.length === 0 ? (
-            <p className="text-sm text-muted-foreground text-center py-8">
-              No upcoming meetings in the next 7 days, or Outlook not connected.
-            </p>
+            calendarStatus?.source === "extension" ? (
+              // An empty extension-sourced calendar must never render
+              // identically to a genuinely free one — that ambiguity is
+              // how a whole day of meetings went missing without the
+              // user realizing the mode itself was at fault (field
+              // report 2026-08-13). Same muted/centered empty-state
+              // styling as the plain message below, just with the
+              // extra honesty of a last-capture time and a next step.
+              <div className="text-sm text-muted-foreground text-center py-8 space-y-1.5">
+                <p className="font-medium text-foreground/80">
+                  No meetings from the Chrome extension.
+                </p>
+                <p>
+                  {calendarStatus.last_capture_at
+                    ? `Last capture: ${timeAgoLabel(calendarStatus.last_capture_at)} · ` +
+                      `${calendarStatus.event_count ?? 0} event` +
+                      `${(calendarStatus.event_count ?? 0) === 1 ? "" : "s"} on file`
+                    : "The extension has never sent a capture."}
+                </p>
+                <p>
+                  Open Outlook Web and click <strong>Capture &amp; Send</strong> in
+                  the Meeting Recorder Chrome extension.
+                </p>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground text-center py-8">
+                No upcoming meetings in the next 7 days, or Outlook not connected.
+              </p>
+            )
           ) : (
             <div className="space-y-2">
               {meetings.map((m, i) => {
@@ -2052,6 +2091,21 @@ function dayLabel(d: Date): string {
   if (diff === 0) return "Today";
   if (diff === 1) return "Tomorrow";
   return d.toLocaleDateString([], { weekday: "short" });
+}
+
+// "Last capture: 12 min ago" / "2h 15m ago" — used by the extension
+// calendar-source empty state so staleness is obvious (field report
+// 2026-08-13: a store that stopped updating looked identical to a
+// genuinely empty calendar).
+function timeAgoLabel(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return null;
+  const mins = Math.max(0, Math.round((Date.now() - t) / 60_000));
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.floor(mins / 60);
+  return `${hours}h ${mins % 60}m ago`;
 }
 
 function formatDur(seconds: number): string {

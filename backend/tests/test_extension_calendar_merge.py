@@ -21,8 +21,10 @@ import pytest
 
 from services.extension_calendar_service import (
     DEDUP_TOLERANCE,
+    DEFAULT_DURATION_MIN,
     ExtensionCalendarService,
     events_from_briefing,
+    events_from_structured,
     merge_meetings,
     normalize_subject,
     parse_clock_time,
@@ -325,3 +327,172 @@ def test_get_events_tolerates_missing_and_corrupt_store(tmp_path: Path):
                                                       encoding="utf-8")
     # A corrupt store must never take the local calendar down with it.
     assert svc.get_events() == []
+
+
+# ── structured events (client-parsed from Outlook Web aria-labels) ──
+#
+# The extension parses aria-label strings itself (see
+# chrome-extension/background.js's parseMeetingLabel /
+# extractEventsFromCandidates, exercised directly by the Node harness
+# in that change) and POSTs already-structured JSON. This is what the
+# backend receives on that path — validate/coerce only, no LLM.
+
+def test_events_from_structured_realistic_day_all_five_captured():
+    """The regression that matters: the field report was 1 of 5 real
+    meetings surviving the old text/LLM path. These are shaped exactly
+    like the user's real subjects (pipe, slash, FW: prefix, trailing
+    space) as already parsed client-side into start/end ISO strings."""
+    raw = [
+        {"subject": "AWS Daily Pulse Call",
+         "start": "2026-08-13T10:00:00", "end": "2026-08-13T10:15:00",
+         "location": "Microsoft Teams Meeting", "organizer": "Zoë Døe"},
+        {"subject": "PRIORITY: AWS Sales| Active Project Status Reviews and Escalations",
+         "start": "2026-08-13T10:00:00", "end": "2026-08-13T10:30:00",
+         "organizer": "Will Poe"},
+        {"subject": "FW: AWS Connect - Italy / ECC next steps: weekly team connect",
+         "start": "2026-08-13T11:30:00", "end": "2026-08-13T12:00:00"},
+        {"subject": "AWS/[scrubbed] - IVA PoC Sync-up",
+         "start": "2026-08-13T13:00:00", "end": "2026-08-13T13:30:00"},
+        {"subject": "AI Transformation Stand Up",
+         "start": "2026-08-13T07:30:00", "end": "2026-08-13T08:30:00"},
+    ]
+    events = events_from_structured(raw)
+    assert len(events) == 5
+    subjects = {e["subject"] for e in events}
+    assert "PRIORITY: AWS Sales| Active Project Status Reviews and Escalations" in subjects
+    assert "FW: AWS Connect - Italy / ECC next steps: weekly team connect" in subjects
+    assert all(e["source"] == "extension" for e in events)
+
+
+def test_events_from_structured_derives_duration_and_defaults_missing_end():
+    events = events_from_structured([
+        {"subject": "Ad-hoc", "start": "2026-08-13T09:00:00"},
+    ])
+    assert len(events) == 1
+    assert events[0]["duration"] == DEFAULT_DURATION_MIN
+    assert events[0]["end"] == events[0]["start"] + timedelta(minutes=DEFAULT_DURATION_MIN)
+
+
+def test_events_from_structured_drops_items_without_subject_or_start():
+    events = events_from_structured([
+        {"subject": "", "start": "2026-08-13T09:00:00"},
+        {"subject": "No start"},
+        {"subject": "not a dict"},  # ignored by the isinstance guard
+        None,
+        {"subject": "Good", "start": "2026-08-13T09:00:00"},
+    ])
+    assert [e["subject"] for e in events] == ["Good"]
+
+
+def test_events_from_structured_tolerates_end_before_start():
+    events = events_from_structured([
+        {"subject": "Backwards", "start": "2026-08-13T10:00:00",
+         "end": "2026-08-13T09:00:00"},
+    ])
+    assert events[0]["end"] > events[0]["start"]
+
+
+# ── replace_all shrink guard (field report 2026-08-13) ──────────────
+
+def test_replace_all_merges_instead_of_shrinking_on_partial_capture(tmp_path: Path):
+    """A capture that returns fewer events than the store already has
+    in-window must not wipe the extras — it merges instead."""
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 13, 12, 0)
+    svc.replace_all([
+        ext("A", now + timedelta(hours=1)),
+        ext("B", now + timedelta(hours=2)),
+        ext("C", now + timedelta(hours=3)),
+    ], now=now)
+
+    # New capture only saw A (fresh copy) and a brand new D — 2 < 3.
+    kept = svc.replace_all([
+        ext("A", now + timedelta(hours=1), location="Room 5"),
+        ext("D", now + timedelta(hours=4)),
+    ], now=now)
+
+    subjects = sorted(e["subject"] for e in kept)
+    assert subjects == ["A", "B", "C", "D"]
+    # New capture's data wins on the A/A collision.
+    a = next(e for e in kept if e["subject"] == "A")
+    assert a["location"] == "Room 5"
+    assert sorted(e["subject"] for e in svc.get_events()) == ["A", "B", "C", "D"]
+
+
+def test_replace_all_recovers_store_on_empty_capture(tmp_path: Path):
+    """The literal field failure: a capture that finds NOTHING must
+    not erase a store that still has good, still-future data."""
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 13, 12, 0)
+    svc.replace_all([
+        ext("Keep me", now + timedelta(hours=1)),
+        ext("Keep me too", now + timedelta(days=1)),
+    ], now=now)
+
+    kept = svc.replace_all([], now=now)
+    assert len(kept) == 2
+    assert len(svc.get_events()) == 2
+
+
+def test_replace_all_replaces_normally_when_capture_is_equal_or_larger(tmp_path: Path):
+    """The common case (including every existing test above, which
+    seeds an empty store first) must keep working exactly as before —
+    a capture that matches or exceeds the prior count replaces
+    outright, which is how a cancelled meeting actually disappears."""
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 13, 12, 0)
+    svc.replace_all([ext("Only one", now + timedelta(hours=1))], now=now)
+
+    kept = svc.replace_all([
+        ext("Fresh one", now + timedelta(hours=1)),
+        ext("Fresh two", now + timedelta(hours=2)),
+    ], now=now)
+    # "Only one" is gone — it wasn't re-reported and the new capture
+    # was not smaller, so this is a legitimate replace, not a merge.
+    assert sorted(e["subject"] for e in kept) == ["Fresh one", "Fresh two"]
+
+
+def test_replace_all_shrink_guard_only_compares_within_the_capture_window(tmp_path: Path):
+    """An old event that has legitimately aged out of the retention
+    window by the time of the new capture must NOT be resurrected by
+    the shrink guard — the comparison is windowed to the new capture's
+    own lo/hi, not the old capture's."""
+    svc = ExtensionCalendarService(tmp_path)
+    t0 = datetime(2026, 8, 1, 9, 0)
+    svc.replace_all([ext("Old one", t0 + timedelta(hours=1))], now=t0)
+
+    # Ten days later: "Old one" is long past RETAIN_PAST (1 day), so a
+    # smaller-looking new capture must still just replace normally.
+    t1 = t0 + timedelta(days=10)
+    kept = svc.replace_all([], now=t1)
+    assert kept == []
+
+
+# ── capture_status (Record tab empty-state honesty) ─────────────────
+
+def test_capture_status_reports_never_captured(tmp_path: Path):
+    svc = ExtensionCalendarService(tmp_path)
+    status = svc.capture_status()
+    assert status == {"updated_at": None, "event_count": 0, "future_event_count": 0}
+
+
+def test_capture_status_reports_counts_and_last_capture_time(tmp_path: Path):
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 13, 12, 0)
+    svc.replace_all([
+        ext("Past today", now - timedelta(hours=2)),
+        ext("Later today", now + timedelta(hours=2)),
+        ext("Tomorrow", now + timedelta(days=1)),
+    ], now=now)
+
+    status = svc.capture_status(now=now)
+    assert status["updated_at"] == now.isoformat()
+    assert status["event_count"] == 3
+    assert status["future_event_count"] == 2
+
+
+def test_capture_status_tolerates_corrupt_store(tmp_path: Path):
+    svc = ExtensionCalendarService(tmp_path)
+    (tmp_path / "extension_calendar.json").write_text("{not json", encoding="utf-8")
+    status = svc.capture_status()
+    assert status["event_count"] == 0
