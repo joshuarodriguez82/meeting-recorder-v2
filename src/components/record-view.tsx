@@ -37,6 +37,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { InfoTip } from "@/components/ui/info-tip";
 import {
   Select,
   SelectContent,
@@ -1228,7 +1229,7 @@ export function RecordView({
       {recording && (
         <Card className="gap-2 py-3.5">
           <CardHeader>
-            <CardTitle className="flex flex-wrap items-center justify-between gap-2 text-base">
+            <CardTitle className="flex flex-wrap items-center justify-between gap-2">
               <span className="flex items-center gap-2">
                 <Camera className="h-4 w-4 text-primary" />
                 Screenshots {screenshotEntries.length > 0 && `(${screenshotEntries.length})`}
@@ -1354,7 +1355,7 @@ export function RecordView({
       {/* Meeting details */}
       <Card className="gap-3 py-3.5">
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
+          <CardTitle className="flex items-center gap-2">
             <Sparkles className="h-4 w-4 text-primary" />
             Meeting Details
           </CardTitle>
@@ -1433,7 +1434,7 @@ export function RecordView({
       {/* Audio devices */}
       <Card className="gap-3 py-3.5">
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
+          <CardTitle className="flex items-center gap-2">
             <Mic className="h-4 w-4 text-primary" />
             Audio Devices
           </CardTitle>
@@ -1566,13 +1567,18 @@ export function RecordView({
               }}
             />
             <div className="space-y-0.5 leading-tight">
-              <Label htmlFor="conference-room-mode" className="cursor-pointer">
-                Conference room mode
-              </Label>
+              <div className="flex items-center gap-1">
+                <Label htmlFor="conference-room-mode" className="cursor-pointer">
+                  Conference room mode
+                </Label>
+                <InfoTip label="About conference room mode">
+                  Mic captures everyone in the room. System-audio loopback
+                  is skipped — use this when nobody is on speakers and the
+                  laptop sits in the middle of the table.
+                </InfoTip>
+              </div>
               <p className="text-xs text-muted-foreground">
-                Mic captures everyone in the room. System-audio loopback
-                is skipped — use this when nobody is on speakers and the
-                laptop sits in the middle of the table.
+                Mic captures the whole room; system audio is skipped.
               </p>
             </div>
           </div>
@@ -1618,7 +1624,7 @@ export function RecordView({
       {/* Upcoming meetings */}
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
+          <CardTitle className="flex items-center gap-2">
             <CalendarIcon className="h-4 w-4 text-primary" />
             Upcoming Meetings
           </CardTitle>
@@ -1826,25 +1832,39 @@ export function RecordView({
                                 </a>
                               </div>
                             )}
-                            <div>
-                              <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
-                                Attendees ({det.data.attendees.length})
-                              </div>
-                              {det.data.attendees.length === 0 ? (
-                                <div className="text-xs text-muted-foreground">None listed.</div>
-                              ) : (
-                                <div className="flex flex-wrap gap-1 max-h-28 overflow-auto">
-                                  {det.data.attendees.map((a, ai) => (
-                                    <span
-                                      key={ai}
-                                      className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-foreground/80"
-                                    >
-                                      {a}
-                                    </span>
-                                  ))}
+                            {(() => {
+                              // The backend's type promises `attendees`
+                              // is always an array, but a partial/error
+                              // response can omit it. Distinguish that
+                              // from a real "no attendees" — an item
+                              // that failed to load must never render as
+                              // one that simply doesn't exist.
+                              const attendeesKnown = Array.isArray(det.data.attendees);
+                              const attendees = det.data.attendees ?? [];
+                              return (
+                                <div>
+                                  <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
+                                    Attendees{attendeesKnown ? ` (${attendees.length})` : ""}
+                                  </div>
+                                  {!attendeesKnown ? (
+                                    <div className="text-xs text-muted-foreground">Attendee list unavailable.</div>
+                                  ) : attendees.length === 0 ? (
+                                    <div className="text-xs text-muted-foreground">None listed.</div>
+                                  ) : (
+                                    <div className="flex flex-wrap gap-1 max-h-28 overflow-auto">
+                                      {attendees.map((a, ai) => (
+                                        <span
+                                          key={ai}
+                                          className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-foreground/80"
+                                        >
+                                          {a}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
                                 </div>
-                              )}
-                            </div>
+                              );
+                            })()}
                             <div>
                               <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
                                 Agenda / invite body
@@ -1875,7 +1895,7 @@ export function RecordView({
       {session && (
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
+            <CardTitle className="flex items-center gap-2">
               <FileText className="h-4 w-4 text-primary" />
               Just Recorded: {session.display_name || `Session ${session.session_id}`}
             </CardTitle>

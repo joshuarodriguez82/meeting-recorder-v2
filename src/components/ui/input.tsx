@@ -20,7 +20,12 @@ function Input({ className, type, ...props }: React.ComponentProps<"input">) {
         // live; disabled deliberately DROPS the border and keeps the
         // dimmed fill + opacity, so "disabled" and "resting" can't be
         // confused in either direction.
-        "h-8 w-full min-w-0 rounded-full border border-input bg-muted/70 px-3.5 py-1 text-base transition-colors outline-none file:inline-flex file:h-6 file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground hover:bg-muted focus-visible:border-ring focus-visible:bg-card focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:cursor-not-allowed disabled:border-transparent disabled:bg-muted/50 disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 md:text-sm dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40",
+        // Typographic scale (design review 2026-08-14): input text at
+        // ~15px on desktop (was 14px/text-sm) so it reads clearly
+        // heavier than the 13px field label above it and the 12px help
+        // text below — text-base on mobile is unchanged (also keeps the
+        // iOS no-auto-zoom threshold).
+        "h-8 w-full min-w-0 rounded-full border border-input bg-muted/70 px-3.5 py-1 text-base transition-colors outline-none file:inline-flex file:h-6 file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground hover:bg-muted focus-visible:border-ring focus-visible:bg-card focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:cursor-not-allowed disabled:border-transparent disabled:bg-muted/50 disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 md:text-[15px] dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40",
         className
       )}
       {...props}
