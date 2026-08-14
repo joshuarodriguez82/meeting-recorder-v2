@@ -377,6 +377,14 @@ class SessionService:
             # Read-only sync-integrity finding (mic/loopback drift or
             # dropped frames vs wall-clock). Surfaced as an info chip.
             "sync_warning": data.get("sync_warning"),
+            # How long finalize (WAV merge + optional AEC) took, kept
+            # separate from duration_s (the capture window) so a slow
+            # post-process never reads as missing audio. See
+            # Session.finalize_duration_s.
+            "finalize_duration_s": data.get("finalize_duration_s"),
+            # Offline AEC decision for this session's finalize, if the
+            # toggle was on. See Session.aec_outcome for the shape.
+            "aec_outcome": data.get("aec_outcome"),
         }
 
     def _read_and_parse(self, path: Path) -> Optional[dict]:
