@@ -665,3 +665,68 @@ test("captureCalendarOnly persists a traceable result even when called directly 
   assert.ok(storage._store.lastCalendarCaptureAt > 0);
   assert.equal(storage._store.lastCalendarResult.ok, false);
 });
+
+// ── FIELD REGRESSION: date AFTER the time range, no column date ──────
+// Every fixture above supplies a columnDateIso, which is what let the
+// suite stay green while real capture returned zero. On a live Outlook
+// Web week view there are no role="columnheader" elements to resolve a
+// column date from, and the date sits AFTER the time range in the
+// label — a position TIME_RANGE_RE never looks at. The field
+// diagnostic reported "47 unresolved date/time" against labels that
+// each carried a fully-qualified date in their own text.
+// These labels are verbatim from that report.
+const FIELD_LABELS = [
+  "Globex, 8:30 AM to 9:00 AM, Friday, August 14, 2026, Microsoft Teams Meeting, By Mark Roe, Busy",
+  "PRIORITY: AWS Sales| Active Project Status Reviews and Escalations, 10:00 AM to 10:30 AM, Friday, August 14, 2026, Microsoft Teams Meeting, By Will Poe, Busy, Exception to recurring event",
+  "Discuss the Northwind collection script concerns and develop a path forward, 10:30 AM to 11:00 AM, Friday, August 14, 2026, Microsoft Teams Meeting, By Roe, Bob Jr. [US-US], Busy",
+  "Hooli/AWS <> Northwind | workforce management and quality management, 1:30 PM to 2:25 PM, Wednesday, August 12, 2026, By Justin Noh, Busy",
+  "AWS Daily Pulse Call , 9:30 AM to 9:45 AM, Friday, August 14, 2026, Microsoft Teams Meeting, By Zoë Døe, Busy, Recurring event",
+  "Q3 Quarterly Management Meeting, 10:00 AM to 11:30 AM, Wednesday, August 12, 2026, By Northwind Evite, Tentative",
+  "Umbrella/AWS/Northwind Sync, 9:30 AM to 10:30 AM, Thursday, August 13, 2026, By Noh, Ken, Busy",
+];
+
+test("FIELD: date after the time range resolves with NO column date", () => {
+  const candidates = FIELD_LABELS.map((label) => ({
+    label, columnDateIso: null, layer: "aria-label",
+  }));
+  const result = sandbox.extractEventsFromCandidates(
+    candidates, { fallbackYear: FALLBACK_YEAR });
+
+  assert.equal(result.events.length, FIELD_LABELS.length,
+    `expected every field label to produce an event; stats=${JSON.stringify(result.stats)}`);
+  assert.equal(result.stats.dateUnresolved, 0);
+
+  const home = result.events.find((e) => e.subject === "Globex");
+  assert.ok(home, "Globex missing");
+  assert.equal(home.start, "2026-08-14T08:30:00");
+  assert.equal(home.end, "2026-08-14T09:00:00");
+
+  // Each event must land on ITS OWN date, not all collapsed onto one.
+  const ricoh = result.events.find((e) => e.subject.startsWith("Hooli/AWS"));
+  assert.equal(ricoh.start, "2026-08-12T13:30:00");
+  const guardian = result.events.find((e) => e.subject === "Umbrella/AWS/Northwind Sync");
+  assert.equal(guardian.start, "2026-08-13T09:30:00");
+});
+
+test("FIELD: a month name in the SUBJECT loses to the real date after the time", () => {
+  const parsed = sandbox.parseMeetingLabel(
+    "August Planning Review, 9:00 AM to 10:00 AM, Monday, August 10, 2026, Busy",
+    null, FALLBACK_YEAR);
+  assert.equal(parsed.kind, "event");
+  assert.equal(parsed.startIso, "2026-08-10T09:00:00");
+});
+
+test("FIELD: an explicit inline date still outranks the trailing one", () => {
+  const parsed = sandbox.parseMeetingLabel(
+    "Offsite, August 17, 9:00 AM to August 19, 5:00 PM, Monday, August 10, 2026",
+    null, FALLBACK_YEAR);
+  assert.equal(parsed.kind, "event");
+  assert.equal(parsed.startIso, "2026-08-17T09:00:00");
+  assert.equal(parsed.endIso, "2026-08-19T17:00:00");
+});
+
+test("FIELD: no date anywhere and no column date is still unresolved", () => {
+  const parsed = sandbox.parseMeetingLabel(
+    "Mystery Meeting, 9:00 AM to 10:00 AM", null, FALLBACK_YEAR);
+  assert.equal(parsed.kind, "date-unresolved");
+});
