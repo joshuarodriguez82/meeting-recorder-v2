@@ -67,8 +67,13 @@ backend/recordings/
 *.env
 config.env
 
-# Local-only — never commit
+# Local-only ï¿½ never commit
 backend/python.disabled/
 test-build-v2.9/
 .claude/
+
+# tools/ui-harness has its own package.json + playwright-core dep,
+# deliberately kept out of the app's root package.json â€” its
+# node_modules is local-only, never committed.
+tools/ui-harness/node_modules/
 
