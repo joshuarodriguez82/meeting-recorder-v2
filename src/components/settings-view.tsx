@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, formatBytes, type ArchiveStatus, type Settings, type TemplateEntry, type CoPilotPromptEntry } from "@/lib/api";
 import { estimateCopilotCost, formatUsd } from "@/lib/copilot-cost";
 import { confirmDialog } from "@/lib/confirm";
@@ -158,6 +158,27 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
   // endless scroll — each tab is ~4-5 related cards.
   const [tab, setTab] = useState<string>("setup");
 
+  // Switching tabs must start at the top. The tabs share ONE scroll
+  // container (page.tsx's `overflow-y-auto` shell, which every view
+  // renders into), so scrolling deep into Setup and then clicking
+  // Data & Diagnostics left the new tab already scrolled halfway —
+  // the same stale-scroll bug fixed for the main nav in v2.23.1, just
+  // one level down. We walk up to whichever ancestor actually scrolls
+  // rather than reaching for a ref in page.tsx, so this keeps working
+  // if the shell's markup changes.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    let el = rootRef.current?.parentElement;
+    while (el) {
+      const oy = getComputedStyle(el).overflowY;
+      if ((oy === "auto" || oy === "scroll") && el.scrollHeight > el.clientHeight) {
+        el.scrollTo({ top: 0 });
+        return;
+      }
+      el = el.parentElement;
+    }
+  }, [tab]);
+
   useEffect(() => {
     (async () => {
       try {
@@ -275,7 +296,7 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
   ];
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
+    <div ref={rootRef} className="mx-auto max-w-3xl space-y-6">
       {/* Tab bar — sticky so it stays reachable while a tab's cards scroll.
           -mt-6/pt-6 is a matched pair that cancels out visually (net zero
           offset for the tab row) but lets the bar's opaque background
@@ -293,7 +314,7 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
           band so nothing can scroll visibly above it. Both values
           mirror page.tsx's pt-6 on the shared scroll container — change
           one and you must change the other. */}
-      <div className="sticky -top-6 z-10 -mx-6 -mt-6 border-b border-border bg-background px-6 pt-6">
+      <div className="sticky -top-6 z-10 -mx-6 -mt-6 border-b border-border bg-background px-6 pt-2">
         <div className="mx-auto flex max-w-3xl flex-wrap gap-1">
           {SETTINGS_TABS.map((t) => (
             <button
@@ -1107,8 +1128,8 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
           viewport (measured: viewport bottom 880px, bar bottom 816px
           before this), and -mb-16/pb-16 extend the background across
           that band. */}
-      <div className="sticky -bottom-16 z-10 -mx-6 -mb-16 border-t border-border bg-background px-6 pb-16">
-        <div className="mx-auto max-w-3xl flex justify-end gap-2 py-3">
+      <div className="sticky -bottom-16 z-10 -mx-6 -mb-16 border-t border-border bg-background px-6 pb-2">
+        <div className="mx-auto max-w-3xl flex justify-end gap-2 py-2">
           <Button onClick={save} disabled={saving}>
             {saving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
             Save Settings
