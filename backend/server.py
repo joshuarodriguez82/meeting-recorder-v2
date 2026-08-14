@@ -1213,6 +1213,16 @@ class SettingsDTO(BaseModel):
     # onto the old direct-scan path (services/session_service.py's
     # _list_sessions_direct).
     session_index_enabled: bool = True
+    # Which calendar source(s) the backend may consult. "auto" (default)
+    # preserves existing behavior: local calendar (Outlook COM / macOS
+    # EventKit) + Chrome-extension events, merged. "outlook" is local
+    # calendar only. "extension" NEVER touches Outlook COM / EventKit —
+    # for a user whose tenant throws a Microsoft sign-in prompt every
+    # time the app touches Outlook (field report 2026-08-14). "off"
+    # disables calendar data entirely. See config/settings.py's
+    # calendar_source docstring and services/calendar_service.py, the
+    # single choke point that enforces this for every caller.
+    calendar_source: str = "auto"
 
 
 class StartRecordingRequest(BaseModel):
@@ -1671,6 +1681,7 @@ async def get_settings():
         audio_mix_format_lookup_enabled=s.audio_mix_format_lookup_enabled,
         echo_cancellation_enabled=s.echo_cancellation_enabled,
         session_index_enabled=s.session_index_enabled,
+        calendar_source=s.calendar_source,
     )
 
 
@@ -1783,6 +1794,7 @@ async def save_settings(payload: SettingsDTO):
         audio_mix_format_lookup_enabled=bool(payload.audio_mix_format_lookup_enabled),
         echo_cancellation_enabled=bool(payload.echo_cancellation_enabled),
         session_index_enabled=bool(payload.session_index_enabled),
+        calendar_source=(payload.calendar_source or "auto").strip().lower(),
     )
     # If the recordings folder changed, migrate client + template state
     # from the previous folder to the new one. Copy, not move, so the
@@ -2203,10 +2215,31 @@ def _serialize_meetings(meetings):
     } for m in meetings]
 
 
+def _calendar_source() -> str:
+    """Current `calendar_source` setting ("auto" / "outlook" /
+    "extension" / "off"), defaulting to "auto" if settings haven't
+    loaded yet. Every calendar endpoint below calls `svc.load_settings()`
+    first, so `svc.settings` is populated by the time this runs."""
+    raw = (svc.settings.calendar_source if svc.settings else "") or "auto"
+    return raw.strip().lower()
+
+
 @app.get("/calendar/today")
 async def get_calendar_today():
-    """Today's meetings (date-based, doesn't cross midnight)."""
+    """Today's meetings (date-based, doesn't cross midnight).
+
+    Gated on `calendar_source`: "extension" and "off" skip the local
+    calendar (Outlook COM / EventKit) call entirely — see
+    config/settings.py's calendar_source docstring for why (a stray
+    Outlook COM touch re-triggers a Microsoft sign-in prompt on some
+    tenants). services/calendar_service.py enforces the same gate
+    internally as the catch-all for every caller; this check just keeps
+    this endpoint from making the call at all when it would be a no-op.
+    """
     try:
+        svc.load_settings()
+        if _calendar_source() in ("extension", "off"):
+            return []
         meetings = await asyncio.to_thread(get_todays_meetings)
         return _serialize_meetings(meetings)
     except Exception as e:
@@ -2244,6 +2277,17 @@ async def get_calendar_upcoming(hours: int = 168, refresh: bool = False):
     field changed name or meaning. Rationale: a meeting visible only in
     Outlook Web previously never reached this panel at all, so it could
     not be used to start a recording (field report 2026-08-11).
+
+    CONCURRENT since field report 2026-08-14: the local fetch and the
+    extension fetch used to run sequentially — a blocked/slow/prompting
+    Outlook (up to the full 45s timeout above) withheld the extension
+    events for the entire wait, even though they were already on disk
+    and instantly available. The two fetches now run concurrently via
+    `asyncio.gather`; the 45s timeout still applies to the local fetch
+    only, and whichever side finishes first no longer waits on the
+    other. `calendar_source` gates which side(s) run at all:
+    "extension" skips the local fetch outright (never touches Outlook
+    COM / EventKit), "off" skips both and returns [].
     """
     try:
         # Idempotent + cheap once loaded; needed here because the
@@ -2254,30 +2298,47 @@ async def get_calendar_upcoming(hours: int = 168, refresh: bool = False):
         if refresh:
             from services.calendar_service import invalidate_calendar_cache
             invalidate_calendar_cache()
-        try:
-            meetings = await asyncio.wait_for(
-                asyncio.to_thread(get_upcoming_meetings, hours),
-                timeout=45.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"Calendar fetch ({hours}h) exceeded 45s — local calendar "
-                f"omitted this round. Outlook/Exchange likely slow to "
-                f"respond. Retry in a moment.")
-            meetings = []
+        source = _calendar_source()
 
-        # Extension-sourced events. Wrapped so a broken/unreadable store
-        # degrades to "local calendar only" rather than 500-ing the
-        # panel — this is an additive source, never a dependency.
-        ext_events: List[dict] = []
-        if svc.extension_calendar_svc:
+        async def _fetch_local() -> List[dict]:
+            if source in ("extension", "off"):
+                return []
             try:
-                ext_events = await asyncio.to_thread(
+                return await asyncio.wait_for(
+                    asyncio.to_thread(get_upcoming_meetings, hours),
+                    timeout=45.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Calendar fetch ({hours}h) exceeded 45s — local calendar "
+                    f"omitted this round. Outlook/Exchange likely slow to "
+                    f"respond. Retry in a moment.")
+                return []
+
+        async def _fetch_extension() -> List[dict]:
+            # Extension-sourced events. Wrapped so a broken/unreadable
+            # store degrades to "local calendar only" rather than
+            # 500-ing the panel — this is an additive source, never a
+            # dependency (except under calendar_source="extension",
+            # where it's the ONLY source, but a read failure there
+            # still degrades to empty rather than a 500).
+            if source == "off":
+                return []
+            if not svc.extension_calendar_svc:
+                return []
+            try:
+                return await asyncio.to_thread(
                     svc.extension_calendar_svc.get_events, hours)
             except Exception as e:  # noqa: BLE001
                 logger.warning(
                     f"Extension calendar events unavailable ({e}); "
                     f"showing local calendar only.")
+                return []
+
+        # Run both concurrently — see the CONCURRENT docstring section
+        # above for why this can no longer be two sequential awaits.
+        meetings, ext_events = await asyncio.gather(
+            _fetch_local(), _fetch_extension())
 
         return _serialize_meetings(merge_meetings(meetings, ext_events))
     except Exception as e:
@@ -2287,7 +2348,30 @@ async def get_calendar_upcoming(hours: int = 168, refresh: bool = False):
 
 @app.get("/calendar/available")
 async def calendar_available():
-    return await asyncio.to_thread(is_outlook_available)
+    """Whether the Record tab's Upcoming Meetings panel has a usable
+    calendar source right now.
+
+    calendar_source-aware:
+      - "off" is always unavailable — no calendar source is in use.
+      - "extension" reports availability based on whether the Chrome
+        extension has ever synced events, NOT on Outlook — probing
+        Outlook here would defeat the entire point of this mode (never
+        touching Outlook COM / EventKit; see config/settings.py's
+        calendar_source docstring).
+      - "auto" / "outlook" preserve the original behavior: probe the
+        local calendar backend.
+    """
+    svc.load_settings()
+    source = _calendar_source()
+    if source == "off":
+        return {"available": False}
+    if source == "extension":
+        available = bool(
+            svc.extension_calendar_svc
+            and await asyncio.to_thread(svc.extension_calendar_svc.has_events))
+        return {"available": available}
+    available = await asyncio.to_thread(is_outlook_available)
+    return {"available": bool(available)}
 
 
 @app.get("/calendar/meeting-detail")
@@ -2295,7 +2379,14 @@ async def calendar_meeting_detail(subject: str, start: str):
     """Lazy detail for one calendar invite — agenda/body, attendees, and
     a parsed one-click join link. Fetched on demand (per meeting) so the
     bulk calendar list stays fast: pulling Outlook bodies for every
-    meeting in the window would blow the 15s COM budget."""
+    meeting in the window would blow the 15s COM budget.
+
+    Gated on `calendar_source` like every other entry point here —
+    "extension"/"off" return the empty shape without ever calling into
+    Outlook COM / EventKit."""
+    svc.load_settings()
+    if _calendar_source() in ("extension", "off"):
+        return {"attendees": [], "body": "", "join_url": None}
     from services.calendar_service import get_meeting_detail
     return await asyncio.to_thread(get_meeting_detail, subject, start)
 
@@ -3155,6 +3246,7 @@ async def set_live_copilot_enabled(payload: dict):
         audio_mix_format_lookup_enabled=s.audio_mix_format_lookup_enabled,
         echo_cancellation_enabled=s.echo_cancellation_enabled,
         session_index_enabled=s.session_index_enabled,
+        calendar_source=s.calendar_source,
     )
     # Update the cached Settings in-place so the change is visible
     # immediately, without going through load_settings() which would
@@ -7110,6 +7202,7 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         audio_mix_format_lookup_enabled=s.audio_mix_format_lookup_enabled,
         echo_cancellation_enabled=s.echo_cancellation_enabled,
         session_index_enabled=s.session_index_enabled,
+        calendar_source=s.calendar_source,
     )
     svc.settings = dataclasses.replace(
         s, live_copilot_mode=new_mode, live_copilot_meeting_type=new_type)
