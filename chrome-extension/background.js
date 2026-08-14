@@ -269,7 +269,66 @@ function nextOccurrence(timeStr) {
 
 // ──────────────────────────────────────────────────────────────────
 // Alarm fires → capture (with dedup) and POST.
+//
+// v1.3.1 — field report 2026-08-14: the calendar-refresh alarm had
+// NEVER once produced a POST (backend log showed only 3 manual
+// "Capture & Send" imports all day, every one carrying all four
+// narrative blobs — a calendar-only alarm POST never carries those).
+// Investigated against the actual MV3 contract rather than guessed:
+//
+//   1. Is setupAlarms() reached reliably? Yes — it runs on BOTH
+//      onInstalled and onStartup, and creates CALENDAR_ALARM_NAME
+//      unconditionally (not gated behind the autoCapture toggle). A
+//      periodic chrome.alarms entry, once created, survives service-
+//      worker suspension/restart on its own — that's the whole point
+//      of the alarms API vs. setTimeout. Not the defect.
+//   2. Does the handler use a stale module-scope backendUrl/token?
+//      No — both branches below call `chrome.storage.local.get(...)`
+//      FRESH on every single alarm fire, which is durable storage,
+//      not an in-memory value that resets on a cold service-worker
+//      start. Not the defect (this was the prime suspect and it does
+//      not hold up against this file's actual code).
+//   3. Does manifest.json declare "alarms"? Yes (see permissions).
+//      Not the defect.
+//   4. THIS is the defect: two early-return branches below (not-
+//      configured, dedupe-skip) returned WITHOUT writing anything to
+//      chrome.storage.local. A real alarm fire that hit either one
+//      left literally zero trace — indistinguishable, from the
+//      options page, the popup, or the backend log, from the alarm
+//      never having fired at all. Combined with lastCalendarCaptureAt
+//      being shared with the manual-capture dedupe timestamp (a
+//      recent manual "Capture & Send" silences the next ~20 minutes
+//      of alarm ticks), a user who occasionally uses the manual
+//      button could see the alarm silently skip run after run with
+//      no way to ever notice. captureCalendarOnly() itself already
+//      wrote lastCalendarCaptureAt/lastCalendarResult on every one of
+//      ITS return paths (capture failure, zero-events, fetch
+//      failure) — only the guard code IN FRONT of that call was
+//      silent. Fixed below: every branch of this listener now writes
+//      both fields, and the call itself is wrapped so an unexpected
+//      thrown error (should never happen — captureCalendarOnly
+//      already catches its own body) still leaves a trace rather than
+//      an unhandled rejection MV3 quietly drops.
 // ──────────────────────────────────────────────────────────────────
+
+// Persist a calendar-alarm attempt that never reached (or threw before)
+// captureCalendarOnly's own storage writes, so "the alarm fired but
+// was skipped/broken" is always visible next to "the alarm never fired
+// at all" — see the v1.3.1 comment above.
+async function recordCalendarAlarmOutcome(reason, message) {
+  const result = {
+    ok: false,
+    skipped: reason !== "error",
+    reason,
+    error: message,
+    ts: Date.now(),
+  };
+  await chrome.storage.local.set({
+    lastCalendarCaptureAt: Date.now(),
+    lastCalendarResult: result,
+  });
+  return result;
+}
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm?.name === CALENDAR_ALARM_NAME) {
@@ -278,14 +337,31 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     });
     if (!cfg.backendUrl || !cfg.token) {
       console.warn("[ext] calendar-refresh fired but extension not configured; skipping");
+      await recordCalendarAlarmOutcome(
+        "not-configured", "Backend URL or token not configured.");
       return;
     }
     if (Date.now() - cfg.lastCalendarCaptureAt < CALENDAR_DEDUP_WINDOW_MS) {
       const mins = Math.round((Date.now() - cfg.lastCalendarCaptureAt) / 60_000);
       console.log(`[ext] calendar-refresh dedupe: last capture ${mins} min ago, skipping`);
+      await recordCalendarAlarmOutcome(
+        "deduped",
+        `Skipped — last calendar capture was ${mins} min ago ` +
+        `(dedupe window ${CALENDAR_DEDUP_WINDOW_MS / 60_000} min).`);
       return;
     }
-    await captureCalendarOnly(cfg.backendUrl, cfg.token);
+    try {
+      await captureCalendarOnly(cfg.backendUrl, cfg.token);
+    } catch (e) {
+      // Defense-in-depth: captureCalendarOnly already wraps its own
+      // body and writes storage on every return path, so this should
+      // be unreachable — but an uncaught throw here would otherwise
+      // be a silent, untraceable MV3 unhandled-rejection, exactly the
+      // failure mode this whole fix exists to close.
+      console.error("[ext] calendar-refresh alarm: unexpected error", e);
+      await recordCalendarAlarmOutcome(
+        "error", `Unexpected error: ${e.message || String(e)}`);
+    }
     return;
   }
 
@@ -1562,7 +1638,19 @@ function _todayIsoLocal() {
 // top_priority / needs_response with a partial calendar-only parse.
 async function captureCalendarOnly(backendUrl, token) {
   if (!backendUrl || !token) {
-    return { ok: false, error: "Backend URL or token not configured." };
+    // Every OTHER return path in this function already persists
+    // lastCalendarCaptureAt/lastCalendarResult (capture failure,
+    // zero-events, fetch failure) — this guard is the one exception
+    // that didn't (see the v1.3.1 comment on the onAlarm listener).
+    // The current sole caller already checks backendUrl/token itself
+    // before calling in, so this is unreachable in practice today,
+    // but a silent gap here would resurface the exact bug being fixed
+    // the moment anything else calls this function directly.
+    const result = { ok: false, error: "Backend URL or token not configured." };
+    await chrome.storage.local.set({
+      lastCalendarCaptureAt: Date.now(), lastCalendarResult: result,
+    });
+    return result;
   }
   console.log("[ext] starting calendar-only refresh");
 

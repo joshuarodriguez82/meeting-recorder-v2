@@ -424,3 +424,146 @@ test("zero meeting-shaped labels yields zero events, with dominantLayer null", (
   assert.equal(result.stats.notMeetingShaped, 3);
   assert.equal(sandbox.dominantLayer(result.stats), null);
 });
+
+// ── calendar-refresh alarm listener (v1.3.1 field report 2026-08-14) ─
+//
+// Field evidence: the calendar-refresh alarm had never once produced a
+// POST. These tests exercise the REAL chrome.alarms.onAlarm listener
+// (not a mock of it) against a fresh vm context per test — a fresh
+// context stands in for an MV3 service-worker cold start, since it
+// carries no in-memory state across "restarts" the way a stale
+// module-scope variable would. `chrome.storage.local` is backed by a
+// plain object that persists ACROSS that reset, exactly like the real
+// durable chrome.storage.local does — this is what proves credentials
+// are read fresh from storage rather than from anything that would
+// reset on a real cold start.
+
+const CALENDAR_ALARM_NAME = "calendar-refresh"; // must match background.js
+const CALENDAR_DEDUP_WINDOW_MS = 20 * 60 * 1000; // must match background.js
+
+function makeStorageLocalStub(initial) {
+  const store = { ...(initial || {}) };
+  return {
+    _store: store,
+    get(defaults) {
+      const out = { ...(defaults || {}) };
+      for (const k of Object.keys(defaults || {})) {
+        if (Object.prototype.hasOwnProperty.call(store, k)) out[k] = store[k];
+      }
+      return Promise.resolve(out);
+    },
+    set(obj) {
+      Object.assign(store, obj);
+      return Promise.resolve();
+    },
+  };
+}
+
+// Loads a brand-new evaluation of background.js — a fresh vm context,
+// standing in for a cold-started service worker — wired to a storage
+// stub seeded with `initialStorage`. Returns the storage stub (so
+// tests can inspect what got written) and the captured onAlarm
+// listener (so tests can fire it directly, the same way chrome.alarms
+// would).
+function loadAlarmSandbox(initialStorage) {
+  const storage = makeStorageLocalStub(initialStorage);
+  let alarmListener = null;
+  const chromeStub = {
+    runtime: {
+      onInstalled: { addListener: () => {} },
+      onStartup: { addListener: () => {} },
+      onMessage: { addListener: () => {} },
+      getManifest: () => ({ version: "1.3.1" }),
+    },
+    storage: {
+      onChanged: { addListener: () => {} },
+      local: storage,
+    },
+    alarms: {
+      onAlarm: { addListener: (fn) => { alarmListener = fn; } },
+      create: () => {},
+      clearAll: async () => {},
+    },
+    // Deliberately no tabs/scripting methods — none of the tests below
+    // need a working capture; the "cold start" test asserts only that
+    // the credentials gate is passed, not that a full capture succeeds
+    // against a real Outlook Web tab (out of scope here; see the DOM
+    // scan tests above for that half).
+    tabs: {},
+    scripting: {},
+  };
+  const alarmVmSandbox = { chrome: chromeStub, console };
+  vm.createContext(alarmVmSandbox);
+  vm.runInContext(SRC, alarmVmSandbox, { filename: BG_PATH });
+  if (!alarmListener) {
+    throw new Error("chrome.alarms.onAlarm.addListener was never called by background.js");
+  }
+  return { sandbox: alarmVmSandbox, storage, alarmListener };
+}
+
+test("calendar alarm: missing credentials is traced, not silent", async () => {
+  const { storage, alarmListener } = loadAlarmSandbox({});
+  await alarmListener({ name: CALENDAR_ALARM_NAME });
+  assert.ok(storage._store.lastCalendarCaptureAt > 0,
+    "a skipped alarm attempt must still stamp lastCalendarCaptureAt");
+  assert.equal(storage._store.lastCalendarResult.ok, false);
+  assert.equal(storage._store.lastCalendarResult.reason, "not-configured");
+});
+
+test("calendar alarm: dedupe skip is traced, not silent", async () => {
+  const now = Date.now();
+  const { storage, alarmListener } = loadAlarmSandbox({
+    backendUrl: "http://127.0.0.1:17645",
+    token: "tok",
+    lastCalendarCaptureAt: now - 5 * 60 * 1000, // 5 min ago, inside the 20-min window
+  });
+  await alarmListener({ name: CALENDAR_ALARM_NAME });
+  assert.equal(storage._store.lastCalendarResult.ok, false);
+  assert.equal(storage._store.lastCalendarResult.reason, "deduped");
+  assert.ok(storage._store.lastCalendarCaptureAt >= now,
+    "the skip itself should still be timestamped as an attempt");
+});
+
+test("calendar alarm: an alarm fired long enough after the last capture is NOT deduped", async () => {
+  const now = Date.now();
+  const { storage, alarmListener } = loadAlarmSandbox({
+    backendUrl: "http://127.0.0.1:17645",
+    token: "tok",
+    lastCalendarCaptureAt: now - (CALENDAR_DEDUP_WINDOW_MS + 60_000), // just past the window
+  });
+  await alarmListener({ name: CALENDAR_ALARM_NAME });
+  assert.notEqual(storage._store.lastCalendarResult.reason, "deduped");
+  assert.notEqual(storage._store.lastCalendarResult.reason, "not-configured");
+});
+
+test("calendar alarm: cold start reads backendUrl/token fresh from chrome.storage.local, not a stale module var", async () => {
+  // The "prime suspect" from the field-report investigation: a module-
+  // scope variable populated once at worker startup would read
+  // undefined here, since this vm context has never run any startup
+  // code that could have populated one. background.js instead reads
+  // chrome.storage.local directly inside the listener, which is
+  // exactly what's seeded below — simulating durable config surviving
+  // a cold start. If background.js regresses to a module-scope cache,
+  // this test starts failing with reason "not-configured".
+  const { storage, alarmListener } = loadAlarmSandbox({
+    backendUrl: "http://127.0.0.1:17645",
+    token: "tok",
+    lastCalendarCaptureAt: 0, // never captured before -> must not dedupe-skip either
+  });
+  await alarmListener({ name: CALENDAR_ALARM_NAME });
+  assert.notEqual(storage._store.lastCalendarResult.reason, "not-configured");
+  assert.notEqual(storage._store.lastCalendarResult.reason, "deduped");
+  // The fake chrome has no working tabs/scripting, so the capture
+  // itself fails further in (proof it got PAST the credentials gate) —
+  // and that failure is still fully traced, never silent.
+  assert.equal(storage._store.lastCalendarResult.ok, false);
+  assert.ok(storage._store.lastCalendarCaptureAt > 0);
+});
+
+test("captureCalendarOnly persists a traceable result even when called directly without credentials", async () => {
+  const { sandbox: sb, storage } = loadAlarmSandbox({});
+  const result = await sb.captureCalendarOnly("", "");
+  assert.equal(result.ok, false);
+  assert.ok(storage._store.lastCalendarCaptureAt > 0);
+  assert.equal(storage._store.lastCalendarResult.ok, false);
+});

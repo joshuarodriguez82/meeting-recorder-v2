@@ -1336,8 +1336,11 @@ function ChromeExtensionCard() {
               <span>
                 The extension that last posted (<strong>{extInfo.last_seen_version}</strong>) is
                 older than the version this app ships (<strong>{extInfo.bundled_version}</strong>).
-                Click <strong>Install / Update extension files</strong> below, then click{" "}
-                <strong>Reload</strong> on the extension in <code className="text-[11px]">chrome://extensions</code>.
+                Click <strong>Install / Update extension files</strong> below, then see{" "}
+                <strong>Updating after a new release</strong> below — clicking{" "}
+                <strong>Reload</strong> in <code className="text-[11px]">chrome://extensions</code> only
+                picks up the new files if that card was already loaded from the stable folder;
+                otherwise you need to remove it and Load unpacked again.
               </span>
             </div>
           )}
@@ -1468,7 +1471,30 @@ function ChromeExtensionCard() {
           <p>5. Click the icon → <strong>Settings</strong>, paste the URL + token from above, click <strong>Save</strong>.</p>
           <p>6. Anytime you want a fresh brief: click the extension icon → <strong>Capture &amp; Send</strong>. Briefing appears in the Today tab.</p>
           <p className="font-medium text-foreground pt-2">Updating after a new release:</p>
-          <p>Click <strong>Install / Update extension files</strong> above, then go to <code>chrome://extensions</code> and click <strong>Reload</strong> on the Meeting Recorder card — same folder, no re-picking a directory.</p>
+          <p>
+            Click <strong>Install / Update extension files</strong> above first — it always
+            refreshes the stable install folder shown above with the latest files, regardless
+            of which case below applies to you.
+          </p>
+          <p>
+            <strong>If the Meeting Recorder card in <code>chrome://extensions</code> was already
+            loaded from that stable folder</strong> (you followed first-time setup above and
+            never re-picked a different folder): click <strong>Reload</strong> on it — same
+            folder, no re-picking a directory.
+          </p>
+          <p>
+            <strong>If this is your first update, or you&apos;re not sure where Chrome loaded it
+            from</strong> (for example you originally unzipped the extension somewhere else):
+            remove the existing Meeting Recorder card in <code>chrome://extensions</code>, then
+            click <strong>Load unpacked</strong> again and pick the stable install folder shown
+            above. We can&apos;t see which folder Chrome has loaded, so we can&apos;t pick this
+            for you — Reload alone silently keeps you on the old version if the card points
+            somewhere else.
+          </p>
+          <p>
+            Either way, confirm the version number shown on the card in{" "}
+            <code>chrome://extensions</code> afterward matches the bundled version above.
+          </p>
         </div>
       </CardContent>
     </Card>
