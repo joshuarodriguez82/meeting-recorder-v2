@@ -67,6 +67,7 @@ SUMMARY_FIELDS: Tuple[str, ...] = (
     "requirements", "attendees", "speakers",
     "audio_integrity_warning", "audio_actual_duration_s",
     "audio_expected_duration_s", "processing_error", "sync_warning",
+    "finalize_duration_s", "aec_outcome",
 )
 
 

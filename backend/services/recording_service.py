@@ -681,6 +681,22 @@ class RecordingService:
         logger.info(f"[stop] capture.stop done in {_t.monotonic()-t:.1f}s")
         self._capture = None
 
+        # TIMING FIX: stamp ended_at HERE — the moment capture actually
+        # stops — not after finalize returns. Finalize (WAV merge,
+        # optional AEC, resample) is a subprocess spawned further down
+        # and can legitimately take minutes on a long meeting (278s
+        # observed with AEC on); the old code stamped ended_at AFTER
+        # that subprocess returned, so `expected_s` (ended_at -
+        # started_at, used by both AUDIO_INTEGRITY and SYNC_INTEGRITY
+        # below) silently included the entire finalize duration. Field
+        # proof: two AEC-enabled stops showed mic_gap tracking finalize
+        # duration to within 0.5s (278.5s finalize -> 278.9s gap; 144.8s
+        # -> 145.2s) — no audio was lost, finalize time was just being
+        # counted as capture time. Finalize's own cost is now recorded
+        # separately in session.finalize_duration_s once it completes.
+        if session:
+            session.ended_at = datetime.now()
+
         # Stop the live transcriber FIRST (before joining the audio
         # threads) so its tail flush + None sentinel reach SSE clients
         # while they're still listening. The 10-second join inside
@@ -723,6 +739,8 @@ class RecordingService:
             logger.info(
                 f"[stop] finalize_recording_streaming → {final_path} …")
             t = _t.monotonic()
+            echo_cancellation_requested = bool(
+                getattr(self._settings, "echo_cancellation_enabled", False))
             try:
                 # SUBPROCESS-ISOLATED FINALIZE (v2.12): the WAV merge
                 # runs in a child process so a native crash here can't
@@ -733,27 +751,61 @@ class RecordingService:
                 # except block below stamps the session "Error saving
                 # audio" and we LEAVE the temp WAVs on disk for the
                 # next-launch recovery flow to pick up.
-                duration_s, _ = self._run_finalize_subprocess(
+                duration_s, _, aec_outcome = self._run_finalize_subprocess(
                     mic_wav_path=self._wav_temp_path,
                     loopback_wav_path=loopback_path,
                     output_wav_path=final_path,
                     target_sr=TARGET_SR,
                     loopback_start_offset_s=loopback_start_offset_s,
-                    echo_cancellation_enabled=bool(
-                        getattr(self._settings,
-                                "echo_cancellation_enabled", False)),
+                    echo_cancellation_enabled=echo_cancellation_requested,
                 )
                 session.audio_path = final_path
-                session.ended_at = datetime.now()
+                # NOTE: ended_at is stamped earlier, right after
+                # capture.stop() — see the [stop] capture.stop() block
+                # above. Finalize's own cost lives here instead, kept
+                # separate so it never gets folded into the capture
+                # window (see Session.finalize_duration_s).
+                finalize_elapsed_s = _t.monotonic() - t
+                session.finalize_duration_s = float(finalize_elapsed_s)
+
+                # AEC OUTCOME — persist distinctly for all three cases:
+                # not requested / requested+decided / requested+no
+                # decision. The last case (child crashed or otherwise
+                # didn't emit AEC_RESULT despite the flag being on) must
+                # never be indistinguishable from "AEC rejected" or "AEC
+                # off" — that exact "unreadable outcome renders as clean"
+                # failure mode has bitten this repo before (document
+                # hits as "Untitled" sessions; extension posts as "never
+                # posted").
+                if not echo_cancellation_requested:
+                    session.aec_outcome = {"requested": False}
+                elif aec_outcome is not None:
+                    session.aec_outcome = aec_outcome
+                else:
+                    session.aec_outcome = {
+                        "requested": True,
+                        "accepted": None,
+                        "reason": "no_decision_returned",
+                        "erle_db": None,
+                        "residual_delay_ms": None,
+                    }
+                    logger.warning(
+                        f"[finalize-subprocess] AEC was requested for "
+                        f"session {session.session_id} but no AEC_RESULT "
+                        f"came back from the finalize subprocess — "
+                        f"recording outcome as unknown, not as rejected.")
+
                 self._on_status("Recording saved. Ready to process.")
                 logger.info(
                     f"Audio saved to {final_path} ({duration_s:.1f}s)")
                 logger.info(
-                    f"[stop] finalize done in {_t.monotonic()-t:.1f}s")
+                    f"[stop] finalize done in {finalize_elapsed_s:.1f}s")
 
                 # AUDIO INTEGRITY CHECK — compare the actual WAV
-                # duration (returned by finalize_recording_streaming)
-                # to the wall-clock duration the recording was running.
+                # duration (returned by finalize_recording_streaming) to
+                # the TRUE capture window (ended_at - started_at, where
+                # ended_at is now stamped at capture.stop(), NOT after
+                # finalize — see the [stop] capture.stop() block above).
                 # Silent partial-audio loss has happened in v2.9.0 and
                 # earlier (multiple processes contending for the same
                 # mic, OneDrive truncating mid-write, etc.) — without
@@ -764,7 +816,12 @@ class RecordingService:
                 #
                 # Tolerance is 10% — small differences are normal
                 # (final-write buffering, sample-rate rounding); 30+%
-                # is the failure mode we're guarding against.
+                # is the failure mode we're guarding against. Because
+                # expected_s no longer includes finalize time, a slow
+                # (e.g. AEC-enabled) finalize can no longer trip this by
+                # itself — it used to: a 278s finalize inflated
+                # expected_s enough to fire a false 14%-deficit CRITICAL
+                # here even though zero audio was lost.
                 session.audio_actual_duration_s = float(duration_s)
                 expected_s = (
                     session.ended_at - session.started_at
@@ -782,18 +839,32 @@ class RecordingService:
                         actual_min = duration_s / 60.0
                         expected_min = expected_s / 60.0
                         lost_min = (expected_s - duration_s) / 60.0
+                        # Deliberately NOT "about N min appears to be
+                        # missing" as a bare claim — that phrasing was
+                        # flatly wrong and alarming when what it actually
+                        # measured (pre-fix) was finalize time, not lost
+                        # audio. This check now compares against the true
+                        # capture window only, and says so, while still
+                        # calling out a genuine shortfall plainly.
                         msg = (
-                            f"Audio is shorter than the recording window. "
-                            f"You got {actual_min:.0f} min of audio in a "
-                            f"{expected_min:.0f}-min recording — about "
-                            f"{lost_min:.0f} min appears to be missing."
+                            f"The saved audio ({actual_min:.0f} min) is "
+                            f"shorter than the {expected_min:.0f}-min "
+                            f"capture window — about {lost_min:.0f} min "
+                            f"may not have been captured (a dropped "
+                            f"device, contention, or write failure during "
+                            f"recording). This does not include the "
+                            f"{finalize_elapsed_s / 60.0:.1f}-min "
+                            f"finalize/processing step afterward, which "
+                            f"is tracked separately and is never counted "
+                            f"as missing audio."
                         )
                         session.audio_integrity_warning = msg
                         logger.critical(
                             f"AUDIO_INTEGRITY: session "
                             f"{session.session_id}: actual="
                             f"{duration_s:.1f}s expected={expected_s:.1f}s "
-                            f"deficit={deficit_ratio*100:.0f}%")
+                            f"deficit={deficit_ratio*100:.0f}% "
+                            f"finalize_s={finalize_elapsed_s:.1f}")
                     elif duration_s > expected_s * 1.10:
                         # Actual longer than expected — also suspicious
                         # (a stale wav got concatenated maybe). Log but
@@ -803,7 +874,7 @@ class RecordingService:
                             f"{session.session_id} wav is longer "
                             f"than wall-clock — actual={duration_s:.1f}s "
                             f"expected={expected_s:.1f}s (possible stale "
-                            f"file concat).")
+                            f"file concat) finalize_s={finalize_elapsed_s:.1f}")
 
                 # SYNC-INTEGRITY (read-only measurement). Compares each
                 # stream's delivered sample count to wall-clock elapsed: a
@@ -815,6 +886,12 @@ class RecordingService:
                 # whether the heavier timestamp-anchoring correction is
                 # actually warranted, and whether echo (if any) is physical
                 # bleed vs. a sync artifact.
+                #
+                # `window` here is the true capture window (ended_at is
+                # stamped at capture.stop(), before finalize spawns) —
+                # `finalize_s` is logged alongside it so a slow finalize
+                # is always legible as its own number, never folded into
+                # (and mistaken for) the capture window or mic_gap.
                 try:
                     if capture_stats and expected_s > 30.0:
                         msr = max(1, int(capture_stats.get("mic_sr") or 1))
@@ -834,7 +911,8 @@ class RecordingService:
                             f"lb={('%.1fs' % lb_secs) if lb_secs is not None else 'n/a'} "
                             f"window={expected_s:.1f}s mic_gap={mic_gap:.1f}s "
                             f"drift={('%.1fs' % drift) if drift is not None else 'n/a'} "
-                            f"overflows(mic/lb)={mic_ovf}/{lb_ovf}")
+                            f"overflows(mic/lb)={mic_ovf}/{lb_ovf} "
+                            f"finalize_s={finalize_elapsed_s:.1f}")
                         bits = []
                         if mic_gap > max(2.0, expected_s * 0.02):
                             bits.append(
@@ -858,9 +936,25 @@ class RecordingService:
                 except Exception as e:
                     logger.warning(f"sync-integrity measurement failed: {e}")
             except Exception as e:
+                finalize_elapsed_s = _t.monotonic() - t
                 logger.exception(
-                    f"[stop] finalize failed after {_t.monotonic()-t:.1f}s")
+                    f"[stop] finalize failed after {finalize_elapsed_s:.1f}s")
                 self._on_status(f"Error saving audio: {e}")
+                session.finalize_duration_s = float(finalize_elapsed_s)
+                if echo_cancellation_requested:
+                    # The whole finalize subprocess failed/crashed before
+                    # any AEC_RESULT could come back — record that
+                    # distinctly from both "not requested" and "AEC
+                    # rejected the mic": neither is true here.
+                    session.aec_outcome = {
+                        "requested": True,
+                        "accepted": None,
+                        "reason": "finalize_subprocess_failed",
+                        "erle_db": None,
+                        "residual_delay_ms": None,
+                    }
+                else:
+                    session.aec_outcome = {"requested": False}
             finally:
                 # Clean up temps ONLY when the merge actually produced a
                 # final WAV at the expected path. Pre-v2.11.1 we
@@ -1675,7 +1769,7 @@ class RecordingService:
         target_sr: int,
         loopback_start_offset_s: Optional[float],
         echo_cancellation_enabled: bool = False,
-    ) -> tuple[float, bool]:
+    ) -> tuple[float, bool, Optional[dict]]:
         """Run the WAV merge in a subprocess instead of in-process.
 
         SURVIVES-NATIVE-CRASH DESIGN (v2.12): finalize reads two big
@@ -1698,7 +1792,26 @@ class RecordingService:
         (``sys.executable``), so we get exactly the same numpy /
         scipy / soundfile / cffi build — no version skew.
 
-        Returns ``(duration_s, loopback_mixed)`` on success.
+        Returns ``(duration_s, loopback_mixed, aec_outcome)`` on success.
+        ``aec_outcome`` is the dict parsed from the child's ``AEC_RESULT``
+        stdout line, or ``None`` if the child never emitted one (either
+        AEC wasn't requested, or it was requested but no decision came
+        back — the caller must tell those two apart using the
+        ``echo_cancellation_enabled`` flag it passed in, exactly like the
+        "document hits as Untitled" / "extension posts as never posted"
+        failure mode this codebase has hit before: an unreadable outcome
+        must never quietly render as a clean one).
+
+        Both the child's stdout and stderr are mirrored into
+        backend.log at INFO level (bounded to the tail 4000 chars each)
+        — this is the ONLY way the child's log lines (including
+        audio_utils.py's "Offline AEC decision: ..." line, which uses
+        the same get_logger() that always logs to the child's STDOUT)
+        ever reach backend.log at all; earlier versions only mirrored
+        stderr, so every log line the child emitted via logger.info(...)
+        was silently dropped — a field pull for AEC decisions came back
+        with nothing despite two AEC-enabled finalizes provably running.
+
         Raises ``RuntimeError`` on any failure, including subprocess
         crash — the message includes the exit code (negative numbers
         on POSIX = signal; large positive on Windows = NTSTATUS like
@@ -1746,33 +1859,62 @@ class RecordingService:
             tail = proc.stderr[-4000:]
             logger.info(f"[finalize-subprocess] stderr:\n{tail}")
 
+        if proc.stdout:
+            # Mirror child stdout too. utils.logger.get_logger's handler
+            # is a StreamHandler(sys.stdout), so EVERY logger.info(...)
+            # call the child makes (including audio_utils.py's "Offline
+            # AEC decision: ..." line) lands here, not in stderr — before
+            # this, only stderr was mirrored, so that entire log stream
+            # was silently discarded past the single machine-parsed
+            # RESULT line. Trimmed the same way stderr is.
+            tail = proc.stdout[-4000:]
+            logger.info(f"[finalize-subprocess] stdout:\n{tail}")
+
         if proc.returncode != 0:
             raise RuntimeError(
                 f"finalize subprocess exited with code {proc.returncode} "
                 f"(stderr tail: {proc.stderr[-400:]!r})"
             )
 
-        # Parse "RESULT duration_s=X loopback_mixed=Y" from stdout.
+        # Parse "RESULT duration_s=X loopback_mixed=Y" and the optional
+        # "AEC_RESULT <json>" line from stdout. Scan every line (not
+        # break-on-first) so AEC_RESULT can appear before or after
+        # RESULT.
         duration_s = 0.0
         loopback_mixed = False
+        aec_outcome: Optional[dict] = None
+        result_found = False
         for line in (proc.stdout or "").splitlines():
             line = line.strip()
-            if not line.startswith("RESULT "):
-                continue
-            kv = dict(
-                part.split("=", 1) for part in line.split()[1:]
-                if "=" in part
-            )
-            try:
-                duration_s = float(kv.get("duration_s", "0"))
-            except ValueError:
-                duration_s = 0.0
-            loopback_mixed = kv.get("loopback_mixed", "false") == "true"
-            break
-        else:
+            if line.startswith("RESULT "):
+                kv = dict(
+                    part.split("=", 1) for part in line.split()[1:]
+                    if "=" in part
+                )
+                try:
+                    duration_s = float(kv.get("duration_s", "0"))
+                except ValueError:
+                    duration_s = 0.0
+                loopback_mixed = kv.get("loopback_mixed", "false") == "true"
+                result_found = True
+            elif line.startswith("AEC_RESULT "):
+                try:
+                    aec_outcome = json.loads(line[len("AEC_RESULT "):])
+                except (ValueError, TypeError) as e:
+                    # Malformed JSON is exactly the "unreadable outcome"
+                    # case — must not silently look like "no AEC" or
+                    # "AEC accepted". Leave aec_outcome as None; the
+                    # caller (which knows whether AEC was requested)
+                    # is responsible for recording that distinctly.
+                    logger.warning(
+                        f"[finalize-subprocess] could not parse "
+                        f"AEC_RESULT line ({e}): {line[:200]!r}")
+                    aec_outcome = None
+
+        if not result_found:
             raise RuntimeError(
                 f"finalize subprocess exited 0 but emitted no RESULT line "
                 f"(stdout tail: {proc.stdout[-200:]!r})"
             )
 
-        return duration_s, loopback_mixed
+        return duration_s, loopback_mixed, aec_outcome

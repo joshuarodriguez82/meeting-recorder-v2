@@ -23,9 +23,24 @@ re-runs the finalize from the preserved temps.
 
 PROTOCOL
 --------
-stdout: ONE line on success, machine-parseable:
+stdout: on success, machine-parseable lines:
+    AEC_RESULT <json>                                  (only when
+        --echo-cancellation was passed — see utils.audio_utils.
+        finalize_recording_streaming's `aec_result` out-param. The
+        parent (recording_service._run_finalize_subprocess) reads this
+        to persist the AEC decision on the session record. Its absence
+        despite --echo-cancellation being passed is itself meaningful:
+        the parent must record that as "no decision came back", never
+        silently treat it as "AEC wasn't requested" or "AEC rejected.")
     RESULT duration_s=<float> loopback_mixed=<bool>
 stderr: human log lines (mirrored into backend.log by the parent)
+
+Everything the child logs via utils.logger.get_logger (including the
+"Offline AEC decision: ..." line in audio_utils.py) goes to the child's
+STDOUT, not stderr — get_logger's handler is a StreamHandler(sys.
+stdout). The parent mirrors both streams into backend.log, but only
+stdout's AEC_RESULT line is authoritative/structured; free-form log
+lines are for human debugging only.
 
 Exit codes:
     0  — success; the merged WAV is at --output
@@ -45,6 +60,7 @@ does: ``BACKEND_ROOT`` is added to ``sys.path`` so ``from utils
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import traceback
 from pathlib import Path
@@ -115,6 +131,14 @@ def main(argv: list[str] | None = None) -> int:
         traceback.print_exc(file=sys.stderr)
         return 2
 
+    # Filled in-place by finalize_recording_streaming when --echo-
+    # cancellation is set (see its `aec_result` param). If AEC's own
+    # try/except swallows something unexpected before it can update
+    # this, it simply stays empty and no AEC_RESULT line is emitted —
+    # the parent then correctly treats that as "requested but no
+    # decision came back" rather than inventing a false one.
+    aec_result: dict = {}
+
     try:
         duration_s, loopback_mixed = finalize_recording_streaming(
             mic_wav_path=args.mic,
@@ -123,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
             target_sr=args.target_sr,
             loopback_start_offset_s=offset,
             echo_cancellation_enabled=args.echo_cancellation,
+            aec_result=aec_result if args.echo_cancellation else None,
         )
     except RuntimeError as e:
         # Expected, raisable error (missing mic, empty WAV, etc.) —
@@ -136,6 +161,8 @@ def main(argv: list[str] | None = None) -> int:
         traceback.print_exc(file=sys.stderr)
         return 1
 
+    if args.echo_cancellation and aec_result:
+        _emit(f"AEC_RESULT {json.dumps(aec_result)}")
     _emit(
         f"RESULT duration_s={duration_s:.6f} "
         f"loopback_mixed={'true' if loopback_mixed else 'false'}"

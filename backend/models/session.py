@@ -97,6 +97,37 @@ class Session:
         # chip so drift is visible; informs whether the heavier timestamp-
         # anchoring correction is worth building. None = clean.
         self.sync_warning: Optional[str] = None
+        # How long the post-stop finalize subprocess (WAV merge, optional
+        # AEC, resample) took, in seconds. Deliberately SEPARATE from
+        # ``ended_at - started_at`` (the capture window) — folding this
+        # into the recording window is exactly the bug that made a slow
+        # AEC-enabled finalize (e.g. 278s) look like ~5 minutes of lost
+        # audio: ``ended_at`` used to be stamped AFTER finalize returned,
+        # so `expected_s` silently included the entire finalize duration.
+        # ``ended_at`` is now stamped when capture actually stops, BEFORE
+        # finalize is spawned; this field is where finalize's own cost
+        # goes instead, so it stays visible without corrupting the
+        # AUDIO_INTEGRITY / SYNC_INTEGRITY capture-window math. None =
+        # finalize hasn't completed (or predates this field).
+        self.finalize_duration_s: Optional[float] = None
+        # Outcome of the offline AEC decision (utils/aec.py) for this
+        # session's finalize, persisted so Settings.echo_cancellation_
+        # enabled can be judged on real field numbers instead of staying
+        # off forever "until there's evidence." Shape:
+        #   {"requested": bool,
+        #    "accepted": Optional[bool],   # None only in the "no
+        #                                  # decision came back" case
+        #    "reason": Optional[str],
+        #    "erle_db": Optional[float],
+        #    "residual_delay_ms": Optional[float]}
+        # `requested=False` means the toggle was off — nothing ran.
+        # `requested=True, accepted=None` means AEC was asked for but no
+        # decision was recoverable (child crashed, or the subprocess
+        # succeeded but didn't report one) — this is NOT the same as a
+        # rejection and must never be displayed as one; see the finalize-
+        # subprocess handling in recording_service.py for how each case
+        # is produced. None = predates this field.
+        self.aec_outcome: Optional[dict] = None
 
     def get_or_create_speaker(self, speaker_id: str) -> Speaker:
         if speaker_id not in self.speakers:
@@ -150,6 +181,8 @@ class Session:
             "processing_error": self.processing_error,
             "auto_process_pending": self.auto_process_pending,
             "sync_warning": self.sync_warning,
+            "finalize_duration_s": self.finalize_duration_s,
+            "aec_outcome": self.aec_outcome,
         }
 
     @classmethod
@@ -200,6 +233,8 @@ class Session:
         session.processing_error = data.get("processing_error") or None
         session.auto_process_pending = data.get("auto_process_pending") or None
         session.sync_warning = data.get("sync_warning") or None
+        session.finalize_duration_s = data.get("finalize_duration_s")
+        session.aec_outcome = data.get("aec_outcome") or None
 
         # Rebuild speakers
         speakers_data = data.get("speakers") or {}
