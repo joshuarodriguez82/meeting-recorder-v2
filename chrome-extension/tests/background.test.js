@@ -78,6 +78,50 @@ const sandbox = loadSandbox();
 // Deliberately minimal — see the file header for the exact surface
 // _calendarDomScanFunc needs.
 
+// Minimal CSS-selector matcher: enough for the simple,
+// non-compound selectors _calendarDomScanFunc actually issues
+// (`*`, bare tag names like `iframe`, `[attr]`, `[attr="value"]`,
+// and comma-separated lists of those) — not a general selector
+// engine. Added specifically so the fake DOM can grow a real
+// `querySelectorAll`, per the v1.3.2 depth-cap fix: the production
+// scan now uses `querySelectorAll` instead of a depth-limited
+// `.children` recursion, so the test double has to support it rather
+// than the production code staying depth-limited just to remain
+// testable against a double that couldn't do it.
+function matchesSimpleSelector(node, rawSel) {
+  const sel = rawSel.trim();
+  if (sel === "*") return true;
+  const attrMatch = /^\[([a-zA-Z0-9_-]+)(?:=("|')(.*?)\2)?\]$/.exec(sel);
+  if (attrMatch) {
+    const [, name, , value] = attrMatch;
+    if (!node.hasAttribute || !node.hasAttribute(name)) return false;
+    if (value === undefined) return true;
+    return node.getAttribute(name) === value;
+  }
+  return (node.tagName || "").toLowerCase() === sel.toLowerCase();
+}
+
+function matchesSelector(node, selector) {
+  return selector.split(",").some((s) => matchesSimpleSelector(node, s));
+}
+
+function collectMatches(root, selector, out) {
+  const kids = root.children || [];
+  for (const kid of kids) {
+    if (matchesSelector(kid, selector)) out.push(kid);
+    collectMatches(kid, selector, out);
+  }
+}
+
+function attachQuerySelectorAll(node) {
+  node.querySelectorAll = (selector) => {
+    const out = [];
+    collectMatches(node, selector, out);
+    return out;
+  };
+  return node;
+}
+
 function el(tag, attrs = {}, opts = {}) {
   const attrsCopy = { ...attrs };
   const node = {
@@ -98,7 +142,7 @@ function el(tag, attrs = {}, opts = {}) {
   };
   Object.defineProperty(node, "innerText", { get: () => opts.text || "" });
   Object.defineProperty(node, "textContent", { get: () => opts.text || "" });
-  return node;
+  return attachQuerySelectorAll(node);
 }
 
 function append(parent, ...kids) {
@@ -110,7 +154,7 @@ function append(parent, ...kids) {
 }
 
 function doc(children) {
-  return { children };
+  return attachQuerySelectorAll({ children });
 }
 
 function setDocument(root) {
@@ -251,6 +295,50 @@ test("non-meeting text anywhere in the tree never throws and never yields an eve
   assert.equal(candidates.length, 0);
 });
 
+// ── _calendarDomScanFunc: deep-nesting field regression (v1.3.2) ─────
+//
+// Field evidence (2026-08-14, Outlook Web week view): the diagnostic
+// probe's FLAT `querySelectorAll("[aria-label]")` found 28 meeting
+// labels that matched the parser's own TIME_RANGE_RE, but the real
+// capture — which used this hand-rolled recursive `walk()` — reported
+// 0 events from 255 candidates. `walk()` hard-stops at `depth > 30`.
+// Outlook Web's React tree nests calendar tiles deeper than that.
+// These tests build a synthetic DOM chain deep enough to reproduce
+// the truncation and assert a valid, otherwise-perfectly-parseable
+// meeting label at that depth is (pre-fix) missed entirely.
+
+// Wraps `leafEl` in `depth - 1` intermediate <div> layers so it sits
+// at generation `depth` below the document (a direct child of
+// `document` is generation 1).
+function buildChain(depth, leafEl) {
+  let node = leafEl;
+  for (let i = 0; i < depth - 1; i++) {
+    const wrapper = el("div");
+    append(wrapper, node);
+    node = wrapper;
+  }
+  return node;
+}
+
+for (const depth of [35, 50]) {
+  test(`a meeting label at nesting depth ${depth} is reachable by the DOM scan`, () => {
+    const leaf = el("div", {
+      role: "button",
+      "aria-label": "Homeserve, 8:30 AM to 9:00 AM, Friday, August 14, 2026, Microsoft Teams Meeting, By Mark Lefky, Busy",
+    });
+    const chain = buildChain(depth, leaf);
+    setDocument(doc([chain]));
+
+    const { candidates, diag } = sandbox._calendarDomScanFunc();
+    const found = candidates.find((c) => c.label.startsWith("Homeserve"));
+    assert.ok(
+      found,
+      `expected the depth-${depth} "Homeserve" candidate to be found, got ` +
+      `${candidates.length} candidate(s); diag=${JSON.stringify(diag)}`,
+    );
+  });
+}
+
 // ── shouldStopPolling: retry-until-stable logic (pure) ────────────────
 
 test("shouldStopPolling: too few samples never stops", () => {
@@ -300,10 +388,20 @@ test("classifyZeroReason: no candidates found at all", () => {
   assert.match(reason, /no candidate elements found/);
 });
 
-test("classifyZeroReason: candidates found but none parseable", () => {
-  const stats = { scanned: 14, allDay: 0, dateUnresolved: 0 };
+test("classifyZeroReason: all candidates not meeting-shaped names that cause specifically (not the old generic catch-all)", () => {
+  const stats = { scanned: 14, notMeetingShaped: 14, allDay: 0, dateUnresolved: 0, deduped: 0 };
   const reason = sandbox.classifyZeroReason(stats, {});
-  assert.match(reason, /found 14 candidates, none had a parseable time/);
+  assert.match(reason, /found 14 candidates, none were meeting-shaped/);
+});
+
+test("classifyZeroReason: mixed causes (no single bucket is 100%) reports the stats breakdown, not a single guessed cause", () => {
+  const stats = { scanned: 10, notMeetingShaped: 4, dateUnresolved: 3, allDay: 2, deduped: 1 };
+  const reason = sandbox.classifyZeroReason(stats, {});
+  assert.match(reason, /found 10 candidates, none produced an event/);
+  assert.match(reason, /4 not meeting-shaped/);
+  assert.match(reason, /3 unresolved date\/time/);
+  assert.match(reason, /2 all-day/);
+  assert.match(reason, /1 duplicate/);
 });
 
 test("classifyZeroReason: candidates found but all all-day", () => {
@@ -319,9 +417,9 @@ test("classifyZeroReason: candidates found with a time but no resolvable date", 
 });
 
 test("classifyZeroReason: singular phrasing for exactly one candidate", () => {
-  const stats = { scanned: 1, allDay: 0, dateUnresolved: 0 };
+  const stats = { scanned: 1, notMeetingShaped: 1, allDay: 0, dateUnresolved: 0 };
   const reason = sandbox.classifyZeroReason(stats, {});
-  assert.match(reason, /found 1 candidate, none had a parseable time/);
+  assert.match(reason, /found 1 candidate, none were meeting-shaped/);
 });
 
 // ── extractEventsFromCandidates / parseMeetingLabel: regression set ──
