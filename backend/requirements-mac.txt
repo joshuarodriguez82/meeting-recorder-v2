@@ -17,8 +17,20 @@ uvicorn[standard]>=0.30.0
 pydantic>=2.0
 anthropic
 openai
-# Engagement-register Excel export (Phase 3); imported lazily.
+# Engagement-register Excel export (Phase 3); imported lazily. Also
+# doubles as the .xlsx Knowledge Folder document extractor (see
+# services/document_service.py) — no new dependency for that feature.
 openpyxl>=3.1
+# Knowledge Folder document ingestion (services/document_service.py):
+# pypdf and python-docx for .pdf/.docx extraction, python-pptx for
+# .pptx (pulls in Pillow + XlsxWriter transitively — measured ~12MB
+# on top of what pypdf/python-docx/openpyxl already add; see PR notes).
+# All three are imported lazily, exactly like openpyxl above — a
+# missing one degrades to a clear per-file skip reason, never an
+# import-time crash of the whole backend.
+pypdf>=5.0
+python-docx>=1.1
+python-pptx>=1.0
 python-dotenv
 # OS keychain for API keys. macOS Keychain on Mac, Secret Service on
 # Linux. See backend/config/secrets.py.

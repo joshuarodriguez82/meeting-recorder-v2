@@ -12,6 +12,8 @@ async function load() {
     captureTimes: DEFAULT_CAPTURE_TIMES,
     lastCaptureAt: 0,
     lastResult: null,
+    lastCalendarCaptureAt: 0,
+    lastCalendarResult: null,
   });
   $("backendUrl").value = cfg.backendUrl;
   $("token").value = cfg.token;
@@ -21,6 +23,33 @@ async function load() {
   $("time2").value = times[1] || "12:00";
   $("time3").value = times[2] || "17:00";
   renderLastCapture(cfg.lastCaptureAt, cfg.lastResult);
+  renderCalendarStatus(cfg.lastCalendarCaptureAt, cfg.lastCalendarResult);
+}
+
+// Calendar refreshes on its own alarm (every 30 min, independent of
+// the autoCapture toggle above) — surfaced separately so staleness or
+// a silent fall-back to the lossy text path is visible without
+// opening the console. See background.js captureCalendarOnly.
+function renderCalendarStatus(ts, result) {
+  const el = $("lastCalendar");
+  if (!el) return;
+  if (!ts) {
+    el.textContent = "Calendar: no capture yet. Runs automatically every 30 min, or click Capture now.";
+    return;
+  }
+  const ago = Math.round((Date.now() - ts) / 60_000);
+  const agoStr = ago < 60 ? `${ago} min ago` : `${Math.floor(ago / 60)}h ${ago % 60}m ago`;
+  if (result?.ok) {
+    const n = result.eventCount ?? 0;
+    const layerLabel = result.layer === "aria-label" ? "structured extraction"
+      : result.layer === "generic-node" ? "structured extraction (fallback nodes)"
+      : "⚠ text fallback — structured extraction found nothing";
+    el.textContent = `Calendar: ${agoStr} · ${n} event${n === 1 ? "" : "s"} · ${layerLabel}`;
+  } else if (result) {
+    el.textContent = `Calendar: ${agoStr} · ✗ ${result.error || "failed"}`;
+  } else {
+    el.textContent = `Calendar: ${agoStr}`;
+  }
 }
 
 function renderLastCapture(ts, result) {
@@ -136,13 +165,18 @@ $("captureNowBtn").addEventListener("click", async () => {
       showStatus("ok",
         `✓ Sent to Meeting Recorder. ` +
         `OWA: ${c.owa || 0}, Teams: ${c.teams || 0}, ` +
-        `Inbox: ${c.inbox || 0}, Chat: ${c.chat || 0}.`);
+        `Inbox: ${c.inbox || 0}, Chat: ${c.chat || 0}, ` +
+        `Calendar: ${c.calendar ?? 0} event${c.calendar === 1 ? "" : "s"}.`);
     } else {
       showStatus("error", `✗ ${result?.error || "Unknown error"}`);
     }
     // Refresh the last-capture display.
-    const cfg = await chrome.storage.local.get({ lastCaptureAt: 0, lastResult: null });
+    const cfg = await chrome.storage.local.get({
+      lastCaptureAt: 0, lastResult: null,
+      lastCalendarCaptureAt: 0, lastCalendarResult: null,
+    });
     renderLastCapture(cfg.lastCaptureAt, cfg.lastResult);
+    renderCalendarStatus(cfg.lastCalendarCaptureAt, cfg.lastCalendarResult);
   } catch (e) {
     showStatus("error", `✗ ${e.message || String(e)}`);
   } finally {

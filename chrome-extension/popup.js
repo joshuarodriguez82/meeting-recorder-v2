@@ -19,6 +19,11 @@ async function refreshConfigBanner() {
   $("captureBtn").disabled = need;
 }
 
+function agoText(ts) {
+  const mins = Math.round((Date.now() - ts) / 60_000);
+  return mins < 60 ? `${mins} min ago` : `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
+}
+
 async function renderLastCapture() {
   const cfg = await chrome.storage.local.get({ lastCaptureAt: 0, lastResult: null });
   const el = $("lastCapture");
@@ -26,10 +31,7 @@ async function renderLastCapture() {
     el.textContent = "";
     return;
   }
-  const mins = Math.round((Date.now() - cfg.lastCaptureAt) / 60_000);
-  const ago = mins < 60
-    ? `${mins} min ago`
-    : `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
+  const ago = agoText(cfg.lastCaptureAt);
   if (cfg.lastResult?.ok) {
     const c = cfg.lastResult.counts || {};
     const parts = [];
@@ -45,6 +47,36 @@ async function renderLastCapture() {
   }
 }
 
+// Calendar count is shown on its own line, prominently — it's fed by
+// a separate, more frequent alarm than the 4-source capture above, so
+// it needs its own status. Also shows which extraction layer produced
+// the count so a silent regression to the lossy text-scrape fallback
+// is visible here instead of invisible (field report 2026-08-13: the
+// old text/LLM path silently dropped 4 of 5 real meetings).
+async function renderCalendarStatus() {
+  const cfg = await chrome.storage.local.get({
+    lastCalendarCaptureAt: 0, lastCalendarResult: null,
+  });
+  const el = $("lastCalendar");
+  if (!cfg.lastCalendarCaptureAt) {
+    el.textContent = "Calendar: no capture yet.";
+    return;
+  }
+  const ago = agoText(cfg.lastCalendarCaptureAt);
+  const r = cfg.lastCalendarResult;
+  if (r?.ok) {
+    const n = r.eventCount ?? 0;
+    const layerLabel = r.layer === "aria-label" ? "structured"
+      : r.layer === "generic-node" ? "structured (fallback nodes)"
+      : "⚠ text fallback";
+    el.innerHTML = `Calendar: ${ago} · ${n} event${n === 1 ? "" : "s"} · ${layerLabel}`;
+  } else if (r) {
+    el.innerHTML = `Calendar: ${ago} · ✗ ${r.error || "failed"}`;
+  } else {
+    el.textContent = `Calendar: ${ago}`;
+  }
+}
+
 function openOptions(e) {
   if (e) e.preventDefault();
   chrome.runtime.openOptionsPage();
@@ -55,7 +87,7 @@ $("optionsLink").addEventListener("click", openOptions);
 
 $("captureBtn").addEventListener("click", async () => {
   $("captureBtn").disabled = true;
-  setStatus("busy", "Opening 4 tabs in the background (OWA, Teams, Inbox, Chat), reading content, sending to recorder… ~30–60 sec.");
+  setStatus("busy", "Opening tabs in the background (OWA, Teams, Inbox, Chat, Calendar), reading content, sending to recorder… ~30–90 sec.");
 
   try {
     const cfg = await getConfig();
@@ -74,11 +106,13 @@ $("captureBtn").addEventListener("click", async () => {
       if (c.teams) parts.push(`Teams: ${c.teams}`);
       if (c.inbox) parts.push(`Inbox: ${c.inbox}`);
       if (c.chat) parts.push(`Chat: ${c.chat}`);
-      setStatus("ok", `✓ Sent (${parts.join(", ") || "0 chars"}). Open the Today tab for the parsed brief.`);
+      parts.push(`Calendar: ${c.calendar ?? 0} event${c.calendar === 1 ? "" : "s"}`);
+      setStatus("ok", `✓ Sent (${parts.join(", ")}). Open the Today tab for the parsed brief.`);
     } else {
       setStatus("error", `✗ ${result?.error || "Unknown error"}`);
     }
     await renderLastCapture();
+    await renderCalendarStatus();
   } catch (e) {
     setStatus("error", `✗ ${e.message || String(e)}`);
   } finally {
@@ -89,3 +123,4 @@ $("captureBtn").addEventListener("click", async () => {
 
 refreshConfigBanner();
 renderLastCapture();
+renderCalendarStatus();

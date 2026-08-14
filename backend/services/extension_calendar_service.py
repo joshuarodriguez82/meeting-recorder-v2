@@ -40,13 +40,41 @@ from the briefing's date + the human ``time`` + ``duration`` strings
 whenever ``start_iso`` is missing or unparseable. Both paths are pure
 functions with no LLM and no I/O, so they're directly testable.
 
+STRUCTURED EVENTS (v2.28 — the "1 of 5" field report, 2026-08-13)
+------------------------------------------------------------------
+The LLM-parse path above was never the calendar's primary path in
+practice: the extension only ever scraped the OWA DAY view (today
+only — structurally incapable of filling the Record tab's 168h
+window) and dumped a char-budget of grid TEXT for the LLM to
+regex-guess events out of. In the field that captured 1 of 5 real
+meetings visible on a single day.
+
+``chrome-extension/background.js`` now reads each event's own
+``aria-label`` directly out of the Outlook Web WEEK view (current +
+next) — Outlook must expose "Subject, 9:30 AM to 10:00 AM, ..." there
+for screen readers, so that contract is far more stable than any CSS
+selector, and there's no free-text heuristic left to lose events to.
+``events_from_structured`` below just validates/coerces that already-
+parsed JSON — no LLM, no regex-over-a-blob involved on this path.
+The OWA-day-view → LLM → ``events_from_briefing`` path above is kept
+as: (a) backward compatibility for an un-upgraded extension that only
+ever sends ``owa_text``, and (b) the extension's own last-resort
+fallback when its structured DOM scan finds nothing at all (Outlook
+Web redesign, etc — see ``captureCalendarTab`` in background.js).
+
 RETENTION
 ---------
-The store is replaced WHOLESALE on each import and clipped to
-now-1d .. now+14d. Stale events must age out on their own: the
-extension only ever reports what OWA is showing today, so an event
-that disappears from Outlook would otherwise linger in our JSON
-forever and keep showing up on the Record tab as a ghost.
+The store is replaced on each import (see ``replace_all``) and clipped
+to now-1d .. now+14d. Stale events age out on their own: the extension
+only ever reports what OWA is showing right now, so an event that
+disappears from Outlook would otherwise linger in our JSON forever and
+keep showing up on the Record tab as a ghost.
+
+A capture that finds FEWER events than the store already holds within
+the same window is treated with suspicion rather than trusted outright
+— see ``replace_all``'s merge-instead-of-shrink guard. A capture that
+finds MORE (or an equal count) replaces normally, which is how a
+cancelled meeting still disappears promptly.
 
 STORAGE
 -------
@@ -285,6 +313,55 @@ def events_from_briefing(briefing: Dict[str, Any],
     return out
 
 
+def events_from_structured(events: Iterable[Any],
+                           date_iso: Optional[str] = None) -> List[dict]:
+    """Turn structured event objects the extension parsed CLIENT-SIDE
+    (out of Outlook Web's own ``aria-label`` accessibility strings —
+    see ``chrome-extension/background.js``'s ``parseMeetingLabel`` /
+    ``extractEventsFromCandidates``) into the same shape
+    ``events_from_briefing`` produces.
+
+    No LLM and no free-text heuristic on this path — the extension
+    already resolved subject/start/end, so this is a straight
+    validate-and-coerce pass. ``date_iso`` is accepted for symmetry
+    with ``events_from_briefing`` but unused: every event here already
+    carries its own full start/end, never a bare display time that
+    needs a day anchored under it.
+
+    Tolerant of a genuinely hostile payload (wrong types, missing
+    keys, garbage strings) — a malformed structured event degrades to
+    "skipped", never a 500, since this feeds a client-controlled HTTP
+    endpoint. Pure: no I/O, no LLM.
+    """
+    out: List[dict] = []
+    for item in events or []:
+        if not isinstance(item, dict):
+            continue
+        subject = str(item.get("subject") or "").strip()
+        if not subject:
+            continue
+        start = _coerce_dt(item.get("start"))
+        if start is None:
+            continue
+        end = _coerce_dt(item.get("end"))
+        if end is None or end <= start:
+            end = start + timedelta(minutes=DEFAULT_DURATION_MIN)
+        attendees = [str(a).strip() for a in (item.get("attendees") or [])
+                     if str(a).strip()][:50]
+        out.append({
+            "subject": subject,
+            "start": start,
+            "end": end,
+            "location": str(item.get("location") or "").strip(),
+            "organizer": str(item.get("organizer") or "").strip(),
+            "attendees": attendees,
+            "duration": max(1, int((end - start).total_seconds() // 60)),
+            "join_url": str(item.get("join_url") or "").strip(),
+            "source": SOURCE_EXTENSION,
+        })
+    return out
+
+
 def merge_meetings(local: Iterable[dict],
                    extension: Iterable[dict]) -> List[dict]:
     """Merge extension-sourced events into the LOCAL list.
@@ -430,7 +507,25 @@ class ExtensionCalendarService:
                     now: Optional[datetime] = None) -> List[dict]:
         """Replace the store with ``events`` clipped to the retention
         window. Returns the events actually kept (as dicts with real
-        datetimes)."""
+        datetimes).
+
+        SHRINK GUARD (field report 2026-08-13): if this capture found
+        FEWER events than the store already holds within the same
+        window, that's more likely a bad/partial capture (Outlook Web
+        slow to render, a DOM regression, the user's laptop asleep
+        mid-scrape) than genuine mass-cancellation, and blowing away
+        a good store on every such capture is exactly how a user's
+        Upcoming Meetings panel goes to zero without anyone noticing.
+        So a shrinking capture is MERGED with what's already there
+        (new data wins on a subject+time collision, old-only survivors
+        are kept) instead of replacing it outright. Stale-but-complete
+        beats fresh-but-empty.
+
+        A capture that finds an equal-or-larger count replaces
+        normally — that's how a genuinely cancelled meeting still
+        disappears promptly, and it's the path every existing caller
+        exercises (first import into an empty store always qualifies).
+        """
         ref = now or datetime.now()
         lo, hi = ref - RETAIN_PAST, ref + RETAIN_FUTURE
 
@@ -452,17 +547,52 @@ class ExtensionCalendarService:
             item["source"] = SOURCE_EXTENSION
             kept.append(item)
 
-        kept.sort(key=lambda m: m["start"])
-        payload = {
-            "updated_at": ref.isoformat(),
-            "events": [self._serialize(e) for e in kept],
-        }
         with self._lock:
+            prior_kept = self._prior_kept_in_window_locked(lo, hi)
+            if len(kept) < len(prior_kept):
+                merged = merge_meetings(kept, prior_kept)
+                logger.warning(
+                    f"Extension calendar capture returned fewer events "
+                    f"({len(kept)}) than the store already holds in "
+                    f"this window ({len(prior_kept)}); merging instead "
+                    f"of replacing so a bad/partial capture can't wipe "
+                    f"good data.")
+                kept = merged
+            else:
+                kept.sort(key=lambda m: m["start"])
+
+            payload = {
+                "updated_at": ref.isoformat(),
+                "events": [self._serialize(e) for e in kept],
+            }
             self._write_locked(payload)
         logger.info(
             f"Extension calendar store: kept {len(kept)} event(s), "
             f"dropped {dropped} outside {lo.date()}..{hi.date()}")
         return kept
+
+    def _prior_kept_in_window_locked(self, lo: datetime,
+                                     hi: datetime) -> List[dict]:
+        """What the CURRENT store would contribute to a capture with
+        window [lo, hi] — used only by ``replace_all``'s shrink guard.
+        Caller already holds ``self._lock``. Never raises: a corrupt or
+        cloud-placeholder store here must not block a fresh capture
+        from being written (unlike ``get_events``, which propagates
+        ``CloudFileNotReadyError`` to the Record tab)."""
+        try:
+            raw = self._read_locked()
+        except CloudFileNotReadyError:
+            return []
+        out: List[dict] = []
+        for entry in (raw or {}).get("events") or []:
+            if not isinstance(entry, dict):
+                continue
+            item = self._deserialize(entry)
+            if item is None or not item["subject"]:
+                continue
+            if lo <= item["start"] <= hi:
+                out.append(item)
+        return out
 
     def get_events(self, within_hours: Optional[int] = None,
                    now: Optional[datetime] = None) -> List[dict]:
@@ -514,3 +644,42 @@ class ExtensionCalendarService:
             # treat as "available" so the user isn't told to reconnect
             # a store that's actually fine, just not synced down yet.
             return True
+
+    def capture_status(self, now: Optional[datetime] = None) -> Dict[str, Any]:
+        """Honest summary of what the extension has actually delivered,
+        for the Record tab's empty state (field report 2026-08-13: an
+        empty extension-only calendar rendered identically to "nothing
+        on today", so the user had no way to tell the mode itself was
+        broken from a genuinely free calendar).
+
+        Returns:
+          updated_at: ISO string of the last successful ``replace_all``
+            (i.e. the last time a capture — structured or text-fallback
+            — was actually written), or None if the extension has never
+            imported anything.
+          event_count: total events currently retained (any time).
+          future_event_count: events still ahead of ``now``.
+
+        Never raises — mirrors ``get_events``/``has_events``: a
+        cloud-placeholder or corrupt store degrades to "nothing yet"
+        rather than taking the Record tab's readiness panel down.
+        """
+        ref = now or datetime.now()
+        try:
+            with self._lock:
+                raw = self._read_locked()
+        except CloudFileNotReadyError:
+            return {"updated_at": None, "event_count": 0, "future_event_count": 0}
+        events = (raw or {}).get("events") or []
+        future = 0
+        for entry in events:
+            if not isinstance(entry, dict):
+                continue
+            item = self._deserialize(entry)
+            if item and item["subject"] and item["end"] > ref:
+                future += 1
+        return {
+            "updated_at": (raw or {}).get("updated_at") or None,
+            "event_count": len(events),
+            "future_event_count": future,
+        }
