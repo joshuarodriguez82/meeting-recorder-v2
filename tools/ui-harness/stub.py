@@ -42,9 +42,76 @@ _EMPTY_LISTS = (
     "/briefing/today", "/prep-brief/auto/pending",
     "/providers/available-models", "/engagements", "/commitments",
     "/decisions", "/follow-ups", "/insights", "/templates",
-    "/speaker-profiles", "/sessions", "/ghost-sessions", "/terminology",
+    "/speaker-profiles", "/ghost-sessions", "/terminology",
     "/auto-record/blocklist", "/sessions/unprocessed",
 )
+
+# Owner-grouping (2026-08): one session whose action_items carry the
+# exact real-world owner-string zoo from the Follow Ups filter bug
+# report, so screenshotting the Follow Ups view exercises actual
+# multi-owner splitting / org-suffix stripping instead of an empty list.
+_FOLLOW_UPS_MD = "\n".join([
+    "- [ ] **All Sales Team Members**: Prep the QBR deck",
+    "- [ ] **Dale/Dan**: Confirm renewal terms",
+    "- [ ] **Dan [scrubbed]**: Send updated pricing",
+    "- [ ] **Emily**: Schedule kickoff call",
+    "- [ ] **Jake (AWS)**: Provision sandbox account",
+    "- [ ] **Jeremy**: Review architecture diagram",
+    "- [ ] **Josh**: Follow up on SOW",
+    "- [ ] **Josh (AWS)**: Loop in AWS TAM",
+    "- [ ] **[scrubbed]**: Send meeting notes",
+    "- [ ] **Joshua**: Confirm timeline with client",
+    "- [ ] **Kamal (Guardian)**: Share security questionnaire",
+    "- [ ] **Karthik**: Review data model",
+    "- [ ] **Ken (AWS)**: Set up VPC peering",
+    "- [ ] **Lisa**: Draft onboarding checklist",
+    "- [ ] **Madonna [scrubbed]**: Approve budget",
+    "- [ ] **Mark**: Sign contract",
+    "- [ ] **Mark/Josh**: Coordinate go-live date",
+    "- [ ] **Melissa**: Update runbook",
+    "- [ ] **Melissa & Kendra**: Finalize training materials",
+    "- [ ] **Osmo/Craig**: Review network diagram",
+    "- [ ] **Osmo/Craig/Josh**: Plan cutover window",
+    "- [ ] **Paul**: Approve change request",
+    "- [ ] **Paul/Craig/Josh**: Coordinate DR test",
+    "- [ ] **Quincy**: Send invoice",
+])
+
+_SESSIONS = [{
+    "session_id": "owner-grouping-demo",
+    "display_name": "Acme Corp — Weekly Sync",
+    "client": "Acme Corp",
+    "started_at": "2026-08-13T15:00:00",
+    "action_items": _FOLLOW_UPS_MD,
+    "speakers": {},
+}]
+
+# One confirmed group (Josh's spelling variants already merged) plus
+# two pending suggestions, so the management dialog has something in
+# every section to screenshot.
+_OWNER_ALIASES = {"aliases": [{
+    "id": "alias-josh",
+    "canonical": "Josh",
+    "members": ["josh", "[scrubbed]", "joshua"],
+}]}
+_OWNER_SUGGESTIONS = {"groups": [
+    {
+        "group_id": "dan",
+        "suggested_canonical": "Dan",
+        "members": [
+            {"key": "dan", "display": "Dan", "count": 1},
+            {"key": "dan [scrubbed]", "display": "Dan [scrubbed]", "count": 1},
+        ],
+    },
+    {
+        "group_id": "ken",
+        "suggested_canonical": "Ken",
+        "members": [
+            {"key": "ken", "display": "Ken", "count": 1},
+            {"key": "kendra", "display": "Kendra", "count": 1},
+        ],
+    },
+]}
 
 
 def body_for(path: str) -> dict | list:
@@ -62,6 +129,15 @@ def body_for(path: str) -> dict | list:
 
     if path in _EMPTY_LISTS:
         return []
+
+    if path == "/sessions":
+        return _SESSIONS
+
+    if path == "/owners/aliases":
+        return _OWNER_ALIASES
+
+    if path == "/owners/suggestions":
+        return _OWNER_SUGGESTIONS
 
     if path == "/recording/status":
         return {
@@ -93,6 +169,29 @@ def body_for(path: str) -> dict | list:
             "last_capture_at": "2026-08-13T13:00:00",
             "event_count": 1,
             "future_event_count": 0,
+        }
+
+    # Settings' Chrome Extension card (2026-08 change): needs a
+    # plausible /extension/info shape to render the bundled/last-seen
+    # version rows and the mismatch warning, not just an empty {}.
+    if path == "/extension/info":
+        return {
+            "bundled_version": "1.2.0",
+            "last_seen_version": "1.1.0",
+            "last_seen_at": "2026-08-13T13:00:00",
+            "status": "update_available",
+            "install_path": r"C:\\Users\\<you>\AppData\Local\MeetingRecorder\chrome-extension",
+        }
+
+    if path == "/extension/install":
+        return {
+            "ok": True,
+            "path": r"C:\\Users\\<you>\AppData\Local\MeetingRecorder\chrome-extension",
+            "files": [
+                "background.js", "manifest.json", "options.html",
+                "options.js", "popup.html", "popup.js",
+            ],
+            "file_count": 6,
         }
 
     return {}
