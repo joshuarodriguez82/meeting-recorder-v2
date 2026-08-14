@@ -657,6 +657,44 @@ export interface QASource {
   similarity: number;
 }
 
+// /search/semantic returns a union of two hit shapes (see
+// backend/services/search_service.py SearchService.search, ~line 265):
+// a session-transcript-chunk hit, or a Knowledge Folder document-chunk
+// hit. They are NOT interchangeable — a document hit has no
+// session_id/display_name/started_at/start_s/end_s, so treating one as
+// a session (as the frontend used to) renders it as a broken,
+// unopenable "Untitled" session row.
+//
+// `source` is optional on the session variant for backward
+// compatibility: it's an additive field per the backend comment, so an
+// older backend that predates it should still be treated as a session
+// hit. Every OTHER session field stays required — widening them to
+// optional would just move today's bug into the type system instead
+// of fixing it.
+export interface SemanticSessionResult {
+  source?: "session";
+  session_id: string;
+  display_name: string;
+  started_at: string;
+  client: string;
+  project: string;
+  start_s: number;
+  end_s: number;
+  text: string;
+  similarity: number;
+}
+
+export interface SemanticDocumentResult {
+  source: "document";
+  doc_name: string;
+  doc_path: string;
+  client: string;
+  text: string;
+  similarity: number;
+}
+
+export type SemanticSearchResult = SemanticSessionResult | SemanticDocumentResult;
+
 // Bare-bones SSE event parser. The browser EventSource API does this
 // for us — but EventSource is GET-only, and the QA endpoint is POST
 // because the body can be 100s of bytes (query + filters). So we
@@ -1117,17 +1155,7 @@ export const api = {
   ) =>
     request<{
       query: string;
-      results: Array<{
-        session_id: string;
-        display_name: string;
-        started_at: string;
-        client: string;
-        project: string;
-        start_s: number;
-        end_s: number;
-        text: string;
-        similarity: number;
-      }>;
+      results: SemanticSearchResult[];
     }>("/search/semantic", {
       method: "POST",
       body: JSON.stringify({ query, top_k, client, project }),
