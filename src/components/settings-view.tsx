@@ -663,7 +663,33 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
         <CardHeader>
           <CardTitle className="text-base">Calendar</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-2">
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="calendar-source">Calendar source</Label>
+            <Select
+              value={settings.calendar_source || "auto"}
+              onValueChange={(v) => v && update("calendar_source", v)}
+            >
+              <SelectTrigger id="calendar-source" className="w-72">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">Automatic</SelectItem>
+                <SelectItem value="extension">Chrome extension only</SelectItem>
+                <SelectItem value="outlook">Local calendar only</SelectItem>
+                <SelectItem value="off">Off</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {settings.calendar_source === "extension"
+                ? "Never contacts Outlook — the Record tab shows only what the Chrome extension has scraped from Outlook Web. Use this if Outlook keeps asking you to sign in; switching here stops those sign-in prompts for good."
+                : settings.calendar_source === "outlook"
+                ? "Uses only the local calendar (Outlook COM on Windows, Calendar app on macOS). Chrome extension events are ignored even if the extension is connected."
+                : settings.calendar_source === "off"
+                ? "No calendar data at all. The Upcoming Meetings panel stays empty and auto-record has nothing to trigger from."
+                : "Uses the local calendar, plus anything the Chrome extension finds. If Outlook keeps asking you to sign in, switch to “Chrome extension only” below."}
+            </p>
+          </div>
           <Label>Notify before meeting (minutes, 0 = off)</Label>
           <Input
             type="number"
