@@ -171,6 +171,29 @@ def body_for(path: str) -> dict | list:
             "future_event_count": 0,
         }
 
+    # Settings' Chrome Extension card (2026-08 change): needs a
+    # plausible /extension/info shape to render the bundled/last-seen
+    # version rows and the mismatch warning, not just an empty {}.
+    if path == "/extension/info":
+        return {
+            "bundled_version": "1.2.0",
+            "last_seen_version": "1.1.0",
+            "last_seen_at": "2026-08-13T13:00:00",
+            "status": "update_available",
+            "install_path": r"C:\Users\joshu\AppData\Local\MeetingRecorder\chrome-extension",
+        }
+
+    if path == "/extension/install":
+        return {
+            "ok": True,
+            "path": r"C:\Users\joshu\AppData\Local\MeetingRecorder\chrome-extension",
+            "files": [
+                "background.js", "manifest.json", "options.html",
+                "options.js", "popup.html", "popup.js",
+            ],
+            "file_count": 6,
+        }
+
     return {}
 
 

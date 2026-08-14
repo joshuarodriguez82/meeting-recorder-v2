@@ -349,6 +349,23 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 // The actual capture.
 // ──────────────────────────────────────────────────────────────────
 
+// The extension's own manifest version, sent on EVERY POST to the
+// backend (see captureAndSend / captureCalendarOnly below) so the app
+// can tell a stale, still-installed extension apart from a current
+// one — see services/extension_calendar_service.py's
+// record_extension_version. Field report: v2.28.0 shipped a new
+// extension version with the app having no way to detect the OLD one
+// was still what the user had loaded in Chrome. chrome.runtime is
+// always available to a service worker, but wrapped defensively
+// anyway — this must never be the reason a capture fails to send.
+function currentExtensionVersion() {
+  try {
+    return chrome.runtime.getManifest().version || null;
+  } catch (_) {
+    return null;
+  }
+}
+
 async function captureAndSend(backendUrl, token, opts = {}) {
   if (!backendUrl || !token) {
     return { ok: false, error: "Backend URL or token not configured. Open Settings." };
@@ -356,7 +373,7 @@ async function captureAndSend(backendUrl, token, opts = {}) {
 
   console.log(`[ext] starting capture (source=${opts.source || "manual"})`);
 
-  const payload = {};
+  const payload = { extension_version: currentExtensionVersion() };
   const counts = {};
   const errors = [];
 
@@ -1558,7 +1575,7 @@ async function captureCalendarOnly(backendUrl, token) {
     return result;
   }
 
-  const payload = { date: _todayIsoLocal() };
+  const payload = { date: _todayIsoLocal(), extension_version: currentExtensionVersion() };
   if (capture.events.length > 0) {
     payload.calendar_events = capture.events;
   } else if (capture.fallbackText) {

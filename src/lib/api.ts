@@ -1578,6 +1578,28 @@ export const api = {
       } | null;
     }>("/recording/auto-status"),
 
+  // Chrome extension bundling (see settings-view.tsx's ChromeExtensionCard).
+  // `status` is one of "up_to_date" | "update_available" | "unknown_version"
+  // | "never_posted" | "unknown" (bundled_version itself unavailable — a
+  // dev build with no zip-bundle run) — see backend/services/
+  // extension_bundle_service.py's extension_version_status for the exact
+  // rules.
+  getExtensionInfo: () =>
+    request<{
+      bundled_version: string | null;
+      last_seen_version: string | null;
+      last_seen_at: string | null;
+      status: "up_to_date" | "update_available" | "unknown_version" | "never_posted" | "unknown";
+      install_path: string;
+    }>("/extension/info"),
+  // Writes/refreshes the bundled extension into its STABLE install
+  // folder (same path every release — see backend endpoint docstring).
+  installExtensionFiles: () =>
+    request<{ ok: boolean; path: string; files: string[]; file_count: number }>(
+      "/extension/install",
+      { method: "POST" }
+    ),
+
   // Sessions
   listSessions: () => request<SessionSummary[]>("/sessions"),
   deleteSession: (id: string) =>

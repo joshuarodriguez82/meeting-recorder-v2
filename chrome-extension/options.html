@@ -124,8 +124,8 @@
 
   <h2>Connection</h2>
   <label for="backendUrl">Meeting Recorder backend URL</label>
-  <input type="text" id="backendUrl" placeholder="http://127.0.0.1:52469">
-  <p class="help">From Meeting Recorder → Settings → Chrome Extension. Port changes each launch.</p>
+  <input type="text" id="backendUrl" placeholder="http://127.0.0.1:17645">
+  <p class="help">From Meeting Recorder → Settings → Chrome Extension. The port is pinned at <code>17645</code> and stays the same across recorder restarts (it only changes if another app is already holding that port).</p>
 
   <label for="token">Auth token</label>
   <input type="password" id="token" placeholder="paste the per-launch token here">
