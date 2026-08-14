@@ -128,6 +128,42 @@ class Session:
         # subprocess handling in recording_service.py for how each case
         # is produced. None = predates this field.
         self.aec_outcome: Optional[dict] = None
+        # FINALIZE-IN-PROGRESS STATE (field repro 2026-08-14): before this
+        # field existed, nothing distinguished "audio is still being
+        # written by the finalize subprocess" from "audio is gone" — a
+        # user who clicked Process 36s into a 192s AEC-enabled finalize
+        # got told the WAV "may have been moved, deleted, or not yet
+        # synced down from the cloud", all three of which were false. The
+        # file didn't exist YET; no data was lost.
+        #
+        # Three states, explicit and persisted so they survive a backend
+        # restart (see services/recovery_service.py's startup orphan
+        # scan, which must resolve a crash-interrupted "finalizing"
+        # session rather than leave it stuck forever):
+        #   None         — no finalize in flight (either none has run
+        #                  yet, or the last one succeeded).
+        #   "finalizing" — the finalize subprocess (WAV merge, optional
+        #                  AEC, resample) is currently running. Set in
+        #                  recording_service.stop_recording() BEFORE the
+        #                  subprocess is spawned (and written to disk via
+        #                  _write_session_stub before the blocking call),
+        #                  cleared back to None the moment the subprocess
+        #                  returns successfully.
+        #   "failed"     — the finalize subprocess raised or crashed;
+        #                  ``finalize_error`` holds the reason. Distinct
+        #                  from "genuinely missing audio" — this is a
+        #                  known, explainable failure, not silence.
+        self.finalize_status: Optional[str] = None
+        # Wall-clock time finalize started, so an in-flight check (e.g.
+        # /sessions/{id}/process) can report how long it's been running.
+        # Cleared alongside finalize_status on success; kept on failure so
+        # the failure message can still say how long it ran before it
+        # died (finalize_duration_s is the authoritative number for that,
+        # but this is the raw timestamp it was computed from).
+        self.finalize_started_at: Optional[datetime.datetime] = None
+        # Human-readable reason the finalize subprocess failed. Only set
+        # when finalize_status == "failed"; None otherwise.
+        self.finalize_error: Optional[str] = None
 
     def get_or_create_speaker(self, speaker_id: str) -> Speaker:
         if speaker_id not in self.speakers:
@@ -183,6 +219,12 @@ class Session:
             "sync_warning": self.sync_warning,
             "finalize_duration_s": self.finalize_duration_s,
             "aec_outcome": self.aec_outcome,
+            "finalize_status": self.finalize_status,
+            "finalize_started_at": (
+                self.finalize_started_at.isoformat()
+                if self.finalize_started_at else None
+            ),
+            "finalize_error": self.finalize_error,
         }
 
     @classmethod
@@ -235,6 +277,15 @@ class Session:
         session.sync_warning = data.get("sync_warning") or None
         session.finalize_duration_s = data.get("finalize_duration_s")
         session.aec_outcome = data.get("aec_outcome") or None
+        session.finalize_status = data.get("finalize_status") or None
+        finalize_started = data.get("finalize_started_at")
+        if finalize_started:
+            try:
+                session.finalize_started_at = datetime.datetime.fromisoformat(
+                    finalize_started)
+            except ValueError:
+                pass
+        session.finalize_error = data.get("finalize_error") or None
 
         # Rebuild speakers
         speakers_data = data.get("speakers") or {}

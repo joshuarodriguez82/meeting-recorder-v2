@@ -599,6 +599,24 @@ export default function Home() {
     };
   }, [backendReady, reloadSessions]);
 
+  // FINALIZE-IN-PROGRESS live pickup (field repro 2026-08-14): a session
+  // whose finalize subprocess is still running (echo cancellation can
+  // push this to several minutes) needs the Sessions list — and any
+  // session-detail dialog reading from it — to notice the moment it
+  // completes, without the user having to manually refresh or tab away
+  // and back. Reuses the SAME `reloadSessions` every other refresh path
+  // here already calls; the only new thing is an adaptive interval
+  // (same idea as src/lib/recording-status.ts's RECORDING_POLL_INTERVAL_MS
+  // — poll faster only while something time-sensitive is actually
+  // happening) that arms itself only while at least one loaded session
+  // is finalizing, and tears itself down the moment none are.
+  const anyFinalizing = sessions.some((s) => s.finalize_status === "finalizing");
+  useEffect(() => {
+    if (!backendReady || !anyFinalizing) return;
+    const id = setInterval(reloadSessions, 8_000);
+    return () => clearInterval(id);
+  }, [backendReady, anyFinalizing, reloadSessions]);
+
   // Calendar loader. Kept here so the list survives nav switches. On
   // errors or empty responses from a transient COM hiccup, we preserve
   // whatever meetings we already have rather than blanking the UI —

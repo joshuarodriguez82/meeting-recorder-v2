@@ -48,6 +48,15 @@ const FALLBACK_TEMPLATES = [
   "Stakeholder Update",
 ];
 
+// Field repro 2026-08-14: the user clicked Process twice in 15 seconds
+// because nothing told them a click was premature — the finalize
+// subprocess (WAV merge + echo cancellation) was still running. Every
+// AI action button shows this same tooltip while finalize_status ===
+// "finalizing" instead of just going quietly disabled.
+const FINALIZING_BUTTON_TOOLTIP =
+  "This recording is still being finalized (echo cancellation can take " +
+  "several minutes) — try again once it's done.";
+
 export function SessionDetailDialog({
   sessionId, open, onOpenChange, onChanged,
   initialTab = "overview", existingClients = [], projectsByClient = {},
@@ -141,6 +150,59 @@ export function SessionDetailDialog({
     const s = await api.getSessionFull(sessionId);
     setSession(s);
   };
+
+  // FINALIZE-IN-PROGRESS (field repro 2026-08-14): a session mid-finalize
+  // has no transcript/audio yet for a specific, temporary reason — not
+  // because anything is wrong. `isFinalizing` gates the AI action
+  // buttons and swaps the audio player for a "processing" placeholder;
+  // `finalizeFailed` surfaces the recorded reason instead of a generic
+  // error the next time the user clicks Process.
+  const isFinalizing = session?.finalize_status === "finalizing";
+  const finalizeFailed = session?.finalize_status === "failed";
+  const finalizeElapsedLabel = (() => {
+    if (!isFinalizing || !session?.finalize_started_at) return null;
+    const startedMs = new Date(session.finalize_started_at).getTime();
+    if (Number.isNaN(startedMs)) return null;
+    const elapsedS = Math.max(0, Math.round((Date.now() - startedMs) / 1000));
+    return formatDuration(elapsedS);
+  })();
+
+  // Poll while finalize is in progress so the dialog picks up completion
+  // on its own — same technique as the `processing` status poller above
+  // (setInterval + a `cancelled` guard torn down on cleanup), just
+  // watching the session's own finalize_status instead of the shared
+  // /recording/status mailbox. The user does not need to close and
+  // reopen the dialog once the (multi-minute, AEC-enabled) finalize
+  // subprocess finishes.
+  useEffect(() => {
+    if (!isFinalizing || !sessionId) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const s = await api.getSessionFull(sessionId);
+        if (cancelled) return;
+        setSession(s);
+        if (s.finalize_status !== "finalizing") {
+          // Transitioned to done or failed — tell the parent (sessions
+          // list / sidebar) to refresh too, same as every other
+          // AI-action completion in this dialog does via onChanged().
+          onChanged?.();
+          if (s.finalize_status === "failed") {
+            toast.error("Finalizing this recording's audio failed", {
+              description: s.finalize_error || undefined,
+            });
+          } else {
+            toast.success("Recording finalized — ready to process");
+          }
+        }
+      } catch {
+        // Backend hiccup mid-finalize — try again next tick.
+      }
+    };
+    const id = setInterval(tick, 4000);
+    return () => { cancelled = true; clearInterval(id); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFinalizing, sessionId]);
 
   const runProcess = async () => {
     if (!sessionId) return;
@@ -348,7 +410,43 @@ export function SessionDetailDialog({
             <ScrollArea className="flex-1 min-h-0">
               <div className="p-6 min-w-0 max-w-full break-words">
                 <TabsContent value="overview" className="mt-0 space-y-6">
-                  {session.audio_path && baseUrl && (
+                  {isFinalizing && (
+                    <div
+                      className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-300 text-xs px-3 py-2.5"
+                      role="status"
+                    >
+                      <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0 mt-0.5" />
+                      <span>
+                        Still finalizing this recording
+                        {finalizeElapsedLabel ? ` (running for ${finalizeElapsedLabel})` : ""}.
+                        {" "}Echo cancellation is enabled, which can make this
+                        step take several minutes for longer meetings. No
+                        data has been lost — this page will update on its
+                        own when it's done; feel free to navigate away and
+                        come back.
+                      </span>
+                    </div>
+                  )}
+                  {finalizeFailed && (
+                    <div
+                      className="flex items-start gap-2 rounded-md border border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300 text-xs px-3 py-2.5"
+                      role="alert"
+                    >
+                      <span aria-hidden className="font-bold leading-none mt-0.5">⚠</span>
+                      <span>
+                        Finalizing this recording&apos;s audio failed
+                        {session.finalize_error ? `: ${session.finalize_error}` : "."}
+                      </span>
+                    </div>
+                  )}
+                  {/* Only attempt playback once finalize is neither
+                      running nor known to have failed — audio_path is
+                      stamped at start_recording (before any bytes exist)
+                      so its mere presence never proves the file is
+                      actually there yet. A 0:00/0:00 player reads as an
+                      empty recording; showing the banners above instead
+                      is the honest version of that state. */}
+                  {session.audio_path && baseUrl && !isFinalizing && !finalizeFailed && (
                     <div className="space-y-2">
                       <Label className="text-xs uppercase tracking-wider text-muted-foreground">Recording</Label>
                       <audio
@@ -447,7 +545,8 @@ export function SessionDetailDialog({
                         variant={hasTranscript ? "outline" : "default"}
                         size="sm"
                         onClick={runProcess}
-                        disabled={processing !== null}
+                        disabled={processing !== null || isFinalizing}
+                        title={isFinalizing ? FINALIZING_BUTTON_TOOLTIP : undefined}
                       >
                         {processing === "process" ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <Cog className="h-3.5 w-3.5 mr-2" />}
                         {hasTranscript ? "Re-process" : "Process"}
@@ -455,32 +554,50 @@ export function SessionDetailDialog({
                       <Button
                         variant="outline" size="sm"
                         onClick={runSummarize}
-                        disabled={!hasTranscript || processing !== null}
+                        disabled={!hasTranscript || processing !== null || isFinalizing}
+                        title={isFinalizing ? FINALIZING_BUTTON_TOOLTIP : undefined}
                       >
                         {processing === "summarize" ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <Sparkles className="h-3.5 w-3.5 mr-2" />}
                         Summarize
                       </Button>
-                      <Button variant="outline" size="sm" onClick={() => runExtract("action_items", "Action items", "actions")} disabled={!hasTranscript || processing !== null}>
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={() => runExtract("action_items", "Action items", "actions")}
+                        disabled={!hasTranscript || processing !== null || isFinalizing}
+                        title={isFinalizing ? FINALIZING_BUTTON_TOOLTIP : undefined}
+                      >
                         {processing === "action_items" ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <ClipboardList className="h-3.5 w-3.5 mr-2" />}
                         Action Items
                       </Button>
-                      <Button variant="outline" size="sm" onClick={() => runExtract("decisions", "Decisions", "decisions")} disabled={!hasTranscript || processing !== null}>
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={() => runExtract("decisions", "Decisions", "decisions")}
+                        disabled={!hasTranscript || processing !== null || isFinalizing}
+                        title={isFinalizing ? FINALIZING_BUTTON_TOOLTIP : undefined}
+                      >
                         {processing === "decisions" ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <Target className="h-3.5 w-3.5 mr-2" />}
                         Decisions
                       </Button>
-                      <Button variant="outline" size="sm" onClick={() => runExtract("requirements", "Requirements", "requirements")} disabled={!hasTranscript || processing !== null}>
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={() => runExtract("requirements", "Requirements", "requirements")}
+                        disabled={!hasTranscript || processing !== null || isFinalizing}
+                        title={isFinalizing ? FINALIZING_BUTTON_TOOLTIP : undefined}
+                      >
                         {processing === "requirements" ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <FileText className="h-3.5 w-3.5 mr-2" />}
                         Requirements
                       </Button>
                       <Button
                         variant="outline" size="sm"
                         onClick={runFollowUpDrafts}
-                        disabled={!hasTranscript || processing !== null}
-                        title={hasTranscript
-                          ? (session.action_items
-                              ? "Create an Outlook draft email per attendee with their action items"
-                              : "Extract action items + create Outlook drafts (one click)")
-                          : "Run Process first — need a transcript before drafting emails"}
+                        disabled={!hasTranscript || processing !== null || isFinalizing}
+                        title={isFinalizing
+                          ? FINALIZING_BUTTON_TOOLTIP
+                          : hasTranscript
+                            ? (session.action_items
+                                ? "Create an Outlook draft email per attendee with their action items"
+                                : "Extract action items + create Outlook drafts (one click)")
+                            : "Run Process first — need a transcript before drafting emails"}
                       >
                         {processing === "follow_up_drafts"
                           ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" />

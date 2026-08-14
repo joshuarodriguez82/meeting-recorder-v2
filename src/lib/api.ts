@@ -394,6 +394,15 @@ export interface SessionSummary {
     erle_db?: number | null;
     residual_delay_ms?: number | null;
   } | null;
+  // Finalize-in-progress state (field repro 2026-08-14): distinguishes
+  // "audio is still being written by the post-stop finalize subprocess"
+  // from "audio is gone" — before this, both looked identical to the
+  // UI (audio_exists: false) and a session mid-finalize could be
+  // mistaken for a lost recording. See SessionFull's finalize_status
+  // for the full three-state contract.
+  finalize_status?: "finalizing" | "failed" | null;
+  finalize_started_at?: string | null;
+  finalize_error?: string | null;
 }
 
 /**
@@ -571,6 +580,27 @@ export interface SessionFull {
     erle_db?: number | null;
     residual_delay_ms?: number | null;
   } | null;
+  // Finalize-in-progress state, persisted so it survives a backend
+  // restart (see backend/services/recovery_service.py's startup
+  // sweep). Three states:
+  //   null           — no finalize in flight right now (either none
+  //                    has run yet, or the last one succeeded).
+  //   "finalizing"   — the post-stop finalize subprocess (WAV merge,
+  //                    optional echo-cancellation pass, resample) is
+  //                    currently running. `finalize_started_at` is set;
+  //                    this is a normal, temporary state — AI actions
+  //                    and playback should show "processing", not an
+  //                    error, and the Process/Summarize/etc buttons
+  //                    should be disabled rather than left clickable
+  //                    (a user hitting Process mid-finalize is exactly
+  //                    the field bug this field exists to fix).
+  //   "failed"       — the finalize subprocess errored or crashed;
+  //                    `finalize_error` holds the reason. Distinct from
+  //                    a genuinely-missing file: this is a known,
+  //                    explainable failure.
+  finalize_status?: "finalizing" | "failed" | null;
+  finalize_started_at?: string | null;
+  finalize_error?: string | null;
 }
 
 export interface Speaker {

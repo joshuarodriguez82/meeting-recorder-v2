@@ -730,11 +730,27 @@ class RecordingService:
             # trigger a native STATUS_ACCESS_VIOLATION on stop (lost session).
             loopback_path = getattr(self, '_loopback_temp_path', None)
             final_path = self._build_audio_path(session.session_id)
+            # FINALIZE-IN-PROGRESS STATE (field repro 2026-08-14): stamp
+            # this BEFORE the stub write (so it's on disk before the
+            # subprocess is even spawned) and clear it the instant the
+            # subprocess returns. Without this, a session mid-finalize
+            # and a session whose audio genuinely vanished were
+            # indistinguishable to every reader (including
+            # /sessions/{id}/process) — see Session.finalize_status for
+            # the full rationale.
+            session.finalize_status = "finalizing"
+            session.finalize_started_at = datetime.now()
+            session.finalize_error = None
             # Re-write the stub session JSON with started_at + planned
             # audio_path BEFORE finalize. If finalize segfaults the
             # process (the 8B88C1C3 case), the JSON is already on disk
             # and the session appears in the list with the temp WAVs
             # ready for recovery, instead of the meeting vanishing.
+            # This also persists finalize_status="finalizing" to disk
+            # BEFORE the blocking subprocess call below, so any reader
+            # (e.g. a concurrent /sessions/{id}/process request) that
+            # loads the session JSON while finalize is running sees the
+            # real state instead of the stale pre-stop stub.
             self._write_session_stub(session)
             logger.info(
                 f"[stop] finalize_recording_streaming → {final_path} …")
@@ -760,6 +776,15 @@ class RecordingService:
                     echo_cancellation_enabled=echo_cancellation_requested,
                 )
                 session.audio_path = final_path
+                # Subprocess returned successfully — clear the
+                # in-progress marker immediately, before any of the
+                # (best-effort) integrity checks below run. Anything
+                # that goes wrong past this point is a reporting
+                # concern, not a "the audio isn't ready yet" one; the
+                # WAV is on disk at final_path right now.
+                session.finalize_status = None
+                session.finalize_started_at = None
+                session.finalize_error = None
                 # NOTE: ended_at is stamped earlier, right after
                 # capture.stop() — see the [stop] capture.stop() block
                 # above. Finalize's own cost lives here instead, kept
@@ -941,6 +966,15 @@ class RecordingService:
                     f"[stop] finalize failed after {finalize_elapsed_s:.1f}s")
                 self._on_status(f"Error saving audio: {e}")
                 session.finalize_duration_s = float(finalize_elapsed_s)
+                # Record the failure distinctly from "still finalizing"
+                # and from "genuinely missing" — see Session.finalize_
+                # status. finalize_started_at is deliberately LEFT set
+                # here (not cleared) so a caller can still see when the
+                # doomed attempt began; finalize_error carries the
+                # reason /sessions/{id}/process must surface instead of
+                # the generic "audio is missing" message.
+                session.finalize_status = "failed"
+                session.finalize_error = str(e)
                 if echo_cancellation_requested:
                     # The whole finalize subprocess failed/crashed before
                     # any AEC_RESULT could come back — record that
