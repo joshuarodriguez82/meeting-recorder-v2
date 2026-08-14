@@ -326,3 +326,122 @@ def test_aec_outcome_recorded_when_finalize_subprocess_itself_fails(tmp_path, mo
     assert out.aec_outcome["requested"] is True
     assert out.aec_outcome["accepted"] is None
     assert out.aec_outcome["reason"] == "finalize_subprocess_failed"
+
+
+# ── finalize-in-progress state (field repro 2026-08-14) ───────────────
+#
+# The user clicked Process 36s into a 192s AEC finalize and got told the
+# WAV "may have been moved, deleted, or not yet synced down from the
+# cloud" — all three false. These tests pin the fix at its source: the
+# persisted three-state marker (finalize_status / finalize_started_at /
+# finalize_error) that /sessions/{id}/process (see server.py) reads to
+# tell "still running" and "failed" apart from "genuinely missing".
+
+def test_finalize_status_is_finalizing_and_on_disk_during_the_subprocess_call(
+    tmp_path, monkeypatch,
+):
+    """The marker must be written to the session JSON on disk BEFORE
+    the (blocking, possibly minutes-long) subprocess call — a
+    concurrent /sessions/{id}/process request reads the session from
+    disk, not from this in-memory object, so if the stub write happened
+    AFTER the call started, a request arriving mid-finalize would see
+    stale (pre-recording-stop) state instead of "finalizing"."""
+    import json as _json
+
+    seen: dict = {}
+
+    def fake_finalize(**kwargs):
+        # Inspect what's actually on disk RIGHT NOW, mid-call.
+        stub_path = tmp_path / "session_TESTSESS.json"
+        seen["stub_existed"] = stub_path.exists()
+        if stub_path.exists():
+            data = _json.loads(stub_path.read_text())
+            seen["finalize_status_on_disk"] = data.get("finalize_status")
+            seen["finalize_started_at_on_disk"] = data.get("finalize_started_at")
+        return (60.0, False, None)
+
+    monkeypatch.setattr(
+        rs.RecordingService, "_run_finalize_subprocess",
+        staticmethod(fake_finalize))
+
+    svc = _make_svc(tmp_path)
+    _arm(svc, started_at=datetime.now() - timedelta(seconds=60),
+         mic_samples=60 * 16000)
+
+    svc.stop_recording()
+
+    assert seen["stub_existed"] is True
+    assert seen["finalize_status_on_disk"] == "finalizing"
+    assert seen["finalize_started_at_on_disk"] is not None
+
+
+def test_finalize_status_cleared_on_success(tmp_path, monkeypatch):
+    def fake_finalize(**kwargs):
+        return (60.0, False, None)
+
+    monkeypatch.setattr(
+        rs.RecordingService, "_run_finalize_subprocess",
+        staticmethod(fake_finalize))
+
+    svc = _make_svc(tmp_path)
+    _arm(svc, started_at=datetime.now() - timedelta(seconds=60),
+         mic_samples=60 * 16000)
+
+    out = svc.stop_recording()
+
+    assert out.finalize_status is None
+    assert out.finalize_started_at is None
+    assert out.finalize_error is None
+
+
+def test_finalize_status_failed_with_reason_on_subprocess_error(tmp_path, monkeypatch):
+    def fake_finalize(**kwargs):
+        raise RuntimeError("finalize subprocess exited with code -11")
+
+    monkeypatch.setattr(
+        rs.RecordingService, "_run_finalize_subprocess",
+        staticmethod(fake_finalize))
+
+    svc = _make_svc(tmp_path)
+    _arm(svc, started_at=datetime.now() - timedelta(seconds=60),
+         mic_samples=60 * 16000)
+
+    out = svc.stop_recording()
+
+    assert out.finalize_status == "failed"
+    assert out.finalize_error is not None
+    assert "code -11" in out.finalize_error
+    # The reason it started (and roughly when) must survive so a
+    # /sessions/{id}/process caller can still report it.
+    assert out.finalize_started_at is not None
+
+
+def test_finalize_status_fields_round_trip_through_json():
+    """The whole point of persisting this to disk (see
+    _write_session_stub) is that a reader loading the session JSON gets
+    the same state back — this is what makes the marker survive a
+    backend restart."""
+    session = rs.Session(session_id="RT1")
+    session.finalize_status = "finalizing"
+    session.finalize_started_at = datetime(2026, 8, 14, 10, 51, 10)
+    session.finalize_error = None
+
+    restored = rs.Session.from_dict(session.to_dict())
+
+    assert restored.finalize_status == "finalizing"
+    assert restored.finalize_started_at == datetime(2026, 8, 14, 10, 51, 10)
+    assert restored.finalize_error is None
+
+    session.finalize_status = "failed"
+    session.finalize_error = "finalize subprocess exited with code -11"
+    restored2 = rs.Session.from_dict(session.to_dict())
+    assert restored2.finalize_status == "failed"
+    assert restored2.finalize_error == "finalize subprocess exited with code -11"
+
+    # A session that predates this feature (no finalize_status key at
+    # all in the dict) must load as None, not raise or default to a
+    # scary value.
+    legacy = rs.Session.from_dict({"session_id": "LEGACY"})
+    assert legacy.finalize_status is None
+    assert legacy.finalize_started_at is None
+    assert legacy.finalize_error is None

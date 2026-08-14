@@ -217,3 +217,160 @@ def test_recovery_is_a_noop_on_clean_and_missing_dirs(recordings_dir: Path, tmp_
         SessionService(str(recordings_dir)),
         capture_dir=iso,
     ) == []
+
+
+# ── crash-mid-finalize recovery (field repro 2026-08-14) ──────────────
+#
+# Session.finalize_status is written to disk as "finalizing" BEFORE the
+# (possibly minutes-long) finalize subprocess is spawned, specifically
+# so a crash mid-finalize is visible instead of silently absent. But
+# nothing used to clear that marker again on restart — a session could
+# report itself as "still finalizing" forever. These tests pin that a
+# backend restart during finalize is always resolved by the startup
+# recovery pass, never left stuck.
+
+def _write_stub_json(recordings_dir: Path, session_id: str, **overrides) -> None:
+    import json as _j
+    base = {
+        "session_id": session_id,
+        "display_name": f"Session {session_id}",
+        "started_at": "2026-08-14T10:00:00",
+        "ended_at": "2026-08-14T10:30:00",
+        "audio_path": str(recordings_dir / f"session_{session_id}.wav"),
+        "speakers": {}, "segments": [], "screenshots": [], "attendees": [],
+        "client": "", "project": "", "notes": "",
+        "finalize_status": "finalizing",
+        "finalize_started_at": "2026-08-14T10:51:10",
+        "finalize_error": None,
+    }
+    base.update(overrides)
+    (recordings_dir / f"session_{session_id}.json").write_text(_j.dumps(base))
+
+
+def test_orphan_recovery_clears_stuck_finalizing_marker(recordings_dir: Path):
+    """The common case: backend crashes mid-finalize, mic/loopback
+    temps survive, restart merges them into a real session. The
+    "finalizing" marker left over from before the crash must not
+    survive into the recovered session — the audio is right there."""
+    write_sine_wav(recordings_dir / "_recording_fin1.wav",
+                   duration_s=2.0, samplerate=48000)
+    _write_stub_json(recordings_dir, "fin1")
+    svc = SessionService(str(recordings_dir))
+
+    results = recover_orphans(
+        str(recordings_dir), svc,
+        capture_dir=str(recordings_dir / "_unused_capture_isolation"),
+    )
+
+    assert _statuses(results) == {"fin1": "recovered"}
+    loaded = svc.load_full("fin1")
+    assert loaded.finalize_status is None
+    assert loaded.finalize_started_at is None
+    assert loaded.finalize_error is None
+
+
+def test_already_finalized_crash_clears_stuck_finalizing_marker(recordings_dir: Path):
+    """Crash happened AFTER finalize wrote the WAV but BEFORE the
+    completed state (finalize_status=None) was persisted — the on-disk
+    JSON still says "finalizing" even though the audio is whole. The
+    already-finalized / cleaned-leftover-temps branch must still clear
+    the stale marker, not just sweep the strays."""
+    write_sine_wav(recordings_dir / "_recording_fin2.wav", 1.0, 48000)
+    write_sine_wav(recordings_dir / "session_fin2.wav", 5.0, 16000)
+    _write_stub_json(recordings_dir, "fin2")
+    svc = SessionService(str(recordings_dir))
+
+    results = recover_orphans(
+        str(recordings_dir), svc,
+        capture_dir=str(recordings_dir / "_unused_capture_isolation"),
+    )
+
+    assert _statuses(results) == {"fin2": "cleaned_leftover_temps"}
+    loaded = svc.load_full("fin2")
+    assert loaded.finalize_status is None
+
+
+def test_failed_orphan_merge_marks_finalize_failed_instead_of_stuck(recordings_dir: Path):
+    """Merge itself fails (corrupt mic temp) — the raw audio genuinely
+    can't be recovered. The session must come out of recovery reporting
+    "failed" with a reason, never left claiming "finalizing" forever."""
+    corrupt_mic = recordings_dir / "_recording_fin3.wav"
+    corrupt_mic.write_bytes(b"not a wav at all" * 256)
+    _write_stub_json(recordings_dir, "fin3")
+    svc = SessionService(str(recordings_dir))
+
+    results = recover_orphans(
+        str(recordings_dir), svc,
+        capture_dir=str(recordings_dir / "_unused_capture_isolation"),
+    )
+
+    assert list(_statuses(results).values())[0].startswith("merge_failed")
+    loaded = svc.load_full("fin3")
+    assert loaded.finalize_status == "failed"
+    assert loaded.finalize_error is not None
+    assert corrupt_mic.exists()  # still preserved for manual recovery
+
+
+def test_stuck_finalizing_sweep_clears_marker_when_audio_already_complete(
+    recordings_dir: Path,
+):
+    """Narrowest race: finalize succeeded, the subprocess's temp files
+    were already deleted, but the backend died before the completed
+    state (finalize_status=None) reached disk. No orphan temp survives
+    for scan_orphans() to find at all — the sweep at the end of
+    recover_orphans() must still find this session by its
+    finalize_status alone and see that the audio is right there."""
+    write_sine_wav(recordings_dir / "session_fin4.wav", 5.0, 16000)
+    _write_stub_json(recordings_dir, "fin4")
+    svc = SessionService(str(recordings_dir))
+
+    results = recover_orphans(
+        str(recordings_dir), svc,
+        capture_dir=str(recordings_dir / "_unused_capture_isolation"),
+    )
+
+    assert _statuses(results) == {
+        "fin4": "finalize_marker_cleared_audio_present"}
+    loaded = svc.load_full("fin4")
+    assert loaded.finalize_status is None
+
+
+def test_stuck_finalizing_sweep_marks_failed_when_nothing_recoverable(
+    recordings_dir: Path,
+):
+    """Worst case for this narrow race: no orphan temp, no completed
+    WAV either — genuinely nothing to recover from. Must resolve to
+    "failed" with an explanatory reason, never sit as "finalizing"
+    forever with no process left running to ever clear it."""
+    _write_stub_json(recordings_dir, "fin5")
+    svc = SessionService(str(recordings_dir))
+
+    results = recover_orphans(
+        str(recordings_dir), svc,
+        capture_dir=str(recordings_dir / "_unused_capture_isolation"),
+    )
+
+    assert _statuses(results) == {
+        "fin5": "finalize_marked_failed_no_recovery"}
+    loaded = svc.load_full("fin5")
+    assert loaded.finalize_status == "failed"
+    assert loaded.finalize_error is not None
+
+
+def test_recovery_leaves_non_finalizing_sessions_untouched(recordings_dir: Path):
+    """A session with no finalize history at all (finalize_status is
+    None, the common case for every session that predates this
+    feature, or that never had a finalize in flight) must not be
+    touched by the sweep — it isn't stuck, there's nothing to resolve."""
+    _write_stub_json(recordings_dir, "fin6", finalize_status=None,
+                     finalize_started_at=None)
+    svc = SessionService(str(recordings_dir))
+
+    results = recover_orphans(
+        str(recordings_dir), svc,
+        capture_dir=str(recordings_dir / "_unused_capture_isolation"),
+    )
+
+    assert results == []
+    loaded = svc.load_full("fin6")
+    assert loaded.finalize_status is None

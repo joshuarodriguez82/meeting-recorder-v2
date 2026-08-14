@@ -385,6 +385,15 @@ class SessionService:
             # Offline AEC decision for this session's finalize, if the
             # toggle was on. See Session.aec_outcome for the shape.
             "aec_outcome": data.get("aec_outcome"),
+            # Finalize-in-progress state — lets the Sessions list show
+            # "Finalizing…" / "Finalize failed" without loading the full
+            # session JSON, and lets recovery_service's startup sweep
+            # find every "finalizing" session by scanning summaries
+            # instead of every session's full JSON. See
+            # Session.finalize_status for the three-state contract.
+            "finalize_status": data.get("finalize_status"),
+            "finalize_started_at": data.get("finalize_started_at"),
+            "finalize_error": data.get("finalize_error"),
         }
 
     def _read_and_parse(self, path: Path) -> Optional[dict]:
