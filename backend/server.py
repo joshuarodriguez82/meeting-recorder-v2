@@ -3830,6 +3830,11 @@ async def get_session_audio(session_id: str):
     data = svc.session_svc.load(session_id)
     if not data:
         raise HTTPException(status_code=404, detail="Session not found")
+    # A session mid-finalize has no playable file at audio_path YET —
+    # that's not the same as "not found". Tell the truth (still
+    # finalizing / finalize failed) instead of a bare 404 that reads as
+    # an empty/lost recording. See _finalize_status_detail.
+    _raise_if_finalizing_dict(data)
     audio_path = data.get("audio_path")
     resolved = _resolve_within_scan_roots(audio_path)
     if resolved is None:
@@ -5375,6 +5380,88 @@ async def import_session(req: ImportSessionRequest):
     return {"ok": True, "session_id": session_id}
 
 
+# ── Finalize-in-progress three-way state (field repro 2026-08-14) ────
+#
+# Before this, /sessions/{id}/process (and every other endpoint that
+# reads a session's audio) had exactly one failure mode for "the WAV
+# isn't at audio_path yet": a RuntimeError claiming the file "may have
+# been moved, deleted, or not yet synced down from the cloud" — a 500,
+# logged at ERROR. That message is only true for a THIRD case; the
+# other two are normal, temporary, and honestly reportable:
+#
+#   1. finalize still running   -> 409, not an error, don't log ERROR.
+#   2. finalize failed          -> report the recorded reason, not a
+#                                   generic "missing" claim.
+#   3. genuinely no finalize in flight and no audio -> the existing
+#                                   RuntimeError-based message is
+#                                   accurate here; leave it alone.
+#
+# See Session.finalize_status / recording_service.stop_recording (where
+# the state is set/cleared) and services/recovery_service.py (where a
+# backend restart mid-finalize is resolved instead of left stuck).
+def _finalize_status_detail(session: "Session") -> Optional[tuple[int, str]]:
+    """Return ``(status_code, detail)`` if ``session`` is currently
+    finalizing or its last finalize failed — the caller should raise
+    HTTPException with these immediately, before touching the audio
+    file at all. Returns None when it's safe to proceed to the normal
+    "does the audio file exist" checks (case 3 above)."""
+    status = getattr(session, "finalize_status", None)
+    if status == "finalizing":
+        elapsed_s = 0.0
+        started = getattr(session, "finalize_started_at", None)
+        if started:
+            elapsed_s = max(0.0, (datetime.now() - started).total_seconds())
+        mins, secs = divmod(int(elapsed_s), 60)
+        elapsed_str = f"{mins}m {secs:02d}s" if mins else f"{secs}s"
+        aec_note = ""
+        if svc.settings and getattr(svc.settings, "echo_cancellation_enabled", False):
+            aec_note = (
+                " Echo cancellation is enabled, which can make this step "
+                "take several minutes for longer meetings."
+            )
+        detail = (
+            f"This recording is still being finalized (running for "
+            f"{elapsed_str}).{aec_note} This is normal — no data has "
+            f"been lost. Please wait and try again in a bit; there's no "
+            f"need to keep retrying."
+        )
+        return (409, detail)
+    if status == "failed":
+        reason = getattr(session, "finalize_error", None) or "unknown error"
+        detail = f"Finalizing this recording's audio failed: {reason}"
+        return (422, detail)
+    return None
+
+
+def _raise_if_finalizing(session: "Session") -> None:
+    """Raise HTTPException for cases 1/2 above; no-op (case 3, or a
+    session with no finalize history at all) otherwise."""
+    result = _finalize_status_detail(session)
+    if result is not None:
+        code, detail = result
+        raise HTTPException(status_code=code, detail=detail)
+
+
+def _raise_if_finalizing_dict(data: dict) -> None:
+    """Same as ``_raise_if_finalizing`` but for callers that only have
+    the raw session dict (e.g. SessionService.load(), not load_full())
+    — the audio and screenshot-serving endpoints use the raw dict to
+    avoid the cost of rebuilding a full Session for a file stream."""
+    status = data.get("finalize_status")
+    if status not in ("finalizing", "failed"):
+        return
+    fake = Session(session_id=data.get("session_id", ""))
+    fake.finalize_status = status
+    fake.finalize_error = data.get("finalize_error")
+    started = data.get("finalize_started_at")
+    if started:
+        try:
+            fake.finalize_started_at = datetime.fromisoformat(started)
+        except ValueError:
+            pass
+    _raise_if_finalizing(fake)
+
+
 @app.post("/sessions/{session_id}/process")
 async def process_session(session_id: str):
     svc.load_settings()
@@ -5412,6 +5499,11 @@ async def process_session(session_id: str):
         session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
+        # Finalize still running or already known to have failed — tell
+        # the truth about which, instead of letting the "audio file
+        # missing" RuntimeError further down claim it was moved/deleted/
+        # not synced. See _finalize_status_detail's module comment.
+        _raise_if_finalizing(session)
         # Serialize the shared-state transcribe/diarize stage — see
         # _PROCESSING_LOCK. Without this, a manual re-process here racing a
         # background auto-process cross-contaminates session transcripts.
@@ -5514,6 +5606,10 @@ async def _run_extraction(session_id: str, extractor_name: str, field_name: str,
     session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    # A session mid-finalize (or whose finalize just failed) has no
+    # transcript yet for a specific, honest reason — surface that
+    # instead of the generic "no transcript" 400 below.
+    _raise_if_finalizing(session)
     if not session.segments:
         raise HTTPException(status_code=400,
                             detail="Session has no transcript (run /process first)")
@@ -5588,7 +5684,10 @@ async def summarize_session(session_id: str, req: TemplateRequest):
     if not svc.summarizer:
         raise HTTPException(status_code=400, detail="Anthropic API key required")
     session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
-    if not session or not session.segments:
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _raise_if_finalizing(session)
+    if not session.segments:
         raise HTTPException(status_code=400, detail="Session has no transcript")
     try:
         # Resolve the template name to its current prompt via the template
@@ -5799,11 +5898,13 @@ async def process_full(session_id: str, req: ProcessFullRequest):
         session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
+        _raise_if_finalizing(session)
         if not session.segments:
             async with _PROCESSING_LOCK:
                 session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
                 if not session:
                     raise HTTPException(status_code=404, detail="Session not found")
+                _raise_if_finalizing(session)
                 if not session.segments:
                     # DATA-LOSS FIX (2026-06-15): see the long-form comment in
                     # the manual /sessions/{id}/process handler. Pass session
@@ -6053,6 +6154,10 @@ async def create_follow_up_drafts(session_id: str, req: FollowUpDraftsRequest):
     svc.load_settings()
     if not svc.summarizer:
         raise HTTPException(status_code=400, detail="Anthropic API key required")
+    session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _raise_if_finalizing(session)
     try:
         from services.follow_up_email import draft_follow_up_emails
         count = await asyncio.to_thread(

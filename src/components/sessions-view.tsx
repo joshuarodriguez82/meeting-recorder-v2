@@ -154,6 +154,18 @@ function RenamableTitle({
  * TRUE stages, each in a bordered circular chip. Variable-length rows
  * meant nothing lined up, and the chips read as a row of buttons.
  */
+
+/** " (running for Xm Ys)" for the Finalizing chip, or "" if the
+ * timestamp is missing/unparseable — the chip still reads fine without
+ * a duration, it just loses the specific number. */
+function _finalizeElapsedSuffix(startedAt?: string | null): string {
+  if (!startedAt) return "";
+  const startedMs = new Date(startedAt).getTime();
+  if (Number.isNaN(startedMs)) return "";
+  const elapsedS = Math.max(0, Math.round((Date.now() - startedMs) / 1000));
+  return ` (running for ${formatDuration(elapsedS)})`;
+}
+
 export function StatusIcons({ session }: { session: SessionSummary }) {
   const stages: { done: boolean; icon: LucideIcon; doneLabel: string; pendingLabel: string }[] = [
     {
@@ -600,6 +612,29 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
                     {s.client && (<><span>·</span><span>{s.client}</span></>)}
                     {s.project && (<><span>·</span><span>{s.project}</span></>)}
                   </div>
+                  {s.finalize_status === "finalizing" && (
+                    <div
+                      className="inline-flex items-start gap-1.5 max-w-full rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300 text-[11px] px-2.5 py-1 mt-2"
+                      title="The post-stop finalize step (WAV merge, optional echo cancellation) is still running. This is normal — no data has been lost. AI actions become available once it finishes."
+                    >
+                      <Loader2 className="h-3 w-3 animate-spin shrink-0 mt-0.5" aria-hidden />
+                      <span className="flex-1">
+                        Finalizing{_finalizeElapsedSuffix(s.finalize_started_at)}
+                        {" "}— echo cancellation can take several minutes.
+                      </span>
+                    </div>
+                  )}
+                  {s.finalize_status === "failed" && (
+                    <div
+                      className="inline-flex items-start gap-1.5 max-w-full rounded-full border border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300 text-[11px] px-2.5 py-1 mt-2"
+                      title="The post-stop finalize step failed — the audio may not be usable. Open the session for details."
+                    >
+                      <span aria-hidden className="font-bold leading-none mt-0.5">⚠</span>
+                      <span className="flex-1">
+                        Finalize failed{s.finalize_error ? `: ${s.finalize_error}` : ""}
+                      </span>
+                    </div>
+                  )}
                   {s.audio_integrity_warning && (
                     <div
                       className="inline-flex items-start gap-1.5 max-w-full rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300 text-[11px] px-2.5 py-1 mt-2"
