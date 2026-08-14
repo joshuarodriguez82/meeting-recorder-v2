@@ -23,6 +23,7 @@ from services.extension_calendar_service import (
     DEDUP_TOLERANCE,
     DEFAULT_DURATION_MIN,
     ExtensionCalendarService,
+    describe_structured_source,
     events_from_briefing,
     events_from_structured,
     merge_meetings,
@@ -392,6 +393,58 @@ def test_events_from_structured_tolerates_end_before_start():
     assert events[0]["end"] > events[0]["start"]
 
 
+# ── observability: stats + path classification (field report chain
+#    culminating 2026-08-14 — two calendar-parse paths produced
+#    identically-shaped output with no way to tell which one ran) ────
+
+def test_events_from_structured_stats_report_raw_kept_and_drop_reasons():
+    stats: dict = {}
+    events = events_from_structured([
+        {"subject": "Good", "start": "2026-08-13T09:00:00"},
+        {"subject": "", "start": "2026-08-13T09:00:00"},   # no subject
+        {"subject": "No start"},                           # no start
+        "not a dict",                                       # not a dict
+        None,                                               # not a dict
+    ], stats=stats)
+    assert len(events) == 1
+    assert stats["raw"] == 5
+    assert stats["kept"] == 1
+    assert stats["dropped_no_subject"] == 1
+    assert stats["dropped_no_start"] == 1
+    assert stats["dropped_not_dict"] == 2
+
+
+def test_events_from_briefing_stats_report_raw_kept_and_drop_reasons():
+    stats: dict = {}
+    briefing = {
+        "date": "2026-08-11",
+        "agenda": [
+            {"title": "Real one", "time": "4:00 PM"},
+            {"title": "Dropped call", "time": "3:00 PM", "status": "cancelled"},
+            {"title": "", "time": "4:00 PM"},
+            {"title": "All-day offsite", "time": "All day"},
+        ],
+    }
+    events = events_from_briefing(briefing, stats=stats)
+    assert len(events) == 1
+    assert stats["raw"] == 4
+    assert stats["kept"] == 1
+    assert stats["dropped_cancelled"] == 1
+    assert stats["dropped_no_subject"] == 1
+    assert stats["dropped_no_start"] == 1
+
+
+def test_describe_structured_source_distinguishes_absent_empty_present():
+    # Old extension (or a request that never built calendar_events at
+    # all) — the key is missing, not an empty list.
+    assert describe_structured_source(None) == "absent"
+    # A current extension whose structured DOM scan ran and genuinely
+    # found nothing this capture.
+    assert describe_structured_source([]) == "empty"
+    # At least one structured event was sent.
+    assert describe_structured_source([{"subject": "x"}]) == "present"
+
+
 # ── replace_all shrink guard (field report 2026-08-13) ──────────────
 
 def test_replace_all_merges_instead_of_shrinking_on_partial_capture(tmp_path: Path):
@@ -468,6 +521,47 @@ def test_replace_all_shrink_guard_only_compares_within_the_capture_window(tmp_pa
     assert kept == []
 
 
+# ── replace_all's import_meta (which parse path produced the store) ──
+
+def test_replace_all_persists_import_meta_and_capture_status_exposes_it(tmp_path: Path):
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 14, 9, 0, 0)
+    svc.replace_all(
+        [ext("Standup", now + timedelta(hours=1))], now=now,
+        import_meta={"path": "structured", "raw": 1, "kept": 1,
+                    "dropped": 0, "fallback_reason": None})
+
+    status = svc.capture_status(now=now)
+    assert status["last_import_path"] == "structured"
+    assert status["last_import_raw"] == 1
+    assert status["last_import_kept"] == 1
+    assert status["last_import_dropped"] == 0
+    assert status["last_import_fallback_reason"] is None
+    assert status["last_import_at"] == now.isoformat()
+
+
+def test_replace_all_without_import_meta_preserves_the_prior_one():
+    """The calendar-refresh alarm's plain event write (no import_meta
+    passed) must not blank out import bookkeeping a different POST
+    already recorded — same preserve contract as last_seen_version."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        svc = ExtensionCalendarService(Path(d))
+        t0 = datetime(2026, 8, 14, 9, 0, 0)
+        svc.replace_all(
+            [ext("Standup", t0 + timedelta(hours=1))], now=t0,
+            import_meta={"path": "text-fallback", "raw": 5, "kept": 1,
+                        "dropped": 4, "fallback_reason": "absent"})
+
+        t1 = t0 + timedelta(minutes=30)
+        svc.replace_all([ext("Standup", t1 + timedelta(hours=1))], now=t1)
+
+        status = svc.capture_status(now=t1)
+        assert status["last_import_path"] == "text-fallback"
+        assert status["last_import_raw"] == 5
+        assert status["last_import_fallback_reason"] == "absent"
+
+
 # ── capture_status (Record tab empty-state honesty) ─────────────────
 
 def test_capture_status_reports_never_captured(tmp_path: Path):
@@ -476,6 +570,9 @@ def test_capture_status_reports_never_captured(tmp_path: Path):
     assert status == {
         "updated_at": None, "event_count": 0, "future_event_count": 0,
         "last_seen_version": None, "last_seen_version_at": None,
+        "last_import_path": None, "last_import_raw": None,
+        "last_import_kept": None, "last_import_dropped": None,
+        "last_import_fallback_reason": None, "last_import_at": None,
     }
 
 
