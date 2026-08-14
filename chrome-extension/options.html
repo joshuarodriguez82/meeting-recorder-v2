@@ -147,6 +147,7 @@
   <p class="help">Each fires once per day. Same-hour duplicates are deduped (skipped if a capture ran within the last hour).</p>
 
   <div id="lastCapture"></div>
+  <div id="lastCalendar" style="margin-top: 4px; font-size: 12px; color: #666; font-weight: 500;"></div>
 
   <button id="saveBtn">Save</button>
   <button id="testBtn" class="secondary">Test connection</button>
@@ -157,16 +158,18 @@
   <div class="card">
     <h2>How it works</h2>
     <p>1. You stay signed in to Outlook + Teams in this Chrome (your normal browsing session).</p>
-    <p>2. On a schedule (or when you click <strong>Capture now</strong>), the extension opens these four URLs in the background:</p>
+    <p>2. On a schedule (or when you click <strong>Capture now</strong>), the extension opens these URLs in the background:</p>
     <ul style="font-size: 12px; margin: 4px 0;">
-      <li><code>outlook.office.com/calendar/view/day</code> — today's agenda</li>
+      <li><code>outlook.office.com/calendar/view/day</code> — today's agenda (feeds the Today tab's briefing)</li>
+      <li><code>outlook.office.com/calendar/view/week</code> (current + next) — feeds the Record tab's Upcoming Meetings list, read as structured events from each meeting's own accessibility label, not scraped text</li>
       <li><code>teams.microsoft.com/.../activity</code> — @mentions, replies, missed calls</li>
       <li><code>outlook.cloud.microsoft/mail/?folder=focusedinbox</code> — focused inbox (most needs-response items live here)</li>
       <li><code>teams.microsoft.com/.../chat</code> — active 1:1 / group chats</li>
     </ul>
-    <p>3. Each tab waits ~10 seconds for content to render, the extension reads the <code>[role="main"]</code> inner text, then closes the tab.</p>
-    <p>4. Combined content is POSTed to your local Meeting Recorder backend; the LLM parses it into a daily briefing with check-offable action items.</p>
-    <p>5. Because the scrapes run in YOUR real Chrome (no Playwright), Microsoft's automation detection doesn't fire — your real session cookies authenticate everything.</p>
+    <p>3. Each tab waits for content to render, the extension reads it, then closes the tab.</p>
+    <p>4. The four narrative sources are POSTed together and the LLM parses them into a daily briefing with check-offable action items. Calendar events are POSTed as structured data and go straight into the Record tab's meeting store — no LLM involved, so nothing is lost to a char-budget or a regex guess.</p>
+    <p>5. The calendar refresh also runs on its own schedule every 30 minutes, independent of the auto-capture toggle above, so Upcoming Meetings stays current even if you never turn that toggle on.</p>
+    <p>6. Because the scrapes run in YOUR real Chrome (no Playwright), Microsoft's automation detection doesn't fire — your real session cookies authenticate everything.</p>
   </div>
 
   <script src="options.js"></script>
