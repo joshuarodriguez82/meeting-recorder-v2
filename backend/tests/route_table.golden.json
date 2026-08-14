@@ -260,6 +260,18 @@
   ]
  ],
  [
+  "/extension/info",
+  [
+   "GET"
+  ]
+ ],
+ [
+  "/extension/install",
+  [
+   "POST"
+  ]
+ ],
+ [
   "/ghost-sessions",
   [
    "DELETE"

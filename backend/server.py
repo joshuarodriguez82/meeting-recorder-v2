@@ -379,6 +379,10 @@ from services.extension_calendar_service import (
     ExtensionCalendarService, events_from_briefing, events_from_structured,
     merge_meetings,
 )
+from services.extension_bundle_service import (
+    bundled_extension_version, export_dir as extension_export_dir,
+    export_extension_files, extension_version_status,
+)
 from services.outlook_web_scraper import (
     OutlookAuthExpired, OutlookScraperError, OutlookScraperUnavailable,
     format_for_briefing_parser, open_signin_window,
@@ -7337,6 +7341,13 @@ class ExtensionImportRequest(BaseModel):
     # view's raw text and, when used, is parsed WITHOUT touching the
     # saved briefing (see the calendar-only branch below).
     calendar_text: Optional[str] = ""
+    # Self-reported extension version — chrome.runtime.getManifest()
+    # .version, added in 1.2.0 (see chrome-extension/background.js).
+    # Absent on an un-upgraded extension; recorded as such rather than
+    # assumed current — see ExtensionCalendarService.
+    # record_extension_version / extension_bundle_service.
+    # extension_version_status.
+    extension_version: Optional[str] = None
 
 
 @app.post("/briefing/extension-import")
@@ -7374,6 +7385,19 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
                           if isinstance(e, dict)]
     calendar_text = (req.calendar_text or "").strip()
     narrative_present = any((owa_text, teams_text, inbox_text, chat_text))
+
+    # Record the extension's self-reported version on EVERY POST that
+    # reaches here, regardless of which branch below runs or whether it
+    # ultimately produces anything usable — a stale extension that
+    # fails to produce anything is exactly the case this needs to catch.
+    # Best-effort: must never fail the import it's piggybacking on.
+    if svc.extension_calendar_svc:
+        try:
+            await asyncio.to_thread(
+                svc.extension_calendar_svc.record_extension_version,
+                req.extension_version)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Extension version bookkeeping failed: {e}")
 
     # ── Calendar-only fast path ──────────────────────────────────────
     # No narrative text at all: this is the calendar-refresh alarm, not
@@ -7509,6 +7533,70 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
         f"fyi={len(stored.get('fyi', []))}, "
         f"calendar_events={ext_kept}")
     return stored
+
+
+# ── Ship-the-extension-in-the-app (see AGENTS.md build item #2/#3) ──────
+#
+# The Chrome extension used to be a separate zip on the GitHub releases
+# page: the user had to find the release, download it, locate their
+# unpacked-extension folder, replace files, and reload — for every
+# release that touched the extension. v2.28.0 shipping a NEW extension
+# version with no way to detect the old one was still installed is what
+# forced this: see services/extension_bundle_service.py.
+#
+# The app now carries chrome-extension/ inside its own runtime bundle
+# (zip-bundle.py) and can write it out on demand to a STABLE folder
+# under the user's app data dir — same folder every release, so
+# updating is "click Install/Update, click Reload in Chrome" instead of
+# a file hunt.
+
+@app.get("/extension/info")
+async def extension_info():
+    """Bundled vs. last-seen Chrome extension version, for the Settings
+    Chrome Extension card. Never 500s: a dev checkout without a
+    zip-bundle build (bundled_version None) and a store that has never
+    seen a POST are both legitimate, reportable states, not errors."""
+    svc.load_settings()
+    bundled = bundled_extension_version()
+    last_seen_version = None
+    last_seen_at = None
+    if svc.extension_calendar_svc:
+        try:
+            status = await asyncio.to_thread(
+                svc.extension_calendar_svc.capture_status)
+            last_seen_version = status.get("last_seen_version")
+            last_seen_at = status.get("last_seen_version_at")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Extension status unavailable: {e}")
+    return {
+        "bundled_version": bundled,
+        "last_seen_version": last_seen_version,
+        "last_seen_at": last_seen_at,
+        "status": extension_version_status(bundled, last_seen_version, last_seen_at),
+        "install_path": str(extension_export_dir()),
+    }
+
+
+@app.post("/extension/install")
+async def install_extension_files():
+    """Write/refresh the bundled extension into its stable install
+    folder (see extension_bundle_service.export_dir — NEVER changes
+    between releases). A failure partway through never leaves a
+    half-written folder presented as success; see export_extension_
+    files's atomically-ish swap."""
+    try:
+        written = await asyncio.to_thread(export_extension_files)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Extension export failed")
+        raise HTTPException(status_code=500, detail=f"Export failed: {e}")
+    return {
+        "ok": True,
+        "path": str(extension_export_dir()),
+        "files": written,
+        "file_count": len(written),
+    }
 
 
 @app.get("/briefing/today")

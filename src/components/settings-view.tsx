@@ -5,7 +5,7 @@ import { api, formatBytes, type ArchiveStatus, type Settings, type TemplateEntry
 import { estimateCopilotCost, formatUsd } from "@/lib/copilot-cost";
 import { confirmDialog } from "@/lib/confirm";
 import { toast } from "sonner";
-import { Loader2, Save, Trash2, Plus, RotateCcw } from "lucide-react";
+import { Loader2, Save, Trash2, Plus, RotateCcw, AlertTriangle, CheckCircle2, Copy, DownloadCloud, HelpCircle } from "lucide-react";
 import { GpuAccelerationCard } from "./gpu-acceleration-card";
 import { KnownSpeakersSection } from "./known-speakers-section";
 import { SemanticIndexSection } from "./semantic-index-section";
@@ -1219,6 +1219,45 @@ function ChromeExtensionCard() {
   const [tokenVisible, setTokenVisible] = useState(false);
   const [copyMsg, setCopyMsg] = useState<string>("");
 
+  // Bundled-vs-last-seen version tracking (v2.28.1: the app had no way
+  // to detect a stale, still-installed extension — see AGENTS.md's
+  // build item #1/#2). `extInfo` is null while loading OR when the
+  // backend couldn't be reached; distinguish those with `extLoading`.
+  const [extInfo, setExtInfo] = useState<Awaited<ReturnType<typeof api.getExtensionInfo>> | null>(null);
+  const [extLoading, setExtLoading] = useState(true);
+  const [installing, setInstalling] = useState(false);
+  const [installMsg, setInstallMsg] = useState<string>("");
+
+  const loadExtInfo = useCallback(async () => {
+    setExtLoading(true);
+    try {
+      setExtInfo(await api.getExtensionInfo());
+    } catch {
+      setExtInfo(null);
+    } finally {
+      setExtLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadExtInfo();
+  }, [loadExtInfo]);
+
+  const installFiles = async () => {
+    setInstalling(true);
+    setInstallMsg("");
+    try {
+      const result = await api.installExtensionFiles();
+      setInstallMsg(
+        `Wrote ${result.file_count} file${result.file_count === 1 ? "" : "s"} to ${result.path}.`);
+      await loadExtInfo();
+    } catch (e) {
+      setInstallMsg(e instanceof Error ? `Install failed: ${e.message}` : "Install failed.");
+    } finally {
+      setInstalling(false);
+    }
+  };
+
   useEffect(() => {
     (async () => {
       try {
@@ -1271,6 +1310,97 @@ function ChromeExtensionCard() {
         </p>
       </CardHeader>
       <CardContent className="space-y-4">
+        <div className="rounded-md border p-3 space-y-2">
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-muted-foreground">Bundled version</span>
+            <span className="font-mono">
+              {extLoading ? "…" : extInfo?.bundled_version ?? "unavailable"}
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-3 text-sm">
+            <span className="text-muted-foreground shrink-0">Last seen</span>
+            <span className="font-mono text-right">
+              {extLoading
+                ? "…"
+                : !extInfo?.last_seen_at
+                  ? "never posted"
+                  : extInfo.last_seen_version
+                    ? `${extInfo.last_seen_version} · ${new Date(extInfo.last_seen_at).toLocaleString()}`
+                    : `unknown / pre-1.2.0 · ${new Date(extInfo.last_seen_at).toLocaleString()}`}
+            </span>
+          </div>
+
+          {!extLoading && extInfo?.status === "update_available" && (
+            <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-xs text-amber-700 dark:text-amber-400">
+              <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+              <span>
+                The extension that last posted (<strong>{extInfo.last_seen_version}</strong>) is
+                older than the version this app ships (<strong>{extInfo.bundled_version}</strong>).
+                Click <strong>Install / Update extension files</strong> below, then click{" "}
+                <strong>Reload</strong> on the extension in <code className="text-[11px]">chrome://extensions</code>.
+              </span>
+            </div>
+          )}
+          {!extLoading && extInfo?.status === "unknown_version" && (
+            <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-xs text-amber-700 dark:text-amber-400">
+              <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+              <span>
+                The extension that last posted didn&apos;t report a version at all (extensions
+                before 1.2.0 didn&apos;t send one). Install/update below to make sure you&apos;re
+                on the current build.
+              </span>
+            </div>
+          )}
+          {!extLoading && extInfo?.status === "never_posted" && (
+            <div className="flex items-start gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-2 text-xs text-muted-foreground">
+              <HelpCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+              <span>The extension has never posted anything to this app yet. Follow the first-time setup below.</span>
+            </div>
+          )}
+          {!extLoading && extInfo?.status === "up_to_date" && (
+            <div className="flex items-center gap-2 text-xs text-emerald-700 dark:text-emerald-400">
+              <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+              <span>Up to date.</span>
+            </div>
+          )}
+          {!extLoading && extInfo?.status === "unknown" && (
+            <div className="flex items-start gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-2 text-xs text-muted-foreground">
+              <HelpCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+              <span>This build doesn&apos;t carry a bundled extension (dev build) — install status can&apos;t be judged.</span>
+            </div>
+          )}
+
+          <Button type="button" size="sm" onClick={installFiles} disabled={installing}>
+            {installing
+              ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              : <DownloadCloud className="h-4 w-4 mr-2" />}
+            Install / Update extension files
+          </Button>
+          {installMsg && <p className="text-xs text-muted-foreground">{installMsg}</p>}
+
+          {extInfo?.install_path && (
+            <div className="space-y-1">
+              <Label className="text-[11px] text-muted-foreground">Stable install folder</Label>
+              <div className="flex gap-2">
+                <Input value={extInfo.install_path} readOnly className="font-mono text-xs" />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => copy("Install path", extInfo.install_path)}
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                This path never changes between releases — load it unpacked in Chrome ONCE, and
+                every future click on <strong>Install / Update</strong> rewrites the same folder
+                in place.
+              </p>
+            </div>
+          )}
+        </div>
+
         <div className="space-y-2">
           <Label>Backend URL</Label>
           <div className="flex gap-2">
@@ -1330,13 +1460,15 @@ function ChromeExtensionCard() {
         )}
 
         <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground space-y-1">
-          <p className="font-medium text-foreground">First-time install:</p>
-          <p>1. Download <code>chrome-extension.zip</code> from the Meeting Recorder release page and extract to a folder you&apos;ll keep around.</p>
+          <p className="font-medium text-foreground">First-time setup:</p>
+          <p>1. Click <strong>Install / Update extension files</strong> above.</p>
           <p>2. In Chrome, open <code>chrome://extensions</code>, enable <strong>Developer mode</strong> (top-right toggle).</p>
-          <p>3. Click <strong>Load unpacked</strong>, select the extracted folder.</p>
+          <p>3. Click <strong>Load unpacked</strong>, select the stable install folder shown above.</p>
           <p>4. Pin the Meeting Recorder extension icon to your toolbar.</p>
           <p>5. Click the icon → <strong>Settings</strong>, paste the URL + token from above, click <strong>Save</strong>.</p>
           <p>6. Anytime you want a fresh brief: click the extension icon → <strong>Capture &amp; Send</strong>. Briefing appears in the Today tab.</p>
+          <p className="font-medium text-foreground pt-2">Updating after a new release:</p>
+          <p>Click <strong>Install / Update extension files</strong> above, then go to <code>chrome://extensions</code> and click <strong>Reload</strong> on the Meeting Recorder card — same folder, no re-picking a directory.</p>
         </div>
       </CardContent>
     </Card>
