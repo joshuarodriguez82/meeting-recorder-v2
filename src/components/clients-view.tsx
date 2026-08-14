@@ -130,6 +130,8 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
 
   // Project sub-selection (null = show all meetings for this client)
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
+  // Which stat-card drill-down (if any) is open below the stat grid.
+  const [drill, setDrill] = useState<"actions" | "decisions" | null>(null);
   // Extra projects the user has created for this client but hasn't tagged yet
   const [pendingProjectsByClient, setPendingProjectsByClient] = useState<Record<string, string[]>>({});
   const [showNewProject, setShowNewProject] = useState(false);
@@ -141,6 +143,13 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
   useEffect(() => {
     setSelectedProject(null);
   }, [selected]);
+
+  // A drill-down open for one client/project's Open Actions or Decisions
+  // stops meaning anything once the filter changes underneath it — close
+  // it so the panel never shows stale rows for the newly-selected scope.
+  useEffect(() => {
+    setDrill(null);
+  }, [selected, selectedProject]);
 
   useEffect(() => {
     if (!selected && clients.length > 0) setSelected(clients[0]);
@@ -244,14 +253,16 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
     ? clientSessions.filter((s) => s.project === selectedProject)
     : clientSessions;
   const visibleSeconds = visibleSessions.reduce((sum, s) => sum + s.duration_s, 0);
-  const openActions = visibleSessions.reduce((count, s) => {
-    if (!s.action_items) return count;
-    return count + (s.action_items.match(/^\s*-\s*\[\s\]/gm)?.length || 0);
-  }, 0);
-  const decisions = visibleSessions.reduce((count, s) => {
-    if (!s.decisions) return count;
-    return count + (s.decisions.match(/^##/gm)?.length || 0);
-  }, 0);
+  // Counts and the drill-down panel both read through parseOpenActions /
+  // parseDecisions (defined near the other module-scope helpers below) so
+  // the number on the stat card and the number of rows in the panel can
+  // never disagree.
+  const openActions = visibleSessions.reduce(
+    (count, s) => count + parseOpenActions(s.action_items).length, 0
+  );
+  const decisions = visibleSessions.reduce(
+    (count, s) => count + parseDecisions(s.decisions).length, 0
+  );
 
   const handleCreateProject = () => {
     const n = newProjectName.trim();
@@ -356,6 +367,7 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
         <KnowledgeFolderCard
           client={selected}
           folder={clientConfigs[selected.trim().toLowerCase()]?.knowledge_folder || ""}
+          exportFolder={clientConfigs[selected.trim().toLowerCase()]?.export_folder || ""}
           onSaved={(folder) => {
             setClientConfigs((prev) => ({
               ...prev,
@@ -440,13 +452,34 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
           </CardContent>
         </Card>
 
-        {/* Stat cards — reflect the current filter (all client meetings OR just the selected project) */}
+        {/* Stat cards — reflect the current filter (all client meetings OR just the selected project).
+            Open Actions and Decisions double as toggles for the drill-down panel below; a card
+            with nothing behind it (value 0) stays non-interactive since there's nothing to open. */}
         <div className="grid grid-cols-4 gap-3">
           <StatCard label="Meetings" value={visibleSessions.length.toString()} />
           <StatCard label="Hours" value={(visibleSeconds / 3600).toFixed(1)} />
-          <StatCard label="Open Actions" value={openActions.toString()} />
-          <StatCard label="Decisions" value={decisions.toString()} />
+          <StatCard
+            label="Open Actions"
+            value={openActions.toString()}
+            active={drill === "actions"}
+            onClick={openActions > 0 ? () => setDrill((d) => (d === "actions" ? null : "actions")) : undefined}
+          />
+          <StatCard
+            label="Decisions"
+            value={decisions.toString()}
+            active={drill === "decisions"}
+            onClick={decisions > 0 ? () => setDrill((d) => (d === "decisions" ? null : "decisions")) : undefined}
+          />
         </div>
+
+        {drill && (
+          <DrillDownCard
+            kind={drill}
+            sessions={visibleSessions}
+            onClose={() => setDrill(null)}
+            onOpenSession={onOpenSession}
+          />
+        )}
 
         {/* Meetings list */}
         <Card>
@@ -773,12 +806,109 @@ function RenameProjectDialog({
   );
 }
 
-function StatCard({ label, value }: { label: string; value: string }) {
+function StatCard({
+  label, value, onClick, active,
+}: {
+  label: string;
+  value: string;
+  onClick?: () => void;
+  active?: boolean;
+}) {
+  // Cards with no onClick must stay exactly as they render today — non-
+  // interactive, no hover, no button semantics — so this branches on
+  // whether the caller passed one rather than always rendering a button.
+  if (!onClick) {
+    return (
+      <Card>
+        <CardContent className="p-4">
+          <div className="text-2xl font-bold text-primary">{value}</div>
+          <div className="text-xs text-muted-foreground mt-1">{label}</div>
+        </CardContent>
+      </Card>
+    );
+  }
   return (
-    <Card>
-      <CardContent className="p-4">
+    <Card className={`p-0 ${active ? "border-primary bg-accent" : ""}`}>
+      <button
+        type="button"
+        onClick={onClick}
+        className={`w-full text-left rounded-xl p-4 cursor-pointer transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+          active ? "bg-accent" : ""
+        }`}
+      >
         <div className="text-2xl font-bold text-primary">{value}</div>
         <div className="text-xs text-muted-foreground mt-1">{label}</div>
+      </button>
+    </Card>
+  );
+}
+
+// Inline drill-down for the Open Actions / Decisions stat cards. Rows come
+// from parseOpenActions / parseDecisions (defined below) so the panel can
+// never show a count that disagrees with the stat card above it.
+function DrillDownCard({
+  kind, sessions, onClose, onOpenSession,
+}: {
+  kind: "actions" | "decisions";
+  sessions: SessionSummary[];
+  onClose: () => void;
+  onOpenSession: (id: string) => void;
+}) {
+  // Group by meeting, skipping any meeting that contributes zero items —
+  // scoped to the sessions already filtered by the active project chip.
+  const groups = sessions
+    .map((s) => ({
+      session: s,
+      items: kind === "actions" ? parseOpenActions(s.action_items) : parseDecisions(s.decisions),
+    }))
+    .filter((g) => g.items.length > 0);
+  const total = groups.reduce((sum, g) => sum + g.items.length, 0);
+  const title = kind === "actions" ? "Open Actions" : "Decisions";
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between py-3">
+        <CardTitle className="text-sm">
+          {title} ({total})
+        </CardTitle>
+        <Button size="sm" variant="ghost" className="h-6 w-6 p-0" onClick={onClose}>
+          <X className="h-3.5 w-3.5" />
+        </Button>
+      </CardHeader>
+      <CardContent className="pt-0 max-h-[420px] overflow-y-auto space-y-4">
+        {/* Can't actually render empty — 0 isn't clickable — but a filter
+            change could still land here between renders, so say so rather
+            than showing a blank box. */}
+        {groups.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-4 text-center">
+            Nothing to show for the current filter.
+          </p>
+        ) : (
+          groups.map(({ session: s, items }) => (
+            <div key={s.session_id}>
+              <button
+                onClick={() => onOpenSession(s.session_id)}
+                className="w-full text-left flex items-center justify-between gap-2 group"
+                title="Open this meeting"
+              >
+                <span className="text-xs font-medium truncate group-hover:underline">
+                  {s.display_name}
+                  <span className="text-muted-foreground font-normal">
+                    {" · "}{s.started_at ? new Date(s.started_at).toLocaleDateString() : ""}
+                  </span>
+                </span>
+                <span className="text-[10px] text-muted-foreground shrink-0">Open</span>
+              </button>
+              <ul className="mt-1.5 space-y-1">
+                {items.map((item, i) => (
+                  <li key={i} className="text-xs text-muted-foreground pl-3 border-l-2 border-border">
+                    {item}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))
+        )}
       </CardContent>
     </Card>
   );
@@ -1295,6 +1425,23 @@ function DesignatedFolderCard({
   );
 }
 
+// Single source of truth for "how many open actions / decisions does this
+// meeting have" — the Open Actions / Decisions stat cards and the
+// drill-down panel both call these, so the count on the card and the
+// number of rows in the panel can never drift apart the way two separate
+// regex passes eventually would.
+function parseOpenActions(markdown: string): string[] {
+  return (markdown.match(/^\s*-\s*\[\s\].*$/gm) || [])
+    .map((line) => line.replace(/^\s*-\s*\[\s\]/, "").trim())
+    .filter(Boolean);
+}
+
+function parseDecisions(markdown: string): string[] {
+  return (markdown.match(/^##.*$/gm) || [])
+    .map((line) => line.replace(/^#+\s*/, "").trim())
+    .filter(Boolean);
+}
+
 interface DocumentSkipGroup {
   reason: string;
   expected: boolean;
@@ -1328,10 +1475,11 @@ function groupDocumentSkips(skipped: DocumentSkip[]): DocumentSkipGroup[] {
 }
 
 function KnowledgeFolderCard({
-  client, folder, onSaved,
+  client, folder, exportFolder, onSaved,
 }: {
   client: string;
   folder: string;
+  exportFolder: string;
   onSaved: (folder: string) => void;
 }) {
   // Same local-copy-plus-reset pattern as DesignatedFolderCard — typing
@@ -1461,6 +1609,26 @@ function KnowledgeFolderCard({
             )}
           </Button>
         </div>
+        {/* Only worth offering when there's a Designated Folder to mirror.
+            Checked state is derived from the input value rather than
+            stored separately, so it can't drift out of sync with what's
+            actually staged in the field. Toggling only stages the value
+            (like typing does) — it deliberately does NOT save, so there's
+            still exactly one save path and one reindex trigger below. */}
+        {exportFolder && (
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={value.trim() === exportFolder.trim()}
+              onChange={(e) => setValue(e.target.checked ? exportFolder : "")}
+              className="accent-primary h-4 w-4 rounded border-border"
+            />
+            <span className="text-xs text-muted-foreground">
+              Same as Designated Folder{" "}
+              <span className="font-mono break-all">({exportFolder})</span>
+            </span>
+          </label>
+        )}
         {folder && (
           <div className="flex items-center justify-between gap-2 rounded-md border px-2.5 py-2">
             <div className="text-xs min-w-0">
