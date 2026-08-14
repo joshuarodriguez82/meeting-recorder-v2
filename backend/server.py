@@ -376,8 +376,8 @@ from services.daily_briefing_service import (
     DailyBriefingService,
 )
 from services.extension_calendar_service import (
-    ExtensionCalendarService, events_from_briefing, events_from_structured,
-    merge_meetings,
+    ExtensionCalendarService, describe_structured_source, events_from_briefing,
+    events_from_structured, merge_meetings,
 )
 from services.extension_bundle_service import (
     bundled_extension_version, export_dir as extension_export_dir,
@@ -2388,7 +2388,12 @@ async def calendar_available():
     if source == "off":
         return {"available": False, "source": source}
     if source == "extension":
-        status = {"updated_at": None, "event_count": 0, "future_event_count": 0}
+        status = {
+            "updated_at": None, "event_count": 0, "future_event_count": 0,
+            "last_import_path": None, "last_import_raw": None,
+            "last_import_kept": None, "last_import_dropped": None,
+            "last_import_fallback_reason": None, "last_import_at": None,
+        }
         if svc.extension_calendar_svc:
             try:
                 status = await asyncio.to_thread(
@@ -2401,6 +2406,20 @@ async def calendar_available():
             "last_capture_at": status["updated_at"],
             "event_count": status["event_count"],
             "future_event_count": status["future_event_count"],
+            # Which calendar-parse path produced the currently-retained
+            # events, and its raw/kept/dropped counts — see
+            # ExtensionCalendarService.replace_all's `import_meta` and
+            # the server's "Extension calendar: path=..." log line.
+            # Lets the Record tab say "2 meetings from the extension's
+            # structured capture" vs. "1 meeting recovered from text"
+            # instead of rendering identically regardless of which path
+            # ran (field report chain culminating 2026-08-14).
+            "last_import_path": status.get("last_import_path"),
+            "last_import_raw": status.get("last_import_raw"),
+            "last_import_kept": status.get("last_import_kept"),
+            "last_import_dropped": status.get("last_import_dropped"),
+            "last_import_fallback_reason": status.get("last_import_fallback_reason"),
+            "last_import_at": status.get("last_import_at"),
         }
     available = await asyncio.to_thread(is_outlook_available)
     return {"available": bool(available), "source": source}
@@ -7544,6 +7563,43 @@ class ExtensionImportRequest(BaseModel):
     extension_version: Optional[str] = None
 
 
+# Two calendar-parse paths (events_from_structured / events_from_briefing
+# — see services/extension_calendar_service.py) produce IDENTICALLY
+# shaped output, so neither the stored JSON nor a bare "kept N events"
+# log line reveals which one ran. That ambiguity directly caused
+# several wrong diagnoses (field report chain culminating 2026-08-14).
+# These two helpers format the extra "Extension calendar: path=..."
+# line every import branch below emits, so a single grep
+# (`grep "Extension calendar: path="`) always answers "which path, how
+# many raw, how many kept, how many dropped and why".
+
+def _extension_calendar_fallback_note(fallback_reason: Optional[str]) -> str:
+    """Human-readable clause explaining WHY a briefing-fallback import
+    fell back — distinct wording for "extension sent no calendar_events
+    key at all" (absent — an old extension, or a capture that threw
+    before building a payload) vs. "extension sent an empty list"
+    (empty — a current extension whose structured DOM scan ran and
+    found zero candidates). Those mean different things and must not
+    collapse into one message."""
+    if fallback_reason == "absent":
+        return "extension sent no structured events"
+    if fallback_reason == "empty":
+        return "extension's structured scan found zero events"
+    return fallback_reason or ""
+
+
+def _extension_calendar_dropped_detail(stats: Dict[str, Any]) -> str:
+    """" (reason: N, reason2: M)" for every non-zero dropped_* key in a
+    stats dict from events_from_structured/events_from_briefing, or ""
+    if nothing was dropped. Pure formatting, never raises."""
+    parts = []
+    for key, value in (stats or {}).items():
+        if key.startswith("dropped_") and value:
+            label = key[len("dropped_"):].replace("_", " ")
+            parts.append(f"{label}: {value}")
+    return f" ({', '.join(parts)})" if parts else ""
+
+
 @app.post("/briefing/extension-import")
 async def import_briefing_from_extension(req: ExtensionImportRequest):
     """Receives scraped OWA + Teams text from the Chrome extension,
@@ -7600,8 +7656,10 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
         if not svc.extension_calendar_svc:
             raise HTTPException(status_code=503,
                                 detail="Calendar store not initialized")
+        stats: Dict[str, Any] = {}
+        fallback_reason = None
         if calendar_events_in:
-            events = events_from_structured(calendar_events_in)
+            events = events_from_structured(calendar_events_in, stats=stats)
             path = "structured"
         else:
             # Structured extraction found nothing client-side — last-
@@ -7610,6 +7668,16 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
             # discard everything except the agenda. Today's saved
             # briefing (greeting/top_priority/needs_response/fyi) is
             # never touched by this branch.
+            #
+            # WHY it fell back matters and is logged below: "absent"
+            # (req.calendar_events was never sent — an old extension,
+            # or a capture that threw before building a payload) and
+            # "empty" (the extension DID run its structured scan and
+            # found zero candidates this time) point at completely
+            # different problems and were previously indistinguishable
+            # from server-side state alone (field report chain
+            # culminating 2026-08-14).
+            fallback_reason = describe_structured_source(req.calendar_events)
             summ = svc.summarizer or svc.live_summarizer
             if summ is None:
                 raise HTTPException(
@@ -7623,14 +7691,29 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
                 raise HTTPException(status_code=502,
                                     detail=f"LLM parse failed: {e}")
             events = events_from_briefing(
-                parsed_fallback, req.date or parsed_fallback.get("date"))
+                parsed_fallback, req.date or parsed_fallback.get("date"),
+                stats=stats)
             path = "text-fallback"
 
+        dropped = stats.get("raw", len(events)) - stats.get("kept", len(events))
         kept = await asyncio.to_thread(
-            svc.extension_calendar_svc.replace_all, events)
+            svc.extension_calendar_svc.replace_all, events, None, {
+                "path": path,
+                "raw": stats.get("raw", len(events)),
+                "kept": stats.get("kept", len(events)),
+                "dropped": dropped,
+                "fallback_reason": fallback_reason,
+            })
         logger.info(
             f"Calendar-only extension capture ({path}): "
             f"{len(events)} parsed -> {len(kept)} kept")
+        log_path = "structured" if path == "structured" else "briefing-fallback"
+        fallback_note = f" ({_extension_calendar_fallback_note(fallback_reason)})" \
+            if fallback_reason else ""
+        logger.info(
+            f"Extension calendar: path={log_path}{fallback_note} "
+            f"raw={stats.get('raw', 0)} kept={stats.get('kept', 0)} "
+            f"dropped={dropped}{_extension_calendar_dropped_detail(stats)}")
         return {
             "ok": True,
             "path": path,
@@ -7705,14 +7788,43 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
     # events from the LLM-parsed briefing agenda for an un-upgraded
     # extension that never sends calendar_events at all.
     ext_kept = 0
+    ext_log_path = "unavailable"  # svc.extension_calendar_svc missing, or update failed
     if svc.extension_calendar_svc:
         try:
+            calendar_stats: Dict[str, Any] = {}
+            fallback_reason = None
             if calendar_events_in:
-                events = events_from_structured(calendar_events_in)
+                events = events_from_structured(calendar_events_in, stats=calendar_stats)
+                path = "structured"
             else:
-                events = events_from_briefing(stored, stored.get("date"))
-            ext_kept = len(await asyncio.to_thread(
-                svc.extension_calendar_svc.replace_all, events))
+                # See the calendar-only fast path above for why "absent"
+                # vs. "empty" matters — an un-upgraded extension that
+                # never sends calendar_events at all vs. a current one
+                # whose structured scan ran and found nothing.
+                fallback_reason = describe_structured_source(req.calendar_events)
+                events = events_from_briefing(
+                    stored, stored.get("date"), stats=calendar_stats)
+                path = "text-fallback"
+
+            dropped = (calendar_stats.get("raw", len(events))
+                      - calendar_stats.get("kept", len(events)))
+            kept_list = await asyncio.to_thread(
+                svc.extension_calendar_svc.replace_all, events, None, {
+                    "path": path,
+                    "raw": calendar_stats.get("raw", len(events)),
+                    "kept": calendar_stats.get("kept", len(events)),
+                    "dropped": dropped,
+                    "fallback_reason": fallback_reason,
+                })
+            ext_kept = len(kept_list)
+            ext_log_path = "structured" if path == "structured" else "briefing-fallback"
+            fallback_note = (f" ({_extension_calendar_fallback_note(fallback_reason)})"
+                             if fallback_reason else "")
+            logger.info(
+                f"Extension calendar: path={ext_log_path}{fallback_note} "
+                f"raw={calendar_stats.get('raw', 0)} "
+                f"kept={calendar_stats.get('kept', 0)} dropped={dropped}"
+                f"{_extension_calendar_dropped_detail(calendar_stats)}")
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 f"Extension calendar store update failed ({e}); "
@@ -7725,7 +7837,7 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
         f"agenda={len(stored.get('agenda', []))}, "
         f"needs_response={len(stored.get('needs_response', []))}, "
         f"fyi={len(stored.get('fyi', []))}, "
-        f"calendar_events={ext_kept}")
+        f"calendar_events={ext_kept}, path={ext_log_path}")
     return stored
 
 
