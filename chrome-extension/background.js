@@ -39,6 +39,46 @@
 // heavier Teams/Inbox/Chat auto-capture — the whole point of
 // `calendar_source: "extension"`), and it's ALSO folded into the
 // manual "Capture & Send" flow so one button covers everything.
+//
+// v1.3 — field report 2026-08-14: v1.2's structured scan hit a
+// tenant where it matched ZERO elements (`Calendar: 0 events`, no
+// further detail) even though the legacy text path still read 1056
+// chars off the same OWA tab. The v1.2 design assumed every
+// meeting-shaped element carries a time range in its OWN aria-label —
+// that assumption doesn't hold everywhere. Since this environment
+// cannot sign in to the user's tenant to see why, three changes:
+//
+//   1. Diagnose calendar capture (options page button): opens the
+//      calendar tab, runs a read-only probe (`_calendarDiagnosticProbeFunc`
+//      below), and prints exactly what the live DOM looks like —
+//      container/event-node counts, every long aria-label verbatim,
+//      iframe/shadow-root counts, timed snapshots — so a correct
+//      selector can be written without ever seeing the tenant, no
+//      DevTools/pasted console script required.
+//   2. Harden the scan itself against the likely causes a zero
+//      result can't distinguish on its own: same-origin iframes and
+//      open shadow roots are now searched (`_calendarDomScanFunc`'s
+//      `walk`), a candidate's time no longer has to live in its own
+//      label (`findExternalTime` checks a `<time>` descendant, its
+//      `datetime`/`data-*` attributes, adjacent siblings, and the
+//      ancestor gridcell/column), and the settle loop now retries on
+//      CANDIDATE COUNT rather than firing once after a fixed text-size
+//      wait (`shouldStopPolling`).
+//   3. A `0 events` result is no longer silent about why: `stats` and
+//      `zeroReason` (`classifyZeroReason`) distinguish "no candidate
+//      elements found" / "page still rendering" / "found N candidates,
+//      none had a parseable time" / "found N candidates, all all-day"
+//      — each points at a different fix.
+//
+// Still true, and still the point of all of the above: none of the
+// live-DOM behavior here has been exercised against a real Outlook
+// Web tenant in this change — there is no way to sign in to one from
+// this environment. The pure functions (parseMeetingLabel,
+// extractEventsFromCandidates, shouldStopPolling, classifyZeroReason)
+// are covered by chrome-extension/tests/, including the DOM-walking
+// functions run against a simulated fake DOM (fake iframe/shadow-root
+// documents); the diagnostic tool above exists specifically because
+// live tenant behavior cannot be.
 
 // Per-source config. Teams (Activity + Chat) needs more time than
 // OWA because the React tree is much heavier — first paint to
@@ -138,6 +178,15 @@ const CALENDAR_REFRESH_MINUTES = 30;
 // nothing). A half-hour cadence with a lighter 20-minute dedupe keeps
 // it current without hammering Outlook Web on every alarm tick.
 const CALENDAR_DEDUP_WINDOW_MS = 20 * 60 * 1000;
+
+// Diagnose calendar capture (v1.3, options page button): timestamps
+// (from tab load) at which the diagnostic probe re-samples the page,
+// so a rendering-timing problem ("nothing yet at 2s, everything by
+// 10s") is distinguishable from a structural one ("still zero at
+// 15s"). Requested explicitly, not derived from CALENDAR_MAX_WAIT_MS —
+// this is a one-shot user-triggered diagnostic, not the retry loop
+// the real capture uses.
+const DIAGNOSTIC_SNAPSHOT_DELAYS_MS = [2000, 5000, 10000, 15000];
 
 // ──────────────────────────────────────────────────────────────────
 // Lifecycle: re-arm alarms whenever the service worker (re)starts.
@@ -288,11 +337,34 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }).then(sendResponse);
     return true;
   }
+  if (msg?.type === "diagnose-calendar") {
+    diagnoseCalendarCapture()
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: e.message || String(e) }));
+    return true;
+  }
 });
 
 // ──────────────────────────────────────────────────────────────────
 // The actual capture.
 // ──────────────────────────────────────────────────────────────────
+
+// The extension's own manifest version, sent on EVERY POST to the
+// backend (see captureAndSend / captureCalendarOnly below) so the app
+// can tell a stale, still-installed extension apart from a current
+// one — see services/extension_calendar_service.py's
+// record_extension_version. Field report: v2.28.0 shipped a new
+// extension version with the app having no way to detect the OLD one
+// was still what the user had loaded in Chrome. chrome.runtime is
+// always available to a service worker, but wrapped defensively
+// anyway — this must never be the reason a capture fails to send.
+function currentExtensionVersion() {
+  try {
+    return chrome.runtime.getManifest().version || null;
+  } catch (_) {
+    return null;
+  }
+}
 
 async function captureAndSend(backendUrl, token, opts = {}) {
   if (!backendUrl || !token) {
@@ -301,7 +373,7 @@ async function captureAndSend(backendUrl, token, opts = {}) {
 
   console.log(`[ext] starting capture (source=${opts.source || "manual"})`);
 
-  const payload = {};
+  const payload = { extension_version: currentExtensionVersion() };
   const counts = {};
   const errors = [];
 
@@ -342,7 +414,8 @@ async function captureAndSend(backendUrl, token, opts = {}) {
     counts.calendar = calendarCapture.events.length;
     console.log(
       `[ext] Calendar: ${calendarCapture.events.length} event(s) ` +
-      `(layer=${calendarCapture.layer || "text-fallback"}, ` +
+      `(layer=${calendarCapture.layer || "text-fallback"}` +
+      `${calendarCapture.zeroReason ? `, zeroReason=${calendarCapture.zeroReason}` : ""}, ` +
       `weeks=${calendarCapture.diag.weeksScanned}), ` +
       `elapsed=${calendarCapture.elapsedMs}ms`);
   } catch (e) {
@@ -389,6 +462,7 @@ async function captureAndSend(backendUrl, token, opts = {}) {
       ok: true,
       counts,
       calendarLayer: calendarCapture?.layer || null,
+      calendarZeroReason: calendarCapture?.zeroReason || null,
       errors: errors.length ? errors : undefined,
       ts: Date.now(),
     };
@@ -402,6 +476,8 @@ async function captureAndSend(backendUrl, token, opts = {}) {
         ok: true,
         eventCount: counts.calendar || 0,
         layer: calendarCapture?.layer || null,
+        zeroReason: calendarCapture?.zeroReason || null,
+        stats: calendarCapture?.stats || null,
         ts: Date.now(),
       },
     });
@@ -929,12 +1005,50 @@ function parseMeetingLabel(label, columnDateIso, fallbackYear) {
   return { kind: "event", subject, startIso: toNaiveIsoString(start), endIso: toNaiveIsoString(end) };
 }
 
-// Turn a list of DOM-scan candidates ({label, columnDateIso, layer})
-// into deduped structured events + stats. Pure. Dedup key is
-// (normalized subject, start) — Outlook Web routinely renders the
-// same event's aria-label on several nested elements (the tile, its
-// title span, its time span, ...), so the SAME event commonly yields
-// several candidates that must collapse to one.
+// Given a candidate's structured start/end (raw strings straight off
+// a `<time datetime>` or `data-start`/`data-end`-style attribute — see
+// `findExternalTime` in the DOM scan below), build real Date objects.
+// Pure. Deliberately does NOT accept a bare time-of-day here (e.g.
+// "10:00 AM") — `new Date("10:00 AM")` silently resolves against
+// TODAY in the runtime's local timezone, which would be quietly wrong
+// for the "next week" scan. Only full datetime strings a `<time
+// datetime="...">` attribute is expected to carry are accepted; a bare
+// time-of-day found via text (sibling/ancestor/descendant) instead
+// takes the OTHER path — merged into the label and resolved through
+// parseMeetingLabel/columnDateIso, same as any other text time range.
+function parseStructuredTimePair(startRaw, endRaw) {
+  if (!startRaw || !endRaw) return null;
+  const start = new Date(startRaw);
+  const end = new Date(endRaw);
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) return null;
+  return { start, end };
+}
+
+// Parse a candidate that arrived with structuredStart/structuredEnd
+// (a datetime-pair the DOM layer found on a `<time>` descendant or
+// datetime/data-* attribute, rather than as text in the label) into
+// the same result shape parseMeetingLabel returns, so callers don't
+// need to care which path produced it.
+function parseStructuredCandidate(c) {
+  const subject = String((c && c.label) || "").replace(/\s+/g, " ").trim();
+  if (!subject) return { kind: "empty" };
+  const pair = parseStructuredTimePair(c.structuredStart, c.structuredEnd);
+  if (!pair) return { kind: "date-unresolved", subject };
+  return {
+    kind: "event",
+    subject,
+    startIso: toNaiveIsoString(pair.start),
+    endIso: toNaiveIsoString(pair.end),
+  };
+}
+
+// Turn a list of DOM-scan candidates ({label, columnDateIso, layer,
+// structuredStart?, structuredEnd?}) into deduped structured events +
+// stats. Pure. Dedup key is (normalized subject, start) — Outlook Web
+// routinely renders the same event's aria-label on several nested
+// elements (the tile, its title span, its time span, ...), so the
+// SAME event commonly yields several candidates that must collapse to
+// one.
 function extractEventsFromCandidates(candidates, opts = {}) {
   const fallbackYear = opts.fallbackYear || new Date().getFullYear();
   const stats = {
@@ -949,7 +1063,9 @@ function extractEventsFromCandidates(candidates, opts = {}) {
   const seen = new Map();
 
   for (const c of candidates || []) {
-    const r = parseMeetingLabel(c && c.label, (c && c.columnDateIso) || null, fallbackYear);
+    const r = (c && c.structuredStart)
+      ? parseStructuredCandidate(c)
+      : parseMeetingLabel(c && c.label, (c && c.columnDateIso) || null, fallbackYear);
     if (r.kind === "all-day") { stats.allDay++; continue; }
     if (r.kind === "not-meeting-shaped" || r.kind === "empty") { stats.notMeetingShaped++; continue; }
     if (r.kind === "date-unresolved") { stats.dateUnresolved++; continue; }
@@ -984,57 +1100,199 @@ function dominantLayer(stats) {
   return null;
 }
 
-// ── DOM scan (browser-only, NOT unit-testable here) ─────────────────
+// Pure: should the settle-and-collect poll loop stop, given the
+// sequence of candidate counts observed so far (oldest first)? Used
+// by settleAndCollectCalendar's retry loop (impure — real
+// chrome.tabs/chrome.scripting calls) and unit-tested directly here
+// with plain arrays of numbers.
+//
+// Stops once the last `stabilityPolls` counts are all equal — but a
+// STABLE ZERO isn't trusted until `minPollsBeforeZeroExit` polls have
+// happened, because a freshly-opened SPA tab reads "0 candidates" on
+// its first few polls before it's mounted anything; that's a
+// still-rendering page, not a structurally empty one. A stable
+// NON-ZERO count is trusted immediately — once real candidates show
+// up and hold steady, there's no reason to keep waiting out the rest
+// of the max-wait budget.
+function shouldStopPolling(counts, opts = {}) {
+  const stabilityPolls = opts.stabilityPolls || STABILITY_POLLS;
+  const minPollsBeforeZeroExit = opts.minPollsBeforeZeroExit || 5;
+  if (!counts || counts.length < stabilityPolls) return false;
+  const tail = counts.slice(-stabilityPolls);
+  if (!tail.every((c) => c === tail[0])) return false;
+  if (tail[0] > 0) return true;
+  return counts.length >= minPollsBeforeZeroExit;
+}
+
+// Pure: explain a ZERO-event result so the popup can say something
+// more useful than "Calendar: 0 events" — see the v1.3 header comment
+// for why this exists. `stillRendering` comes from the caller: true
+// when the candidate-count poll loop (shouldStopPolling above) never
+// stabilized before CALENDAR_MAX_WAIT_MS ran out.
+function classifyZeroReason(stats, opts = {}) {
+  if (opts.stillRendering) {
+    return "page still rendering (candidate count never stabilized before the wait limit)";
+  }
+  const scanned = (stats && stats.scanned) || 0;
+  if (scanned === 0) {
+    return "no candidate elements found";
+  }
+  const plural = scanned === 1 ? "" : "s";
+  if (stats.allDay > 0 && stats.allDay === scanned) {
+    return `found ${scanned} candidate${plural}, all all-day (excluded)`;
+  }
+  if (stats.dateUnresolved > 0 && stats.dateUnresolved === scanned) {
+    return `found ${scanned} candidate${plural} with a time but no resolvable date`;
+  }
+  return `found ${scanned} candidate${plural}, none had a parseable time`;
+}
+
+// ── DOM scan (runs inside the page; exercised in tests via a
+//    simulated fake DOM — see chrome-extension/tests/) ───────────────
 
 // Runs inside the calendar tab via chrome.scripting.executeScript.
 // Deliberately fully self-contained (no reference to any function
 // above) — injected scripts execute in an isolated page context that
 // cannot close over this file's top-level scope, same constraint the
 // existing readMainText/clickTeamsNav functions already work under.
+// The ONLY external thing it touches is the ambient `document` global
+// — real in the browser, a plain object test fixtures set as
+// `globalThis.document` before calling this function directly in
+// Node (see chrome-extension/tests/).
 //
-// Returns a plain array of { label, columnDateIso, layer } records —
-// no parsing happens here, only collection, so every actual parsing
-// decision lives in the tested pure functions above.
+// Walks `document` plus every reachable same-origin iframe
+// (`el.contentDocument` — cross-origin access throws or returns null,
+// caught and skipped) and open shadow root (`el.shadowRoot` — closed
+// roots aren't exposed on the element at all, so those are silently
+// and correctly never pierced) using only `.children` — no
+// `querySelectorAll`, so the walk works identically over a real DOM
+// and over a hand-built fake one in tests.
+//
+// Returns { candidates, diag }. `candidates` is a plain array of
+// { label, columnDateIso, layer, structuredStart?, structuredEnd? }
+// records — no parsing happens here, only collection; every actual
+// interpretation decision lives in the tested pure functions above.
+// `diag` is walk-shape info (element/iframe/shadow-root counts) for
+// logging.
 function _calendarDomScanFunc() {
   const out = [];
+  const diag = { elementsWalked: 0, iframesSeen: 0, iframesEntered: 0, shadowRootsSeen: 0 };
   try {
     const TIME_HINT_RE = /\d{1,2}(:\d{2})?\s*[AaPp]?\.?[Mm]?\b|\d{1,2}:\d{2}\b/;
     const ALLDAY_HINT_RE = /\ball[\s-]?day\b/i;
     const MONTH_HINT_RE = /(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept|Sep|Oct|Nov|Dec)\.?\s+\d{1,2}(,?\s*\d{4})?/i;
+    const TIME_RANGE_HINT_RE = /(\d{1,2}(:\d{2})?\s*[AaPp]\.?[Mm]\.?|\d{1,2}:\d{2})\s*(?:to|until|-|–|—)\s*(\d{1,2}(:\d{2})?\s*[AaPp]\.?[Mm]\.?|\d{1,2}:\d{2})/i;
     const KNOWN_DATE_ATTRS = ["data-start-date", "data-date", "data-start-day", "data-day", "data-dayid"];
+    const ROLE_HINT_VALUES = { button: true, option: true, gridcell: true };
 
-    function nearestDateIso(el) {
+    function getAttr(el, name) {
+      try { return el && el.getAttribute ? el.getAttribute(name) : null; } catch (_) { return null; }
+    }
+    function textOf(el) {
+      try { return (el && (el.innerText != null ? el.innerText : el.textContent)) || ""; } catch (_) { return ""; }
+    }
+
+    // Breadth-first search for up to `maxResults` descendants matching
+    // `predicate`, capped at `maxDepth`. Used to find <time>
+    // descendants without depending on querySelectorAll.
+    function findDescendants(el, predicate, maxDepth, maxResults) {
+      const found = [];
+      const queue = [{ node: el, depth: 0 }];
+      while (queue.length && found.length < maxResults) {
+        const cur = queue.shift();
+        if (cur.depth > 0 && predicate(cur.node)) found.push(cur.node);
+        if (cur.depth >= maxDepth) continue;
+        const kids = cur.node.children || [];
+        for (let i = 0; i < kids.length; i++) queue.push({ node: kids[i], depth: cur.depth + 1 });
+      }
+      return found;
+    }
+
+    // A candidate's time doesn't have to live in its own label/text.
+    // Look, in order: (1) a <time> descendant — if TWO are found,
+    // treat their `datetime` attrs as a structured start/end pair
+    // (common pattern: separate start-time and end-time nodes); (2)
+    // the element's own datetime/data-start(-time)/data-end(-time)
+    // attributes, as a structured pair; (3) TEXT that already spells
+    // a two-sided range — a <time> descendant's text, the element's
+    // own title/data-time attrs, adjacent siblings' text, or the
+    // nearest ancestor gridcell/column/columnheader's text — merged
+    // into the label and left to the existing text-range parser
+    // downstream (columnDateIso already handles the "no date in the
+    // text" case correctly, so a text range is safer than guessing a
+    // date on a bare time-of-day here — see parseStructuredTimePair's
+    // comment for why bare times aren't treated as structured).
+    function findExternalTime(el) {
+      const timeEls = findDescendants(el, (n) => (n.tagName || "").toLowerCase() === "time", 6, 2);
+      const dtAttrs = timeEls.map((t) => getAttr(t, "datetime")).filter(Boolean);
+      if (dtAttrs.length >= 2) return { mode: "datetime-pair", start: dtAttrs[0], end: dtAttrs[1] };
+
+      const startAttr = getAttr(el, "datetime") || getAttr(el, "data-start") || getAttr(el, "data-start-time");
+      const endAttr = getAttr(el, "data-end") || getAttr(el, "data-end-time");
+      if (startAttr && endAttr) return { mode: "datetime-pair", start: startAttr, end: endAttr };
+
+      const texts = [];
+      if (timeEls.length) texts.push(textOf(timeEls[0]).trim());
+      for (const attr of ["title", "data-time", "data-start-time"]) {
+        const v = getAttr(el, attr);
+        if (v) texts.push(v);
+      }
+      const parent = el.parentElement;
+      if (parent && parent.children) {
+        for (let i = 0; i < parent.children.length; i++) {
+          const kid = parent.children[i];
+          if (kid === el) continue;
+          texts.push(textOf(kid).trim() || getAttr(kid, "aria-label") || "");
+        }
+      }
+      let node = el.parentElement;
+      for (let depth = 0; node && depth < 6; depth++, node = node.parentElement) {
+        const role = getAttr(node, "role");
+        if (role === "gridcell" || role === "columnheader" || role === "column") {
+          texts.push(getAttr(node, "aria-label") || textOf(node));
+        }
+      }
+      for (const t of texts) if (t && TIME_RANGE_HINT_RE.test(t)) return { mode: "text", text: t };
+      for (const t of texts) if (t && TIME_HINT_RE.test(t)) return { mode: "text", text: t };
+      return null;
+    }
+
+    function nearestDateIso(el, columnHeaders) {
       let node = el;
       for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
         for (const attr of KNOWN_DATE_ATTRS) {
-          const v = node.getAttribute && node.getAttribute(attr);
+          const v = getAttr(node, attr);
           if (v) {
             const d = new Date(v);
             if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
           }
         }
-        const aria = node.getAttribute && node.getAttribute("aria-label");
+        const aria = getAttr(node, "aria-label");
         if (aria && MONTH_HINT_RE.test(aria)) {
           const d = new Date(aria.replace(/^[A-Za-z]+,\s*/, ""));
           if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
         }
       }
-      // Tier 3: nearest columnheader by horizontal position.
+      // Tier 3: nearest columnheader (collected during the same walk
+      // that found `el`, across the whole reachable tree including
+      // iframes/shadow roots) by horizontal position.
       try {
-        const headers = document.querySelectorAll('[role="columnheader"]');
-        const rect = el.getBoundingClientRect();
-        const cx = rect.left + rect.width / 2;
-        let best = null, bestDist = Infinity;
-        for (const h of headers) {
-          const label = h.getAttribute("aria-label") || h.innerText || "";
-          if (!MONTH_HINT_RE.test(label)) continue;
-          const hr = h.getBoundingClientRect();
-          const dist = Math.abs((hr.left + hr.width / 2) - cx);
-          if (dist < bestDist) { bestDist = dist; best = label; }
-        }
-        if (best) {
-          const d = new Date(best.replace(/^[A-Za-z]+,\s*/, ""));
-          if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+        const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+        if (rect) {
+          const cx = rect.left + rect.width / 2;
+          let best = null, bestDist = Infinity;
+          for (const h of columnHeaders) {
+            const label = getAttr(h, "aria-label") || textOf(h);
+            if (!label || !MONTH_HINT_RE.test(label)) continue;
+            const hr = h.getBoundingClientRect ? h.getBoundingClientRect() : null;
+            if (!hr) continue;
+            const dist = Math.abs((hr.left + hr.width / 2) - cx);
+            if (dist < bestDist) { bestDist = dist; best = label; }
+          }
+          if (best) {
+            const d = new Date(best.replace(/^[A-Za-z]+,\s*/, ""));
+            if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+          }
         }
       } catch (_) { /* best-effort only */ }
       return null;
@@ -1045,31 +1303,93 @@ function _calendarDomScanFunc() {
     // subject+start dedup downstream is the real safety net; this is
     // just cheap early pruning.
     const seenLabels = new Set();
+    const columnHeaders = [];
+    // { el, label, layer, structuredStart?, structuredEnd? } — date
+    // resolution (needs the FULL columnHeaders list) happens in a
+    // second pass after the whole tree has been walked, so an event
+    // that appears before its column's header in DOM order still
+    // resolves correctly.
+    const rawCandidates = [];
 
-    for (const el of document.querySelectorAll("[aria-label]")) {
-      const label = el.getAttribute("aria-label") || "";
-      if (!label || seenLabels.has(label)) continue;
-      if (!TIME_HINT_RE.test(label) && !ALLDAY_HINT_RE.test(label)) continue;
-      seenLabels.add(label);
-      out.push({ label, columnDateIso: nearestDateIso(el), layer: "aria-label" });
+    function visit(el) {
+      const role = getAttr(el, "role");
+      if (role === "columnheader") columnHeaders.push(el);
+
+      const ownLabel = getAttr(el, "aria-label");
+      if (ownLabel) {
+        if (seenLabels.has(ownLabel)) return;
+        let label = ownLabel;
+        let structuredStart, structuredEnd;
+        if (!TIME_HINT_RE.test(label) && !ALLDAY_HINT_RE.test(label)) {
+          const ext = findExternalTime(el);
+          if (ext && ext.mode === "text") label = `${label}, ${ext.text}`;
+          else if (ext && ext.mode === "datetime-pair") { structuredStart = ext.start; structuredEnd = ext.end; }
+        }
+        if (!structuredStart && !TIME_HINT_RE.test(label) && !ALLDAY_HINT_RE.test(label)) return;
+        seenLabels.add(ownLabel);
+        rawCandidates.push({ el, label, layer: "aria-label", structuredStart, structuredEnd });
+        return;
+      }
+
+      // Layer 2: generic event-shaped node without its own aria-label
+      // (some builds render calendar tiles this way). Broader net,
+      // only adds candidates layer 1 didn't already cover.
+      if (!role || !ROLE_HINT_VALUES[role]) return;
+      let text = textOf(el).trim();
+      if (!text || seenLabels.has(text)) return;
+      let structuredStart, structuredEnd;
+      if (!TIME_HINT_RE.test(text) && !ALLDAY_HINT_RE.test(text)) {
+        const ext = findExternalTime(el);
+        if (ext && ext.mode === "text") text = `${text}, ${ext.text}`;
+        else if (ext && ext.mode === "datetime-pair") { structuredStart = ext.start; structuredEnd = ext.end; }
+      }
+      if (!structuredStart && !TIME_HINT_RE.test(text) && !ALLDAY_HINT_RE.test(text)) return;
+      seenLabels.add(text);
+      rawCandidates.push({ el, label: text, layer: "generic-node", structuredStart, structuredEnd });
     }
 
-    // Layer 2: generic event-shaped nodes without their own aria-label
-    // (some builds render calendar tiles this way). Broader net, only
-    // adds candidates layer 1 didn't already cover.
-    for (const el of document.querySelectorAll('[role="button"], [role="option"], [role="gridcell"]')) {
-      if (el.hasAttribute("aria-label")) continue;
-      const text = (el.innerText || "").trim();
-      if (!text || seenLabels.has(text)) continue;
-      if (!TIME_HINT_RE.test(text) && !ALLDAY_HINT_RE.test(text)) continue;
-      seenLabels.add(text);
-      out.push({ label: text, columnDateIso: nearestDateIso(el), layer: "generic-node" });
+    // Walk `root` (a Document, ShadowRoot, or element) and recurse
+    // into same-origin iframes and open shadow roots. `.children`
+    // only (no text nodes) matches real-DOM semantics and is the only
+    // API this needs, which is what makes it fake-DOM-testable.
+    function walk(root, depth) {
+      if (!root || depth > 30) return;
+      const kids = root.children || [];
+      for (let i = 0; i < kids.length; i++) {
+        const el = kids[i];
+        diag.elementsWalked++;
+        visit(el);
+        if (el.shadowRoot) {
+          diag.shadowRootsSeen++;
+          walk(el.shadowRoot, depth + 1);
+        }
+        const tag = (el.tagName || "").toLowerCase();
+        if (tag === "iframe") {
+          diag.iframesSeen++;
+          let innerDoc = null;
+          try { innerDoc = el.contentDocument || null; } catch (_) { innerDoc = null; }
+          if (innerDoc) { diag.iframesEntered++; walk(innerDoc, depth + 1); }
+        }
+        walk(el, depth + 1);
+      }
+    }
+
+    walk(typeof document !== "undefined" ? document : null, 0);
+
+    for (const c of rawCandidates) {
+      out.push({
+        label: c.label,
+        columnDateIso: nearestDateIso(c.el, columnHeaders),
+        layer: c.layer,
+        structuredStart: c.structuredStart,
+        structuredEnd: c.structuredEnd,
+      });
     }
   } catch (_) {
     // Best-effort only — an empty return here just means the caller
     // falls back to the text-scrape path.
   }
-  return out;
+  return { candidates: out, diag };
 }
 
 // Advance Outlook Web's calendar to the following week. Unverified —
@@ -1111,59 +1431,80 @@ async function goToNextCalendarWeek(tabId) {
   return false;
 }
 
-// Wait for the calendar tab's content to settle (same text-size
-// heuristic as OWA/Teams above, just sized for a week grid), then run
-// the DOM scan. Returns { candidates, text } — `text` is the raw
-// inner-text fallback used only when structured extraction finds
-// nothing at all.
+// Wait for the calendar tab's content to settle, then return whatever
+// the DOM scan found. v1.3: retries on CANDIDATE COUNT, not a fixed
+// text-size wait — the old version ran the DOM scan exactly once,
+// AFTER the text-based settle loop finished, so a grid that rendered
+// its text shell before its event tiles (or one behind a same-origin
+// iframe the old scan couldn't see at all) could get scanned before
+// anything was actually there. Now the scan itself runs every poll
+// and `shouldStopPolling` decides when the count has stabilized.
+// Returns { candidates, text, scanDiag, stabilized } — `text` is the
+// raw inner-text fallback used only when structured extraction finds
+// nothing at all; `stabilized` is false if the max-wait budget ran out
+// without the count ever settling (see classifyZeroReason's
+// "page still rendering" case).
 async function settleAndCollectCalendar(tabId, label) {
-  let lastLen = -1, stableCount = 0, text = "";
   const start = Date.now();
+  let text = "";
+  let candidates = [];
+  let scanDiag = {};
+  const counts = [];
+  let stabilized = false;
+
   while (Date.now() - start < CALENDAR_MAX_WAIT_MS) {
     try {
       text = (await readMainText(tabId)) || "";
     } catch (e) {
       console.warn(`[ext] calendar ${label}: text read failed:`, e);
     }
-    if (text.length >= CALENDAR_TARGET_CHARS) break;
-    if (text.length === lastLen && text.length > 0) {
-      stableCount += 1;
-      if (stableCount >= STABILITY_POLLS) break;
-    } else {
-      stableCount = 0;
-      lastLen = text.length;
+    try {
+      const result = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: _calendarDomScanFunc,
+      });
+      const scanResult = (result && result[0] && result[0].result) || {};
+      candidates = scanResult.candidates || [];
+      scanDiag = scanResult.diag || {};
+    } catch (e) {
+      console.warn(`[ext] calendar ${label}: DOM scan failed:`, e);
+    }
+
+    counts.push(candidates.length);
+
+    if (shouldStopPolling(counts)) {
+      stabilized = true;
+      break;
+    }
+    // Fast path: plenty of fallback text AND at least one candidate
+    // already — no reason to keep polling out the stability window.
+    if (text.length >= CALENDAR_TARGET_CHARS && candidates.length > 0) {
+      stabilized = true;
+      break;
     }
     await sleep(POLL_MS);
   }
 
-  let candidates = [];
-  try {
-    const result = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: _calendarDomScanFunc,
-    });
-    candidates = (result && result[0] && result[0].result) || [];
-  } catch (e) {
-    console.warn(`[ext] calendar ${label}: DOM scan failed:`, e);
-  }
-
   console.log(
-    `[ext] calendar ${label}: ${candidates.length} candidate label(s), ` +
+    `[ext] calendar ${label}: ${candidates.length} candidate(s) after ` +
+    `${counts.length} poll(s) (stabilized=${stabilized}, ` +
+    `iframesEntered=${scanDiag.iframesEntered || 0}, ` +
+    `shadowRootsSeen=${scanDiag.shadowRootsSeen || 0}), ` +
     `${text.length} chars fallback text (below floor=` +
     `${text.length < CALENDAR_MIN_USEFUL_CHARS})`);
-  return { candidates, text };
+  return { candidates, text, scanDiag, stabilized };
 }
 
 // Full calendar capture: this week + next week (see the header
 // comment on why one week view alone can miss the tail of the panel's
 // 168h window), structured extraction with a text-scrape fallback.
-// Returns { events, layer, stats, fallbackText, elapsedMs, diag }.
+// Returns { events, layer, stats, zeroReason, fallbackText, elapsedMs, diag }.
 async function captureCalendarTab() {
   const tab = await chrome.tabs.create({ url: CALENDAR_WEEK_URL, active: false });
   const tabId = tab.id;
   const start = Date.now();
   const allCandidates = [];
-  const diag = { weeksScanned: 0, nextWeekNavOk: null };
+  const diag = { weeksScanned: 0, nextWeekNavOk: null, anyWeekUnstable: false };
   let fallbackText = "";
 
   try {
@@ -1173,6 +1514,7 @@ async function captureCalendarTab() {
     allCandidates.push(...week1.candidates);
     fallbackText = week1.text;
     diag.weeksScanned += 1;
+    if (!week1.stabilized) diag.anyWeekUnstable = true;
 
     const navOk = await goToNextCalendarWeek(tabId);
     diag.nextWeekNavOk = navOk;
@@ -1181,6 +1523,7 @@ async function captureCalendarTab() {
       allCandidates.push(...week2.candidates);
       if (week2.text) fallbackText += "\n\n" + week2.text;
       diag.weeksScanned += 1;
+      if (!week2.stabilized) diag.anyWeekUnstable = true;
     }
   } finally {
     try { await chrome.tabs.remove(tabId); } catch (_) { /* ignore */ }
@@ -1189,11 +1532,15 @@ async function captureCalendarTab() {
   const extraction = extractEventsFromCandidates(allCandidates, {
     fallbackYear: new Date().getFullYear(),
   });
+  const zeroReason = extraction.events.length === 0
+    ? classifyZeroReason(extraction.stats, { stillRendering: diag.anyWeekUnstable })
+    : null;
 
   return {
     events: extraction.events,
     layer: dominantLayer(extraction.stats),
     stats: extraction.stats,
+    zeroReason,
     fallbackText: fallbackText.trim(),
     elapsedMs: Date.now() - start,
     diag,
@@ -1228,7 +1575,7 @@ async function captureCalendarOnly(backendUrl, token) {
     return result;
   }
 
-  const payload = { date: _todayIsoLocal() };
+  const payload = { date: _todayIsoLocal(), extension_version: currentExtensionVersion() };
   if (capture.events.length > 0) {
     payload.calendar_events = capture.events;
   } else if (capture.fallbackText) {
@@ -1236,8 +1583,12 @@ async function captureCalendarOnly(backendUrl, token) {
   } else {
     const result = {
       ok: false,
-      error: "Calendar tab returned nothing (0 structured events, 0 fallback " +
-        "text). Is Outlook Web signed in? Try Capture & Send from the popup.",
+      error: `Calendar tab returned nothing (0 structured events, 0 fallback ` +
+        `text — ${capture.zeroReason || "unknown reason"}). Is Outlook Web ` +
+        `signed in? Try Capture & Send from the popup, or Diagnose calendar ` +
+        `capture in Settings.`,
+      zeroReason: capture.zeroReason || null,
+      stats: capture.stats,
     };
     await chrome.storage.local.set({ lastCalendarCaptureAt: Date.now(), lastCalendarResult: result });
     return result;
@@ -1261,6 +1612,7 @@ async function captureCalendarOnly(backendUrl, token) {
       eventCount: capture.events.length,
       layer: capture.layer,
       stats: capture.stats,
+      zeroReason: capture.zeroReason || null,
       weeksScanned: capture.diag.weeksScanned,
       backendKept: typeof data.kept_events === "number" ? data.kept_events : null,
       ts: Date.now(),
@@ -1278,4 +1630,198 @@ async function captureCalendarOnly(backendUrl, token) {
     await chrome.storage.local.set({ lastCalendarCaptureAt: Date.now(), lastCalendarResult: result });
     return result;
   }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Diagnose calendar capture (v1.3) — one-click, read-only DOM probe.
+//
+// The user is not asked to open DevTools or paste a console script:
+// clicking "Diagnose calendar capture" in Settings opens the same
+// calendar tab the real capture uses, runs this probe against it at
+// several points in time, and the options page renders the result
+// with a Copy button. The probe is read-only — it never clicks
+// anything and never navigates.
+//
+// This function is deliberately NOT unit-tested: it relies on real
+// `querySelectorAll` (including inside iframe documents and shadow
+// roots, which support it natively), and the fake DOM used elsewhere
+// in this file's tests doesn't implement a CSS selector engine. It
+// stays self-contained (no closures over this file's module scope)
+// for the same chrome.scripting.executeScript constraint as
+// _calendarDomScanFunc above.
+// ──────────────────────────────────────────────────────────────────
+
+function _calendarDiagnosticProbeFunc(timeRangeSource, timeHintSource) {
+  try {
+    // Discover every reachable root: the top document, every
+    // same-origin iframe document, and every open shadow root —
+    // BFS, so nested iframes/shadow roots (an iframe inside a shadow
+    // root, or vice versa) are still found.
+    function collectRoots() {
+      const entries = [{ root: document, kind: "document" }];
+      const seen = new Set([document]);
+      let shadowRootCount = 0, iframeCount = 0, iframeAccessibleCount = 0;
+      let i = 0;
+      while (i < entries.length) {
+        const root = entries[i++].root;
+        let all;
+        try { all = root.querySelectorAll("*"); } catch (_) { all = []; }
+        for (const el of all) {
+          if (el.tagName === "IFRAME") {
+            iframeCount++;
+            let doc = null;
+            try { doc = el.contentDocument; } catch (_) { doc = null; }
+            if (doc && !seen.has(doc)) {
+              seen.add(doc);
+              entries.push({ root: doc, kind: "iframe" });
+              iframeAccessibleCount++;
+            }
+          }
+          if (el.shadowRoot && !seen.has(el.shadowRoot)) {
+            shadowRootCount++;
+            seen.add(el.shadowRoot);
+            entries.push({ root: el.shadowRoot, kind: "shadow" });
+          }
+        }
+      }
+      return { entries, shadowRootCount, iframeCount, iframeAccessibleCount };
+    }
+
+    function countAcross(entries, selector) {
+      let n = 0;
+      for (const e of entries) {
+        try { n += e.root.querySelectorAll(selector).length; } catch (_) { /* ignore */ }
+      }
+      return n;
+    }
+
+    const { entries, shadowRootCount, iframeCount, iframeAccessibleCount } = collectRoots();
+
+    const containerCounts = {
+      '[role="grid"]': countAcross(entries, '[role="grid"]'),
+      '[role="main"]': countAcross(entries, '[role="main"]'),
+      '[role="application"]': countAcross(entries, '[role="application"]'),
+      '[data-app-section]': countAcross(entries, '[data-app-section]'),
+    };
+    const eventNodeCounts = {
+      '[role="button"][aria-label]': countAcross(entries, '[role="button"][aria-label]'),
+      'div[role="button"]': countAcross(entries, 'div[role="button"]'),
+      '[role="gridcell"] [role="button"]': countAcross(entries, '[role="gridcell"] [role="button"]'),
+      '[data-automationid]': countAcross(entries, '[data-automationid]'),
+      '[role="listitem"]': countAcross(entries, '[role="listitem"]'),
+      'div[draggable="true"]': countAcross(entries, 'div[draggable="true"]'),
+    };
+
+    const ariaEls = [];
+    for (const e of entries) {
+      try { ariaEls.push(...e.root.querySelectorAll("[aria-label]")); } catch (_) { /* ignore */ }
+    }
+    const labels = ariaEls
+      .map((el) => el.getAttribute("aria-label") || "")
+      .filter(Boolean);
+    const longestLabels = [...labels].sort((a, b) => b.length - a.length).slice(0, 25);
+
+    const timeRangeRe = new RegExp(timeRangeSource, "i");
+    const timeHintRe = new RegExp(timeHintSource);
+    const timeRangeMatchCount = labels.filter((l) => timeRangeRe.test(l)).length;
+    const timeHintMatchCount = labels.filter((l) => timeHintRe.test(l)).length;
+
+    // First grid container found (in root-discovery order — document
+    // first, then iframes/shadow roots in BFS order), so we know
+    // whether the calendar grid itself lives inside an iframe.
+    let gridEl = null, gridInsideIframe = false;
+    for (const e of entries) {
+      let found = null;
+      try { found = e.root.querySelector('[role="grid"]'); } catch (_) { /* ignore */ }
+      if (found) { gridEl = found; gridInsideIframe = e.kind === "iframe"; break; }
+    }
+    const gridInnerText = gridEl
+      ? ((gridEl.innerText != null ? gridEl.innerText : gridEl.textContent) || "")
+      : "";
+
+    return {
+      finalUrl: location.href,
+      containerCounts,
+      eventNodeCounts,
+      ariaLabelCount: ariaEls.length,
+      longestLabels,
+      patternsTried: [
+        { name: "full time-range (subject + start + end, what the real parser requires)", source: timeRangeSource, matchCount: timeRangeMatchCount },
+        { name: "any clock-time hint (looser — what the DOM scan uses to pick candidates)", source: timeHintSource, matchCount: timeHintMatchCount },
+      ],
+      iframeCount,
+      iframeAccessibleCount,
+      shadowRootCount,
+      gridInsideIframe,
+      gridInnerTextSample: gridInnerText.slice(0, 2000),
+    };
+  } catch (e) {
+    return { error: String((e && e.message) || e) };
+  }
+}
+
+// Open the calendar tab, run the diagnostic probe at
+// DIAGNOSTIC_SNAPSHOT_DELAYS_MS after load, and return a report the
+// options page renders directly (JSON, via a Copy button — see the
+// v1.3 header comment). Read-only: never clicks, never navigates.
+async function diagnoseCalendarCapture() {
+  const tab = await chrome.tabs.create({ url: CALENDAR_WEEK_URL, active: false });
+  const tabId = tab.id;
+  const start = Date.now();
+  const snapshots = [];
+
+  try {
+    await waitForTabComplete(tabId);
+
+    for (const delay of DIAGNOSTIC_SNAPSHOT_DELAYS_MS) {
+      const waitMore = delay - (Date.now() - start);
+      if (waitMore > 0) await sleep(waitMore);
+
+      let snap = null;
+      try {
+        const result = await chrome.scripting.executeScript({
+          target: { tabId },
+          args: [TIME_RANGE_RE.source, "\\d{1,2}(:\\d{2})?\\s*[AaPp]?\\.?[Mm]?\\b|\\d{1,2}:\\d{2}\\b"],
+          func: _calendarDiagnosticProbeFunc,
+        });
+        snap = (result && result[0] && result[0].result) || null;
+      } catch (e) {
+        snap = { error: e.message || String(e) };
+      }
+      snapshots.push({ atMs: Date.now() - start, requestedAtMs: delay, ...(snap || {}) });
+    }
+  } finally {
+    try { await chrome.tabs.remove(tabId); } catch (_) { /* ignore */ }
+  }
+
+  const final = snapshots[snapshots.length - 1] || {};
+  return {
+    ok: true,
+    url: CALENDAR_WEEK_URL,
+    finalUrl: final.finalUrl || null,
+    elapsedMs: Date.now() - start,
+    // Element counts at each snapshot — lets a reader tell "nothing
+    // structural is wrong, it just wasn't done rendering yet" (counts
+    // climb over the 4 samples) apart from "structurally zero"
+    // (counts flat at 0 the whole time).
+    timeline: snapshots.map((s) => ({
+      atMs: s.atMs,
+      containerCounts: s.containerCounts,
+      eventNodeCounts: s.eventNodeCounts,
+      ariaLabelCount: s.ariaLabelCount,
+      timeRangeMatchCount: s.patternsTried && s.patternsTried[0] && s.patternsTried[0].matchCount,
+      error: s.error,
+    })),
+    ariaLabelCount: final.ariaLabelCount,
+    longestLabels: final.longestLabels || [],
+    patternsTried: final.patternsTried || [],
+    iframeCount: final.iframeCount,
+    iframeAccessibleCount: final.iframeAccessibleCount,
+    shadowRootCount: final.shadowRootCount,
+    gridInsideIframe: final.gridInsideIframe,
+    gridInnerTextSample: final.gridInnerTextSample || "",
+    containerCounts: final.containerCounts,
+    eventNodeCounts: final.eventNodeCounts,
+    error: final.error || null,
+  };
 }

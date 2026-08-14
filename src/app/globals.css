@@ -51,6 +51,15 @@
 }
 
 :root {
+  /* Native controls the browser paints itself — <datalist> popups (the
+     Client / Project pickers on the Record tab), <select> menus, date
+     pickers, scrollbars — follow `color-scheme`, NOT our CSS variables.
+     With this undeclared the webview inherits the OS preference, so on
+     a Windows machine set to dark the Client dropdown rendered as a
+     black panel inside an otherwise light app. Declaring it here (and
+     flipping it in .dark below) keeps those OS-drawn surfaces in step
+     with the theme the rest of the app is using. */
+  color-scheme: light;
   --background: oklch(0.967 0.004 247);
   --foreground: oklch(0.15 0.015 250);
   --card: oklch(1 0 0);
@@ -92,6 +101,8 @@
 }
 
 .dark {
+  /* Counterpart to the :root declaration — see the comment there. */
+  color-scheme: dark;
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);

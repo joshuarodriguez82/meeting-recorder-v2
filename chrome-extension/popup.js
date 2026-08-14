@@ -66,10 +66,19 @@ async function renderCalendarStatus() {
   const r = cfg.lastCalendarResult;
   if (r?.ok) {
     const n = r.eventCount ?? 0;
-    const layerLabel = r.layer === "aria-label" ? "structured"
-      : r.layer === "generic-node" ? "structured (fallback nodes)"
-      : "⚠ text fallback";
-    el.innerHTML = `Calendar: ${ago} · ${n} event${n === 1 ? "" : "s"} · ${layerLabel}`;
+    if (n === 0) {
+      // A zero result on its own is indistinguishable between "no
+      // candidate elements found" / "page still rendering" / "found
+      // N candidates, none had a parseable time" — each points at a
+      // completely different fix, so say which one (field report
+      // 2026-08-14). See Settings → Diagnose calendar capture for more.
+      el.innerHTML = `Calendar: ${ago} · 0 events (${r.zeroReason || "reason unknown"})`;
+    } else {
+      const layerLabel = r.layer === "aria-label" ? "structured"
+        : r.layer === "generic-node" ? "structured (fallback nodes)"
+        : "⚠ text fallback";
+      el.innerHTML = `Calendar: ${ago} · ${n} event${n === 1 ? "" : "s"} · ${layerLabel}`;
+    }
   } else if (r) {
     el.innerHTML = `Calendar: ${ago} · ✗ ${r.error || "failed"}`;
   } else {
@@ -106,7 +115,10 @@ $("captureBtn").addEventListener("click", async () => {
       if (c.teams) parts.push(`Teams: ${c.teams}`);
       if (c.inbox) parts.push(`Inbox: ${c.inbox}`);
       if (c.chat) parts.push(`Chat: ${c.chat}`);
-      parts.push(`Calendar: ${c.calendar ?? 0} event${c.calendar === 1 ? "" : "s"}`);
+      const calN = c.calendar ?? 0;
+      const calSuffix = (calN === 0 && result.calendarZeroReason)
+        ? ` (${result.calendarZeroReason})` : "";
+      parts.push(`Calendar: ${calN} event${calN === 1 ? "" : "s"}${calSuffix}`);
       setStatus("ok", `✓ Sent (${parts.join(", ")}). Open the Today tab for the parsed brief.`);
     } else {
       setStatus("error", `✗ ${result?.error || "Unknown error"}`);

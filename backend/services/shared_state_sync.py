@@ -96,11 +96,25 @@ logger = get_logger(__name__)
 # dispatch below) since it's checked in several places.
 CLIENT_CONFIGS_FILE = "client_configs.json"
 
-# The two JSON stores that live alongside the recordings dir but are not
-# part of the session-JSON archive copy. Order doesn't matter — both are
+# The JSON stores that live alongside the recordings dir but are not
+# part of the session-JSON archive copy. Order doesn't matter — each is
 # handled independently — but keeping it as a tuple (not a set) gives
 # status()/push()/pull() a stable, deterministic report order.
-SHARED_FILES = (CLIENT_CONFIGS_FILE, "summary_templates.json")
+#
+# owner_aliases.json (services/owner_service.py's OwnerAliasStore —
+# confirmed owner-name merges like "Joshua" -> "Josh") is a whole-file,
+# newest-wins copy same as summary_templates.json, NOT the field-aware
+# merge client_configs.json needs: its only content is `{"aliases": {id:
+# {canonical, members, created_at}}, "rejected": [[key, key], ...]}` —
+# no absolute filesystem paths anywhere in that shape, so there is
+# nothing machine-specific to blank or protect. A user curating aliases
+# on one machine (say, merging Josh's spelling variants) must see the
+# same grouping on their other machine against the same shared session
+# library, or the two machines would silently show different owners for
+# identical Follow Ups/Commitments data.
+SHARED_FILES = (
+    CLIENT_CONFIGS_FILE, "summary_templates.json", "owner_aliases.json",
+)
 
 # ClientConfig fields that are absolute, machine-specific filesystem
 # paths (services/client_config_service.py's ClientConfig dataclass).

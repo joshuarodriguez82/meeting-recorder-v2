@@ -58,6 +58,14 @@ class _ReplaceAllSpy:
         return self._kept
 
 
+class _RecordVersionSpy:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, version):
+        self.calls.append(version)
+
+
 class _FakeSummarizer:
     def __init__(self, parsed=None, raise_error=False):
         self.calls = []
@@ -74,14 +82,19 @@ class _FakeSummarizer:
         return self._parsed
 
 
-def _wire(monkeypatch, *, summarizer=None, save_parsed=None, replace_all=None):
+def _wire(monkeypatch, *, summarizer=None, save_parsed=None, replace_all=None,
+         record_extension_version=None):
     monkeypatch.setattr(server.svc, "load_settings", lambda: None)
     monkeypatch.setattr(
         server.svc, "daily_briefing_svc",
         SimpleNamespace(save_parsed=save_parsed or _SaveParsedSpy()))
     monkeypatch.setattr(
         server.svc, "extension_calendar_svc",
-        SimpleNamespace(replace_all=replace_all or _ReplaceAllSpy()))
+        SimpleNamespace(
+            replace_all=replace_all or _ReplaceAllSpy(),
+            record_extension_version=(
+                record_extension_version or _RecordVersionSpy()),
+        ))
     monkeypatch.setattr(server.svc, "summarizer", summarizer)
     monkeypatch.setattr(server.svc, "live_summarizer", None)
 
@@ -186,3 +199,42 @@ def test_full_capture_prefers_structured_events_over_briefing_derived(monkeypatc
     assert len(replace_all.calls[0]) == 5, (
         "calendar store must be populated from calendar_events (5), "
         "not derived from the 1-item briefing agenda")
+
+
+def test_extension_version_is_recorded_from_a_post(monkeypatch):
+    record_spy = _RecordVersionSpy()
+    replace_all = _ReplaceAllSpy(kept=REALISTIC_STRUCTURED_EVENTS[:1])
+    _wire(monkeypatch, replace_all=replace_all, record_extension_version=record_spy)
+
+    req = server.ExtensionImportRequest(
+        calendar_events=REALISTIC_STRUCTURED_EVENTS[:1], extension_version="1.2.0")
+    asyncio.run(server.import_briefing_from_extension(req))
+
+    assert record_spy.calls == ["1.2.0"]
+
+
+def test_absent_extension_version_is_recorded_as_none_not_assumed_current(monkeypatch):
+    record_spy = _RecordVersionSpy()
+    replace_all = _ReplaceAllSpy(kept=REALISTIC_STRUCTURED_EVENTS[:1])
+    _wire(monkeypatch, replace_all=replace_all, record_extension_version=record_spy)
+
+    # An un-upgraded (pre-1.2.0) extension never sends extension_version.
+    req = server.ExtensionImportRequest(calendar_events=REALISTIC_STRUCTURED_EVENTS[:1])
+    asyncio.run(server.import_briefing_from_extension(req))
+
+    assert record_spy.calls == [None]
+
+
+def test_extension_version_is_recorded_even_on_full_narrative_capture(monkeypatch):
+    """Version bookkeeping runs unconditionally, not only on the
+    calendar-only fast path -- a manual Capture & Send must report its
+    version too."""
+    summ = _FakeSummarizer()
+    record_spy = _RecordVersionSpy()
+    _wire(monkeypatch, summarizer=summ, record_extension_version=record_spy)
+
+    req = server.ExtensionImportRequest(
+        owa_text="Today's calendar text", extension_version="1.2.0")
+    asyncio.run(server.import_briefing_from_extension(req))
+
+    assert record_spy.calls == ["1.2.0"]
