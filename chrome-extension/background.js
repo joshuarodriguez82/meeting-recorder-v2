@@ -269,7 +269,66 @@ function nextOccurrence(timeStr) {
 
 // ──────────────────────────────────────────────────────────────────
 // Alarm fires → capture (with dedup) and POST.
+//
+// v1.3.1 — field report 2026-08-14: the calendar-refresh alarm had
+// NEVER once produced a POST (backend log showed only 3 manual
+// "Capture & Send" imports all day, every one carrying all four
+// narrative blobs — a calendar-only alarm POST never carries those).
+// Investigated against the actual MV3 contract rather than guessed:
+//
+//   1. Is setupAlarms() reached reliably? Yes — it runs on BOTH
+//      onInstalled and onStartup, and creates CALENDAR_ALARM_NAME
+//      unconditionally (not gated behind the autoCapture toggle). A
+//      periodic chrome.alarms entry, once created, survives service-
+//      worker suspension/restart on its own — that's the whole point
+//      of the alarms API vs. setTimeout. Not the defect.
+//   2. Does the handler use a stale module-scope backendUrl/token?
+//      No — both branches below call `chrome.storage.local.get(...)`
+//      FRESH on every single alarm fire, which is durable storage,
+//      not an in-memory value that resets on a cold service-worker
+//      start. Not the defect (this was the prime suspect and it does
+//      not hold up against this file's actual code).
+//   3. Does manifest.json declare "alarms"? Yes (see permissions).
+//      Not the defect.
+//   4. THIS is the defect: two early-return branches below (not-
+//      configured, dedupe-skip) returned WITHOUT writing anything to
+//      chrome.storage.local. A real alarm fire that hit either one
+//      left literally zero trace — indistinguishable, from the
+//      options page, the popup, or the backend log, from the alarm
+//      never having fired at all. Combined with lastCalendarCaptureAt
+//      being shared with the manual-capture dedupe timestamp (a
+//      recent manual "Capture & Send" silences the next ~20 minutes
+//      of alarm ticks), a user who occasionally uses the manual
+//      button could see the alarm silently skip run after run with
+//      no way to ever notice. captureCalendarOnly() itself already
+//      wrote lastCalendarCaptureAt/lastCalendarResult on every one of
+//      ITS return paths (capture failure, zero-events, fetch
+//      failure) — only the guard code IN FRONT of that call was
+//      silent. Fixed below: every branch of this listener now writes
+//      both fields, and the call itself is wrapped so an unexpected
+//      thrown error (should never happen — captureCalendarOnly
+//      already catches its own body) still leaves a trace rather than
+//      an unhandled rejection MV3 quietly drops.
 // ──────────────────────────────────────────────────────────────────
+
+// Persist a calendar-alarm attempt that never reached (or threw before)
+// captureCalendarOnly's own storage writes, so "the alarm fired but
+// was skipped/broken" is always visible next to "the alarm never fired
+// at all" — see the v1.3.1 comment above.
+async function recordCalendarAlarmOutcome(reason, message) {
+  const result = {
+    ok: false,
+    skipped: reason !== "error",
+    reason,
+    error: message,
+    ts: Date.now(),
+  };
+  await chrome.storage.local.set({
+    lastCalendarCaptureAt: Date.now(),
+    lastCalendarResult: result,
+  });
+  return result;
+}
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm?.name === CALENDAR_ALARM_NAME) {
@@ -278,14 +337,31 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     });
     if (!cfg.backendUrl || !cfg.token) {
       console.warn("[ext] calendar-refresh fired but extension not configured; skipping");
+      await recordCalendarAlarmOutcome(
+        "not-configured", "Backend URL or token not configured.");
       return;
     }
     if (Date.now() - cfg.lastCalendarCaptureAt < CALENDAR_DEDUP_WINDOW_MS) {
       const mins = Math.round((Date.now() - cfg.lastCalendarCaptureAt) / 60_000);
       console.log(`[ext] calendar-refresh dedupe: last capture ${mins} min ago, skipping`);
+      await recordCalendarAlarmOutcome(
+        "deduped",
+        `Skipped — last calendar capture was ${mins} min ago ` +
+        `(dedupe window ${CALENDAR_DEDUP_WINDOW_MS / 60_000} min).`);
       return;
     }
-    await captureCalendarOnly(cfg.backendUrl, cfg.token);
+    try {
+      await captureCalendarOnly(cfg.backendUrl, cfg.token);
+    } catch (e) {
+      // Defense-in-depth: captureCalendarOnly already wraps its own
+      // body and writes storage on every return path, so this should
+      // be unreachable — but an uncaught throw here would otherwise
+      // be a silent, untraceable MV3 unhandled-rejection, exactly the
+      // failure mode this whole fix exists to close.
+      console.error("[ext] calendar-refresh alarm: unexpected error", e);
+      await recordCalendarAlarmOutcome(
+        "error", `Unexpected error: ${e.message || String(e)}`);
+    }
     return;
   }
 
@@ -1129,22 +1205,52 @@ function shouldStopPolling(counts, opts = {}) {
 // for why this exists. `stillRendering` comes from the caller: true
 // when the candidate-count poll loop (shouldStopPolling above) never
 // stabilized before CALENDAR_MAX_WAIT_MS ran out.
+//
+// v1.3.2: this used to end in a single catch-all — "found N
+// candidates, none had a parseable time" — for every scanned>0 case
+// that wasn't 100% all-day or 100% date-unresolved. That string is
+// exactly what a 2026-08-14 field report showed while the TRUE cause
+// was unrelated to parsing at all (the DOM scan's depth cap silently
+// truncating before it ever reached the meeting tiles — see
+// _calendarDomScanFunc's header comment). A wrong-but-confident
+// diagnosis cost real debugging time. The catch-all is now broken
+// apart into the three distinct "candidates existed but produced
+// nothing" shapes `extractEventsFromCandidates`'s stats already
+// distinguish, plus a genuine mixed-cause fallback that shows the
+// stats breakdown instead of guessing a single headline cause.
 function classifyZeroReason(stats, opts = {}) {
   if (opts.stillRendering) {
     return "page still rendering (candidate count never stabilized before the wait limit)";
   }
-  const scanned = (stats && stats.scanned) || 0;
+  const s = stats || {};
+  const scanned = s.scanned || 0;
   if (scanned === 0) {
     return "no candidate elements found";
   }
   const plural = scanned === 1 ? "" : "s";
-  if (stats.allDay > 0 && stats.allDay === scanned) {
+  const notMeetingShaped = s.notMeetingShaped || 0;
+  const allDay = s.allDay || 0;
+  const dateUnresolved = s.dateUnresolved || 0;
+  const deduped = s.deduped || 0;
+
+  if (allDay > 0 && allDay === scanned) {
     return `found ${scanned} candidate${plural}, all all-day (excluded)`;
   }
-  if (stats.dateUnresolved > 0 && stats.dateUnresolved === scanned) {
+  if (notMeetingShaped > 0 && notMeetingShaped === scanned) {
+    return `found ${scanned} candidate${plural}, none were meeting-shaped ` +
+      `(didn't match "<subject>, <time> to <time>")`;
+  }
+  if (dateUnresolved > 0 && dateUnresolved === scanned) {
     return `found ${scanned} candidate${plural} with a time but no resolvable date`;
   }
-  return `found ${scanned} candidate${plural}, none had a parseable time`;
+  // Genuinely mixed causes (or a bucket this function doesn't have a
+  // name for yet, e.g. every candidate deduped away) — name what's
+  // actually known rather than defaulting to one of the specific
+  // messages above, which would misattribute the cause the same way
+  // the old single catch-all did.
+  return `found ${scanned} candidate${plural}, none produced an event ` +
+    `(${notMeetingShaped} not meeting-shaped, ${dateUnresolved} unresolved date/time, ` +
+    `${allDay} all-day, ${deduped} duplicate)`;
 }
 
 // ── DOM scan (runs inside the page; exercised in tests via a
@@ -1160,23 +1266,47 @@ function classifyZeroReason(stats, opts = {}) {
 // `globalThis.document` before calling this function directly in
 // Node (see chrome-extension/tests/).
 //
-// Walks `document` plus every reachable same-origin iframe
+// Scans `document` plus every reachable same-origin iframe
 // (`el.contentDocument` — cross-origin access throws or returns null,
 // caught and skipped) and open shadow root (`el.shadowRoot` — closed
 // roots aren't exposed on the element at all, so those are silently
-// and correctly never pierced) using only `.children` — no
-// `querySelectorAll`, so the walk works identically over a real DOM
-// and over a hand-built fake one in tests.
+// and correctly never pierced).
+//
+// v1.3.2: this used to be a hand-rolled `.children` recursion with a
+// hard `depth > 30` cutoff, on the theory that `querySelectorAll`
+// couldn't be used because it doesn't exist on the fake-DOM test
+// harness. That cutoff was the actual bug: a 2026-08-14 field
+// diagnostic against a real Outlook Web week view showed the flat
+// probe's `querySelectorAll("[aria-label]")` finding 28 matching
+// meeting labels while the real scan found 0 candidates. Instrumenting
+// the walk (see the depth-35/50 tests in
+// chrome-extension/tests/background.test.js) confirmed it: the walk's
+// own diagnostics showed `maxDepthReached: 31, elementsWalked: 31` on
+// a synthetic 35-level-deep tree — the recursion hits `depth > 30` on
+// its 32nd nesting level and stops, silently, before ever reaching a
+// label planted at level 35. Outlook Web's React tree nests calendar
+// tiles past that. `querySelectorAll` has no such limit — it's a
+// native engine call, not a JS stack recursion — so each discovered
+// root (document / iframe document / shadow root) is now searched
+// flat with one call, and the fake-DOM test harness grew a
+// `querySelectorAll` of its own (chrome-extension/tests/, `el()`/
+// `doc()`) rather than keeping the depth-limited recursion just to
+// stay testable against a double that couldn't do it.
+//
+// Only root DISCOVERY (finding iframes and shadow hosts, which aren't
+// reachable via a CSS selector) still walks `.children` — via
+// `querySelectorAll("*")` per root, which is a single flat call per
+// root, not a depth-limited recursive one.
 //
 // Returns { candidates, diag }. `candidates` is a plain array of
 // { label, columnDateIso, layer, structuredStart?, structuredEnd? }
 // records — no parsing happens here, only collection; every actual
 // interpretation decision lives in the tested pure functions above.
-// `diag` is walk-shape info (element/iframe/shadow-root counts) for
-// logging.
+// `diag` is scan-shape info (element/iframe/shadow-root/root counts)
+// for logging.
 function _calendarDomScanFunc() {
   const out = [];
-  const diag = { elementsWalked: 0, iframesSeen: 0, iframesEntered: 0, shadowRootsSeen: 0 };
+  const diag = { elementsWalked: 0, rootsScanned: 0, iframesSeen: 0, iframesEntered: 0, shadowRootsSeen: 0 };
   try {
     const TIME_HINT_RE = /\d{1,2}(:\d{2})?\s*[AaPp]?\.?[Mm]?\b|\d{1,2}:\d{2}\b/;
     const ALLDAY_HINT_RE = /\ball[\s-]?day\b/i;
@@ -1348,33 +1478,67 @@ function _calendarDomScanFunc() {
       rawCandidates.push({ el, label: text, layer: "generic-node", structuredStart, structuredEnd });
     }
 
-    // Walk `root` (a Document, ShadowRoot, or element) and recurse
-    // into same-origin iframes and open shadow roots. `.children`
-    // only (no text nodes) matches real-DOM semantics and is the only
-    // API this needs, which is what makes it fake-DOM-testable.
-    function walk(root, depth) {
-      if (!root || depth > 30) return;
-      const kids = root.children || [];
-      for (let i = 0; i < kids.length; i++) {
-        const el = kids[i];
-        diag.elementsWalked++;
-        visit(el);
-        if (el.shadowRoot) {
-          diag.shadowRootsSeen++;
-          walk(el.shadowRoot, depth + 1);
+    // Discover every reachable root — the top document, every
+    // same-origin iframe document, and every open shadow root — via
+    // BFS so a shadow root nested inside an iframe (or vice versa) is
+    // still found. Each root is inspected with ONE flat
+    // `querySelectorAll("*")` call, not a depth-limited recursion:
+    // finding iframe/shadow-host elements has no CSS-selector
+    // shortcut (there's no `:has-shadow-root` selector), but a flat
+    // scan-and-classify of every element in a root is a single native
+    // call regardless of how deep that root's tree goes.
+    function collectRoots(root0) {
+      const entries = [{ root: root0, kind: "document" }];
+      const seen = new Set([root0]);
+      let i = 0;
+      while (i < entries.length) {
+        const root = entries[i++].root;
+        diag.rootsScanned++;
+        let all;
+        try { all = root.querySelectorAll("*"); } catch (_) { all = []; }
+        for (const node of all) {
+          const tag = (node.tagName || "").toLowerCase();
+          if (tag === "iframe") {
+            diag.iframesSeen++;
+            let innerDoc = null;
+            try { innerDoc = node.contentDocument || null; } catch (_) { innerDoc = null; }
+            if (innerDoc && !seen.has(innerDoc)) {
+              seen.add(innerDoc);
+              diag.iframesEntered++;
+              entries.push({ root: innerDoc, kind: "iframe" });
+            }
+          }
+          if (node.shadowRoot && !seen.has(node.shadowRoot)) {
+            seen.add(node.shadowRoot);
+            diag.shadowRootsSeen++;
+            entries.push({ root: node.shadowRoot, kind: "shadow" });
+          }
         }
-        const tag = (el.tagName || "").toLowerCase();
-        if (tag === "iframe") {
-          diag.iframesSeen++;
-          let innerDoc = null;
-          try { innerDoc = el.contentDocument || null; } catch (_) { innerDoc = null; }
-          if (innerDoc) { diag.iframesEntered++; walk(innerDoc, depth + 1); }
-        }
-        walk(el, depth + 1);
       }
+      return entries;
     }
 
-    walk(typeof document !== "undefined" ? document : null, 0);
+    // The candidate-shaped selector: anything with its own aria-label
+    // (layer 1), any of the layer-2 generic-event roles (so `visit`
+    // can apply the same "no own label, but event-shaped" fallback it
+    // always has), or a columnheader (needed for date resolution,
+    // see `nearestDateIso`'s tier 3 — previously found for free
+    // because the old walk visited literally everything; a flat query
+    // has to ask for it explicitly).
+    const CANDIDATE_SELECTOR =
+      '[aria-label], [role="button"], [role="option"], [role="gridcell"], [role="columnheader"]';
+
+    const root0 = typeof document !== "undefined" ? document : null;
+    if (root0) {
+      for (const { root } of collectRoots(root0)) {
+        let nodes;
+        try { nodes = root.querySelectorAll(CANDIDATE_SELECTOR); } catch (_) { nodes = []; }
+        for (const node of nodes) {
+          diag.elementsWalked++;
+          visit(node);
+        }
+      }
+    }
 
     for (const c of rawCandidates) {
       out.push({
@@ -1562,7 +1726,19 @@ function _todayIsoLocal() {
 // top_priority / needs_response with a partial calendar-only parse.
 async function captureCalendarOnly(backendUrl, token) {
   if (!backendUrl || !token) {
-    return { ok: false, error: "Backend URL or token not configured." };
+    // Every OTHER return path in this function already persists
+    // lastCalendarCaptureAt/lastCalendarResult (capture failure,
+    // zero-events, fetch failure) — this guard is the one exception
+    // that didn't (see the v1.3.1 comment on the onAlarm listener).
+    // The current sole caller already checks backendUrl/token itself
+    // before calling in, so this is unreachable in practice today,
+    // but a silent gap here would resurface the exact bug being fixed
+    // the moment anything else calls this function directly.
+    const result = { ok: false, error: "Backend URL or token not configured." };
+    await chrome.storage.local.set({
+      lastCalendarCaptureAt: Date.now(), lastCalendarResult: result,
+    });
+    return result;
   }
   console.log("[ext] starting calendar-only refresh");
 
@@ -1769,6 +1945,7 @@ async function diagnoseCalendarCapture() {
   const tabId = tab.id;
   const start = Date.now();
   const snapshots = [];
+  let realScan = null;
 
   try {
     await waitForTabComplete(tabId);
@@ -1790,6 +1967,32 @@ async function diagnoseCalendarCapture() {
       }
       snapshots.push({ atMs: Date.now() - start, requestedAtMs: delay, ...(snap || {}) });
     }
+
+    // Run the REAL production scan (_calendarDomScanFunc — the exact
+    // function settleAndCollectCalendar calls during a live capture)
+    // once more, at the end, and report what IT saw next to the
+    // probe's own independent flat-query counts above. Before v1.3.2
+    // these two could silently diverge (a depth-capped recursive walk
+    // finding far fewer candidates than a flat `[aria-label]` query
+    // over the same page) with nothing in this report calling that
+    // out — which is exactly what let the depth-cap bug masquerade as
+    // a parsing problem. Keeping both numbers in the same report
+    // means any future regression that makes the real scan see less
+    // than the flat probe shows up immediately as a mismatch here,
+    // instead of requiring someone to re-derive it from field reports.
+    try {
+      const result = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: _calendarDomScanFunc,
+      });
+      const scanResult = (result && result[0] && result[0].result) || {};
+      realScan = {
+        candidateCount: (scanResult.candidates || []).length,
+        diag: scanResult.diag || null,
+      };
+    } catch (e) {
+      realScan = { error: e.message || String(e) };
+    }
   } finally {
     try { await chrome.tabs.remove(tabId); } catch (_) { /* ignore */ }
   }
@@ -1800,6 +2003,10 @@ async function diagnoseCalendarCapture() {
     url: CALENDAR_WEEK_URL,
     finalUrl: final.finalUrl || null,
     elapsedMs: Date.now() - start,
+    // What the real production DOM scan found, for direct comparison
+    // against `ariaLabelCount`/`patternsTried` below (the diagnostic
+    // probe's OWN independent flat query) — see the comment above.
+    realScan,
     // Element counts at each snapshot — lets a reader tell "nothing
     // structural is wrong, it just wasn't done rendering yet" (counts
     // climb over the 4 samples) apart from "structurally zero"

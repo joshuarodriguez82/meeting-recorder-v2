@@ -1560,6 +1560,16 @@ export const api = {
       last_capture_at?: string | null;
       event_count?: number;
       future_event_count?: number;
+      // Which calendar-parse path produced the currently-retained
+      // extension events, and why a fallback happened — see
+      // backend/services/extension_calendar_service.py's
+      // replace_all `import_meta` / capture_status.
+      last_import_path?: string | null;
+      last_import_raw?: number | null;
+      last_import_kept?: number | null;
+      last_import_dropped?: number | null;
+      last_import_fallback_reason?: string | null;
+      last_import_at?: string | null;
     }>("/calendar/available"),
 
   // Auto-record loop status. `enabled` mirrors Settings.auto_record_enabled;
