@@ -8,10 +8,11 @@ reason, never a silent drop or an uncaught exception — three earlier
 field reports trace back to exactly that failure shape elsewhere in
 this codebase.
 
-No optional deps (pypdf, python-docx, sentence-transformers) are
-installed in this test environment by design — the pypdf/docx
-"missing dependency" tests rely on that being true, and every embed
-call uses a small deterministic fake instead of the real model.
+No optional deps (pypdf, python-docx, openpyxl, python-pptx,
+sentence-transformers) are installed in this test environment by
+design — the "missing dependency" tests below rely on that being
+true, and every embed call uses a small deterministic fake instead of
+the real model.
 """
 
 import hashlib
@@ -25,6 +26,7 @@ import pytest
 
 from core.embeddings import MODEL_ID
 from services.document_service import (
+    SUPPORTED_EXTENSIONS,
     chunk_text,
     extract_text,
     index_folder,
@@ -127,7 +129,11 @@ def test_extract_text_pdf_missing_dependency_names_pypdf(tmp_path):
     assert text == ""
     assert reason is not None
     assert "pypdf" in reason.lower()
-    assert "pip install" in reason.lower()
+    # "pip install" is unactionable advice inside a packaged desktop
+    # app with a bootstrapped venv — the user has no pip to run. The
+    # message should point at reinstalling the app instead.
+    assert "pip install" not in reason.lower()
+    assert "reinstall" in reason.lower()
 
 
 def test_extract_text_docx_missing_dependency_names_python_docx(tmp_path):
@@ -137,7 +143,132 @@ def test_extract_text_docx_missing_dependency_names_python_docx(tmp_path):
     assert text == ""
     assert reason is not None
     assert "python-docx" in reason.lower()
-    assert "pip install" in reason.lower()
+    assert "pip install" not in reason.lower()
+    assert "reinstall" in reason.lower()
+
+
+def test_extract_text_xlsx_missing_dependency_names_openpyxl(tmp_path):
+    # openpyxl IS a hard dependency of the app (Excel export uses it),
+    # but the extractor still lazily imports it and must degrade
+    # cleanly if it's ever unavailable at runtime — exactly like pypdf
+    # and python-docx. Not installed in this CI venv by design, so this
+    # exercises the real ImportError path, no mocking needed.
+    p = tmp_path / "estimate.xlsx"
+    p.write_bytes(b"PK\x03\x04 not a real xlsx")
+    text, reason = extract_text(p)
+    assert text == ""
+    assert reason is not None
+    assert "openpyxl" in reason.lower()
+    assert "pip install" not in reason.lower()
+    assert "reinstall" in reason.lower()
+
+
+def test_extract_text_pptx_missing_dependency_names_python_pptx(tmp_path):
+    p = tmp_path / "deck.pptx"
+    p.write_bytes(b"PK\x03\x04 not a real pptx")
+    text, reason = extract_text(p)
+    assert text == ""
+    assert reason is not None
+    assert "python-pptx" in reason.lower()
+    assert "pip install" not in reason.lower()
+    assert "reinstall" in reason.lower()
+
+
+def test_extract_text_html_needs_no_optional_dependency(tmp_path):
+    # Stdlib html.parser only — always available, unlike the other new
+    # extractors.
+    p = tmp_path / "architecture.html"
+    p.write_text(
+        "<html><head><style>body{color:red}</style>"
+        "<script>alert('x')</script></head>"
+        "<body><h1>Architecture</h1><p>Contact Center design.</p></body>"
+        "</html>",
+        encoding="utf-8",
+    )
+    text, reason = extract_text(p)
+    assert reason is None
+    assert "Architecture" in text
+    assert "Contact Center design." in text
+    # script/style contents must never leak into extracted text.
+    assert "alert" not in text
+    assert "color:red" not in text
+
+
+# ── non-text formats: expected skip, not a defect ───────────────────
+
+@pytest.mark.parametrize("filename", ["photo.jpg", "diagram.png", "chart.drawio"])
+def test_extract_text_images_and_diagrams_are_non_text_not_unsupported(tmp_path, filename):
+    p = tmp_path / filename
+    p.write_bytes(b"\x00\x01binary junk")
+    text, reason = extract_text(p)
+    assert text == ""
+    assert reason is not None
+    # These must read as "expected, not indexed" rather than
+    # "unsupported file type" — the latter reads like a defect the
+    # user should go fix, which images/diagrams are not.
+    assert "not a text document" in reason.lower()
+    assert "unsupported" not in reason.lower()
+
+
+def test_index_folder_flags_non_text_skips_as_expected(tmp_path):
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "notes.txt").write_text("hello world", encoding="utf-8")
+    (folder / "photo.jpg").write_bytes(b"\xff\xd8\xff not a real jpeg")
+    (folder / "weird.xyz").write_bytes(b"nonsense")
+
+    recordings = tmp_path / "recordings"
+    recordings.mkdir()
+
+    report = index_folder(folder, "Aon", fake_embed, recordings)
+    by_file = {s["file"]: s for s in report["skipped"]}
+    jpg_skip = next(s for f, s in by_file.items() if f.endswith("photo.jpg"))
+    xyz_skip = next(s for f, s in by_file.items() if f.endswith("weird.xyz"))
+
+    assert jpg_skip["expected"] is True
+    assert "not a text document" in jpg_skip["reason"].lower()
+    # A genuinely unsupported/unknown extension is a real (if minor)
+    # gap, not an expected non-text format.
+    assert xyz_skip["expected"] is False
+
+
+# ── character cap ────────────────────────────────────────────────────
+
+def test_extract_text_enforces_character_cap(tmp_path):
+    from services.document_service import MAX_EXTRACTED_CHARS
+    p = tmp_path / "huge.txt"
+    p.write_text("x" * (MAX_EXTRACTED_CHARS + 10_000), encoding="utf-8")
+    text, reason = extract_text(p)
+    assert reason is None
+    assert len(text) == MAX_EXTRACTED_CHARS
+
+
+# ── SUPPORTED_EXTENSIONS / dispatch agreement ────────────────────────
+
+def test_supported_extensions_and_dispatch_agree(tmp_path):
+    """The exact bug that triggered this whole rework: SUPPORTED_EXTENSIONS
+    claimed .docx/.pdf were supported when the libraries weren't shipped,
+    and claimed .xlsx was unsupported when openpyxl was already bundled
+    and only the extractor was missing. Guard both directions so "we say
+    we support it" and "we can actually attempt to read it" can never
+    silently drift apart again."""
+    from services.document_service import _EXTRACTORS, _PLAIN_TEXT_EXTENSIONS
+
+    dispatch_extensions = _PLAIN_TEXT_EXTENSIONS | set(_EXTRACTORS)
+    assert dispatch_extensions == SUPPORTED_EXTENSIONS
+
+    for ext in SUPPORTED_EXTENSIONS:
+        p = tmp_path / f"probe{ext}"
+        p.write_bytes(b"probe content, not necessarily a valid file")
+        text, reason = extract_text(p)
+        # A supported extension must never fall through to the
+        # "unsupported file type" branch — whatever else goes wrong
+        # (missing optional library, corrupt content), the dispatch
+        # table must have a branch for it.
+        if reason:
+            assert "unsupported file type" not in reason.lower(), (
+                f"{ext} is in SUPPORTED_EXTENSIONS but extract_text() "
+                f"dispatched it as unsupported: {reason!r}")
 
 
 # ── index_folder / remove_stale ────────────────────────────────────

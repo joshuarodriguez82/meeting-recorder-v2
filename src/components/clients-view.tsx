@@ -4,6 +4,7 @@ import { useMemo, useState, useEffect, useCallback } from "react";
 import {
   api, formatDuration,
   type SessionSummary, type ClientExportStatus, type ClientKnowledgeStatus,
+  type DocumentSkip,
 } from "@/lib/api";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -16,7 +17,7 @@ import {
 } from "@/components/ui/dialog";
 import {
   Plus, Sparkles, Loader2, Tag, Pencil, Trash2, FolderKanban, X, FolderOpen,
-  Check, BookOpen, RefreshCw, AlertTriangle,
+  Check, BookOpen, RefreshCw, AlertTriangle, ChevronDown, ChevronRight,
 } from "lucide-react";
 
 interface Props {
@@ -1294,6 +1295,38 @@ function DesignatedFolderCard({
   );
 }
 
+interface DocumentSkipGroup {
+  reason: string;
+  expected: boolean;
+  count: number;
+  files: string[];
+}
+
+// A real Knowledge Folder can produce dozens of skips of the same
+// shape (e.g. 40 .docx files all hitting the same missing-library
+// reason) — dumping all of them as a flat list reads as a wall of
+// text and buries the handful that actually differ. Grouping by the
+// exact reason string collapses those identical-cause runs to one
+// line with a count; the full per-file list stays available behind
+// the disclosure below for anyone who needs to check a specific file.
+function groupDocumentSkips(skipped: DocumentSkip[]): DocumentSkipGroup[] {
+  const byReason = new Map<string, DocumentSkipGroup>();
+  for (const s of skipped) {
+    const existing = byReason.get(s.reason);
+    if (existing) {
+      existing.count += 1;
+      existing.files.push(s.file);
+    } else {
+      byReason.set(s.reason, {
+        reason: s.reason, expected: s.expected, count: 1, files: [s.file],
+      });
+    }
+  }
+  // Largest groups first — the count a user most needs to see (e.g.
+  // "40 files — <reason>") shouldn't be buried below one-off skips.
+  return Array.from(byReason.values()).sort((a, b) => b.count - a.count);
+}
+
 function KnowledgeFolderCard({
   client, folder, onSaved,
 }: {
@@ -1311,8 +1344,13 @@ function KnowledgeFolderCard({
   const [reindexing, setReindexing] = useState(false);
   const [lastReport, setLastReport] = useState<{
     indexed: number; unchanged: number; total_chunks: number;
-    skipped: { file: string; reason: string }[];
+    skipped: DocumentSkip[];
   } | null>(null);
+  // Full per-file skip list is collapsed by default (see
+  // groupDocumentSkips) — reset the disclosure on every fresh reindex
+  // so a newly-shortened or newly-lengthened list doesn't stay
+  // expanded/collapsed from a previous run's state.
+  const [showAllSkipped, setShowAllSkipped] = useState(false);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -1331,6 +1369,7 @@ function KnowledgeFolderCard({
     try {
       const report = await api.reindexClientKnowledge(client);
       setLastReport(report);
+      setShowAllSkipped(false);
       const skippedCount = report.skipped.length;
       toast.success(
         `Indexed ${report.indexed} document${report.indexed === 1 ? "" : "s"}`
@@ -1462,23 +1501,65 @@ function KnowledgeFolderCard({
             </Button>
           </div>
         )}
-        {lastReport && lastReport.skipped.length > 0 && (
-          <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-2.5 py-2 space-y-1.5">
-            <div className="flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-500">
-              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-              {lastReport.skipped.length} file
-              {lastReport.skipped.length === 1 ? "" : "s"} skipped
+        {lastReport && lastReport.skipped.length > 0 && (() => {
+          const groups = groupDocumentSkips(lastReport.skipped);
+          // Files that were never going to be text (images, diagrams,
+          // media, archives) aren't a problem — only give this the
+          // amber "something needs attention" treatment when at least
+          // one skip is a genuine gap (missing library, corrupt file,
+          // truly unsupported extension).
+          const hasRealSkip = lastReport.skipped.some((s) => !s.expected);
+          return (
+            <div
+              className={
+                hasRealSkip
+                  ? "rounded-md border border-amber-500/40 bg-amber-500/5 px-2.5 py-2 space-y-1.5"
+                  : "rounded-md border px-2.5 py-2 space-y-1.5"
+              }
+            >
+              <div
+                className={
+                  hasRealSkip
+                    ? "flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-500"
+                    : "flex items-center gap-1.5 text-xs font-medium text-muted-foreground"
+                }
+              >
+                {hasRealSkip && <AlertTriangle className="h-3.5 w-3.5 shrink-0" />}
+                {lastReport.skipped.length} file
+                {lastReport.skipped.length === 1 ? "" : "s"} skipped
+              </div>
+              <ul className="space-y-1">
+                {groups.map((g) => (
+                  <li key={g.reason} className="text-[11px] leading-snug text-muted-foreground">
+                    <span className="font-medium text-foreground/80">{g.count}</span>{" "}
+                    {g.count === 1 ? "file" : "files"} — {g.reason}
+                  </li>
+                ))}
+              </ul>
+              <button
+                type="button"
+                onClick={() => setShowAllSkipped((v) => !v)}
+                className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+              >
+                {showAllSkipped
+                  ? <ChevronDown className="h-3 w-3 shrink-0" />
+                  : <ChevronRight className="h-3 w-3 shrink-0" />}
+                {showAllSkipped ? "Hide" : "Show"} all {lastReport.skipped.length}{" "}
+                file{lastReport.skipped.length === 1 ? "" : "s"}
+              </button>
+              {showAllSkipped && (
+                <ul className="space-y-1 border-t pt-1.5">
+                  {lastReport.skipped.map((s, i) => (
+                    <li key={i} className="text-[11px] leading-snug text-muted-foreground">
+                      <span className="font-mono break-all">{s.file}</span>
+                      {" — "}{s.reason}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
-            <ul className="space-y-1">
-              {lastReport.skipped.map((s, i) => (
-                <li key={i} className="text-[11px] leading-snug text-muted-foreground">
-                  <span className="font-mono break-all">{s.file}</span>
-                  {" — "}{s.reason}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
+          );
+        })()}
       </CardContent>
     </Card>
   );

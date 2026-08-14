@@ -5,8 +5,14 @@ anthropic
 openai
 # Engagement-register Excel workbook export (Phase 3). Imported lazily
 # so a missing wheel degrades to a clear API error, never an import
-# crash of the whole backend.
+# crash of the whole backend. Also doubles as the .xlsx Knowledge
+# Folder document extractor (services/document_service.py).
 openpyxl>=3.1
+# Knowledge Folder document ingestion: pypdf/.pdf, python-docx/.docx,
+# python-pptx/.pptx. Imported lazily, same pattern as openpyxl above.
+pypdf>=5.0
+python-docx>=1.1
+python-pptx>=1.0
 python-dotenv
 # OS keychain for secrets (Anthropic/HF/OpenAI keys). Picks the right
 # backend automatically: Windows Credential Manager, macOS Keychain,

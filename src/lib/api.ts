@@ -704,6 +704,11 @@ export interface ClientExportStatus {
 export interface DocumentSkip {
   file: string;
   reason: string;
+  // true when the file was never going to be a text document (image,
+  // diagram, audio/video, archive) — expected, not a defect. false for
+  // a genuine failure: missing library, corrupt file, unsupported
+  // extension, empty extraction. See services/document_service.py.
+  expected: boolean;
 }
 
 export interface KnowledgeReindexReport {
