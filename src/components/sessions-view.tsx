@@ -9,6 +9,8 @@ import { toast } from "sonner";
 import {
   Loader2, Trash2, FolderOpen, Upload, Pencil, Check, X,
   RotateCcw, ChevronDown, ChevronRight, ClipboardCopy,
+  Mic, Captions, Sparkles, ListChecks, Target, FileText,
+  type LucideIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -153,34 +155,34 @@ function RenamableTitle({
  * meant nothing lined up, and the chips read as a row of buttons.
  */
 export function StatusIcons({ session }: { session: SessionSummary }) {
-  const stages = [
+  const stages: { done: boolean; icon: LucideIcon; doneLabel: string; pendingLabel: string }[] = [
     {
-      done: session.audio_exists, emoji: "🎤",
+      done: session.audio_exists, icon: Mic,
       doneLabel: "Audio file exists",
       pendingLabel: "Audio — no file on disk",
     },
     {
-      done: session.has_transcript, emoji: "⚙",
+      done: session.has_transcript, icon: Captions,
       doneLabel: "Transcribed + speakers identified",
       pendingLabel: "Transcript — not generated yet",
     },
     {
-      done: session.has_summary, emoji: "✨",
+      done: session.has_summary, icon: Sparkles,
       doneLabel: "Summary generated",
       pendingLabel: "Summary — not generated yet",
     },
     {
-      done: session.has_action_items, emoji: "📋",
+      done: session.has_action_items, icon: ListChecks,
       doneLabel: "Action items extracted",
       pendingLabel: "Action items — not generated yet",
     },
     {
-      done: session.has_decisions, emoji: "🎯",
+      done: session.has_decisions, icon: Target,
       doneLabel: "Decisions extracted",
       pendingLabel: "Decisions — not generated yet",
     },
     {
-      done: session.has_requirements, emoji: "📝",
+      done: session.has_requirements, icon: FileText,
       doneLabel: "Requirements extracted",
       pendingLabel: "Requirements — not generated yet",
     },
@@ -188,7 +190,7 @@ export function StatusIcons({ session }: { session: SessionSummary }) {
   const doneCount = stages.filter((s) => s.done).length;
   return (
     <TooltipProvider>
-      {/* Tight gap + fixed-width slots so the six glyphs read as one
+      {/* Tight gap + fixed-width slots so the six icons read as one
           progress unit rather than six separate controls. No chip
           backgrounds — those were what made it look like a button row. */}
       <div
@@ -196,32 +198,35 @@ export function StatusIcons({ session }: { session: SessionSummary }) {
         role="img"
         aria-label={`Processing progress: ${doneCount} of ${stages.length} stages complete`}
       >
-        {stages.map((s, idx) => (
-          <Tooltip key={idx}>
-            <TooltipTrigger
-              render={
-                <span
-                  aria-hidden
-                  className={
-                    "inline-flex h-6 w-6 items-center justify-center text-[15px] leading-none cursor-default transition-opacity "
-                    + (s.done
-                      // Present: full-strength glyph. Bumped a couple of
-                      // px and un-chipped so it holds contrast against a
-                      // white card instead of washing out.
-                      ? "opacity-100"
-                      // Absent: still occupies its slot, but desaturated
-                      // to a faint monochrome ghost so the gap in the
-                      // pipeline is obvious without shouting.
-                      : "opacity-25 grayscale contrast-50")
-                  }
-                >
-                  {s.emoji}
-                </span>
-              }
-            />
-            <TooltipContent>{s.done ? s.doneLabel : s.pendingLabel}</TooltipContent>
-          </Tooltip>
-        ))}
+        {stages.map((s, idx) => {
+          const Icon = s.icon;
+          return (
+            <Tooltip key={idx}>
+              <TooltipTrigger
+                render={
+                  <span
+                    aria-hidden
+                    className={
+                      "inline-flex h-6 w-6 items-center justify-center leading-none cursor-default transition-opacity "
+                      + (s.done
+                        // Present: full-strength icon in the app's own
+                        // accent color, so a completed stage reads as
+                        // "on" rather than just "less transparent".
+                        ? "text-primary opacity-100"
+                        // Absent: still occupies its slot, but faded to
+                        // a faint ghost so the gap in the pipeline is
+                        // obvious without shouting.
+                        : "text-muted-foreground opacity-30")
+                    }
+                  >
+                    <Icon className="h-3.5 w-3.5" strokeWidth={2.25} />
+                  </span>
+                }
+              />
+              <TooltipContent>{s.done ? s.doneLabel : s.pendingLabel}</TooltipContent>
+            </Tooltip>
+          );
+        })}
       </div>
     </TooltipProvider>
   );
@@ -281,25 +286,51 @@ function SessionsDiagnosticsPanel() {
     );
   }
 
-  const folderCount = diag.roots.length;
+  // The backend's declared response shape says every one of these
+  // fields is always present, but a half-failed init (some endpoints
+  // 200, others 500 mid-startup) can ship a partial object anyway — the
+  // exact case that used to crash this whole tab on `diag.roots.length`.
+  // Every array/number read below goes through one of these safe
+  // accessors instead of trusting the type, and `partial` tracks
+  // whether anything was actually missing so the summary line can say
+  // "unavailable" rather than quietly reporting a fabricated 0 — a
+  // failed-to-load field must never read the same as a genuinely empty
+  // one.
+  const rootsKnown = Array.isArray(diag.roots);
+  const roots = diag.roots ?? [];
+  const unreachableKnown = Array.isArray(diag.unreachable_roots);
+  const unreachableRoots = diag.unreachable_roots ?? [];
+  const skippedDetailKnown = Array.isArray(diag.skipped_detail);
+  const skippedDetail = diag.skipped_detail ?? [];
+  const totalKnown = typeof diag.total === "number";
+  const visibleKnown = typeof diag.visible_in_app === "number";
+  const skippedKnown = typeof diag.skipped === "number";
+  const primaryDirKnown = typeof diag.primary_dir === "string" && diag.primary_dir.length > 0;
+
+  const partial = !rootsKnown || !unreachableKnown || !skippedDetailKnown
+    || !totalKnown || !visibleKnown || !skippedKnown;
+
+  const folderCount = roots.length;
   // Same rule the example in the spec uses: the file count found on
   // disk vs. what the Sessions list actually shows. Skips (unreadable
   // files) and dedupe-across-roots (same session_id in two folders)
   // both show up here even though they have different causes — the
   // point is the two numbers no longer silently agreeing.
-  const mismatched = diag.total !== diag.visible_in_app;
-  const hasUnreachable = diag.unreachable_roots.length > 0;
-  const hasSkips = diag.skipped > 0;
-  const isEmpty = diag.visible_in_app === 0;
-  const needsAttention = mismatched || hasSkips || hasUnreachable || isEmpty;
+  const mismatched = totalKnown && visibleKnown && diag.total !== diag.visible_in_app;
+  const hasUnreachable = unreachableRoots.length > 0;
+  const hasSkips = skippedKnown && diag.skipped > 0;
+  const isEmpty = visibleKnown && diag.visible_in_app === 0;
+  const needsAttention = partial || mismatched || hasSkips || hasUnreachable || isEmpty;
 
   const fileWord = diag.total === 1 ? "file" : "files";
   const folderWord = folderCount === 1 ? "folder" : "folders";
-  const summaryText = isEmpty
-    ? `No sessions showing — looked in ${folderCount} ${folderWord}`
-    : `${diag.total} session ${fileWord} found across ${folderCount} ${folderWord} · ${diag.visible_in_app} shown`;
+  const summaryText = partial
+    ? "Session diagnostics response was incomplete — some folder/file counts are unavailable"
+    : isEmpty
+      ? `No sessions showing — looked in ${folderCount} ${folderWord}`
+      : `${diag.total} session ${fileWord} found across ${folderCount} ${folderWord} · ${diag.visible_in_app} shown`;
 
-  const open = expanded || isEmpty;
+  const open = expanded || isEmpty || partial;
 
   if (!needsAttention) {
     return (
@@ -321,21 +352,25 @@ function SessionsDiagnosticsPanel() {
   }
 
   const unreachableByPath = new Map(
-    diag.unreachable_roots.map((r) => [r.path, r.error]),
+    unreachableRoots.map((r) => [r.path, r.error]),
   );
+  // Same "always visible, never collapsible away" treatment as isEmpty:
+  // a malformed response is an anomaly, not a state the user should be
+  // able to dismiss without seeing it.
+  const forcedOpen = isEmpty || partial;
 
   return (
     <div
-      className={`rounded-2xl border border-amber-500/25 bg-amber-500/10 text-amber-800 dark:text-amber-300 ${isEmpty ? "p-3" : ""}`}
+      className={`rounded-2xl border border-amber-500/25 bg-amber-500/10 text-amber-800 dark:text-amber-300 ${forcedOpen ? "p-3" : ""}`}
     >
       <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
-          disabled={isEmpty}
+          disabled={forcedOpen}
           className="flex items-center gap-1.5 text-left text-xs font-medium min-w-0 disabled:cursor-default"
         >
-          {!isEmpty && (open
+          {!forcedOpen && (open
             ? <ChevronDown className="h-3.5 w-3.5 shrink-0" />
             : <ChevronRight className="h-3.5 w-3.5 shrink-0" />)}
           <span aria-hidden className="font-bold">⚠</span>
@@ -365,10 +400,21 @@ function SessionsDiagnosticsPanel() {
 
       {open && (
         <div className="px-3 pb-3 space-y-3 text-xs">
+          {partial && (
+            <div>
+              The backend&apos;s diagnostics response was missing some
+              expected fields — this usually means the backend is still
+              finishing startup or hit an error partway through. What
+              could be read is shown below; anything marked
+              &quot;unavailable&quot; failed to load and is not
+              necessarily empty.
+            </div>
+          )}
+
           <div className="space-y-1">
             <div className="font-medium">Folders scanned</div>
             <div className="space-y-1">
-              {diag.roots.map((r) => (
+              {roots.map((r) => (
                 <div key={r.path} className="flex items-start gap-1.5 font-mono break-all">
                   <span className="flex-1">{r.path}</span>
                   <span className="shrink-0 font-sans text-amber-700 dark:text-amber-400">
@@ -378,12 +424,17 @@ function SessionsDiagnosticsPanel() {
                   </span>
                 </div>
               ))}
-              {diag.roots.length === 0 && (
-                <div className="italic">No folders were reachable at all.</div>
+              {roots.length === 0 && (
+                <div className="italic">
+                  {rootsKnown ? "No folders were reachable at all." : "Folder list unavailable."}
+                </div>
               )}
             </div>
             <div className="text-amber-700 dark:text-amber-400">
-              Primary (write) folder: <span className="font-mono break-all">{diag.primary_dir}</span>
+              Primary (write) folder:{" "}
+              <span className="font-mono break-all">
+                {primaryDirKnown ? diag.primary_dir : "unavailable"}
+              </span>
             </div>
           </div>
 
@@ -393,14 +444,17 @@ function SessionsDiagnosticsPanel() {
                 {diag.skipped} file{diag.skipped === 1 ? "" : "s"} skipped
               </div>
               <div className="space-y-0.5">
-                {diag.skipped_detail.slice(0, 8).map((d, i) => (
+                {skippedDetail.slice(0, 8).map((d, i) => (
                   <div key={i} className="font-mono break-all text-[11px]">
                     {d.path} — <span className="font-sans">{d.reason}</span>
                   </div>
                 ))}
-                {diag.skipped > diag.skipped_detail.slice(0, 8).length && (
+                {!skippedDetailKnown && (
+                  <div className="italic">Skip details unavailable.</div>
+                )}
+                {skippedDetailKnown && diag.skipped > skippedDetail.slice(0, 8).length && (
                   <div className="italic">
-                    …and {diag.skipped - diag.skipped_detail.slice(0, 8).length} more.
+                    …and {diag.skipped - skippedDetail.slice(0, 8).length} more.
                   </div>
                 )}
               </div>

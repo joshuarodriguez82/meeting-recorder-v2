@@ -14,6 +14,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { InfoTip } from "@/components/ui/info-tip";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -270,14 +271,26 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
       // the endpoint still protects against deleting a row whose WAV
       // synced down between the scan and the delete.
       const res = await api.deleteGhostSessions({ min_age_days: 0 });
-      const ok = res.deleted.length;
-      const errs = res.errors.length;
-      if (errs > 0) {
+      // The endpoint's type promises `deleted`/`errors` are always
+      // arrays, but a malformed response shouldn't be read as "0
+      // deleted, 0 errors" — that's indistinguishable from genuine
+      // success and would hide a real problem.
+      const deletedKnown = Array.isArray(res.deleted);
+      const errorsKnown = Array.isArray(res.errors);
+      if (!deletedKnown || !errorsKnown) {
         toast.warning(
-          `Deleted ${ok} ghost session(s); ${errs} skipped (see backend log).`
+          "Purge response was incomplete — check Sessions to confirm what was actually removed."
         );
       } else {
-        toast.success(`Deleted ${ok} ghost session(s).`);
+        const ok = res.deleted.length;
+        const errs = res.errors.length;
+        if (errs > 0) {
+          toast.warning(
+            `Deleted ${ok} ghost session(s); ${errs} skipped (see backend log).`
+          );
+        } else {
+          toast.success(`Deleted ${ok} ghost session(s).`);
+        }
       }
       const fresh = await api.listGhostSessions().catch(() => null);
       setGhostCount(fresh?.count ?? 0);
@@ -338,7 +351,7 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
       {/* API Keys */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">API Keys</CardTitle>
+          <CardTitle>API Keys</CardTitle>
           <p className="text-xs text-muted-foreground mt-1">
             HuggingFace is always required (powers speaker identification via
             pyannote). The Anthropic key is only required when AI Provider is
@@ -450,11 +463,25 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
       {/* Recordings folder (v2.4: cross-device sync support) */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Recordings Folder</CardTitle>
+          <CardTitle>Recordings Folder</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="space-y-2">
-            <Label>Where Meeting Recorder saves session audio, transcripts, and client list</Label>
+            <div className="flex items-center gap-1">
+              <Label>Where Meeting Recorder saves session audio, transcripts, and client list</Label>
+              <InfoTip label="Why this must be a local folder">
+                <strong>Use a local folder</strong> (e.g.{" "}
+                <code className="text-[11px]">C:\Users\you\MeetingRecordings</code>).
+                Recording writes large audio streams here in real time — a
+                cloud-stream folder (Google Drive <code className="text-[11px]">G:\</code>,
+                OneDrive Files On-Demand) stalls those writes and can freeze
+                the backend mid-recording. To get sessions onto a network /
+                cloud folder, set the <strong>Cloud Mirror</strong> below —
+                it copies in the background where a slow drive can&apos;t
+                hurt a recording. Existing sessions stay where they are;
+                restart the app after changing.
+              </InfoTip>
+            </div>
             <div className="flex gap-2">
               <Input
                 value={settings.recordings_dir}
@@ -486,22 +513,30 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
                 Browse…
               </Button>
             </div>
-            <p className="text-xs text-muted-foreground leading-relaxed">
-              <strong>Use a local folder</strong> (e.g.{" "}
-              <code className="text-[11px]">C:\Users\you\MeetingRecordings</code>).
-              Recording writes large audio streams here in real time — a
-              cloud-stream folder (Google Drive <code className="text-[11px]">G:\</code>,
-              OneDrive Files On-Demand) stalls those writes and can freeze
-              the backend mid-recording. To get sessions onto a network /
-              cloud folder, set the <strong>Cloud Mirror</strong> below —
-              it copies in the background where a slow drive can&apos;t
-              hurt a recording. Existing sessions stay where they are;
-              restart the app after changing.
+            <p className="text-xs text-muted-foreground">
+              Must be local disk — a cloud-sync folder can stall writes and
+              freeze the backend mid-recording.
             </p>
           </div>
 
           <div className="space-y-2 border-t pt-4">
-            <Label>Cloud Mirror — network folder for finished sessions (optional)</Label>
+            <div className="flex items-center gap-1">
+              <Label>Cloud Mirror — network folder for finished sessions (optional)</Label>
+              <InfoTip label="What Cloud Mirror copies">
+                After each processing step, the session&apos;s{" "}
+                <strong>transcript, summary, action items, decisions,
+                and requirements</strong> are copied here into a subfolder
+                named for its <strong>client</strong> (sessions without a
+                client go to <code className="text-[11px]">Unfiled</code>).
+                The <strong>raw audio and session file stay on local disk</strong>
+                {" "}— they&apos;re what stalled Google Drive in earlier builds
+                and nobody reads a WAV from a shared drive anyway. Copies
+                run in the background with retries; a slow or briefly-
+                offline drive delays the text copy, never the recording. A
+                client&apos;s explicit Designated Folder (Clients view)
+                wins over this root and follows the same text-only rule.
+              </InfoTip>
+            </div>
             <div className="flex gap-2">
               <Input
                 value={settings.cloud_mirror_dir || ""}
@@ -533,19 +568,9 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
                 Browse…
               </Button>
             </div>
-            <p className="text-xs text-muted-foreground leading-relaxed">
-              After each processing step, the session&apos;s{" "}
-              <strong>transcript, summary, action items, decisions,
-              and requirements</strong> are copied here into a subfolder
-              named for its <strong>client</strong> (sessions without a
-              client go to <code className="text-[11px]">Unfiled</code>).
-              The <strong>raw audio and session file stay on local disk</strong>
-              {" "}— they&apos;re what stalled Google Drive in earlier builds
-              and nobody reads a WAV from a shared drive anyway. Copies
-              run in the background with retries; a slow or briefly-
-              offline drive delays the text copy, never the recording. A
-              client&apos;s explicit Designated Folder (Clients view)
-              wins over this root and follows the same text-only rule.
+            <p className="text-xs text-muted-foreground">
+              Copies finished session text (never audio) here in the
+              background, organized by client.
             </p>
           </div>
         </CardContent>
@@ -557,14 +582,31 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
           Cloud Mirror above). */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Session Archive</CardTitle>
+          <CardTitle>Session Archive</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="space-y-2">
-            <Label>
-              Roaming folder for session files (iCloud / OneDrive / Google
-              Drive) — optional
-            </Label>
+            <div className="flex items-center gap-1">
+              <Label>
+                Roaming folder for session files (iCloud / OneDrive / Google
+                Drive) — optional
+              </Label>
+              <InfoTip label="How Session Archive syncing works">
+                Each machine records to its own local disk — a Mac and a PC
+                never share a filesystem. Point this at a folder your sync
+                client (iCloud Drive, OneDrive, Google Drive) already keeps
+                in sync between your machines, and every processed
+                meeting&apos;s <strong>transcript, summary, action items,
+                decisions, and requirements</strong> is copied there in the
+                background so the other machine sees the same library.{" "}
+                <strong>Audio is never copied here</strong> — only the small
+                session file. The folder must already exist; it won&apos;t
+                be created for you, so a typo&apos;d path or an unmounted
+                drive fails loudly on Save instead of quietly starting an
+                empty archive. Click <strong>Save Settings</strong> below
+                after entering a path.
+              </InfoTip>
+            </div>
             <div className="flex gap-2">
               <Input
                 value={settings.session_archive_dir || ""}
@@ -596,20 +638,9 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
                 Browse…
               </Button>
             </div>
-            <p className="text-xs text-muted-foreground leading-relaxed">
-              Each machine records to its own local disk — a Mac and a PC
-              never share a filesystem. Point this at a folder your sync
-              client (iCloud Drive, OneDrive, Google Drive) already keeps
-              in sync between your machines, and every processed
-              meeting&apos;s <strong>transcript, summary, action items,
-              decisions, and requirements</strong> is copied there in the
-              background so the other machine sees the same library.{" "}
-              <strong>Audio is never copied here</strong> — only the small
-              session file. The folder must already exist; it won&apos;t
-              be created for you, so a typo&apos;d path or an unmounted
-              drive fails loudly on Save instead of quietly starting an
-              empty archive. Click <strong>Save Settings</strong> below
-              after entering a path.
+            <p className="text-xs text-muted-foreground">
+              Syncs session text between your machines via your own cloud
+              folder. Audio is never copied here.
             </p>
           </div>
           <SessionArchiveStatusPanel savedAt={settingsSavedAt} />
@@ -621,7 +652,7 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
       {/* Models */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">AI Models</CardTitle>
+          <CardTitle>AI Models</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
@@ -665,7 +696,7 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
       {/* Email */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Email (Outlook)</CardTitle>
+          <CardTitle>Email (Outlook)</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
@@ -682,7 +713,7 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
       {/* Calendar */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Calendar</CardTitle>
+          <CardTitle>Calendar</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
@@ -737,7 +768,7 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
       {/* Workflow */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Workflow</CardTitle>
+          <CardTitle>Workflow</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <Toggle
@@ -908,7 +939,7 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
       {settings.live_copilot_enabled && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">
+            <CardTitle>
               Coaching context{" "}
               <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
                 optional
@@ -983,7 +1014,7 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
           always-on hard cap at the bottom. */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Auto-stop</CardTitle>
+          <CardTitle>Auto-stop</CardTitle>
           <p className="text-xs text-muted-foreground mt-1">
             Catches forgotten recordings. Warnings appear in the app
             and fire a native OS notification; auto-stops actually end
@@ -1057,7 +1088,7 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
       {/* Retention */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Retention</CardTitle>
+          <CardTitle>Retention</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           {storage && (
@@ -1229,7 +1260,7 @@ function ChromeExtensionCard() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Chrome Extension</CardTitle>
+        <CardTitle>Chrome Extension</CardTitle>
         <p className="text-xs text-muted-foreground mt-1">
           The Meeting Recorder Chrome extension pulls today&apos;s
           Outlook calendar + Teams Activity from your real Chrome and
@@ -1962,7 +1993,7 @@ function LiveCoPilotModelCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">
+        <CardTitle>
           Live Co-Pilot model{" "}
           <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
             optional
@@ -2266,7 +2297,7 @@ function AutoRecordBlocklistPatternsCard() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Auto-record skip patterns</CardTitle>
+        <CardTitle>Auto-record skip patterns</CardTitle>
         <p className="text-xs text-muted-foreground mt-1">
           Don&apos;t auto-record any meeting whose title <em>contains</em>{" "}
           one of these substrings (case-insensitive). Useful for the
@@ -2514,7 +2545,7 @@ function AppUpdatesCard() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">App Updates</CardTitle>
+        <CardTitle>App Updates</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex items-center justify-between gap-3">
@@ -2645,7 +2676,7 @@ function SummaryTemplatesCard() {
       <CardHeader>
         <div className="flex items-start justify-between gap-3">
           <div>
-            <CardTitle className="text-base">Summary Templates</CardTitle>
+            <CardTitle>Summary Templates</CardTitle>
             <p className="text-xs text-muted-foreground mt-1">
               Each template is a prompt Claude uses when you click <strong>Summarize</strong> on
               a session. Edit the prompts to match the kind of meetings you actually run, or add
@@ -2889,7 +2920,7 @@ function CoPilotPromptLibraryCard({
       <CardHeader>
         <div className="flex items-start justify-between gap-3">
           <div>
-            <CardTitle className="text-base">{title}</CardTitle>
+            <CardTitle>{title}</CardTitle>
             <p className="text-xs text-muted-foreground mt-1">{description}</p>
           </div>
           <Button variant="outline" size="sm" onClick={() => setCreating(true)}>
@@ -3083,7 +3114,7 @@ function CoPilotCadenceCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">
+        <CardTitle>
           Co-Pilot Cadence{" "}
           <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
             optional
@@ -3268,7 +3299,7 @@ function DiagnosticsCard() {
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
-        <CardTitle className="text-base">Diagnostics</CardTitle>
+        <CardTitle>Diagnostics</CardTitle>
         <Button size="sm" variant="outline" onClick={refresh} disabled={loading}>
           {loading
             ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
@@ -3286,7 +3317,7 @@ function DiagnosticsCard() {
 
         {diag && (
           <div className="space-y-1.5">
-            {diag.checks.map((c) => (
+            {(Array.isArray(diag.checks) ? diag.checks : []).map((c) => (
               <div key={c.id} className="flex items-start gap-2.5 text-sm">
                 <span className="mt-1.5">{dot(c.status)}</span>
                 <div className="min-w-0">
@@ -3297,6 +3328,11 @@ function DiagnosticsCard() {
                 </div>
               </div>
             ))}
+            {!Array.isArray(diag.checks) && (
+              <div className="text-sm text-muted-foreground">
+                Checks unavailable — the diagnostics response was incomplete.
+              </div>
+            )}
           </div>
         )}
 
@@ -3458,7 +3494,7 @@ function TerminologyCard() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Domain terminology</CardTitle>
+        <CardTitle>Domain terminology</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <p className="text-sm text-muted-foreground">
