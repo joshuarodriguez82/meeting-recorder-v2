@@ -158,6 +158,41 @@ def _normalize_diarization_device(value: str) -> str:
     return v if v in _VALID_DIARIZATION_DEVICES else "auto"
 
 
+# Field report 2026-08-14: a user on a locked-down corporate tenant
+# (ttecdigital.com) hit a Microsoft sign-in prompt every time they opened
+# the Record tab, because /calendar/upcoming's Outlook COM fetch
+# (Dispatch("Outlook.Application") launches Outlook if it isn't already
+# running, which is enough to trigger the tenant's conditional-access
+# challenge) ran unconditionally. They'd already given up on Outlook and
+# switched to the Chrome extension (scrapes Outlook Web from their real,
+# already-authenticated browser — see services/extension_calendar_service.py)
+# but had no way to tell the backend to stop touching Outlook entirely, so
+# the prompt kept firing on every Record-tab open regardless.
+#
+#   "auto"      — current behavior: local calendar (Outlook COM / macOS
+#                 EventKit) plus extension events, merged.
+#   "outlook"   — local calendar only, no extension merge.
+#   "extension" — Chrome-extension-scraped events only. NO Outlook COM /
+#                 EventKit call is made anywhere, ever — this is the
+#                 whole point, since a single stray call re-triggers the
+#                 sign-in prompt. See services/calendar_service.py, which
+#                 is the single choke point every caller (server.py
+#                 endpoints, calendar_monitor.py, auto_record_service.py)
+#                 goes through.
+#   "off"       — no calendar data of any kind; /calendar/* endpoints
+#                 return empty results without error.
+#
+# Self-healing on read (see _normalize_diarization_device above for the
+# precedent): a corrupt/unrecognized value falls back to "auto" rather
+# than raising.
+_VALID_CALENDAR_SOURCES = {"auto", "outlook", "extension", "off"}
+
+
+def _normalize_calendar_source(value: str) -> str:
+    v = (value or "").strip().lower()
+    return v if v in _VALID_CALENDAR_SOURCES else "auto"
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable application settings resolved at startup."""
@@ -352,6 +387,13 @@ class Settings:
     # direct-scan path, e.g. while ruling out the index as a cause of a
     # sessions-list bug.
     session_index_enabled: bool
+    # Which calendar source(s) the backend is allowed to consult:
+    # "auto" (default, local calendar + extension merged), "outlook"
+    # (local calendar only), "extension" (Chrome-extension-scraped
+    # events only — NEVER touches Outlook COM / EventKit, anywhere; see
+    # services/calendar_service.py), or "off" (no calendar data at
+    # all). See the field report above _normalize_calendar_source.
+    calendar_source: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -488,6 +530,8 @@ class Settings:
             echo_cancellation_enabled=_get_bool(
                 "ECHO_CANCELLATION_ENABLED", False),
             session_index_enabled=_get_bool("SESSION_INDEX_ENABLED", True),
+            calendar_source=_normalize_calendar_source(
+                _get("CALENDAR_SOURCE", "auto")),
         )
 
     @property
@@ -573,6 +617,7 @@ class Settings:
         audio_mix_format_lookup_enabled: bool = True,
         echo_cancellation_enabled: bool = False,
         session_index_enabled: bool = True,
+        calendar_source: str = "auto",
     ) -> None:
         """Write settings back to the .env file.
 
@@ -685,6 +730,10 @@ class Settings:
             f"ECHO_CANCELLATION_ENABLED="
             f"{'true' if echo_cancellation_enabled else 'false'}\n"
             f"SESSION_INDEX_ENABLED={'true' if session_index_enabled else 'false'}\n"
+            # Not validated on write — from_env normalizes any garbage
+            # value back to "auto" on read (see _normalize_calendar_source
+            # above), matching diarization_device's self-healing pattern.
+            f"CALENDAR_SOURCE={calendar_source}\n"
         )
         # Write to the canonical LOCALAPPDATA location first. In rare cases
         # a Tauri-spawned Python child cannot open files under LOCALAPPDATA
