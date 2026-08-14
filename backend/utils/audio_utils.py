@@ -381,6 +381,7 @@ def finalize_recording_streaming(
     block_seconds: float = STREAM_BLOCK_SECONDS,
     loopback_start_offset_s: Optional[float] = None,
     echo_cancellation_enabled: bool = False,
+    aec_result: Optional[dict] = None,
 ) -> Tuple[float, bool]:
     """
     Stream-merge mic + (optional) loopback into a single mono PCM_16 WAV at
@@ -426,6 +427,17 @@ def finalize_recording_streaming(
             the right-aligned heuristic.
         echo_cancellation_enabled: run offline AEC on the mic channel
             before mixing. Default False.
+        aec_result: optional out-param. When given a dict, this function
+            fills it in-place with the AEC outcome for this call —
+            {"requested": bool, "accepted": Optional[bool], "reason":
+            Optional[str], "erle_db": Optional[float],
+            "residual_delay_ms": Optional[float]}. This is how the
+            decision escapes this function (and, via finalize_audio.py's
+            AEC_RESULT stdout line, the finalize subprocess) instead of
+            existing only as a log line that a subprocess parent may
+            never see. Left as `{}` (never populated) if the caller
+            doesn't pass a dict; existing callers that don't care about
+            AEC observability are unaffected.
 
     Returns:
         (duration_seconds_written, loopback_mixed_in)
@@ -603,12 +615,41 @@ def finalize_recording_streaming(
             f"near_energy={aec_decision.get('near_energy')} "
             f"residual_energy={aec_decision.get('residual_energy')}"
         )
+        if aec_result is not None:
+            aec_result.update({
+                "requested": True,
+                "accepted": bool(aec_decision.get("accepted")),
+                "reason": aec_decision.get("reason"),
+                "erle_db": aec_decision.get("erle_db"),
+                "residual_delay_ms": aec_decision.get("residual_delay_ms"),
+            })
         if aec_decision.get("accepted") and aec_decision.get("out_path"):
             mic_path_for_read = Path(aec_decision["out_path"])
             mic_sr_for_read = target_sr
         else:
             _safe_unlink(aec_temp_path)
             aec_temp_path = None
+    elif echo_cancellation_enabled:
+        # Requested, but there's no usable loopback reference to run AEC
+        # against (no loopback track, pre-resample failed, or no
+        # wallclock offset). This is a real, distinct outcome — NOT a
+        # rejection AEC itself made and NOT "not requested" — so a field
+        # pull for "why didn't AEC run" doesn't come back empty.
+        logger.info(
+            "Offline AEC requested but skipped: no usable loopback "
+            "reference (have_lb=%s lb_path_16k=%s lb_offset_out=%s)",
+            have_lb, bool(lb_path_16k), lb_offset_out,
+        )
+        if aec_result is not None:
+            aec_result.update({
+                "requested": True,
+                "accepted": False,
+                "reason": "no_usable_loopback_reference",
+                "erle_db": None,
+                "residual_delay_ms": None,
+            })
+    elif aec_result is not None:
+        aec_result.update({"requested": False})
 
     written_out = 0
     loopback_mixed = False

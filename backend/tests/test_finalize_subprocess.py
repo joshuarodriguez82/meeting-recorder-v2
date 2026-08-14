@@ -158,6 +158,75 @@ def test_subprocess_accepts_echo_cancellation_flag(recordings_dir: Path):
     assert float(result["duration_s"]) == pytest.approx(2.0, abs=0.05)
 
 
+def _parse_aec_result(stdout: str) -> dict | None:
+    import json
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line.startswith("AEC_RESULT "):
+            return json.loads(line[len("AEC_RESULT "):])
+    return None
+
+
+def test_subprocess_emits_aec_result_line_when_requested(recordings_dir: Path):
+    """--echo-cancellation must produce a machine-parseable AEC_RESULT
+    line on stdout, ahead of (or alongside) RESULT — this is the only
+    channel the AEC decision has to reach the parent process, since the
+    child's own logger.info(...) calls land on stdout too and the
+    parent only ever treated stdout as noise before this."""
+    mic = write_sine_wav(
+        recordings_dir / "_recording_subE.wav",
+        duration_s=2.0, samplerate=16000,
+    )
+    loopback = write_sine_wav(
+        recordings_dir / "_loopback_subE.wav",
+        duration_s=2.0, samplerate=16000,
+    )
+    out = recordings_dir / "session_subE.wav"
+
+    proc = _run([
+        "--mic", str(mic),
+        "--loopback", str(loopback),
+        "--output", str(out),
+        "--target-sr", "16000",
+        "--offset", "0.0",
+        "--echo-cancellation",
+    ])
+
+    assert proc.returncode == 0, (
+        f"unexpected exit {proc.returncode}; stderr={proc.stderr}")
+    aec_result = _parse_aec_result(proc.stdout)
+    assert aec_result is not None, (
+        f"no AEC_RESULT line in stdout: {proc.stdout!r}")
+    assert aec_result["requested"] is True
+    assert aec_result["accepted"] in (True, False)
+    assert "reason" in aec_result
+    # RESULT must still be present and parseable alongside it.
+    assert _parse_result(proc.stdout) != {}
+
+
+def test_subprocess_emits_no_aec_result_line_when_not_requested(recordings_dir: Path):
+    """Without --echo-cancellation, no AEC_RESULT line should appear —
+    the parent's job is to read that absence as 'not requested', which
+    only works if a truly-off run never emits one."""
+    mic = write_sine_wav(
+        recordings_dir / "_recording_subF.wav",
+        duration_s=2.0, samplerate=16000,
+    )
+    out = recordings_dir / "session_subF.wav"
+
+    proc = _run([
+        "--mic", str(mic),
+        "--loopback", "",
+        "--output", str(out),
+        "--target-sr", "16000",
+        "--offset", "",
+    ])
+
+    assert proc.returncode == 0, (
+        f"unexpected exit {proc.returncode}; stderr={proc.stderr}")
+    assert _parse_aec_result(proc.stdout) is None
+
+
 def test_subprocess_exits_2_on_bad_offset(tmp_path: Path):
     """Argparse-level / wrapper-level misuse exits 2 — distinct from
     finalize failure (1) and native crash (other). Lets the parent
