@@ -361,6 +361,33 @@ export function SessionDetailDialog({
                       </audio>
                     </div>
                   )}
+                  {(session.finalize_duration_s != null || session.aec_outcome?.requested) && (
+                    <div className="text-[11px] text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1">
+                      {session.finalize_duration_s != null && (
+                        <span title="WAV merge + optional echo cancellation, tracked separately from the recording window so a slow post-process never reads as missing audio.">
+                          Finalize: {session.finalize_duration_s < 60
+                            ? `${session.finalize_duration_s.toFixed(1)}s`
+                            : `${(session.finalize_duration_s / 60).toFixed(1)}m`}
+                        </span>
+                      )}
+                      {session.aec_outcome?.requested && (
+                        <span
+                          title={[
+                            session.aec_outcome.reason ? `reason: ${session.aec_outcome.reason}` : null,
+                            session.aec_outcome.erle_db != null ? `ERLE: ${session.aec_outcome.erle_db.toFixed(1)} dB` : null,
+                            session.aec_outcome.residual_delay_ms != null ? `residual delay: ${session.aec_outcome.residual_delay_ms.toFixed(0)} ms` : null,
+                          ].filter(Boolean).join(" · ")}
+                        >
+                          Echo cancellation:{" "}
+                          {session.aec_outcome.accepted === true
+                            ? "applied"
+                            : session.aec_outcome.accepted === false
+                              ? (session.aec_outcome.reason ? `not applied (${session.aec_outcome.reason})` : "not applied")
+                              : "outcome unknown (no decision returned)"}
+                        </span>
+                      )}
+                    </div>
+                  )}
                   <div className="space-y-2">
                     <Label>Meeting Name</Label>
                     <Input

@@ -419,3 +419,114 @@ def test_echo_cancellation_with_silent_loopback_falls_back_cleanly(
     )
     assert duration_s == pytest.approx(2.0, abs=0.05)
     assert list(recordings_dir.glob("_aecmic_*.tmp.wav")) == []
+
+
+# ── `aec_result` out-param: how the decision escapes this function ────
+#
+# This is the observability path a subprocess parent depends on:
+# finalize_audio.py passes its own dict here, then emits it as the
+# AEC_RESULT stdout line _run_finalize_subprocess parses. These tests
+# pin the dict's shape for every distinct outcome so a field pull for
+# "why didn't AEC run" / "did AEC help" always has an answer.
+
+def test_aec_result_populated_when_accepted(recordings_dir: Path):
+    near, far, _voice = _synthetic_echo_fixture(duration_s=4.0)
+    mic = recordings_dir / "_recording_result_accept.wav"
+    loopback = recordings_dir / "_loopback_result_accept.wav"
+    sf.write(str(mic), near, SR, subtype="FLOAT")
+    sf.write(str(loopback), far, SR, subtype="FLOAT")
+    out = recordings_dir / "session_result_accept.wav"
+
+    aec_result: dict = {}
+    finalize_recording_streaming(
+        mic_wav_path=str(mic), loopback_wav_path=str(loopback),
+        output_wav_path=str(out), target_sr=SR,
+        loopback_start_offset_s=0.0, echo_cancellation_enabled=True,
+        aec_result=aec_result,
+    )
+    assert aec_result["requested"] is True
+    assert aec_result["accepted"] is True, aec_result["reason"]
+    assert aec_result["erle_db"] is not None
+    assert aec_result["erle_db"] > 0
+
+
+def test_aec_result_populated_when_rejected(recordings_dir: Path):
+    """Silent loopback => decide_offline_aec rejects (reference_silent).
+    aec_result must report accepted=False with a real reason, not be
+    left empty."""
+    mic = write_sine_wav(recordings_dir / "_recording_result_reject.wav",
+                         duration_s=2.0, samplerate=SR)
+    loopback = write_silence_wav(
+        recordings_dir / "_loopback_result_reject.wav",
+        duration_s=2.0, samplerate=SR)
+    out = recordings_dir / "session_result_reject.wav"
+
+    aec_result: dict = {}
+    finalize_recording_streaming(
+        mic_wav_path=str(mic), loopback_wav_path=str(loopback),
+        output_wav_path=str(out), target_sr=SR,
+        loopback_start_offset_s=0.0, echo_cancellation_enabled=True,
+        aec_result=aec_result,
+    )
+    assert aec_result["requested"] is True
+    assert aec_result["accepted"] is False
+    assert aec_result["reason"]  # non-empty machine-readable code
+
+
+def test_aec_result_reports_no_usable_loopback_distinctly(recordings_dir: Path):
+    """Requested but there's no loopback track at all — must be a
+    distinct, honest outcome ('no_usable_loopback_reference'), not
+    silently indistinguishable from 'AEC ran and rejected the mic'."""
+    mic = write_sine_wav(recordings_dir / "_recording_result_nolb.wav",
+                         duration_s=2.0, samplerate=SR)
+    out = recordings_dir / "session_result_nolb.wav"
+
+    aec_result: dict = {}
+    finalize_recording_streaming(
+        mic_wav_path=str(mic), loopback_wav_path=None,
+        output_wav_path=str(out), target_sr=SR,
+        echo_cancellation_enabled=True,
+        aec_result=aec_result,
+    )
+    assert aec_result == {
+        "requested": True,
+        "accepted": False,
+        "reason": "no_usable_loopback_reference",
+        "erle_db": None,
+        "residual_delay_ms": None,
+    }
+
+
+def test_aec_result_reports_not_requested(recordings_dir: Path):
+    mic = write_sine_wav(recordings_dir / "_recording_result_off.wav",
+                         duration_s=2.0, samplerate=SR)
+    loopback = write_sine_wav(recordings_dir / "_loopback_result_off.wav",
+                              duration_s=2.0, samplerate=SR)
+    out = recordings_dir / "session_result_off.wav"
+
+    aec_result: dict = {}
+    finalize_recording_streaming(
+        mic_wav_path=str(mic), loopback_wav_path=str(loopback),
+        output_wav_path=str(out), target_sr=SR,
+        loopback_start_offset_s=0.0, echo_cancellation_enabled=False,
+        aec_result=aec_result,
+    )
+    assert aec_result == {"requested": False}
+
+
+def test_aec_result_default_none_is_safe(recordings_dir: Path):
+    """Callers that don't pass aec_result (every pre-existing call site)
+    must be completely unaffected — no crash, no behavior change."""
+    mic = write_sine_wav(recordings_dir / "_recording_result_default.wav",
+                         duration_s=2.0, samplerate=SR)
+    loopback = write_sine_wav(
+        recordings_dir / "_loopback_result_default.wav",
+        duration_s=2.0, samplerate=SR)
+    out = recordings_dir / "session_result_default.wav"
+
+    duration_s, loopback_mixed = finalize_recording_streaming(
+        mic_wav_path=str(mic), loopback_wav_path=str(loopback),
+        output_wav_path=str(out), target_sr=SR,
+        loopback_start_offset_s=0.0, echo_cancellation_enabled=True,
+    )
+    assert duration_s == pytest.approx(2.0, abs=0.05)

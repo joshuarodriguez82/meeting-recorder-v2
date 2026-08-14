@@ -382,6 +382,18 @@ export interface SessionSummary {
   // frames vs wall-clock, measured at stop. Informational (no audio
   // altered). null = clean.
   sync_warning?: string | null;
+  // How long finalize (WAV merge + optional AEC) took, in seconds —
+  // kept separate from duration_s (the capture window). See SessionFull.
+  finalize_duration_s?: number | null;
+  // Offline AEC decision for this session's finalize. See SessionFull's
+  // aec_outcome for the shape and the "requested but no decision" case.
+  aec_outcome?: {
+    requested: boolean;
+    accepted?: boolean | null;
+    reason?: string | null;
+    erle_db?: number | null;
+    residual_delay_ms?: number | null;
+  } | null;
 }
 
 /**
@@ -541,6 +553,24 @@ export interface SessionFull {
   audio_expected_duration_s?: number | null;
   processing_error?: string | null;
   sync_warning?: string | null;
+  // How long finalize (WAV merge + optional AEC) took, in seconds. Kept
+  // separate from ended_at/duration so a slow post-process never reads
+  // as missing audio. null = predates this field, or finalize hasn't
+  // completed.
+  finalize_duration_s?: number | null;
+  // Offline AEC decision for this session's finalize, if the
+  // echo-cancellation toggle was on. `requested: false` = toggle was
+  // off. `accepted: null` means AEC was requested but no decision came
+  // back (child crashed, or didn't report one) — this is DELIBERATELY
+  // distinct from a rejection (`accepted: false` with a real `reason`)
+  // and must be rendered as "unknown", never merged with either.
+  aec_outcome?: {
+    requested: boolean;
+    accepted?: boolean | null;
+    reason?: string | null;
+    erle_db?: number | null;
+    residual_delay_ms?: number | null;
+  } | null;
 }
 
 export interface Speaker {
