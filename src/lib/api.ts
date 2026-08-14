@@ -657,6 +657,44 @@ export interface QASource {
   similarity: number;
 }
 
+// /search/semantic returns a union of two hit shapes (see
+// backend/services/search_service.py SearchService.search, ~line 265):
+// a session-transcript-chunk hit, or a Knowledge Folder document-chunk
+// hit. They are NOT interchangeable — a document hit has no
+// session_id/display_name/started_at/start_s/end_s, so treating one as
+// a session (as the frontend used to) renders it as a broken,
+// unopenable "Untitled" session row.
+//
+// `source` is optional on the session variant for backward
+// compatibility: it's an additive field per the backend comment, so an
+// older backend that predates it should still be treated as a session
+// hit. Every OTHER session field stays required — widening them to
+// optional would just move today's bug into the type system instead
+// of fixing it.
+export interface SemanticSessionResult {
+  source?: "session";
+  session_id: string;
+  display_name: string;
+  started_at: string;
+  client: string;
+  project: string;
+  start_s: number;
+  end_s: number;
+  text: string;
+  similarity: number;
+}
+
+export interface SemanticDocumentResult {
+  source: "document";
+  doc_name: string;
+  doc_path: string;
+  client: string;
+  text: string;
+  similarity: number;
+}
+
+export type SemanticSearchResult = SemanticSessionResult | SemanticDocumentResult;
+
 // Bare-bones SSE event parser. The browser EventSource API does this
 // for us — but EventSource is GET-only, and the QA endpoint is POST
 // because the body can be 100s of bytes (query + filters). So we
@@ -1117,17 +1155,7 @@ export const api = {
   ) =>
     request<{
       query: string;
-      results: Array<{
-        session_id: string;
-        display_name: string;
-        started_at: string;
-        client: string;
-        project: string;
-        start_s: number;
-        end_s: number;
-        text: string;
-        similarity: number;
-      }>;
+      results: SemanticSearchResult[];
     }>("/search/semantic", {
       method: "POST",
       body: JSON.stringify({ query, top_k, client, project }),
@@ -1550,6 +1578,28 @@ export const api = {
       } | null;
     }>("/recording/auto-status"),
 
+  // Chrome extension bundling (see settings-view.tsx's ChromeExtensionCard).
+  // `status` is one of "up_to_date" | "update_available" | "unknown_version"
+  // | "never_posted" | "unknown" (bundled_version itself unavailable — a
+  // dev build with no zip-bundle run) — see backend/services/
+  // extension_bundle_service.py's extension_version_status for the exact
+  // rules.
+  getExtensionInfo: () =>
+    request<{
+      bundled_version: string | null;
+      last_seen_version: string | null;
+      last_seen_at: string | null;
+      status: "up_to_date" | "update_available" | "unknown_version" | "never_posted" | "unknown";
+      install_path: string;
+    }>("/extension/info"),
+  // Writes/refreshes the bundled extension into its STABLE install
+  // folder (same path every release — see backend endpoint docstring).
+  installExtensionFiles: () =>
+    request<{ ok: boolean; path: string; files: string[]; file_count: number }>(
+      "/extension/install",
+      { method: "POST" }
+    ),
+
   // Sessions
   listSessions: () => request<SessionSummary[]>("/sessions"),
   deleteSession: (id: string) =>
@@ -1713,6 +1763,36 @@ export const api = {
     return request<InsightsSummary>(
       `/insights/summary${qs ? `?${qs}` : ""}`);
   },
+
+  // Owner grouping (Follow Ups + Commitments owner normalisation) —
+  // see src/lib/owner-grouping.ts for the split/normalise rules these
+  // aliases layer on top of, and backend/services/owner_service.py for
+  // the source of truth both mirror.
+  getOwnerAliases: () =>
+    request<{ aliases: OwnerAlias[] }>("/owners/aliases"),
+  createOwnerAlias: (canonical: string, members: string[]) =>
+    request<OwnerAlias>("/owners/aliases", {
+      method: "POST",
+      body: JSON.stringify({ canonical, members }),
+    }),
+  updateOwnerAlias: (
+    id: string,
+    patch: { canonical?: string; add_members?: string[]; remove_members?: string[] },
+  ) =>
+    request<OwnerAlias | { deleted: true; id: string }>(
+      `/owners/aliases/${encodeURIComponent(id)}`,
+      { method: "PATCH", body: JSON.stringify(patch) },
+    ),
+  deleteOwnerAlias: (id: string) =>
+    request<{ ok: boolean }>(
+      `/owners/aliases/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  getOwnerSuggestions: () =>
+    request<{ groups: OwnerSuggestionGroup[] }>("/owners/suggestions"),
+  rejectOwnerSuggestion: (a: string, b: string) =>
+    request<{ ok: boolean }>("/owners/suggestions/reject", {
+      method: "POST",
+      body: JSON.stringify({ a, b }),
+    }),
 
   // Engagement register: structured records rolled up across every
   // session for a client (optionally one project), deduped.
@@ -2021,6 +2101,29 @@ export interface OpenActionItem {
   description: string;
   due: string;
   item_hash: string;
+}
+
+// A confirmed owner-name merge (e.g. "Joshua" -> "Josh"). `members` are
+// tier-2 normalised keys (see src/lib/owner-grouping.ts). Backend:
+// services/owner_service.py's OwnerAliasStore.
+export interface OwnerAlias {
+  id: string;
+  canonical: string;
+  members: string[];
+}
+
+export interface OwnerSuggestionMember {
+  key: string;
+  display: string;
+  count: number;
+}
+
+// A judgement-call merge candidate the user must accept before it
+// takes effect — see owner_service.py's suggest_groups().
+export interface OwnerSuggestionGroup {
+  group_id: string;
+  suggested_canonical: string;
+  members: OwnerSuggestionMember[];
 }
 export interface InsightsSummary {
   window: {

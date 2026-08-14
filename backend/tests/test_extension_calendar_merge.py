@@ -473,7 +473,10 @@ def test_replace_all_shrink_guard_only_compares_within_the_capture_window(tmp_pa
 def test_capture_status_reports_never_captured(tmp_path: Path):
     svc = ExtensionCalendarService(tmp_path)
     status = svc.capture_status()
-    assert status == {"updated_at": None, "event_count": 0, "future_event_count": 0}
+    assert status == {
+        "updated_at": None, "event_count": 0, "future_event_count": 0,
+        "last_seen_version": None, "last_seen_version_at": None,
+    }
 
 
 def test_capture_status_reports_counts_and_last_capture_time(tmp_path: Path):

@@ -124,8 +124,8 @@
 
   <h2>Connection</h2>
   <label for="backendUrl">Meeting Recorder backend URL</label>
-  <input type="text" id="backendUrl" placeholder="http://127.0.0.1:52469">
-  <p class="help">From Meeting Recorder → Settings → Chrome Extension. Port changes each launch.</p>
+  <input type="text" id="backendUrl" placeholder="http://127.0.0.1:17645">
+  <p class="help">From Meeting Recorder → Settings → Chrome Extension. The port is pinned at <code>17645</code> and stays the same across recorder restarts (it only changes if another app is already holding that port).</p>
 
   <label for="token">Auth token</label>
   <input type="password" id="token" placeholder="paste the per-launch token here">
@@ -170,6 +170,15 @@
     <p>4. The four narrative sources are POSTed together and the LLM parses them into a daily briefing with check-offable action items. Calendar events are POSTed as structured data and go straight into the Record tab's meeting store — no LLM involved, so nothing is lost to a char-budget or a regex guess.</p>
     <p>5. The calendar refresh also runs on its own schedule every 30 minutes, independent of the auto-capture toggle above, so Upcoming Meetings stays current even if you never turn that toggle on.</p>
     <p>6. Because the scrapes run in YOUR real Chrome (no Playwright), Microsoft's automation detection doesn't fire — your real session cookies authenticate everything.</p>
+  </div>
+
+  <div class="card">
+    <h2>Diagnose calendar capture</h2>
+    <p>If Calendar keeps showing 0 events, click below. It opens the calendar page in the background, inspects the live page structure at a few points in time, and prints exactly what it found — container/event-node counts, every long accessibility label verbatim, whether the grid is inside an iframe or a shadow root, and how those counts changed over 15 seconds. No DevTools, nothing to paste into a console. It changes nothing on the page and sends nothing anywhere except back to this options page.</p>
+    <p class="help">Copy the result and share it — it has everything needed to write a correct selector for your Outlook Web build without seeing it directly.</p>
+    <button id="diagnoseBtn" class="secondary">Diagnose calendar capture</button>
+    <button id="copyDiagnosticBtn" class="secondary" style="display:none;">Copy</button>
+    <pre id="diagnosticOutput" style="display:none; margin-top:12px; padding:12px; background:#111827; color:#e5e7eb; border-radius:6px; font-size:11px; line-height:1.5; max-height:420px; overflow:auto; white-space:pre-wrap; word-break:break-word;"></pre>
   </div>
 
   <script src="options.js"></script>

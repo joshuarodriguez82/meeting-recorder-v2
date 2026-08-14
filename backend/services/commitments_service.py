@@ -42,6 +42,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable, List, Optional
 
+from services.owner_service import AliasIndex, resolve_owners
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -143,6 +144,7 @@ class CommitmentsService:
         status: Optional[List[str]] = None,
         owner: Optional[str] = None,
         side: Optional[str] = None,
+        alias_index: Optional[AliasIndex] = None,
     ) -> List[dict]:
         """Aggregate every session's commitments into a flat list,
         optionally filtered. Each entry is enriched with session
@@ -152,7 +154,16 @@ class CommitmentsService:
         status is a list because the most common "Active" filter is
         "awaiting + overdue" — which we compute here from due_date_iso
         rather than persisting an "overdue" status that would drift
-        over time."""
+        over time.
+
+        owner filtering goes through services/owner_service.py's
+        resolve_owners() rather than a raw string compare: a
+        commitment's `owner` field may itself be a multi-owner string
+        ("Mark/Josh"), so `owner="Josh"` must match it. Pass
+        `alias_index` (see server.py) to also honour confirmed owner
+        aliases ("Joshua" -> "Josh"); omitting it still gets correct
+        split + case/org-suffix matching, just without the
+        user-confirmed judgement-call merges."""
         sessions = self._session_service.list_sessions()
         sess_lookup = {s["session_id"]: s for s in sessions}
 
@@ -170,8 +181,10 @@ class CommitmentsService:
         today = datetime.now().date()
         for sid in candidate_ids:
             for c in self.list_for_session(sid):
-                if owner and c.owner.lower() != owner.lower():
-                    continue
+                if owner:
+                    resolved = resolve_owners(c.owner, alias_index)
+                    if owner.lower() not in (r.lower() for r in resolved):
+                        continue
                 if side and c.side != side:
                     continue
                 # Compute "is overdue" on the fly from due_date_iso
