@@ -245,7 +245,8 @@ def parse_clock_time(text: Any) -> Optional[tuple]:
 
 
 def events_from_briefing(briefing: Dict[str, Any],
-                         date_iso: Optional[str] = None) -> List[dict]:
+                         date_iso: Optional[str] = None,
+                         stats: Optional[Dict[str, Any]] = None) -> List[dict]:
     """Lift calendar events out of a parsed daily briefing.
 
     Prefers the LLM's ``start_iso`` / ``end_iso``; falls back to
@@ -256,9 +257,20 @@ def events_from_briefing(briefing: Dict[str, Any],
     meeting must not resurface on the Record tab as something to
     record.
 
+    ``stats``, if given a dict, is mutated in place with ``raw``
+    (agenda items seen), ``kept`` (events returned), and a
+    ``dropped_<reason>`` count per drop reason — this is what lets the
+    server log *why* a briefing-fallback parse lost events, not just
+    that it did (field report chain culminating 2026-08-14: two
+    calendar-parse paths produced identically-shaped output, so neither
+    the stored JSON nor the log could ever say which one ran or why it
+    came up short).
+
     Pure: no I/O, no clock read except through ``date_iso``.
     """
     if not isinstance(briefing, dict):
+        if stats is not None:
+            stats.update(raw=0, kept=0)
         return []
     day_iso = str(date_iso or briefing.get("date") or "").strip()
     try:
@@ -266,14 +278,21 @@ def events_from_briefing(briefing: Dict[str, Any],
     except (TypeError, ValueError):
         day = None
 
+    agenda = briefing.get("agenda") or []
     out: List[dict] = []
-    for item in briefing.get("agenda") or []:
+    dropped_no_subject = 0
+    dropped_cancelled = 0
+    dropped_no_start = 0
+    for item in agenda:
         if not isinstance(item, dict):
+            dropped_no_subject += 1
             continue
         subject = str(item.get("title") or "").strip()
         if not subject:
+            dropped_no_subject += 1
             continue
         if str(item.get("status") or "").strip().lower() == "cancelled":
+            dropped_cancelled += 1
             continue
 
         start = _coerce_dt(item.get("start_iso"))
@@ -286,6 +305,7 @@ def events_from_briefing(briefing: Dict[str, Any],
             # No timeline position → useless for the Record tab, which
             # is entirely ordered by start time. Skip rather than
             # inventing a slot.
+            dropped_no_start += 1
             continue
 
         end = _coerce_dt(item.get("end_iso"))
@@ -310,11 +330,20 @@ def events_from_briefing(briefing: Dict[str, Any],
             "join_url": str(item.get("join_url") or "").strip(),
             "source": SOURCE_EXTENSION,
         })
+    if stats is not None:
+        stats.update(
+            raw=len(agenda),
+            kept=len(out),
+            dropped_no_subject=dropped_no_subject,
+            dropped_cancelled=dropped_cancelled,
+            dropped_no_start=dropped_no_start,
+        )
     return out
 
 
 def events_from_structured(events: Iterable[Any],
-                           date_iso: Optional[str] = None) -> List[dict]:
+                           date_iso: Optional[str] = None,
+                           stats: Optional[Dict[str, Any]] = None) -> List[dict]:
     """Turn structured event objects the extension parsed CLIENT-SIDE
     (out of Outlook Web's own ``aria-label`` accessibility strings —
     see ``chrome-extension/background.js``'s ``parseMeetingLabel`` /
@@ -328,20 +357,32 @@ def events_from_structured(events: Iterable[Any],
     carries its own full start/end, never a bare display time that
     needs a day anchored under it.
 
+    ``stats``, if given a dict, is mutated in place with ``raw``,
+    ``kept``, and per-reason ``dropped_*`` counts — same contract as
+    ``events_from_briefing``'s ``stats``, so the server can log both
+    paths identically regardless of which one ran.
+
     Tolerant of a genuinely hostile payload (wrong types, missing
     keys, garbage strings) — a malformed structured event degrades to
     "skipped", never a 500, since this feeds a client-controlled HTTP
     endpoint. Pure: no I/O, no LLM.
     """
+    events = list(events or [])
     out: List[dict] = []
-    for item in events or []:
+    dropped_not_dict = 0
+    dropped_no_subject = 0
+    dropped_no_start = 0
+    for item in events:
         if not isinstance(item, dict):
+            dropped_not_dict += 1
             continue
         subject = str(item.get("subject") or "").strip()
         if not subject:
+            dropped_no_subject += 1
             continue
         start = _coerce_dt(item.get("start"))
         if start is None:
+            dropped_no_start += 1
             continue
         end = _coerce_dt(item.get("end"))
         if end is None or end <= start:
@@ -359,7 +400,50 @@ def events_from_structured(events: Iterable[Any],
             "join_url": str(item.get("join_url") or "").strip(),
             "source": SOURCE_EXTENSION,
         })
+    if stats is not None:
+        stats.update(
+            raw=len(events),
+            kept=len(out),
+            dropped_not_dict=dropped_not_dict,
+            dropped_no_subject=dropped_no_subject,
+            dropped_no_start=dropped_no_start,
+        )
     return out
+
+
+def describe_structured_source(raw_calendar_events: Optional[Any]) -> str:
+    """Classify what the extension actually sent for ``calendar_events``
+    on THIS request, so a briefing-fallback parse can say WHY it fell
+    back rather than just that it did.
+
+    Three states, deliberately not collapsed to a boolean:
+
+      - "absent" — the key was never sent at all (an extension older
+        than the structured-capture change, or a request that never
+        built one — e.g. background.js's ``captureCalendarTab``
+        threw). This means "we have no client-side extraction to
+        trust at all."
+      - "empty"  — the key WAS sent, as an empty list: a current
+        extension whose structured DOM scan ran and found zero
+        candidates this capture (see ``classifyZeroReason`` in
+        background.js). This means "the extraction ran and came up
+        genuinely empty," a materially different situation from
+        "absent" even though both end up taking the same fallback
+        code path server-side.
+      - "present" — at least one structured event was sent; no
+        fallback needed (this function is really only interesting for
+        its other two answers, but included for completeness/logging
+        symmetry).
+
+    Pure: no I/O.
+    """
+    if raw_calendar_events is None:
+        return "absent"
+    try:
+        n = len(raw_calendar_events)
+    except TypeError:
+        return "absent"
+    return "empty" if n == 0 else "present"
 
 
 def merge_meetings(local: Iterable[dict],
@@ -543,10 +627,26 @@ class ExtensionCalendarService:
             self._write_locked(raw)
 
     def replace_all(self, events: Iterable[dict],
-                    now: Optional[datetime] = None) -> List[dict]:
+                    now: Optional[datetime] = None,
+                    import_meta: Optional[Dict[str, Any]] = None) -> List[dict]:
         """Replace the store with ``events`` clipped to the retention
         window. Returns the events actually kept (as dicts with real
         datetimes).
+
+        ``import_meta``, if given, is an observability record of HOW
+        ``events`` was produced — ``{"path": "structured"|"text-fallback",
+        "raw": int, "kept": int, "dropped": int, "fallback_reason":
+        str|None}`` — persisted alongside the events (see
+        ``capture_status``) so the Record tab's calendar panel can say
+        "2 meetings from the extension's structured capture" instead of
+        rendering identically regardless of which of the two calendar-
+        parse paths actually ran (field report chain culminating
+        2026-08-14: that ambiguity caused several wrong diagnoses
+        because neither the stored JSON nor the log revealed the path).
+        Preserved across a write that doesn't supply it, the same way
+        ``last_seen_version`` is preserved below — this method owns
+        "events"/"updated_at" and must not blank out import bookkeeping
+        a DIFFERENT call already recorded.
 
         SHRINK GUARD (field report 2026-08-13): if this capture found
         FEWER events than the store already holds within the same
@@ -615,6 +715,18 @@ class ExtensionCalendarService:
                 "last_seen_version": (raw_before or {}).get("last_seen_version"),
                 "last_seen_version_at": (raw_before or {}).get("last_seen_version_at"),
             }
+            if import_meta is not None:
+                payload["last_import_path"] = import_meta.get("path")
+                payload["last_import_raw"] = import_meta.get("raw")
+                payload["last_import_kept"] = import_meta.get("kept")
+                payload["last_import_dropped"] = import_meta.get("dropped")
+                payload["last_import_fallback_reason"] = import_meta.get("fallback_reason")
+                payload["last_import_at"] = ref.isoformat()
+            else:
+                for k in ("last_import_path", "last_import_raw", "last_import_kept",
+                          "last_import_dropped", "last_import_fallback_reason",
+                          "last_import_at"):
+                    payload[k] = (raw_before or {}).get(k)
             self._write_locked(payload)
         logger.info(
             f"Extension calendar store: kept {len(kept)} event(s), "
@@ -713,12 +825,31 @@ class ExtensionCalendarService:
             from ``last_seen_version`` being None so "never posted" and
             "posted but pre-1.2.0" don't collapse into the same state —
             see ``extension_bundle_service.extension_version_status``.
+          last_import_path: "structured" | "text-fallback" | None — which
+            calendar-parse path produced the CURRENTLY RETAINED events
+            (see ``replace_all``'s ``import_meta``). None if nothing
+            has imported yet.
+          last_import_raw / last_import_kept / last_import_dropped: the
+            counts that path saw, for the same reason last_import_path
+            exists — see the server's "Extension calendar: path=..."
+            log line, which carries the same numbers.
+          last_import_fallback_reason: why a "text-fallback" import fell
+            back — e.g. "extension sent no structured events" vs.
+            "extension's structured scan found zero events" — or None
+            when the path was "structured" (no fallback happened) or
+            nothing has imported yet.
+          last_import_at: ISO string of when that import happened.
 
         Never raises — mirrors ``get_events``/``has_events``: a
         cloud-placeholder or corrupt store degrades to "nothing yet"
         rather than taking the Record tab's readiness panel down.
         """
         ref = now or datetime.now()
+        empty_import_meta = {
+            "last_import_path": None, "last_import_raw": None,
+            "last_import_kept": None, "last_import_dropped": None,
+            "last_import_fallback_reason": None, "last_import_at": None,
+        }
         try:
             with self._lock:
                 raw = self._read_locked()
@@ -726,6 +857,7 @@ class ExtensionCalendarService:
             return {
                 "updated_at": None, "event_count": 0, "future_event_count": 0,
                 "last_seen_version": None, "last_seen_version_at": None,
+                **empty_import_meta,
             }
         events = (raw or {}).get("events") or []
         future = 0
@@ -741,4 +873,10 @@ class ExtensionCalendarService:
             "future_event_count": future,
             "last_seen_version": (raw or {}).get("last_seen_version") or None,
             "last_seen_version_at": (raw or {}).get("last_seen_version_at") or None,
+            "last_import_path": (raw or {}).get("last_import_path"),
+            "last_import_raw": (raw or {}).get("last_import_raw"),
+            "last_import_kept": (raw or {}).get("last_import_kept"),
+            "last_import_dropped": (raw or {}).get("last_import_dropped"),
+            "last_import_fallback_reason": (raw or {}).get("last_import_fallback_reason"),
+            "last_import_at": (raw or {}).get("last_import_at"),
         }

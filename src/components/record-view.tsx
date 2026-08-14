@@ -307,6 +307,17 @@ export function RecordView({
     last_capture_at?: string | null;
     event_count?: number;
     future_event_count?: number;
+    // Which calendar-parse path produced the currently-retained events
+    // — "structured" (client-side aria-label extraction, no LLM) vs.
+    // "text-fallback" (LLM-parsed after the extension's own structured
+    // scan came up empty or absent) — and why a fallback happened, so
+    // the empty/low-count state can say "N meetings from the
+    // extension's structured capture" instead of rendering identically
+    // regardless of which path ran (field report chain culminating
+    // 2026-08-14; see backend/services/extension_calendar_service.py's
+    // replace_all `import_meta`).
+    last_import_path?: string | null;
+    last_import_fallback_reason?: string | null;
   } | null>(null);
 
   // Load initial data. Calendar data is owned by the parent (page.tsx)
@@ -1697,7 +1708,19 @@ export function RecordView({
                   {calendarStatus.last_capture_at
                     ? `Last capture: ${timeAgoLabel(calendarStatus.last_capture_at)} · ` +
                       `${calendarStatus.event_count ?? 0} event` +
-                      `${(calendarStatus.event_count ?? 0) === 1 ? "" : "s"} on file`
+                      `${(calendarStatus.event_count ?? 0) === 1 ? "" : "s"} on file` +
+                      // Which calendar-parse path produced those events —
+                      // "structured" (client-side aria-label extraction,
+                      // no LLM) vs. "text-fallback" (LLM-recovered after
+                      // the extension's own scan came up empty/absent) —
+                      // so this never renders identically regardless of
+                      // which path ran (field report chain culminating
+                      // 2026-08-14).
+                      ((calendarStatus.event_count ?? 0) > 0 && calendarStatus.last_import_path
+                        ? calendarStatus.last_import_path === "structured"
+                          ? " (extension's structured capture)"
+                          : " (recovered from text)"
+                        : "")
                     : "The extension has never sent a capture."}
                 </p>
                 <p>

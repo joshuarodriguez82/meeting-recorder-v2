@@ -333,6 +333,9 @@ def test_available_reports_extension_data_not_outlook(monkeypatch):
         "available": True, "source": "extension",
         "last_capture_at": "2026-08-13T13:00:00",
         "event_count": 3, "future_event_count": 2,
+        "last_import_path": None, "last_import_raw": None,
+        "last_import_kept": None, "last_import_dropped": None,
+        "last_import_fallback_reason": None, "last_import_at": None,
     }
 
     _wire(monkeypatch, calendar_source="extension", extension_svc=SimpleNamespace(
@@ -344,6 +347,9 @@ def test_available_reports_extension_data_not_outlook(monkeypatch):
     assert result == {
         "available": False, "source": "extension",
         "last_capture_at": None, "event_count": 0, "future_event_count": 0,
+        "last_import_path": None, "last_import_raw": None,
+        "last_import_kept": None, "last_import_dropped": None,
+        "last_import_fallback_reason": None, "last_import_at": None,
     }
 
 

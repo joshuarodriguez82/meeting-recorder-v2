@@ -24,6 +24,7 @@ collaborators replaced by lightweight spies. No LLM SDK involved.
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -51,10 +52,12 @@ class _SaveParsedSpy:
 class _ReplaceAllSpy:
     def __init__(self, kept=None):
         self.calls = []
+        self.import_meta_calls = []
         self._kept = kept if kept is not None else []
 
-    def __call__(self, events):
+    def __call__(self, events, now=None, import_meta=None):
         self.calls.append(list(events))
+        self.import_meta_calls.append(import_meta)
         return self._kept
 
 
@@ -159,6 +162,121 @@ def test_calendar_only_text_fallback_uses_llm_but_still_skips_briefing_save(monk
     assert len(summ.calls) == 1
     assert save_parsed.calls == [], "calendar-only path must not touch the saved briefing"
     assert len(replace_all.calls) == 1
+
+
+# ── observability: path= logging + import_meta wiring (field report
+#    chain culminating 2026-08-14 — two calendar-parse paths produced
+#    identically-shaped output, so neither the log nor the stored JSON
+#    ever said which one ran, which caused several wrong diagnoses) ──
+
+def test_calendar_only_structured_path_logs_and_records_import_meta(monkeypatch, caplog):
+    replace_all = _ReplaceAllSpy(kept=REALISTIC_STRUCTURED_EVENTS)
+    _wire(monkeypatch, replace_all=replace_all)
+
+    req = server.ExtensionImportRequest(calendar_events=REALISTIC_STRUCTURED_EVENTS)
+    with caplog.at_level(logging.INFO, logger="server"):
+        result = asyncio.run(server.import_briefing_from_extension(req))
+
+    assert result["path"] == "structured"
+    assert replace_all.import_meta_calls == [{
+        "path": "structured", "raw": 5, "kept": 5, "dropped": 0,
+        "fallback_reason": None,
+    }]
+    log_lines = [r.message for r in caplog.records]
+    path_lines = [m for m in log_lines if m.startswith("Extension calendar: path=")]
+    assert len(path_lines) == 1
+    assert path_lines[0] == "Extension calendar: path=structured raw=5 kept=5 dropped=0"
+
+
+def test_calendar_only_text_fallback_because_absent_logs_the_reason(monkeypatch, caplog):
+    """calendar_events was never sent at all (an old extension, or a
+    capture that threw before building a payload) -- distinct from an
+    extension that DID run its scan and found nothing."""
+    summ = _FakeSummarizer(parsed={
+        "greeting": "", "top_priority": None, "needs_response": [],
+        "agenda": [{"title": "Ad-hoc Sync", "time": "2:00 PM",
+                    "duration": "30 min", "status": "scheduled"}],
+        "schedule_notes": [], "fyi": [], "date": "2026-08-13",
+    })
+    replace_all = _ReplaceAllSpy(kept=[{"subject": "Ad-hoc Sync"}])
+    _wire(monkeypatch, summarizer=summ, replace_all=replace_all)
+
+    req = server.ExtensionImportRequest(
+        calendar_text="Ad-hoc Sync 2:00 PM - 2:30 PM", date="2026-08-13")
+    assert req.calendar_events is None  # never sent -- "absent", not "empty"
+    with caplog.at_level(logging.INFO, logger="server"):
+        result = asyncio.run(server.import_briefing_from_extension(req))
+
+    assert result["path"] == "text-fallback"
+    assert len(replace_all.import_meta_calls) == 1
+    meta = replace_all.import_meta_calls[0]
+    assert meta["fallback_reason"] == "absent"
+    assert meta["raw"] == 1 and meta["kept"] == 1
+    path_line = next(
+        r.message for r in caplog.records
+        if r.message.startswith("Extension calendar: path="))
+    assert path_line == (
+        "Extension calendar: path=briefing-fallback "
+        "(extension sent no structured events) raw=1 kept=1 dropped=0")
+
+
+def test_calendar_only_text_fallback_because_empty_logs_the_reason(monkeypatch, caplog):
+    """calendar_events WAS sent, as an empty list: a current extension
+    whose structured DOM scan ran and genuinely found zero candidates
+    this capture -- must not be logged the same way as "absent"."""
+    summ = _FakeSummarizer(parsed={
+        "greeting": "", "top_priority": None, "needs_response": [],
+        "agenda": [
+            {"title": "Ad-hoc Sync", "time": "2:00 PM",
+             "duration": "30 min", "status": "scheduled"},
+            {"title": "Cancelled one", "time": "3:00 PM", "status": "cancelled"},
+        ],
+        "schedule_notes": [], "fyi": [], "date": "2026-08-13",
+    })
+    replace_all = _ReplaceAllSpy(kept=[{"subject": "Ad-hoc Sync"}])
+    _wire(monkeypatch, summarizer=summ, replace_all=replace_all)
+
+    req = server.ExtensionImportRequest(
+        calendar_events=[],  # sent, but explicitly empty
+        calendar_text="Ad-hoc Sync 2:00 PM - 2:30 PM", date="2026-08-13")
+    with caplog.at_level(logging.INFO, logger="server"):
+        result = asyncio.run(server.import_briefing_from_extension(req))
+
+    assert result["path"] == "text-fallback"
+    meta = replace_all.import_meta_calls[0]
+    assert meta["fallback_reason"] == "empty"
+    assert meta["raw"] == 2 and meta["kept"] == 1 and meta["dropped"] == 1
+    path_line = next(
+        r.message for r in caplog.records
+        if r.message.startswith("Extension calendar: path="))
+    assert path_line == (
+        "Extension calendar: path=briefing-fallback "
+        "(extension's structured scan found zero events) "
+        "raw=2 kept=1 dropped=1 (cancelled: 1)")
+
+
+def test_full_capture_narrative_summary_line_carries_path(monkeypatch, caplog):
+    """The pre-existing 'Chrome-extension import:' summary line must
+    carry path= too, so a single grep answers "which path ran" for
+    both the calendar-only fast path and a full narrative capture."""
+    summ = _FakeSummarizer(parsed={
+        "greeting": "hi", "top_priority": None, "needs_response": [],
+        "agenda": [], "schedule_notes": [], "fyi": [],
+    })
+    save_parsed = _SaveParsedSpy(
+        stored={"date": "2026-08-13", "agenda": []})
+    replace_all = _ReplaceAllSpy(kept=REALISTIC_STRUCTURED_EVENTS)
+    _wire(monkeypatch, summarizer=summ, save_parsed=save_parsed, replace_all=replace_all)
+
+    req = server.ExtensionImportRequest(
+        owa_text="Today's calendar text", calendar_events=REALISTIC_STRUCTURED_EVENTS)
+    with caplog.at_level(logging.INFO, logger="server"):
+        asyncio.run(server.import_briefing_from_extension(req))
+
+    summary_line = next(
+        r.message for r in caplog.records
+        if r.message.startswith("Chrome-extension import:"))
+    assert "path=structured" in summary_line
 
 
 def test_no_content_at_all_is_a_400(monkeypatch):

@@ -78,6 +78,50 @@ const sandbox = loadSandbox();
 // Deliberately minimal — see the file header for the exact surface
 // _calendarDomScanFunc needs.
 
+// Minimal CSS-selector matcher: enough for the simple,
+// non-compound selectors _calendarDomScanFunc actually issues
+// (`*`, bare tag names like `iframe`, `[attr]`, `[attr="value"]`,
+// and comma-separated lists of those) — not a general selector
+// engine. Added specifically so the fake DOM can grow a real
+// `querySelectorAll`, per the v1.3.2 depth-cap fix: the production
+// scan now uses `querySelectorAll` instead of a depth-limited
+// `.children` recursion, so the test double has to support it rather
+// than the production code staying depth-limited just to remain
+// testable against a double that couldn't do it.
+function matchesSimpleSelector(node, rawSel) {
+  const sel = rawSel.trim();
+  if (sel === "*") return true;
+  const attrMatch = /^\[([a-zA-Z0-9_-]+)(?:=("|')(.*?)\2)?\]$/.exec(sel);
+  if (attrMatch) {
+    const [, name, , value] = attrMatch;
+    if (!node.hasAttribute || !node.hasAttribute(name)) return false;
+    if (value === undefined) return true;
+    return node.getAttribute(name) === value;
+  }
+  return (node.tagName || "").toLowerCase() === sel.toLowerCase();
+}
+
+function matchesSelector(node, selector) {
+  return selector.split(",").some((s) => matchesSimpleSelector(node, s));
+}
+
+function collectMatches(root, selector, out) {
+  const kids = root.children || [];
+  for (const kid of kids) {
+    if (matchesSelector(kid, selector)) out.push(kid);
+    collectMatches(kid, selector, out);
+  }
+}
+
+function attachQuerySelectorAll(node) {
+  node.querySelectorAll = (selector) => {
+    const out = [];
+    collectMatches(node, selector, out);
+    return out;
+  };
+  return node;
+}
+
 function el(tag, attrs = {}, opts = {}) {
   const attrsCopy = { ...attrs };
   const node = {
@@ -98,7 +142,7 @@ function el(tag, attrs = {}, opts = {}) {
   };
   Object.defineProperty(node, "innerText", { get: () => opts.text || "" });
   Object.defineProperty(node, "textContent", { get: () => opts.text || "" });
-  return node;
+  return attachQuerySelectorAll(node);
 }
 
 function append(parent, ...kids) {
@@ -110,7 +154,7 @@ function append(parent, ...kids) {
 }
 
 function doc(children) {
-  return { children };
+  return attachQuerySelectorAll({ children });
 }
 
 function setDocument(root) {
@@ -251,6 +295,50 @@ test("non-meeting text anywhere in the tree never throws and never yields an eve
   assert.equal(candidates.length, 0);
 });
 
+// ── _calendarDomScanFunc: deep-nesting field regression (v1.3.2) ─────
+//
+// Field evidence (2026-08-14, Outlook Web week view): the diagnostic
+// probe's FLAT `querySelectorAll("[aria-label]")` found 28 meeting
+// labels that matched the parser's own TIME_RANGE_RE, but the real
+// capture — which used this hand-rolled recursive `walk()` — reported
+// 0 events from 255 candidates. `walk()` hard-stops at `depth > 30`.
+// Outlook Web's React tree nests calendar tiles deeper than that.
+// These tests build a synthetic DOM chain deep enough to reproduce
+// the truncation and assert a valid, otherwise-perfectly-parseable
+// meeting label at that depth is (pre-fix) missed entirely.
+
+// Wraps `leafEl` in `depth - 1` intermediate <div> layers so it sits
+// at generation `depth` below the document (a direct child of
+// `document` is generation 1).
+function buildChain(depth, leafEl) {
+  let node = leafEl;
+  for (let i = 0; i < depth - 1; i++) {
+    const wrapper = el("div");
+    append(wrapper, node);
+    node = wrapper;
+  }
+  return node;
+}
+
+for (const depth of [35, 50]) {
+  test(`a meeting label at nesting depth ${depth} is reachable by the DOM scan`, () => {
+    const leaf = el("div", {
+      role: "button",
+      "aria-label": "Homeserve, 8:30 AM to 9:00 AM, Friday, August 14, 2026, Microsoft Teams Meeting, By Mark Lefky, Busy",
+    });
+    const chain = buildChain(depth, leaf);
+    setDocument(doc([chain]));
+
+    const { candidates, diag } = sandbox._calendarDomScanFunc();
+    const found = candidates.find((c) => c.label.startsWith("Homeserve"));
+    assert.ok(
+      found,
+      `expected the depth-${depth} "Homeserve" candidate to be found, got ` +
+      `${candidates.length} candidate(s); diag=${JSON.stringify(diag)}`,
+    );
+  });
+}
+
 // ── shouldStopPolling: retry-until-stable logic (pure) ────────────────
 
 test("shouldStopPolling: too few samples never stops", () => {
@@ -300,10 +388,20 @@ test("classifyZeroReason: no candidates found at all", () => {
   assert.match(reason, /no candidate elements found/);
 });
 
-test("classifyZeroReason: candidates found but none parseable", () => {
-  const stats = { scanned: 14, allDay: 0, dateUnresolved: 0 };
+test("classifyZeroReason: all candidates not meeting-shaped names that cause specifically (not the old generic catch-all)", () => {
+  const stats = { scanned: 14, notMeetingShaped: 14, allDay: 0, dateUnresolved: 0, deduped: 0 };
   const reason = sandbox.classifyZeroReason(stats, {});
-  assert.match(reason, /found 14 candidates, none had a parseable time/);
+  assert.match(reason, /found 14 candidates, none were meeting-shaped/);
+});
+
+test("classifyZeroReason: mixed causes (no single bucket is 100%) reports the stats breakdown, not a single guessed cause", () => {
+  const stats = { scanned: 10, notMeetingShaped: 4, dateUnresolved: 3, allDay: 2, deduped: 1 };
+  const reason = sandbox.classifyZeroReason(stats, {});
+  assert.match(reason, /found 10 candidates, none produced an event/);
+  assert.match(reason, /4 not meeting-shaped/);
+  assert.match(reason, /3 unresolved date\/time/);
+  assert.match(reason, /2 all-day/);
+  assert.match(reason, /1 duplicate/);
 });
 
 test("classifyZeroReason: candidates found but all all-day", () => {
@@ -319,9 +417,9 @@ test("classifyZeroReason: candidates found with a time but no resolvable date", 
 });
 
 test("classifyZeroReason: singular phrasing for exactly one candidate", () => {
-  const stats = { scanned: 1, allDay: 0, dateUnresolved: 0 };
+  const stats = { scanned: 1, notMeetingShaped: 1, allDay: 0, dateUnresolved: 0 };
   const reason = sandbox.classifyZeroReason(stats, {});
-  assert.match(reason, /found 1 candidate, none had a parseable time/);
+  assert.match(reason, /found 1 candidate, none were meeting-shaped/);
 });
 
 // ── extractEventsFromCandidates / parseMeetingLabel: regression set ──
@@ -423,4 +521,147 @@ test("zero meeting-shaped labels yields zero events, with dominantLayer null", (
   assert.equal(result.events.length, 0);
   assert.equal(result.stats.notMeetingShaped, 3);
   assert.equal(sandbox.dominantLayer(result.stats), null);
+});
+
+// ── calendar-refresh alarm listener (v1.3.1 field report 2026-08-14) ─
+//
+// Field evidence: the calendar-refresh alarm had never once produced a
+// POST. These tests exercise the REAL chrome.alarms.onAlarm listener
+// (not a mock of it) against a fresh vm context per test — a fresh
+// context stands in for an MV3 service-worker cold start, since it
+// carries no in-memory state across "restarts" the way a stale
+// module-scope variable would. `chrome.storage.local` is backed by a
+// plain object that persists ACROSS that reset, exactly like the real
+// durable chrome.storage.local does — this is what proves credentials
+// are read fresh from storage rather than from anything that would
+// reset on a real cold start.
+
+const CALENDAR_ALARM_NAME = "calendar-refresh"; // must match background.js
+const CALENDAR_DEDUP_WINDOW_MS = 20 * 60 * 1000; // must match background.js
+
+function makeStorageLocalStub(initial) {
+  const store = { ...(initial || {}) };
+  return {
+    _store: store,
+    get(defaults) {
+      const out = { ...(defaults || {}) };
+      for (const k of Object.keys(defaults || {})) {
+        if (Object.prototype.hasOwnProperty.call(store, k)) out[k] = store[k];
+      }
+      return Promise.resolve(out);
+    },
+    set(obj) {
+      Object.assign(store, obj);
+      return Promise.resolve();
+    },
+  };
+}
+
+// Loads a brand-new evaluation of background.js — a fresh vm context,
+// standing in for a cold-started service worker — wired to a storage
+// stub seeded with `initialStorage`. Returns the storage stub (so
+// tests can inspect what got written) and the captured onAlarm
+// listener (so tests can fire it directly, the same way chrome.alarms
+// would).
+function loadAlarmSandbox(initialStorage) {
+  const storage = makeStorageLocalStub(initialStorage);
+  let alarmListener = null;
+  const chromeStub = {
+    runtime: {
+      onInstalled: { addListener: () => {} },
+      onStartup: { addListener: () => {} },
+      onMessage: { addListener: () => {} },
+      getManifest: () => ({ version: "1.3.1" }),
+    },
+    storage: {
+      onChanged: { addListener: () => {} },
+      local: storage,
+    },
+    alarms: {
+      onAlarm: { addListener: (fn) => { alarmListener = fn; } },
+      create: () => {},
+      clearAll: async () => {},
+    },
+    // Deliberately no tabs/scripting methods — none of the tests below
+    // need a working capture; the "cold start" test asserts only that
+    // the credentials gate is passed, not that a full capture succeeds
+    // against a real Outlook Web tab (out of scope here; see the DOM
+    // scan tests above for that half).
+    tabs: {},
+    scripting: {},
+  };
+  const alarmVmSandbox = { chrome: chromeStub, console };
+  vm.createContext(alarmVmSandbox);
+  vm.runInContext(SRC, alarmVmSandbox, { filename: BG_PATH });
+  if (!alarmListener) {
+    throw new Error("chrome.alarms.onAlarm.addListener was never called by background.js");
+  }
+  return { sandbox: alarmVmSandbox, storage, alarmListener };
+}
+
+test("calendar alarm: missing credentials is traced, not silent", async () => {
+  const { storage, alarmListener } = loadAlarmSandbox({});
+  await alarmListener({ name: CALENDAR_ALARM_NAME });
+  assert.ok(storage._store.lastCalendarCaptureAt > 0,
+    "a skipped alarm attempt must still stamp lastCalendarCaptureAt");
+  assert.equal(storage._store.lastCalendarResult.ok, false);
+  assert.equal(storage._store.lastCalendarResult.reason, "not-configured");
+});
+
+test("calendar alarm: dedupe skip is traced, not silent", async () => {
+  const now = Date.now();
+  const { storage, alarmListener } = loadAlarmSandbox({
+    backendUrl: "http://127.0.0.1:17645",
+    token: "tok",
+    lastCalendarCaptureAt: now - 5 * 60 * 1000, // 5 min ago, inside the 20-min window
+  });
+  await alarmListener({ name: CALENDAR_ALARM_NAME });
+  assert.equal(storage._store.lastCalendarResult.ok, false);
+  assert.equal(storage._store.lastCalendarResult.reason, "deduped");
+  assert.ok(storage._store.lastCalendarCaptureAt >= now,
+    "the skip itself should still be timestamped as an attempt");
+});
+
+test("calendar alarm: an alarm fired long enough after the last capture is NOT deduped", async () => {
+  const now = Date.now();
+  const { storage, alarmListener } = loadAlarmSandbox({
+    backendUrl: "http://127.0.0.1:17645",
+    token: "tok",
+    lastCalendarCaptureAt: now - (CALENDAR_DEDUP_WINDOW_MS + 60_000), // just past the window
+  });
+  await alarmListener({ name: CALENDAR_ALARM_NAME });
+  assert.notEqual(storage._store.lastCalendarResult.reason, "deduped");
+  assert.notEqual(storage._store.lastCalendarResult.reason, "not-configured");
+});
+
+test("calendar alarm: cold start reads backendUrl/token fresh from chrome.storage.local, not a stale module var", async () => {
+  // The "prime suspect" from the field-report investigation: a module-
+  // scope variable populated once at worker startup would read
+  // undefined here, since this vm context has never run any startup
+  // code that could have populated one. background.js instead reads
+  // chrome.storage.local directly inside the listener, which is
+  // exactly what's seeded below — simulating durable config surviving
+  // a cold start. If background.js regresses to a module-scope cache,
+  // this test starts failing with reason "not-configured".
+  const { storage, alarmListener } = loadAlarmSandbox({
+    backendUrl: "http://127.0.0.1:17645",
+    token: "tok",
+    lastCalendarCaptureAt: 0, // never captured before -> must not dedupe-skip either
+  });
+  await alarmListener({ name: CALENDAR_ALARM_NAME });
+  assert.notEqual(storage._store.lastCalendarResult.reason, "not-configured");
+  assert.notEqual(storage._store.lastCalendarResult.reason, "deduped");
+  // The fake chrome has no working tabs/scripting, so the capture
+  // itself fails further in (proof it got PAST the credentials gate) —
+  // and that failure is still fully traced, never silent.
+  assert.equal(storage._store.lastCalendarResult.ok, false);
+  assert.ok(storage._store.lastCalendarCaptureAt > 0);
+});
+
+test("captureCalendarOnly persists a traceable result even when called directly without credentials", async () => {
+  const { sandbox: sb, storage } = loadAlarmSandbox({});
+  const result = await sb.captureCalendarOnly("", "");
+  assert.equal(result.ok, false);
+  assert.ok(storage._store.lastCalendarCaptureAt > 0);
+  assert.equal(storage._store.lastCalendarResult.ok, false);
 });
