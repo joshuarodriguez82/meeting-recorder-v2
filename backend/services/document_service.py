@@ -18,6 +18,20 @@ extraction) rather than raising or disappearing. extract_text() never
 raises for a bad *input* file; it only raises for genuine programming
 errors.
 
+Follow-up field data (2026-08-14): a real client Knowledge Folder — a
+user's actual working corpus of SOWs, estimates, and RFP responses —
+hit 87 skipped files out of what should have been the bulk of the
+folder. Two distinct bugs, not one: SUPPORTED_EXTENSIONS claimed .pdf
+and .docx support that pypdf/python-docx never shipped (advice to
+`pip install` them is also unactionable inside a packaged app with a
+bootstrapped venv, so that's gone too), and .xlsx/.pptx/.html had no
+extractor at all despite openpyxl already being bundled for a different
+feature. See the dispatch table below (_EXTRACTORS) and
+NON_TEXT_EXTENSIONS, which now separate "we can't read this yet" from
+"this was never going to be readable" (images, diagrams, media,
+archives) — the field reports specifically called out the latter
+reading like a defect when it isn't one.
+
 Sidecar schema (one .npz + one .json per document, under
 <recordings_dir>/doc_index/):
     {
@@ -53,8 +67,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from html.parser import HTMLParser
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -64,11 +79,22 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Kept intentionally small and stdlib/lazy-import only. Anything add to
-# this set needs a matching branch in extract_text() with a lazy import
-# and a skip-reason path — never a hard dependency for the rest of the
-# app to import this module.
-SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx"}
+# Field data (2026-08-14 LMA gap analysis): a real client Knowledge
+# Folder — SOWs, estimates, RFP responses, architecture decks — hit 87
+# skipped files, nearly the user's whole corpus. Root causes: pypdf and
+# python-docx were declared supported but never shipped, and .xlsx/.pptx/
+# .html had no extractor at all despite openpyxl already being a hard
+# dependency for the Excel export feature. This set (and the dispatch
+# table below it, _EXTRACTORS) is now the actual source of truth for
+# what's readable — see the consistency test in
+# tests/test_document_service.py that fails if they ever drift apart
+# again.
+#
+# .txt/.md are handled inline (no library at all); every other
+# extension here must have a matching entry in _EXTRACTORS with a lazy
+# import and a skip-reason path — never a hard dependency for the rest
+# of the app to import this module.
+_PLAIN_TEXT_EXTENSIONS = {".txt", ".md"}
 
 # 350 words is a slightly tighter window than the 400-word transcript
 # chunking in core.embeddings — document prose tends to be denser
@@ -113,11 +139,12 @@ def _iter_candidate_files(folder: Path):
     a document a user meant to index, so they're excluded entirely
     rather than reported as a skip.
 
-    Deliberately NOT filtered by SUPPORTED_EXTENSIONS here: a .pptx or
-    .csv the user dropped in the folder should show up in the reindex
-    report as a skip with an "unsupported file type" reason (from
-    extract_text), not vanish without a trace — the same silent-skip
-    failure mode the module docstring calls out.
+    Deliberately NOT filtered by SUPPORTED_EXTENSIONS here: a .csv or
+    .drawio the user dropped in the folder should show up in the
+    reindex report as a skip with an "unsupported file type" (or "not a
+    text document") reason (from extract_text), not vanish without a
+    trace — the same silent-skip failure mode the module docstring
+    calls out.
     """
     for path in folder.rglob("*"):
         if not path.is_file():
@@ -133,15 +160,57 @@ def _iter_candidate_files(folder: Path):
 
 # ── Text extraction ─────────────────────────────────────────────────
 
+# Applied uniformly across every extractor, not just the newer ones —
+# a single pathological source file (a hundred-sheet workbook, a
+# thousand-page PDF) shouldn't be able to blow up chunk count/embedding
+# time regardless of format. ~500k characters is roughly 85k words —
+# generous for a real SOW/estimate/RFP response, a hard stop for
+# anything absurd. Applied once, centrally, in extract_text() below
+# rather than per-extractor so every format gets the same guarantee.
+MAX_EXTRACTED_CHARS = 500_000
+
+# Formats that are never going to hold extractable text — images and
+# diagram/media/archive formats. Reported as "not a text document",
+# never as a defect the user should go fix (see extract_text
+# docstring). Values are the plural noun used in the skip message.
+#
+# .drawio is deliberately NOT here as an extraction target: modern
+# draw.io files store each <diagram> as base64+deflate-compressed,
+# URL-encoded XML (desktop-app default), while older/plain exports are
+# uncompressed XML with mxCell value="..." labels — reliably telling
+# the two apart and decoding the compressed variant needs a real test
+# fixture from an actual draw.io export to get right, which we don't
+# have here. That didn't "fall out cleanly," so .drawio is classified
+# as a non-text diagram format below instead of guessing at a decoder.
+NON_TEXT_EXTENSIONS: Dict[str, str] = {
+    ".jpg": "images", ".jpeg": "images", ".png": "images", ".gif": "images",
+    ".bmp": "images", ".tiff": "images", ".tif": "images", ".webp": "images",
+    ".svg": "images", ".ico": "images", ".heic": "images",
+    ".drawio": "diagrams", ".vsdx": "diagrams",
+    ".mp3": "audio files", ".wav": "audio files", ".m4a": "audio files",
+    ".mp4": "video files", ".mov": "video files",
+    ".zip": "archives", ".rar": "archives", ".7z": "archives",
+}
+
+
 def extract_text(path: Path) -> Tuple[str, Optional[str]]:
     """Extract plain text from a supported document.
 
     Returns (text, skip_reason). Exactly one of the two is meaningful:
     on success `text` is non-empty and `skip_reason` is None; on any
     failure `text` is "" and `skip_reason` explains why in terms a user
-    can act on ("pypdf not installed — pip install pypdf", "encrypted
-    PDF (password protected)", "no extractable text (empty or
-    image-only document)", ...).
+    can act on:
+      - a genuinely missing optional library ("pypdf isn't installed —
+        this copy of the app is missing a component; reinstalling
+        should fix it") — deliberately NOT "pip install X": inside a
+        packaged desktop app with a bootstrapped venv the user has no
+        pip to run, so that advice was actionable only for developers,
+        misleading for everyone else.
+      - a format that was never going to be text ("not a text document
+        — images aren't indexed") — expected, not a problem, so it
+        reads differently from a real failure.
+      - an actual failure: corrupt/encrypted file, empty extraction,
+        unsupported extension.
 
     Never raises for a bad input file — every failure mode observed in
     the field (missing optional dependency, corrupt/encrypted file,
@@ -151,13 +220,14 @@ def extract_text(path: Path) -> Tuple[str, Optional[str]]:
     """
     suffix = path.suffix.lower()
     try:
-        if suffix in (".txt", ".md"):
+        if suffix in _PLAIN_TEXT_EXTENSIONS:
             text = path.read_text(encoding="utf-8", errors="replace")
             reason = None
-        elif suffix == ".pdf":
-            text, reason = _extract_pdf(path)
-        elif suffix == ".docx":
-            text, reason = _extract_docx(path)
+        elif suffix in _EXTRACTORS:
+            text, reason = _EXTRACTORS[suffix](path)
+        elif suffix in NON_TEXT_EXTENSIONS:
+            kind = NON_TEXT_EXTENSIONS[suffix]
+            return "", f"not a text document — {kind} aren't indexed"
         else:
             return "", f"unsupported file type: {suffix or '(no extension)'}"
     except OSError as e:
@@ -169,14 +239,27 @@ def extract_text(path: Path) -> Tuple[str, Optional[str]]:
     text = (text or "").strip()
     if not text:
         return "", "no extractable text (empty or image-only document)"
+    if len(text) > MAX_EXTRACTED_CHARS:
+        text = text[:MAX_EXTRACTED_CHARS]
     return text, None
+
+
+def _missing_dependency_reason(package: str) -> str:
+    """Shared phrasing for every lazy-imported extractor library that
+    turns out not to be installed. NOT "pip install X" — see
+    extract_text docstring for why that's the wrong advice inside a
+    packaged app."""
+    return (
+        f"{package} isn't installed — this copy of the app is missing "
+        "a component; reinstalling should fix it"
+    )
 
 
 def _extract_pdf(path: Path) -> Tuple[str, Optional[str]]:
     try:
         import pypdf  # noqa: PLC0415  (deliberately lazy — see module docstring)
     except ImportError:
-        return "", "pypdf not installed — pip install pypdf"
+        return "", _missing_dependency_reason("pypdf")
 
     try:
         reader = pypdf.PdfReader(str(path))
@@ -205,7 +288,7 @@ def _extract_docx(path: Path) -> Tuple[str, Optional[str]]:
     try:
         import docx  # noqa: PLC0415  (python-docx; deliberately lazy)
     except ImportError:
-        return "", "python-docx not installed — pip install python-docx"
+        return "", _missing_dependency_reason("python-docx")
 
     try:
         document = docx.Document(str(path))
@@ -214,6 +297,152 @@ def _extract_docx(path: Path) -> Tuple[str, Optional[str]]:
 
     paragraphs = [p.text for p in document.paragraphs]
     return "\n".join(paragraphs), None
+
+
+def _extract_xlsx(path: Path) -> Tuple[str, Optional[str]]:
+    """Sheet-by-sheet cell text, useful for semantic search: each
+    sheet's name as a header, then its rows as pipe-joined cell text.
+    Blank cells and blank rows are dropped so the extracted text isn't
+    mostly whitespace for sparse workbooks.
+
+    read_only + data_only load: read_only streams rows without loading
+    charts/images into memory at all (they're simply never visited),
+    and data_only returns each formula cell's last-calculated value
+    instead of the formula string — "=SUM(B2:B40)" is useless for
+    search, "142500" is not.
+    """
+    try:
+        import openpyxl  # noqa: PLC0415  (deliberately lazy — see module docstring)
+    except ImportError:
+        return "", _missing_dependency_reason("openpyxl")
+
+    try:
+        wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+    except Exception as e:
+        return "", f"corrupt or unreadable xlsx: {e}"
+
+    parts: List[str] = []
+    try:
+        for ws in wb.worksheets:
+            sheet_lines = [f"## {ws.title}"]
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c) for c in row if c is not None and str(c).strip()]
+                if cells:
+                    sheet_lines.append(" | ".join(cells))
+            if len(sheet_lines) > 1:
+                parts.append("\n".join(sheet_lines))
+            # Bail out once well past the cap rather than fully reading
+            # (and holding in memory) every sheet of a huge workbook
+            # only to truncate it afterward — extract_text() re-applies
+            # the exact cap on the joined result either way.
+            if sum(len(p) for p in parts) > MAX_EXTRACTED_CHARS:
+                break
+    except Exception as e:
+        return "", f"corrupt or unreadable xlsx: {e}"
+    finally:
+        wb.close()
+
+    return "\n\n".join(parts), None
+
+
+def _extract_pptx(path: Path) -> Tuple[str, Optional[str]]:
+    """Per-slide shape text plus speaker notes. python-pptx pulls in
+    Pillow and lxml transitively — a heavier addition than pypdf or
+    python-docx (see requirements files for the measured install
+    size) — so this stays behind the same lazy-import/skip-reason
+    pattern as every other optional extractor: a missing library here
+    degrades to a clear, counted skip, never an ImportError at module
+    load time for the rest of the app.
+    """
+    try:
+        from pptx import Presentation  # noqa: PLC0415  (python-pptx; deliberately lazy)
+    except ImportError:
+        return "", _missing_dependency_reason("python-pptx")
+
+    try:
+        prs = Presentation(str(path))
+    except Exception as e:
+        return "", f"corrupt or unreadable pptx: {e}"
+
+    parts: List[str] = []
+    try:
+        for i, slide in enumerate(prs.slides, start=1):
+            slide_lines = [f"## Slide {i}"]
+            for shape in slide.shapes:
+                if getattr(shape, "has_text_frame", False):
+                    t = (shape.text_frame.text or "").strip()
+                    if t:
+                        slide_lines.append(t)
+                elif getattr(shape, "has_table", False):
+                    for row in shape.table.rows:
+                        cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                        if cells:
+                            slide_lines.append(" | ".join(cells))
+            if getattr(slide, "has_notes_slide", False):
+                notes = (slide.notes_slide.notes_text_frame.text or "").strip()
+                if notes:
+                    slide_lines.append(f"Speaker notes: {notes}")
+            if len(slide_lines) > 1:
+                parts.append("\n".join(slide_lines))
+    except Exception as e:
+        return "", f"corrupt or unreadable pptx: {e}"
+
+    return "\n\n".join(parts), None
+
+
+class _HTMLTextExtractor(HTMLParser):
+    """Minimal tag-stripping text extractor — stdlib only, no new
+    dependency. Drops <script>/<style> contents (never document
+    prose); keeps everything else, one text run per line."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._parts: List[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:  # noqa: ARG002
+        if tag in ("script", "style"):
+            self._skip_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("script", "style") and self._skip_depth > 0:
+            self._skip_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth == 0 and data.strip():
+            self._parts.append(data.strip())
+
+    def get_text(self) -> str:
+        return "\n".join(self._parts)
+
+
+def _extract_html(path: Path) -> Tuple[str, Optional[str]]:
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    parser = _HTMLTextExtractor()
+    try:
+        parser.feed(raw)
+        parser.close()
+    except Exception as e:
+        return "", f"corrupt or unreadable html: {e}"
+    return parser.get_text(), None
+
+
+# Dispatch table: the single source of truth for "which extensions can
+# actually be read" — SUPPORTED_EXTENSIONS below is derived from this
+# plus the inline-handled plain-text extensions, so the two can never
+# silently drift apart the way "unsupported file type: .xlsx" (despite
+# openpyxl being bundled) drifted from the real capability of this
+# module. See test_supported_extensions_and_dispatch_agree.
+_EXTRACTORS: Dict[str, Callable[[Path], Tuple[str, Optional[str]]]] = {
+    ".pdf": _extract_pdf,
+    ".docx": _extract_docx,
+    ".xlsx": _extract_xlsx,
+    ".pptx": _extract_pptx,
+    ".html": _extract_html,
+    ".htm": _extract_html,
+}
+
+SUPPORTED_EXTENSIONS = _PLAIN_TEXT_EXTENSIONS | set(_EXTRACTORS)
 
 
 # ── Chunking ─────────────────────────────────────────────────────────
@@ -293,11 +522,18 @@ def index_folder(
     and the stale .pkl is removed once the rebuild succeeds.
 
     Returns {"indexed": int, "unchanged": int,
-             "skipped": [{"file": str, "reason": str}, ...],
+             "skipped": [{"file": str, "reason": str, "expected": bool}, ...],
              "total_chunks": int} — total_chunks counts every chunk
     currently on disk for this run (both freshly indexed and unchanged
     documents), so the report reflects the whole current index rather
     than only this run's work.
+
+    Each skip's "expected" flag distinguishes a format that was never
+    going to be a text document (images, diagrams, media, archives —
+    see NON_TEXT_EXTENSIONS) from a genuine failure (missing library,
+    corrupt file, unsupported extension, empty extraction). The
+    frontend uses this to avoid making the former read like a defect
+    the user should go fix.
     """
     folder = Path(folder)
     doc_dir = _doc_index_dir(recordings_dir)
@@ -305,7 +541,8 @@ def index_folder(
 
     if not folder.is_dir():
         report["skipped"].append(
-            {"file": str(folder), "reason": "folder does not exist"})
+            {"file": str(folder), "reason": "folder does not exist",
+             "expected": False})
         return report
 
     doc_dir.mkdir(parents=True, exist_ok=True)
@@ -318,7 +555,8 @@ def index_folder(
             file_mtime = path.stat().st_mtime
         except OSError as e:
             report["skipped"].append(
-                {"file": str(path), "reason": f"could not stat file: {e}"})
+                {"file": str(path), "reason": f"could not stat file: {e}",
+                 "expected": False})
             continue
 
         if npz_path.exists() and json_path.exists():
@@ -341,21 +579,26 @@ def index_folder(
 
         text, reason = extract_text(path)
         if reason:
-            report["skipped"].append({"file": str(path), "reason": reason})
+            report["skipped"].append({
+                "file": str(path), "reason": reason,
+                "expected": path.suffix.lower() in NON_TEXT_EXTENSIONS,
+            })
             continue
 
         chunks = chunk_text(text)
         if not chunks:
             report["skipped"].append(
                 {"file": str(path),
-                 "reason": "no chunks produced from extracted text"})
+                 "reason": "no chunks produced from extracted text",
+                 "expected": False})
             continue
 
         try:
             embeddings = embed_fn(chunks)
         except Exception as e:
             report["skipped"].append(
-                {"file": str(path), "reason": f"embedding failed: {e}"})
+                {"file": str(path), "reason": f"embedding failed: {e}",
+                 "expected": False})
             continue
 
         embeddings = _normalize_rows(embeddings)
@@ -364,7 +607,8 @@ def index_folder(
                 {"file": str(path),
                  "reason": (
                      f"embed_fn returned {embeddings.shape[0]} vectors "
-                     f"for {len(chunks)} chunks")})
+                     f"for {len(chunks)} chunks"),
+                 "expected": False})
             continue
 
         meta = {
