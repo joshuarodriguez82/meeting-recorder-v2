@@ -68,6 +68,7 @@ SUMMARY_FIELDS: Tuple[str, ...] = (
     "audio_integrity_warning", "audio_actual_duration_s",
     "audio_expected_duration_s", "processing_error", "sync_warning",
     "finalize_duration_s", "aec_outcome",
+    "finalize_status", "finalize_started_at", "finalize_error",
 )
 
 
