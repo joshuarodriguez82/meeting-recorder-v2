@@ -27,6 +27,7 @@ from models.segment import Segment
 from models.session import Session
 from services.speaker_profile_service import SpeakerProfileService
 from utils.audio_utils import finalize_recording_streaming
+from utils.finalize_gate import below_normal_priority_kwargs, finalize_slot
 from utils.logger import get_logger
 
 
@@ -738,6 +739,21 @@ class RecordingService:
             # indistinguishable to every reader (including
             # /sessions/{id}/process) — see Session.finalize_status for
             # the full rationale.
+            #
+            # SERIALIZED FINALIZE (field data 2026-08, 192-278s observed
+            # with echo cancellation on — ~40x the pre-AEC cost): a
+            # second finalize (a back-to-back meeting's stop, a bulk
+            # re-process/export, or the startup orphan-recovery sweep)
+            # running at the same time as this one would compete for
+            # cores with a still-live recording and drop frames. Route
+            # through the single process-wide gate in utils.finalize_
+            # gate — see that module's docstring for the full rationale
+            # and the other call site (recovery_service.recover_orphans).
+            # Stamp "finalizing" here first (this may briefly be wrong —
+            # ``_mark_queued`` below corrects it to "queued" if another
+            # finalize turns out to already hold the gate) so a backend
+            # crash in the moment before we even ask for the gate still
+            # leaves a real, non-None state on disk for recovery to see.
             session.finalize_status = "finalizing"
             session.finalize_started_at = datetime.now()
             session.finalize_error = None
@@ -752,29 +768,61 @@ class RecordingService:
             # loads the session JSON while finalize is running sees the
             # real state instead of the stale pre-stop stub.
             self._write_session_stub(session)
-            logger.info(
-                f"[stop] finalize_recording_streaming → {final_path} …")
-            t = _t.monotonic()
             echo_cancellation_requested = bool(
                 getattr(self._settings, "echo_cancellation_enabled", False))
+
+            def _mark_queued() -> None:
+                # Invoked by finalize_slot() from this same thread,
+                # exactly once, ONLY when another finalize already holds
+                # the process-wide gate — before we block waiting for
+                # it. Flips the eager "finalizing" guess above to the
+                # true "queued" state and persists it immediately, so
+                # /sessions/{id}/process and the UI tell the user this
+                # stop is waiting behind another job instead of looking
+                # silently stuck for however long that job takes.
+                # Reuses finalize_status / finalize_started_at — no
+                # parallel field.
+                session.finalize_status = "queued"
+                session.finalize_started_at = datetime.now()
+                session.finalize_error = None
+                self._write_session_stub(session)
+                logger.info(
+                    f"[stop] finalize for session {session.session_id} "
+                    f"queued behind another in-flight finalize")
+
+            t = _t.monotonic()
             try:
-                # SUBPROCESS-ISOLATED FINALIZE (v2.12): the WAV merge
-                # runs in a child process so a native crash here can't
-                # take the backend down. The child reports duration +
-                # loopback-mixed status via stdout; the parent parses
-                # it and proceeds as before on success. On crash /
-                # non-zero exit the helper raises RuntimeError, the
-                # except block below stamps the session "Error saving
-                # audio" and we LEAVE the temp WAVs on disk for the
-                # next-launch recovery flow to pick up.
-                duration_s, _, aec_outcome = self._run_finalize_subprocess(
-                    mic_wav_path=self._wav_temp_path,
-                    loopback_wav_path=loopback_path,
-                    output_wav_path=final_path,
-                    target_sr=TARGET_SR,
-                    loopback_start_offset_s=loopback_start_offset_s,
-                    echo_cancellation_enabled=echo_cancellation_requested,
-                )
+                with finalize_slot(on_queued=_mark_queued):
+                    # We now hold the one process-wide finalize slot.
+                    # Re-stamp "finalizing" (state may have been flipped
+                    # to "queued" above) and restart the clock here, not
+                    # when this stop first asked for the slot — a run
+                    # that had to wait behind another job must not have
+                    # that wait counted as its own finalize_duration_s.
+                    session.finalize_status = "finalizing"
+                    session.finalize_started_at = datetime.now()
+                    session.finalize_error = None
+                    self._write_session_stub(session)
+                    logger.info(
+                        f"[stop] finalize_recording_streaming → {final_path} …")
+                    t = _t.monotonic()
+                    # SUBPROCESS-ISOLATED FINALIZE (v2.12): the WAV merge
+                    # runs in a child process so a native crash here can't
+                    # take the backend down. The child reports duration +
+                    # loopback-mixed status via stdout; the parent parses
+                    # it and proceeds as before on success. On crash /
+                    # non-zero exit the helper raises RuntimeError, the
+                    # except block below stamps the session "Error saving
+                    # audio" and we LEAVE the temp WAVs on disk for the
+                    # next-launch recovery flow to pick up.
+                    duration_s, _, aec_outcome = self._run_finalize_subprocess(
+                        mic_wav_path=self._wav_temp_path,
+                        loopback_wav_path=loopback_path,
+                        output_wav_path=final_path,
+                        target_sr=TARGET_SR,
+                        loopback_start_offset_s=loopback_start_offset_s,
+                        echo_cancellation_enabled=echo_cancellation_requested,
+                    )
                 session.audio_path = final_path
                 # Subprocess returned successfully — clear the
                 # in-progress marker immediately, before any of the
@@ -1870,6 +1918,17 @@ class RecordingService:
         logger.info(
             f"[finalize-subprocess] spawn {' '.join(argv[1:])}"
         )
+        # NEVER-OUTRANK-LIVE-CAPTURE (field data 2026-08): even the one
+        # finalize the gate lets through must not compete on equal
+        # footing with a live recording's capture thread for CPU cores
+        # — that contention is exactly what drops frames in a meeting
+        # that's still happening. Ask the OS scheduler to run this
+        # child at below-normal priority; see utils.finalize_gate for
+        # the per-platform mechanism. This is a hint, never a
+        # requirement: if applying it makes the spawn itself fail for
+        # any reason, retry once at normal priority rather than losing
+        # the recording's audio over a scheduler nicety.
+        priority_kwargs = below_normal_priority_kwargs()
         try:
             proc = subprocess.run(
                 argv,
@@ -1880,11 +1939,26 @@ class RecordingService:
                 # to merge. The watchdog has its own per-step
                 # instrumentation; a hung subprocess would surface
                 # via the [stop] timing log.
+                **priority_kwargs,
             )
-        except OSError as e:
-            raise RuntimeError(
-                f"could not spawn finalize subprocess: {e}"
-            ) from e
+        except (OSError, ValueError) as e:
+            if priority_kwargs:
+                logger.warning(
+                    f"[finalize-subprocess] spawn with below-normal "
+                    f"priority failed ({e}); retrying at normal "
+                    f"priority")
+                try:
+                    proc = subprocess.run(
+                        argv, capture_output=True, text=True, check=False,
+                    )
+                except OSError as e2:
+                    raise RuntimeError(
+                        f"could not spawn finalize subprocess: {e2}"
+                    ) from e2
+            else:
+                raise RuntimeError(
+                    f"could not spawn finalize subprocess: {e}"
+                ) from e
 
         if proc.stderr:
             # Mirror child stderr into backend.log so its diagnostics

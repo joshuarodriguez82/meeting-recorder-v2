@@ -295,32 +295,38 @@ def recover_orphans(
     # report itself as "still finalizing" forever, even though the audio
     # is sitting right there, complete, on disk.
     #
-    # Walk every session still claiming finalize_status == "finalizing"
-    # that the orphan loop above didn't already touch, and resolve it
-    # directly from what's actually on disk:
+    # Walk every session still claiming an in-flight finalize_status
+    # ("finalizing", or "queued" — a session that crashed while waiting
+    # behind another finalize on the process-wide gate, see utils/
+    # finalize_gate.py, never even started its own subprocess but is
+    # exactly as stuck-looking to a reader) that the orphan loop above
+    # didn't already touch, and resolve it directly from what's
+    # actually on disk:
     #   - final WAV present  -> finalize actually succeeded; clear the
     #     stale marker.
-    #   - final WAV absent   -> genuinely crashed mid-finalize with
-    #     nothing left to recover from; mark it failed (with a reason)
-    #     instead of leaving it stuck.
+    #   - final WAV absent   -> genuinely crashed mid-finalize (or while
+    #     still queued) with nothing left to recover from; mark it
+    #     failed (with a reason) instead of leaving it stuck.
+    _IN_FLIGHT_STATES = ("finalizing", "queued")
     try:
         for row in session_svc.list_sessions():
             sid = row.get("session_id")
             if not sid or sid in handled_sids:
                 continue
-            if row.get("finalize_status") != "finalizing":
+            if row.get("finalize_status") not in _IN_FLIGHT_STATES:
                 continue
             handled_sids.add(sid)
             session = session_svc.load_full(sid)
-            if session is None or session.finalize_status != "finalizing":
+            if session is None or session.finalize_status not in _IN_FLIGHT_STATES:
                 continue
             audio_path = session.audio_path
             if audio_path and Path(audio_path).exists():
                 logger.warning(
-                    f"Session {sid} was left marked 'finalizing' by a "
-                    f"backend restart, but its audio file is present and "
-                    f"complete at {audio_path} — finalize actually "
-                    f"succeeded; clearing the stale marker."
+                    f"Session {sid} was left marked "
+                    f"'{session.finalize_status}' by a backend restart, "
+                    f"but its audio file is present and complete at "
+                    f"{audio_path} — finalize actually succeeded; "
+                    f"clearing the stale marker."
                 )
                 session.finalize_status = None
                 session.finalize_started_at = None
@@ -332,17 +338,17 @@ def recover_orphans(
                 })
             else:
                 logger.error(
-                    f"Session {sid} was left marked 'finalizing' by a "
-                    f"backend restart and no audio was recoverable "
-                    f"(no orphan temp found, no completed WAV on disk) "
-                    f"— marking finalize failed instead of leaving it "
-                    f"stuck."
+                    f"Session {sid} was left marked "
+                    f"'{session.finalize_status}' by a backend restart "
+                    f"and no audio was recoverable (no orphan temp "
+                    f"found, no completed WAV on disk) — marking "
+                    f"finalize failed instead of leaving it stuck."
                 )
                 session.finalize_status = "failed"
                 session.finalize_error = (
                     "The backend restarted while this recording was "
-                    "finalizing and no raw capture could be found to "
-                    "recover from."
+                    "finalizing (or queued behind another finalize) and "
+                    "no raw capture could be found to recover from."
                 )
                 session_svc.save(session)
                 results.append({
@@ -394,23 +400,26 @@ def _mark_finalize_failed_if_stuck(
     session_svc: SessionService, sid: str, reason: str
 ) -> None:
     """If ``sid``'s persisted session is marked finalize_status ==
-    "finalizing", this branch has just established the raw audio could
-    NOT be recovered (empty capture, merge failure, or a truncated
-    merge we refused to keep) — flip it to "failed" with ``reason``
-    instead of leaving "finalizing" on disk forever with nothing left
-    running to ever clear it.
+    "finalizing" OR "queued" (crashed while waiting behind another
+    finalize on the process-wide gate — see utils/finalize_gate.py —
+    before its own subprocess ever started), this branch has just
+    established the raw audio could NOT be recovered (empty capture,
+    merge failure, or a truncated merge we refused to keep) — flip it
+    to "failed" with ``reason`` instead of leaving it on disk forever
+    with nothing left running to ever clear it.
 
-    No-ops if the session was never marked finalizing (e.g. this orphan
-    predates the finalize-state feature, or crashed before finalize
-    ever started) — those cases are unrelated to this failure mode and
-    already handled by the pre-existing ghost-session / audio-integrity
-    machinery.
+    No-ops if the session was never marked finalizing/queued (e.g. this
+    orphan predates the finalize-state feature, or crashed before
+    finalize ever started) — those cases are unrelated to this failure
+    mode and already handled by the pre-existing ghost-session / audio-
+    integrity machinery.
 
     Best-effort: a failure here must never abort the surrounding
     recovery pass."""
     try:
         session = session_svc.load_full(sid)
-        if session is None or session.finalize_status != "finalizing":
+        if session is None or session.finalize_status not in (
+                "finalizing", "queued"):
             return
         session.finalize_status = "failed"
         session.finalize_error = reason

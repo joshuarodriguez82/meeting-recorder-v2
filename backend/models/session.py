@@ -136,23 +136,37 @@ class Session:
         # synced down from the cloud", all three of which were false. The
         # file didn't exist YET; no data was lost.
         #
-        # Three states, explicit and persisted so they survive a backend
+        # Four states, explicit and persisted so they survive a backend
         # restart (see services/recovery_service.py's startup orphan
-        # scan, which must resolve a crash-interrupted "finalizing"
-        # session rather than leave it stuck forever):
+        # scan, which must resolve a crash-interrupted "finalizing" OR
+        # "queued" session rather than leave it stuck forever):
         #   None         — no finalize in flight (either none has run
         #                  yet, or the last one succeeded).
+        #   "queued"     — this session's finalize is waiting behind
+        #                  ANOTHER finalize currently holding the
+        #                  process-wide slot (see utils/finalize_gate.py
+        #                  — at most one finalize subprocess runs at a
+        #                  time, process-wide, so it can never outrank a
+        #                  still-live recording for CPU). Set from
+        #                  recording_service.stop_recording()'s
+        #                  ``_mark_queued`` callback the moment the gate
+        #                  is found contended; flips to "finalizing" the
+        #                  instant the slot is actually acquired.
         #   "finalizing" — the finalize subprocess (WAV merge, optional
-        #                  AEC, resample) is currently running. Set in
+        #                  AEC, resample) is currently running (i.e. it
+        #                  holds the process-wide gate). Set in
         #                  recording_service.stop_recording() BEFORE the
         #                  subprocess is spawned (and written to disk via
         #                  _write_session_stub before the blocking call),
         #                  cleared back to None the moment the subprocess
         #                  returns successfully.
-        #   "failed"     — the finalize subprocess raised or crashed;
-        #                  ``finalize_error`` holds the reason. Distinct
-        #                  from "genuinely missing audio" — this is a
-        #                  known, explainable failure, not silence.
+        #   "failed"     — the finalize subprocess raised or crashed (or
+        #                  the backend restarted while this session was
+        #                  "finalizing"/"queued" with nothing recoverable
+        #                  left on disk); ``finalize_error`` holds the
+        #                  reason. Distinct from "genuinely missing
+        #                  audio" — this is a known, explainable failure,
+        #                  not silence.
         self.finalize_status: Optional[str] = None
         # Wall-clock time finalize started, so an in-flight check (e.g.
         # /sessions/{id}/process) can report how long it's been running.
