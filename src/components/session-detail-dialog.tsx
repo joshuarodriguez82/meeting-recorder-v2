@@ -51,11 +51,16 @@ const FALLBACK_TEMPLATES = [
 // Field repro 2026-08-14: the user clicked Process twice in 15 seconds
 // because nothing told them a click was premature — the finalize
 // subprocess (WAV merge + echo cancellation) was still running. Every
-// AI action button shows this same tooltip while finalize_status ===
-// "finalizing" instead of just going quietly disabled.
+// AI action button shows this same tooltip while finalize_status is
+// "finalizing" OR "queued" (2026-08 serialized finalize — waiting
+// behind another finalize job) instead of just going quietly disabled.
+// Kept deliberately state-agnostic (rather than branching on isQueued)
+// since it's a terse hover tooltip, not the overview-tab banner, which
+// does spell out the queued/running distinction.
 const FINALIZING_BUTTON_TOOLTIP =
-  "This recording is still being finalized (echo cancellation can take " +
-  "several minutes) — try again once it's done.";
+  "This recording's audio is still finalizing (or queued behind another " +
+  "finalize job) — echo cancellation can take several minutes — try " +
+  "again once it's done.";
 
 export function SessionDetailDialog({
   sessionId, open, onOpenChange, onChanged,
@@ -157,7 +162,17 @@ export function SessionDetailDialog({
   // buttons and swaps the audio player for a "processing" placeholder;
   // `finalizeFailed` surfaces the recorded reason instead of a generic
   // error the next time the user clicks Process.
-  const isFinalizing = session?.finalize_status === "finalizing";
+  //
+  // `isQueued` (2026-08 serialized finalize, see backend utils/
+  // finalize_gate.py) is the narrower "waiting behind another finalize
+  // job, hasn't started yet" sub-state — `isFinalizing` deliberately
+  // includes it (same buttons-disabled / same poll-for-completion
+  // behavior) but the banner text below reads `isQueued` separately so
+  // it can say "waiting", not "still finalizing", while the wait is
+  // what's actually happening.
+  const isQueued = session?.finalize_status === "queued";
+  const isFinalizing =
+    session?.finalize_status === "finalizing" || isQueued;
   const finalizeFailed = session?.finalize_status === "failed";
   const finalizeElapsedLabel = (() => {
     if (!isFinalizing || !session?.finalize_started_at) return null;
@@ -182,10 +197,12 @@ export function SessionDetailDialog({
         const s = await api.getSessionFull(sessionId);
         if (cancelled) return;
         setSession(s);
-        if (s.finalize_status !== "finalizing") {
-          // Transitioned to done or failed — tell the parent (sessions
-          // list / sidebar) to refresh too, same as every other
-          // AI-action completion in this dialog does via onChanged().
+        if (s.finalize_status !== "finalizing" && s.finalize_status !== "queued") {
+          // Transitioned to done or failed (queued -> finalizing is
+          // still in-flight, not a completion) — tell the parent
+          // (sessions list / sidebar) to refresh too, same as every
+          // other AI-action completion in this dialog does via
+          // onChanged().
           onChanged?.();
           if (s.finalize_status === "failed") {
             toast.error("Finalizing this recording's audio failed", {
@@ -417,13 +434,25 @@ export function SessionDetailDialog({
                     >
                       <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0 mt-0.5" />
                       <span>
-                        Still finalizing this recording
-                        {finalizeElapsedLabel ? ` (running for ${finalizeElapsedLabel})` : ""}.
-                        {" "}Echo cancellation is enabled, which can make this
-                        step take several minutes for longer meetings. No
-                        data has been lost — this page will update on its
-                        own when it's done; feel free to navigate away and
-                        come back.
+                        {isQueued ? (
+                          <>
+                            Waiting behind another finalize job that&apos;s
+                            currently running
+                            {finalizeElapsedLabel ? ` (queued for ${finalizeElapsedLabel})` : ""}.
+                            {" "}This recording&apos;s own finalize will start
+                            as soon as that one finishes.
+                          </>
+                        ) : (
+                          <>
+                            Still finalizing this recording
+                            {finalizeElapsedLabel ? ` (running for ${finalizeElapsedLabel})` : ""}.
+                            {" "}Echo cancellation is enabled, which can make this
+                            step take several minutes for longer meetings.
+                          </>
+                        )}
+                        {" "}No data has been lost — this page will update on
+                        its own when it&apos;s done; feel free to navigate
+                        away and come back.
                       </span>
                     </div>
                   )}

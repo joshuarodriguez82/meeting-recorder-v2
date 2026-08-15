@@ -4,6 +4,7 @@ from pathlib import Path
 from faster_whisper import WhisperModel
 
 from utils.logger import get_logger
+from utils.ml_memory import cleanup_ml_memory
 
 logger = get_logger(__name__)
 
@@ -91,4 +92,13 @@ class TranscriptionEngine:
             )
         except Exception as e:
             raise RuntimeError(f"Transcription failed: {e}") from e
+        finally:
+            # SESSION-BOUNDARY cleanup, not per-chunk: this transcribe()
+            # runs once per whole recording (the post-stop batch pass —
+            # see recording_service.process_session), never inside the
+            # live-transcription hot path (core/live_transcriber.py
+            # calls engine._model.transcribe() directly and never
+            # touches this method), so one gc.collect() +
+            # torch cache release here costs nothing latency-sensitive.
+            cleanup_ml_memory()
         return segment_list

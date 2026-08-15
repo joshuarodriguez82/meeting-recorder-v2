@@ -5401,18 +5401,35 @@ async def import_session(req: ImportSessionRequest):
 # backend restart mid-finalize is resolved instead of left stuck).
 def _finalize_status_detail(session: "Session") -> Optional[tuple[int, str]]:
     """Return ``(status_code, detail)`` if ``session`` is currently
-    finalizing or its last finalize failed — the caller should raise
-    HTTPException with these immediately, before touching the audio
-    file at all. Returns None when it's safe to proceed to the normal
-    "does the audio file exist" checks (case 3 above)."""
+    finalizing (or queued behind another finalize) or its last finalize
+    failed — the caller should raise HTTPException with these
+    immediately, before touching the audio file at all. Returns None
+    when it's safe to proceed to the normal "does the audio file exist"
+    checks (case 3 above)."""
     status = getattr(session, "finalize_status", None)
-    if status == "finalizing":
+    if status in ("finalizing", "queued"):
         elapsed_s = 0.0
         started = getattr(session, "finalize_started_at", None)
         if started:
             elapsed_s = max(0.0, (datetime.now() - started).total_seconds())
         mins, secs = divmod(int(elapsed_s), 60)
         elapsed_str = f"{mins}m {secs:02d}s" if mins else f"{secs}s"
+        if status == "queued":
+            # SERIALIZED FINALIZE (see utils/finalize_gate.py): another
+            # finalize already holds the one process-wide slot, so this
+            # one hasn't even started its own subprocess yet. Say so
+            # explicitly — "still being finalized" would read as
+            # progress that isn't actually happening, and the elapsed
+            # time here counts the WAIT, not finalize work.
+            detail = (
+                f"This recording is waiting behind another finalize job "
+                f"that's currently running (queued for {elapsed_str}). "
+                f"This is normal — no data has been lost, and this one "
+                f"will start as soon as the other finishes. Please wait "
+                f"and try again in a bit; there's no need to keep "
+                f"retrying."
+            )
+            return (409, detail)
         aec_note = ""
         if svc.settings and getattr(svc.settings, "echo_cancellation_enabled", False):
             aec_note = (
@@ -5448,7 +5465,7 @@ def _raise_if_finalizing_dict(data: dict) -> None:
     — the audio and screenshot-serving endpoints use the raw dict to
     avoid the cost of rebuilding a full Session for a file stream."""
     status = data.get("finalize_status")
-    if status not in ("finalizing", "failed"):
+    if status not in ("finalizing", "queued", "failed"):
         return
     fake = Session(session_id=data.get("session_id", ""))
     fake.finalize_status = status

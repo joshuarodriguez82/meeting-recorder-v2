@@ -1218,6 +1218,172 @@ fn kill_backend_process(app: &tauri::AppHandle) {
     }
 }
 
+/// Windows-only kernel backstop for orphaned sidecar processes.
+///
+/// The Python sidecar already has a parent-PID watchdog
+/// (`backend/server.py::_parent_pid_watchdog`) that polls
+/// `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, ...)` on our PID and
+/// shuts itself down cleanly — finalizing any in-progress recording —
+/// when we're gone. That graceful path is NOT replaced by anything
+/// here; it stays the primary mechanism, and the only one that lets an
+/// active recording finish before Python exits. Do not remove it.
+///
+/// What it can't cover: PID recycling. `_pid_alive` only proves *some*
+/// process currently holds that PID, not that it's still *us*. If
+/// Windows reassigns our old PID to an unrelated process after we die,
+/// the watchdog reads "parent alive" forever and never fires — Python
+/// keeps holding the audio device, the SQLite lock, and the backend
+/// port, which then blocks the next launch. A Job Object closes that
+/// deterministically in the kernel instead of by polling: when the job
+/// handle closes — a clean `CloseHandle`, or the OS reclaiming every
+/// handle of our own process because we crashed or got killed from
+/// Task Manager — every process still assigned to the job (the Python
+/// sidecar and any grandchild it spawned, e.g. ffmpeg) is terminated
+/// immediately.
+///
+/// Held in `BACKEND_JOB`, a process-lifetime `static` — the same
+/// pattern already used above for `BACKEND_PORT` / `BACKEND_TOKEN` /
+/// `BOOTSTRAPPING`. That's deliberate, not incidental: if this handle
+/// were instead a local that dropped at the end of
+/// `spawn_python_backend`, the job would close — and immediately kill
+/// the child it was just assigned to — the moment that function
+/// returned. A `static` only closes it when the process exits (exactly
+/// when the kill-on-close should fire) or when a later
+/// `spawn_python_backend` call replaces it with a fresh job for a
+/// freshly-respawned child (also fine: by then the old child has
+/// already been killed and reaped by `kill_backend_process` /
+/// `restart_backend`, so closing its now-empty old job is a no-op, not
+/// a kill).
+#[cfg(windows)]
+static BACKEND_JOB: Mutex<Option<WindowsJob>> = Mutex::new(None);
+
+/// Thin RAII owner of a Windows Job Object HANDLE. `Drop` closes the
+/// handle, which — because the job was created with
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` — terminates every process
+/// still assigned to it.
+#[cfg(windows)]
+struct WindowsJob(windows::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+// SAFETY: a Win32 HANDLE is an opaque kernel-object reference; closing
+// or otherwise operating on it from a thread other than the one that
+// created it is explicitly supported by the Windows API. BACKEND_JOB
+// (a `Mutex<Option<WindowsJob>>`, used from the setup thread, the
+// watchdog thread, and Tauri command threads) needs `WindowsJob: Send`
+// for the `Mutex` to be `Sync`; there is no thread-affinity to violate.
+unsafe impl Send for WindowsJob {}
+
+#[cfg(windows)]
+impl Drop for WindowsJob {
+    fn drop(&mut self) {
+        // SAFETY: self.0 was returned by a successful CreateJobObjectW
+        // in `assign_child_to_new_job` and is never closed anywhere
+        // else, so it is guaranteed valid and open at this point.
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+/// Create a fresh Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`
+/// and assign the just-spawned `child` to it, storing the handle in
+/// `BACKEND_JOB` (see its doc comment for the ownership/lifetime
+/// reasoning).
+///
+/// Best-effort by design: every failure is logged and swallowed. This
+/// is a hardening measure layered on top of a working sidecar launch —
+/// it must never become a new reason the launch itself fails, so
+/// `spawn_python_backend` always proceeds regardless of what happens
+/// here, leaving the Python-side parent-PID watchdog as the (weaker
+/// but functioning) fallback.
+///
+/// Nested jobs: Windows 8+ allows a process to belong to more than one
+/// job at once, so `JOB_OBJECT_LIMIT_BREAKAWAY_OK` is not needed even
+/// if our own process (or the child) already happens to be in some
+/// other job — e.g. one assigned by a launcher, MSI installer, or CI
+/// runner. Nothing else in this file puts the child in a job or a new
+/// process group before this call (`Command::spawn` above uses only
+/// `CREATE_NO_WINDOW` via `no_window()`; there is no
+/// `CREATE_NEW_PROCESS_GROUP` and no other `AssignProcessToJobObject`
+/// anywhere in this file), so in the common case the child isn't in
+/// any job yet when this runs. Should `AssignProcessToJobObject` fail
+/// anyway (e.g. a restrictive job with breakaway disabled on some
+/// Windows 7-era edge case, or a permissions issue), that failure is
+/// just logged and ignored like every other failure path here.
+#[cfg(windows)]
+fn assign_child_to_new_job(child: &Child) {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    // SAFETY: `None` attributes + a null name creates an unnamed,
+    // process-local job object. No other preconditions.
+    let job = match unsafe { CreateJobObjectW(None, None) } {
+        Ok(h) => h,
+        Err(e) => {
+            rlog(&format!(
+                "Job Object: CreateJobObjectW failed (continuing without it): {}", e));
+            return;
+        }
+    };
+
+    let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+    // SAFETY: `job` was just created and is valid; `info` is a live
+    // local whose address and exact size match what
+    // SetInformationJobObject expects for the
+    // JobObjectExtendedLimitInformation class.
+    let set_result = unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    if let Err(e) = set_result {
+        rlog(&format!(
+            "Job Object: SetInformationJobObject failed (continuing without it): {}", e));
+        // SAFETY: `job` is the valid handle created above; nothing has
+        // assigned a process to it yet, so closing it here just frees
+        // the kernel object without killing anything.
+        unsafe { let _ = CloseHandle(job); }
+        return;
+    }
+
+    // SAFETY: `child` is the live Child returned by cmd.spawn() in
+    // spawn_python_backend, still open for the duration of this call.
+    let process_handle = HANDLE(child.as_raw_handle());
+    // SAFETY: `job` was configured above; `process_handle` refers to
+    // the process we just spawned and still hold a handle to.
+    let assign_result = unsafe { AssignProcessToJobObject(job, process_handle) };
+    if let Err(e) = assign_result {
+        rlog(&format!(
+            "Job Object: AssignProcessToJobObject failed (continuing without it): {}", e));
+        // SAFETY: same as above — no process is actually assigned to
+        // `job` at this point (the call that would have assigned one
+        // just failed), so closing it kills nothing.
+        unsafe { let _ = CloseHandle(job); }
+        return;
+    }
+
+    rlog("Job Object: Python sidecar assigned, KILL_ON_JOB_CLOSE armed");
+    if let Ok(mut slot) = BACKEND_JOB.lock() {
+        // Replacing drops (closes) whatever job the previous backend
+        // held. That previous child was already killed+reaped by
+        // kill_backend_process/restart_backend before any respawn that
+        // reaches here, so the old job has no processes left in it —
+        // closing it is a no-op, not a kill. See BACKEND_JOB's doc
+        // comment.
+        *slot = Some(WindowsJob(job));
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let backend = BackendProcess(Mutex::new(None));
@@ -1930,6 +2096,12 @@ fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
         })?;
 
     rlog(&format!("Python process started, PID ~{}", child.id()));
+
+    // Kernel backstop for orphaned-process cleanup — see BACKEND_JOB's
+    // doc comment above for why this exists alongside (not instead of)
+    // the Python-side parent-PID watchdog. No-op on non-Windows.
+    #[cfg(windows)]
+    assign_child_to_new_job(&child);
 
     if let Some(state) = app.try_state::<BackendProcess>() {
         *state.0.lock().unwrap() = Some(child);

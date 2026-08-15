@@ -29,6 +29,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from utils.logger import get_logger
+from utils.ml_memory import cleanup_ml_memory
 
 logger = get_logger(__name__)
 
@@ -144,45 +145,53 @@ def extract_speaker_centroids(
         signal = signal.mean(dim=0, keepdim=True)  # to mono
 
     centroids: Dict[str, np.ndarray] = {}
-    for speaker, turns in turns_by_speaker.items():
-        valid_turns = [(s, e) for (s, e) in turns
-                       if (e - s) >= MIN_TURN_SECONDS]
-        total = sum((e - s) for s, e in valid_turns)
-        if total < min_total_seconds:
-            logger.info(
-                f"Speaker {speaker}: only {total:.1f}s usable speech — "
-                f"skipping fingerprint (need >={min_total_seconds}s)")
-            continue
-
-        embeddings = []
-        for start_s, end_s in valid_turns:
-            start_idx = max(0, int(start_s * fs))
-            end_idx = min(signal.shape[1], int(end_s * fs))
-            if end_idx <= start_idx:
-                continue
-            segment = signal[:, start_idx:end_idx]
-            try:
-                with torch.no_grad():
-                    emb = classifier.encode_batch(segment).squeeze().cpu().numpy()
-                embeddings.append(emb)
-            except Exception as e:
-                # ECAPA can choke on very specific waveform edge cases
-                # (all-zeros, NaNs from a corrupt frame). Skip the turn,
-                # keep going — one bad turn shouldn't lose the centroid.
-                logger.debug(f"ECAPA failed on turn {start_s}-{end_s}: {e}")
+    try:
+        for speaker, turns in turns_by_speaker.items():
+            valid_turns = [(s, e) for (s, e) in turns
+                           if (e - s) >= MIN_TURN_SECONDS]
+            total = sum((e - s) for s, e in valid_turns)
+            if total < min_total_seconds:
+                logger.info(
+                    f"Speaker {speaker}: only {total:.1f}s usable speech — "
+                    f"skipping fingerprint (need >={min_total_seconds}s)")
                 continue
 
-        if not embeddings:
-            continue
+            embeddings = []
+            for start_s, end_s in valid_turns:
+                start_idx = max(0, int(start_s * fs))
+                end_idx = min(signal.shape[1], int(end_s * fs))
+                if end_idx <= start_idx:
+                    continue
+                segment = signal[:, start_idx:end_idx]
+                try:
+                    with torch.no_grad():
+                        emb = classifier.encode_batch(segment).squeeze().cpu().numpy()
+                    embeddings.append(emb)
+                except Exception as e:
+                    # ECAPA can choke on very specific waveform edge cases
+                    # (all-zeros, NaNs from a corrupt frame). Skip the turn,
+                    # keep going — one bad turn shouldn't lose the centroid.
+                    logger.debug(f"ECAPA failed on turn {start_s}-{end_s}: {e}")
+                    continue
 
-        # Centroid = unweighted mean of per-turn embeddings, L2-normalized
-        # so cosine == dot product downstream.
-        centroid = np.mean(np.stack(embeddings), axis=0)
-        norm = float(np.linalg.norm(centroid))
-        if norm < 1e-8:
-            continue  # degenerate — would produce NaN comparisons
-        centroid = (centroid / norm).astype(np.float32)
-        centroids[speaker] = centroid
+            if not embeddings:
+                continue
+
+            # Centroid = unweighted mean of per-turn embeddings, L2-normalized
+            # so cosine == dot product downstream.
+            centroid = np.mean(np.stack(embeddings), axis=0)
+            norm = float(np.linalg.norm(centroid))
+            if norm < 1e-8:
+                continue  # degenerate — would produce NaN comparisons
+            centroid = (centroid / norm).astype(np.float32)
+            centroids[speaker] = centroid
+    finally:
+        # SESSION-BOUNDARY cleanup: this runs once per whole recording's
+        # worth of speaker turns (called from recording_service.
+        # _fingerprint_speakers after diarization), never per-utterance
+        # — embed_utterance() below is the hot live-tracking sibling and
+        # deliberately does NOT call this.
+        cleanup_ml_memory()
 
     logger.info(
         f"Computed {len(centroids)}/{len(turns_by_speaker)} speaker "
