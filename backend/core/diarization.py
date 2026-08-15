@@ -5,6 +5,7 @@ Pyannote speaker diarization — GPU accelerated.
 import asyncio
 from typing import List, Optional, Tuple
 from utils.logger import get_logger
+from utils.ml_memory import cleanup_ml_memory
 
 logger = get_logger(__name__)
 
@@ -122,6 +123,12 @@ class DiarizationEngine:
                 f"Diarization failed: {e}\n"
                 "Check that the audio file is a valid 16kHz mono WAV."
             ) from e
+        finally:
+            # SESSION-BOUNDARY cleanup: one diarization pass per whole
+            # recording (see recording_service.process_session), not a
+            # hot loop — safe to pay a gc.collect() + torch cache
+            # release here.
+            cleanup_ml_memory()
 
         turns = []
         for turn, _, speaker in diarization.itertracks(yield_label=True):
