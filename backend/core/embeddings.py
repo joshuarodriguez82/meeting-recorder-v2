@@ -31,6 +31,7 @@ from typing import Iterable, List, Optional
 import numpy as np
 
 from utils.logger import get_logger
+from utils.ml_memory import cleanup_ml_memory
 
 logger = get_logger(__name__)
 
@@ -198,18 +199,27 @@ def embed_texts(texts: List[str]) -> np.ndarray:
     if not texts:
         return np.zeros((0, embedding_dim()), dtype=np.float32)
     model = _get_model()
-    # MiniLM-L6 has a 256-token limit; sentence-transformers truncates
-    # silently. 400 words usually fits in 256 tokens (English avg
-    # 0.7 tokens/word); on long Spanish/multilingual chunks the tail
-    # may get clipped, which is acceptable — the head usually carries
-    # enough topical signal for retrieval.
-    embeddings = model.encode(
-        texts,
-        normalize_embeddings=True,
-        convert_to_numpy=True,
-        show_progress_bar=False,
-        batch_size=32,
-    )
+    try:
+        # MiniLM-L6 has a 256-token limit; sentence-transformers truncates
+        # silently. 400 words usually fits in 256 tokens (English avg
+        # 0.7 tokens/word); on long Spanish/multilingual chunks the tail
+        # may get clipped, which is acceptable — the head usually carries
+        # enough topical signal for retrieval.
+        embeddings = model.encode(
+            texts,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+            batch_size=32,
+        )
+    finally:
+        # SESSION-BOUNDARY / POST-BATCH cleanup: embed_texts is the
+        # batch path (one call per session's worth of transcript chunks
+        # via embed_chunks/search_service.index_session, or one call
+        # per document ingestion batch) — never the single-string,
+        # latency-sensitive embed_query() below, which deliberately does
+        # NOT call this on every interactive search.
+        cleanup_ml_memory()
     return embeddings.astype(np.float32, copy=False)
 
 
