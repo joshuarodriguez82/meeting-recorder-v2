@@ -399,8 +399,9 @@ export interface SessionSummary {
   // from "audio is gone" — before this, both looked identical to the
   // UI (audio_exists: false) and a session mid-finalize could be
   // mistaken for a lost recording. See SessionFull's finalize_status
-  // for the full three-state contract.
-  finalize_status?: "finalizing" | "failed" | null;
+  // for the full four-state contract (adds "queued" — serialized
+  // finalize, 2026-08).
+  finalize_status?: "finalizing" | "queued" | "failed" | null;
   finalize_started_at?: string | null;
   finalize_error?: string | null;
 }
@@ -582,9 +583,19 @@ export interface SessionFull {
   } | null;
   // Finalize-in-progress state, persisted so it survives a backend
   // restart (see backend/services/recovery_service.py's startup
-  // sweep). Three states:
+  // sweep). Four states:
   //   null           — no finalize in flight right now (either none
   //                    has run yet, or the last one succeeded).
+  //   "queued"       — this recording's finalize is waiting behind
+  //                    ANOTHER finalize job that currently holds the
+  //                    backend's single process-wide finalize slot
+  //                    (2026-08 serialization — at most one finalize
+  //                    subprocess runs at a time so it can never starve
+  //                    a still-live recording of CPU). Treat the same
+  //                    as "finalizing" for gating AI actions/playback;
+  //                    the distinct value exists so the message can
+  //                    honestly say "waiting behind another job"
+  //                    instead of implying this one is already running.
   //   "finalizing"   — the post-stop finalize subprocess (WAV merge,
   //                    optional echo-cancellation pass, resample) is
   //                    currently running. `finalize_started_at` is set;
@@ -598,7 +609,7 @@ export interface SessionFull {
   //                    `finalize_error` holds the reason. Distinct from
   //                    a genuinely-missing file: this is a known,
   //                    explainable failure.
-  finalize_status?: "finalizing" | "failed" | null;
+  finalize_status?: "finalizing" | "queued" | "failed" | null;
   finalize_started_at?: string | null;
   finalize_error?: string | null;
 }

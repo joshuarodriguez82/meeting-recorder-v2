@@ -610,7 +610,14 @@ export default function Home() {
   // — poll faster only while something time-sensitive is actually
   // happening) that arms itself only while at least one loaded session
   // is finalizing, and tears itself down the moment none are.
-  const anyFinalizing = sessions.some((s) => s.finalize_status === "finalizing");
+  // Includes "queued" (2026-08 serialized finalize — at most one
+  // finalize subprocess runs process-wide, see backend utils/
+  // finalize_gate.py) alongside "finalizing": a session waiting behind
+  // another finalize job needs this same live-pickup polling just as
+  // much as one actually running, so it doesn't sit un-refreshed for
+  // however long the job ahead of it takes.
+  const anyFinalizing = sessions.some(
+    (s) => s.finalize_status === "finalizing" || s.finalize_status === "queued");
   useEffect(() => {
     if (!backendReady || !anyFinalizing) return;
     const id = setInterval(reloadSessions, 8_000);

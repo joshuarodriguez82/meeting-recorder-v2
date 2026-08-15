@@ -155,15 +155,18 @@ function RenamableTitle({
  * meant nothing lined up, and the chips read as a row of buttons.
  */
 
-/** " (running for Xm Ys)" for the Finalizing chip, or "" if the
- * timestamp is missing/unparseable — the chip still reads fine without
- * a duration, it just loses the specific number. */
-function _finalizeElapsedSuffix(startedAt?: string | null): string {
+/** " (running for Xm Ys)" (or " (queued for Xm Ys)" when `verb` is
+ * overridden) for the Finalizing/Queued chip, or "" if the timestamp is
+ * missing/unparseable — the chip still reads fine without a duration,
+ * it just loses the specific number. */
+function _finalizeElapsedSuffix(
+  startedAt?: string | null, verb: string = "running",
+): string {
   if (!startedAt) return "";
   const startedMs = new Date(startedAt).getTime();
   if (Number.isNaN(startedMs)) return "";
   const elapsedS = Math.max(0, Math.round((Date.now() - startedMs) / 1000));
-  return ` (running for ${formatDuration(elapsedS)})`;
+  return ` (${verb} for ${formatDuration(elapsedS)})`;
 }
 
 export function StatusIcons({ session }: { session: SessionSummary }) {
@@ -612,6 +615,18 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
                     {s.client && (<><span>·</span><span>{s.client}</span></>)}
                     {s.project && (<><span>·</span><span>{s.project}</span></>)}
                   </div>
+                  {s.finalize_status === "queued" && (
+                    <div
+                      className="inline-flex items-start gap-1.5 max-w-full rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300 text-[11px] px-2.5 py-1 mt-2"
+                      title="At most one finalize job runs at a time so it never competes with a live recording for CPU — this one is waiting for another finalize to finish. This is normal — no data has been lost."
+                    >
+                      <Loader2 className="h-3 w-3 animate-spin shrink-0 mt-0.5" aria-hidden />
+                      <span className="flex-1">
+                        Queued{_finalizeElapsedSuffix(s.finalize_started_at, "queued")}
+                        {" "}— waiting behind another finalize job.
+                      </span>
+                    </div>
+                  )}
                   {s.finalize_status === "finalizing" && (
                     <div
                       className="inline-flex items-start gap-1.5 max-w-full rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300 text-[11px] px-2.5 py-1 mt-2"
