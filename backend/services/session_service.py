@@ -615,6 +615,7 @@ class SessionService:
             ".json", ".wav", ".log",
             ".embeddings.npz", ".embeddings.json", ".embeddings.pkl",
             ".commitments.json", ".item_status.json",
+            ".channel_attribution.json",
         )
         for suffix in primary_suffixes:
             p = self._recordings_dir / f"session_{session_id}{suffix}"
@@ -637,6 +638,7 @@ class SessionService:
             f"session_{session_id}.embeddings.pkl",
             f"session_{session_id}.commitments.json",
             f"session_{session_id}.item_status.json",
+            f"session_{session_id}.channel_attribution.json",
         }
         try:
             primary_resolved = self._recordings_dir.expanduser().resolve()
