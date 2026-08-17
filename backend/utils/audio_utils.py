@@ -382,6 +382,8 @@ def finalize_recording_streaming(
     loopback_start_offset_s: Optional[float] = None,
     echo_cancellation_enabled: bool = False,
     aec_result: Optional[dict] = None,
+    channel_attribution_enabled: bool = False,
+    conference_room_mode: bool = False,
 ) -> Tuple[float, bool]:
     """
     Stream-merge mic + (optional) loopback into a single mono PCM_16 WAV at
@@ -438,6 +440,21 @@ def finalize_recording_streaming(
             never see. Left as `{}` (never populated) if the caller
             doesn't pass a dict; existing callers that don't care about
             AEC observability are unaffected.
+        channel_attribution_enabled: compute the channel-dominance
+            speaker-attribution timeline and write it to the
+            ``session_<ID>.channel_attribution.json`` sidecar beside
+            ``output_wav_path``. Default False so every existing caller
+            (recovery, tests) behaves exactly as before; the recording
+            service passes the ``channel_attribution_enabled`` setting
+            (default ON). This is ADDITIVE ANALYSIS ONLY — it runs as
+            its own read pass over its own file handles and cannot
+            change a single byte of the merged output. See
+            core/channel_attribution.py.
+        conference_room_mode: this recording had the mic capturing a
+            whole room with system audio deliberately skipped, so "the
+            mic means the user" is false. Recorded in the sidecar as an
+            explicit stand-down reason rather than silently producing a
+            meaningless timeline.
 
     Returns:
         (duration_seconds_written, loopback_mixed_in)
@@ -651,6 +668,92 @@ def finalize_recording_streaming(
     elif aec_result is not None:
         aec_result.update({"requested": False})
 
+    # ── Channel-dominance speaker attribution (opt-in, default off at
+    # this layer; ON by default at the settings layer) ───────────────
+    #
+    # WHY HERE: this is the only moment both raw streams still exist.
+    # recording_service deletes _recording_<id>.wav / _loopback_<id>.wav
+    # the instant this function returns successfully (unless
+    # KEEP_AUDIO_TEMPS=1), and diarization doesn't run until Process
+    # time, in a different process, possibly days later. The physical
+    # who-is-who evidence has to be captured now or it is gone forever.
+    #
+    # WHY A SEPARATE PASS: the merged WAV must be byte-identical whether
+    # this is on or off, and the cheapest way to guarantee that is for
+    # this code to share nothing — no reader, no buffer, no branch —
+    # with the code below that writes it. The cost is one extra
+    # streaming read of each input, in a below-normal-priority
+    # subprocess, after the recording has already stopped.
+    #
+    # WHY COMPUTED HERE BUT WRITTEN AFTER THE MERGE: the analysis needs
+    # the resampled loopback temp, which the `finally` below deletes; but
+    # a sidecar on disk describing a WAV that was never produced would
+    # be a live trap. If this merge then crashes, recovery_service
+    # re-merges the preserved temps with the LEGACY right-alignment
+    # heuristic (no wallclock anchor), producing a WAV on a slightly
+    # different timeline — and a stale sidecar from the failed attempt
+    # would be silently mapped onto it. Computing now and committing
+    # only after the merge succeeds means a failed finalize leaves no
+    # sidecar at all, which is the correct, honest state.
+    #
+    # Wrapped whole in try/except and importing lazily: a missing
+    # module, a malformed input, anything at all here costs the
+    # attribution feature for one session and NOTHING else. Losing
+    # attribution is nothing; losing the recording is everything.
+    attribution_doc: Optional[dict] = None
+    if channel_attribution_enabled:
+        try:
+            from core.channel_attribution import (
+                compute_attribution_from_files,
+                stood_down_document,
+            )
+            session_id_hint = out_path.stem.replace("session_", "") or None
+            if conference_room_mode:
+                # The mic is capturing the ROOM. Channel dominance says
+                # nothing about who is talking, so don't pretend.
+                attribution_doc = stood_down_document(
+                    "conference_room_mode",
+                    samplerate=target_sr,
+                    duration_s=mic_total_out / float(target_sr),
+                    loopback_present=bool(have_lb),
+                    conference_room_mode=True,
+                    session_id=session_id_hint,
+                )
+            elif not (have_lb and lb_path_16k and lb_offset_out is not None
+                      and loopback_start_offset_s is not None
+                      and loopback_start_offset_s >= 0):
+                # Either there is no loopback at all (mic-only session —
+                # a real field case, `lb=n/a`), or there is one but only
+                # the legacy right-alignment heuristic put it on the
+                # timeline. Comparing streams that may be seconds apart
+                # would produce garbage at exactly the boundaries that
+                # matter, so we decline rather than guess.
+                attribution_doc = stood_down_document(
+                    ("mic_only_recording" if not have_lb
+                     else "no_wallclock_alignment"),
+                    samplerate=target_sr,
+                    duration_s=mic_total_out / float(target_sr),
+                    loopback_present=bool(have_lb),
+                    session_id=session_id_hint,
+                )
+            else:
+                attribution_doc = compute_attribution_from_files(
+                    mic_wav_path=str(mic_path_for_read),
+                    mic_samplerate=mic_sr_for_read,
+                    loopback_16k_path=lb_path_16k,
+                    target_sr=target_sr,
+                    loopback_offset_frames=lb_offset_out,
+                    conference_room_mode=False,
+                    aec_applied=aec_temp_path is not None,
+                    session_id=session_id_hint,
+                )
+        except Exception as e:
+            attribution_doc = None
+            logger.exception(
+                f"Channel attribution failed ({e}) — this session's "
+                f"diarization will fall back to voice-only clustering; "
+                f"the recording itself is unaffected")
+
     written_out = 0
     loopback_mixed = False
     lb_reader: Optional[sf.SoundFile] = None
@@ -725,6 +828,40 @@ def finalize_recording_streaming(
             _safe_unlink(aec_temp_path)
 
     duration_s = written_out / target_sr
+
+    # Commit the channel-attribution sidecar now that the merged WAV
+    # provably exists — see the "WHY COMPUTED HERE BUT WRITTEN AFTER
+    # THE MERGE" note above. write_sidecar never raises.
+    if attribution_doc is not None:
+        try:
+            from core.channel_attribution import (
+                sidecar_path_for_audio, write_sidecar,
+            )
+            summary = attribution_doc.get("summary") or {}
+            write_sidecar(
+                sidecar_path_for_audio(str(out_path)), attribution_doc)
+            logger.info(
+                "Channel attribution: usable=%s reason=%s mic=%.1fs "
+                "loopback=%.1fs both=%.1fs overlap_frac=%.3f "
+                "bleed_corr=%.3f contested_mic=%.3f confidence=%.3f "
+                "spans=%d",
+                summary.get("usable"), summary.get("stand_down_reason"),
+                summary.get("mic_seconds", 0.0),
+                summary.get("loopback_seconds", 0.0),
+                summary.get("both_seconds", 0.0),
+                summary.get("overlap_fraction", 0.0),
+                summary.get("bleed_correlation", 0.0),
+                summary.get("contested_mic_fraction", 0.0),
+                summary.get("overall_confidence", 0.0),
+                summary.get("span_count", 0),
+            )
+        except Exception as e:
+            logger.exception(
+                f"Could not commit the channel-attribution sidecar "
+                f"({e}) — diarization for this session falls back to "
+                f"voice-only clustering; the merged audio is already "
+                f"safely on disk and is unaffected")
+
     if have_lb and loopback_mixed:
         # Drift sanity check. mic_total_out is what we expect from the mic
         # samplecount alone; written_out should match (mix doesn't add or

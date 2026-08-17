@@ -107,7 +107,29 @@ class DiarizationEngine:
         self._max_speakers = max_speakers
         logger.info("Diarization pipeline loaded.")
 
-    async def diarize(self, audio_path: str) -> List[dict]:
+    async def diarize(
+        self,
+        audio_path: str,
+        channel_attribution: Optional[dict] = None,
+    ) -> List[dict]:
+        """Diarize `audio_path` into speaker turns.
+
+        `channel_attribution` is the parsed
+        ``session_<ID>.channel_attribution.json`` sidecar written during
+        finalize (see core/channel_attribution.py) — the record of which
+        physical DEVICE captured each moment of the recording. When it
+        is present and trustworthy, the spans the mic confidently owns
+        are reassigned to the user outright, so pyannote's clustering
+        is only responsible for telling far-end speakers apart from each
+        other and can never hand the far end's words to the user.
+
+        Passing None — or a sidecar that stands itself down (mic-only
+        session, conference-room mode, a speakerphone recording where
+        far-end audio bleeds into the mic, or any session recorded
+        before the sidecar existed) — leaves the pyannote turns exactly
+        as they are: pure voice-similarity diarization, i.e. the
+        behaviour every caller had before this parameter existed.
+        """
         logger.info(f"Diarizing: {audio_path}")
         loop = asyncio.get_event_loop()
         try:
@@ -138,7 +160,50 @@ class DiarizationEngine:
                 "speaker": speaker,
             })
         logger.info(f"Diarization complete: {len(set(t['speaker'] for t in turns))} speakers detected.")
-        return turns
+        return self.apply_channel_attribution(turns, channel_attribution)
+
+    @staticmethod
+    def apply_channel_attribution(
+        turns: List[dict],
+        channel_attribution: Optional[dict],
+    ) -> List[dict]:
+        """Constrain voice-clustered turns with the channel timeline.
+
+        Split out from ``diarize`` so it is reachable (and testable)
+        without loading pyannote, and so a re-process path that already
+        has turns in hand can apply the same constraint.
+
+        Never raises: any failure here logs and returns the turns
+        untouched, which is exactly today's pure-voice behaviour. The
+        import is deferred for the same reason the pyannote import is —
+        so merely importing this module stays cheap and cannot fail on
+        a backend that never diarizes.
+        """
+        if not channel_attribution:
+            return turns
+        try:
+            from core.channel_attribution import constrain_turns_to_owner
+            constrained, stats = constrain_turns_to_owner(
+                turns, channel_attribution)
+        except Exception as e:
+            logger.exception(
+                f"Channel-aware attribution failed ({e}); keeping the "
+                f"voice-only diarization result unchanged")
+            return turns
+        if not stats.get("applied"):
+            logger.info(
+                "Channel attribution not applied (%s) — speaker "
+                "attribution falls back to voice-only clustering",
+                stats.get("reason"))
+            return turns
+        logger.info(
+            "Channel attribution applied: %.1fs assigned to the user "
+            "(%s) by capture device; %d turns → %d (%d split at a "
+            "channel boundary); timeline confidence %s",
+            stats.get("owner_seconds", 0.0), stats.get("owner_label"),
+            stats.get("turns_in", 0), stats.get("turns_out", 0),
+            stats.get("split_turns", 0), stats.get("overall_confidence"))
+        return constrained
 
     @staticmethod
     def assign_speakers(
