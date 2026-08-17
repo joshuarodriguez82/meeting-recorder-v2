@@ -296,6 +296,15 @@ class RecordingService:
         self._recording = False
         self._capture_sr = TARGET_SR
         self._chunk_count = 0
+        # Whether THIS recording was started in conference-room mode
+        # (mic captures the whole room, system audio deliberately
+        # skipped). Latched at start_recording and read at finalize:
+        # channel-dominance attribution is meaningless in that mode —
+        # "the mic" is not "the user" — so finalize records it as an
+        # explicit stand-down reason in the sidecar instead of writing
+        # a timeline nobody should act on. See
+        # core/channel_attribution.evaluate_trust.
+        self._conference_room_mode = False
         self._session_log_handler: Optional[logging.FileHandler] = None
         # Live transcription (#1 from the roadmap). Constructed lazily
         # on first start_recording so we don't pay the import cost at
@@ -517,6 +526,7 @@ class RecordingService:
         self._start_session_log(session_id)
 
         self._recording = True
+        self._conference_room_mode = bool(conference_room_mode)
         self._chunk_count = 0
         self._last_chunk_at = None
         self._loopback_level_ema = 0.0
@@ -770,6 +780,14 @@ class RecordingService:
             self._write_session_stub(session)
             echo_cancellation_requested = bool(
                 getattr(self._settings, "echo_cancellation_enabled", False))
+            # Channel-dominance attribution, default ON (see
+            # config/settings.py's channel_attribution_enabled). This is
+            # the ONLY point in the app's lifetime where both raw
+            # streams still exist — the `finally` block below deletes
+            # them the moment the merge succeeds — so the who-is-who
+            # evidence is captured here or never.
+            channel_attribution_requested = bool(
+                getattr(self._settings, "channel_attribution_enabled", True))
 
             def _mark_queued() -> None:
                 # Invoked by finalize_slot() from this same thread,
@@ -822,6 +840,9 @@ class RecordingService:
                         target_sr=TARGET_SR,
                         loopback_start_offset_s=loopback_start_offset_s,
                         echo_cancellation_enabled=echo_cancellation_requested,
+                        channel_attribution_enabled=(
+                            channel_attribution_requested),
+                        conference_room_mode=self._conference_room_mode,
                     )
                 session.audio_path = final_path
                 # Subprocess returned successfully — clear the
@@ -1160,7 +1181,17 @@ class RecordingService:
                     logger.warning(f"terminology correction pass failed: {e}")
 
             self._on_status("__stage:transcribe:done____stage:diarize:active__")
-            diarization_turns = await self._diarization.diarize(local_audio_path)
+            # Channel-attribution sidecar lookup. Deliberately keyed off
+            # session.audio_path (the CANONICAL path in recordings_dir,
+            # where finalize wrote the sidecar) and NOT
+            # local_audio_path, which is the %TEMP% scratch copy of the
+            # WAV alone. Returns None for every session recorded before
+            # this feature shipped, and for any unreadable/malformed
+            # file — both of which degrade to today's voice-only
+            # diarization with no error.
+            attribution = self._load_channel_attribution(session)
+            diarization_turns = await self._diarization.diarize(
+                local_audio_path, channel_attribution=attribution)
 
             self._on_status("__stage:diarize:done____stage:speakers:active__")
             attributed = DiarizationEngine.assign_speakers(raw_segments, diarization_turns)
@@ -1176,6 +1207,7 @@ class RecordingService:
             session.speakers = {}
             for raw in attributed:
                 speaker = session.get_or_create_speaker(raw["speaker_id"])
+                self._name_owner_speaker(speaker)
                 segment = Segment(
                     speaker_id=speaker.speaker_id,
                     start=raw["start"],
@@ -1207,6 +1239,48 @@ class RecordingService:
             # leaving the scratch on disk would just bloat %TEMP%.
             await asyncio.to_thread(
                 _purge_processing_temp, session.session_id)
+
+    @staticmethod
+    def _load_channel_attribution(session: Session) -> Optional[dict]:
+        """Read this session's channel-attribution sidecar, or None.
+
+        None is the normal, expected answer in several cases and NONE of
+        them is an error: the feature is switched off, the session
+        predates the sidecar, finalize stood down (mic-only, conference
+        room, speakerphone), or the file is unreadable. Every one of
+        them means "diarize by voice alone, exactly as before"."""
+        try:
+            from core.channel_attribution import load_sidecar_for_audio
+            return load_sidecar_for_audio(session.audio_path)
+        except Exception as e:
+            logger.warning(
+                f"Could not load channel-attribution sidecar for "
+                f"{session.session_id}: {e} — diarizing by voice alone")
+            return None
+
+    @staticmethod
+    def _name_owner_speaker(speaker) -> None:
+        """Give the channel-confirmed user speaker a readable name.
+
+        The speaker_id itself is the app's existing identity string for
+        "the user's own mic" (core.live_transcriber.SPEAKER_YOU, which
+        the live transcript already publishes) — this only replaces the
+        raw label with the badge text the live preview shows, and only
+        while the speaker is still unnamed. It never overwrites a real
+        name: `_fingerprint_speakers` below matches this speaker's
+        centroid against the known-speakers store
+        (services/speaker_profile_service.py) and replaces this with the
+        user's actual name when it recognises them. That store, not
+        anything here, is where the user's identity lives."""
+        try:
+            from core.channel_attribution import (
+                OWNER_SPEAKER_DISPLAY_NAME, OWNER_SPEAKER_LABEL,
+            )
+        except Exception:  # pragma: no cover - defensive
+            return
+        if (speaker.speaker_id == OWNER_SPEAKER_LABEL
+                and speaker.display_name == OWNER_SPEAKER_LABEL):
+            speaker.display_name = OWNER_SPEAKER_DISPLAY_NAME
 
     def _fingerprint_speakers(
         self, diarization_turns: List[dict],
@@ -1851,6 +1925,8 @@ class RecordingService:
         target_sr: int,
         loopback_start_offset_s: Optional[float],
         echo_cancellation_enabled: bool = False,
+        channel_attribution_enabled: bool = False,
+        conference_room_mode: bool = False,
     ) -> tuple[float, bool, Optional[dict]]:
         """Run the WAV merge in a subprocess instead of in-process.
 
@@ -1915,6 +1991,17 @@ class RecordingService:
         ]
         if echo_cancellation_enabled:
             argv.append("--echo-cancellation")
+        if channel_attribution_enabled:
+            # Deliberately NOT part of the stdout result protocol: the
+            # child's output is a sidecar file next to the merged WAV
+            # (which is what the later, out-of-process diarization run
+            # reads), and its one-line summary reaches backend.log via
+            # the stdout mirroring below. Nothing in this method's
+            # control flow depends on it, so nothing here can break
+            # when attribution fails.
+            argv.append("--channel-attribution")
+            if conference_room_mode:
+                argv.append("--conference-room")
         logger.info(
             f"[finalize-subprocess] spawn {' '.join(argv[1:])}"
         )

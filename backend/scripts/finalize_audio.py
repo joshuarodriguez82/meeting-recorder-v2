@@ -35,6 +35,14 @@ stdout: on success, machine-parseable lines:
     RESULT duration_s=<float> loopback_mixed=<bool>
 stderr: human log lines (mirrored into backend.log by the parent)
 
+``--channel-attribution`` deliberately adds NO line to this protocol.
+Its result is a file on disk (``session_<ID>.channel_attribution.json``
+beside ``--output``), which is what the later, out-of-process
+diarization run actually reads; the child's one-line summary reaches
+backend.log through the normal stdout mirroring below. Nothing in the
+parent's control flow depends on it, so nothing in the parent's control
+flow can break when it fails.
+
 Everything the child logs via utils.logger.get_logger (including the
 "Offline AEC decision: ..." line in audio_utils.py) goes to the child's
 STDOUT, not stderr — get_logger's handler is a StreamHandler(sys.
@@ -108,6 +116,26 @@ def main(argv: list[str] | None = None) -> int:
               "reference) before mixing. Default off — see "
               "Settings.echo_cancellation_enabled / utils/aec.py."),
     )
+    parser.add_argument(
+        "--channel-attribution", action="store_true",
+        help=("Compute the channel-dominance speaker-attribution "
+              "timeline from the two raw streams and write it to the "
+              "session_<ID>.channel_attribution.json sidecar beside "
+              "--output. This MUST happen here: both raw streams only "
+              "exist during finalize, and diarization runs later at "
+              "Process time. Additive analysis only — the merged WAV "
+              "is byte-identical with or without it. See "
+              "Settings.channel_attribution_enabled and "
+              "core/channel_attribution.py."),
+    )
+    parser.add_argument(
+        "--conference-room", action="store_true",
+        help=("This recording used conference-room mode (mic captures "
+              "the whole room, system audio deliberately skipped), so "
+              "channel dominance carries no information about who is "
+              "speaking. Recorded in the sidecar as an explicit "
+              "stand-down reason."),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -148,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
             loopback_start_offset_s=offset,
             echo_cancellation_enabled=args.echo_cancellation,
             aec_result=aec_result if args.echo_cancellation else None,
+            channel_attribution_enabled=args.channel_attribution,
+            conference_room_mode=args.conference_room,
         )
     except RuntimeError as e:
         # Expected, raisable error (missing mic, empty WAV, etc.) —

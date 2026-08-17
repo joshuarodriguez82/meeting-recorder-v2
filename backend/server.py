@@ -1226,6 +1226,12 @@ class SettingsDTO(BaseModel):
     # onto the old direct-scan path (services/session_service.py's
     # _list_sessions_direct).
     session_index_enabled: bool = True
+    # Kill switch for channel-aware diarization. Default True — see
+    # config/settings.py's channel_attribution_enabled docstring and
+    # core/channel_attribution.py. False makes speaker attribution
+    # depend purely on voice similarity again (no channel override, no
+    # sidecar written at finalize).
+    channel_attribution_enabled: bool = True
     # Which calendar source(s) the backend may consult. "auto" (default)
     # preserves existing behavior: local calendar (Outlook COM / macOS
     # EventKit) + Chrome-extension events, merged. "outlook" is local
@@ -1694,6 +1700,7 @@ async def get_settings():
         audio_mix_format_lookup_enabled=s.audio_mix_format_lookup_enabled,
         echo_cancellation_enabled=s.echo_cancellation_enabled,
         session_index_enabled=s.session_index_enabled,
+        channel_attribution_enabled=s.channel_attribution_enabled,
         calendar_source=s.calendar_source,
     )
 
@@ -1807,6 +1814,8 @@ async def save_settings(payload: SettingsDTO):
         audio_mix_format_lookup_enabled=bool(payload.audio_mix_format_lookup_enabled),
         echo_cancellation_enabled=bool(payload.echo_cancellation_enabled),
         session_index_enabled=bool(payload.session_index_enabled),
+        channel_attribution_enabled=bool(
+            payload.channel_attribution_enabled),
         calendar_source=(payload.calendar_source or "auto").strip().lower(),
     )
     # If the recordings folder changed, migrate client + template state
@@ -3297,6 +3306,7 @@ async def set_live_copilot_enabled(payload: dict):
         audio_mix_format_lookup_enabled=s.audio_mix_format_lookup_enabled,
         echo_cancellation_enabled=s.echo_cancellation_enabled,
         session_index_enabled=s.session_index_enabled,
+        channel_attribution_enabled=s.channel_attribution_enabled,
         calendar_source=s.calendar_source,
     )
     # Update the cached Settings in-place so the change is visible
@@ -7558,6 +7568,7 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         audio_mix_format_lookup_enabled=s.audio_mix_format_lookup_enabled,
         echo_cancellation_enabled=s.echo_cancellation_enabled,
         session_index_enabled=s.session_index_enabled,
+        channel_attribution_enabled=s.channel_attribution_enabled,
         calendar_source=s.calendar_source,
     )
     svc.settings = dataclasses.replace(

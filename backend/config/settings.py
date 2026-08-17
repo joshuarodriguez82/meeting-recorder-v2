@@ -387,6 +387,50 @@ class Settings:
     # direct-scan path, e.g. while ruling out the index as a cause of a
     # sessions-list bug.
     session_index_enabled: bool
+    # Kill switch for channel-aware diarization (core/channel_
+    # attribution.py). Default ON.
+    #
+    # WHAT IT DOES WHEN ON: during finalize — the only moment both raw
+    # capture streams still exist on disk — the mic and loopback tracks
+    # are compared frame by frame and a timeline of who-owned-the-audio
+    # spans is written to session_<ID>.channel_attribution.json. At
+    # Process time, diarization uses that timeline to assign the user's
+    # spans to the user OUTRIGHT, leaving pyannote only the job of
+    # telling far-end speakers apart from each other.
+    #
+    # WHY IT EXISTS: the recorder captures two physically separate
+    # streams — the mic (definitionally the user) and system-audio
+    # loopback (definitionally everyone else) — and then merges them
+    # into one mono WAV before diarization ever sees them. That merge
+    # throws away perfect, free ground truth about who-is-who and asks
+    # a clustering model to re-derive it from voice alone. When it gets
+    # that wrong, the far end's words appear in the user's own turns —
+    # the "user repeating what they're saying" symptom, long
+    # misattributed to acoustic echo until a real session measured
+    # `Echo cancellation: not applied (erle_non_positive)` on a headset
+    # recording, i.e. no echo path existed at all.
+    #
+    # WHAT TURNING IT OFF COSTS: speaker attribution goes back to being
+    # decided purely by voice similarity, so the user's transcript
+    # turns can again contain the far end's words, and the user's own
+    # speaker centroid (the one the known-speakers store matches their
+    # real name against) is again computed from whatever pyannote put
+    # in that cluster rather than from mic-confirmed audio only.
+    # NOTHING ELSE changes: no audio is altered either way — the merged
+    # WAV is byte-identical with this on or off — and the extra
+    # finalize work is one additional streaming read of each raw stream
+    # in the below-normal-priority finalize subprocess, with zero
+    # per-frame cost on the live transcription path.
+    #
+    # Turning it off is the right move if attribution is ever seen
+    # making things WORSE on real recordings. Note that it already
+    # stands down on its own — falling back to exactly the old
+    # behaviour, with no override — for mic-only sessions, conference-
+    # room mode, non-headset (speaker-bleed) recordings, low-confidence
+    # timelines, and every session recorded before this shipped; see
+    # core/channel_attribution.evaluate_trust for the full list of
+    # stand-down reasons, each of which is recorded in the sidecar.
+    channel_attribution_enabled: bool
     # Which calendar source(s) the backend is allowed to consult:
     # "auto" (default, local calendar + extension merged), "outlook"
     # (local calendar only), "extension" (Chrome-extension-scraped
@@ -530,6 +574,8 @@ class Settings:
             echo_cancellation_enabled=_get_bool(
                 "ECHO_CANCELLATION_ENABLED", False),
             session_index_enabled=_get_bool("SESSION_INDEX_ENABLED", True),
+            channel_attribution_enabled=_get_bool(
+                "CHANNEL_ATTRIBUTION_ENABLED", True),
             calendar_source=_normalize_calendar_source(
                 _get("CALENDAR_SOURCE", "auto")),
         )
@@ -617,6 +663,7 @@ class Settings:
         audio_mix_format_lookup_enabled: bool = True,
         echo_cancellation_enabled: bool = False,
         session_index_enabled: bool = True,
+        channel_attribution_enabled: bool = True,
         calendar_source: str = "auto",
     ) -> None:
         """Write settings back to the .env file.
@@ -730,6 +777,8 @@ class Settings:
             f"ECHO_CANCELLATION_ENABLED="
             f"{'true' if echo_cancellation_enabled else 'false'}\n"
             f"SESSION_INDEX_ENABLED={'true' if session_index_enabled else 'false'}\n"
+            f"CHANNEL_ATTRIBUTION_ENABLED="
+            f"{'true' if channel_attribution_enabled else 'false'}\n"
             # Not validated on write — from_env normalizes any garbage
             # value back to "auto" on read (see _normalize_calendar_source
             # above), matching diarization_device's self-healing pattern.
