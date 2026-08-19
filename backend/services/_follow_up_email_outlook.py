@@ -20,42 +20,14 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from core._precision import no_invented_precision
+from services.follow_up_owners import DraftResult, build_draft_plan
 from utils.com_worker import run_com
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-
-# Match lines like:  - [ ] **John Smith**: Send the SOW draft by Friday
-_ACTION_ITEM_RE = re.compile(
-    r"^\s*-\s*\[\s*[xX ]?\s*\]\s*\*\*\[?([^\]*]+?)\]?\*\*\s*:\s*(.+)$"
-)
-
-
-def _parse_action_items_by_owner(action_items_md: str) -> Dict[str, List[str]]:
-    """
-    Group checkbox-style action items by owner. Returns a dict keyed by owner
-    display name (as it appears in the markdown) → list of action descriptions.
-    """
-    out: Dict[str, List[str]] = {}
-    if not action_items_md:
-        return out
-    for line in action_items_md.splitlines():
-        m = _ACTION_ITEM_RE.match(line)
-        if not m:
-            continue
-        owner = m.group(1).strip()
-        desc = m.group(2).strip()
-        if not owner or not desc:
-            continue
-        # Skip generic "Team" / "All" / "Everyone" — we can't resolve a single email
-        if owner.lower() in {"team", "all", "everyone", "group", "tbd", "unknown"}:
-            continue
-        out.setdefault(owner, []).append(desc)
-    return out
 
 
 def _resolve_email(outlook_ns, name: str) -> Optional[str]:
@@ -164,10 +136,17 @@ def _body_to_html(body: str) -> str:
 
 
 def draft_follow_up_emails(svc, session_id: str,
-                            tone: str = "friendly-professional") -> int:
+                            tone: str = "friendly-professional") -> DraftResult:
     """
     Create an Outlook draft for each attendee with assigned action items.
-    Returns the number of drafts actually created.
+    Returns a DraftResult — the draft count plus WHY the count is what it
+    is, so the caller can tell "no action items" from "action items we
+    couldn't read" from "nobody individual owns anything".
+
+    Owner attribution comes from services/follow_up_owners.py: the
+    session's commitments sidecar when it has open, individually-owned
+    commitments (a real `owner` field, alias-resolved), otherwise a
+    tolerant re-parse of the `action_items` markdown.
 
     Runs synchronously — callers should invoke via asyncio.to_thread.
 
@@ -181,15 +160,10 @@ def draft_follow_up_emails(svc, session_id: str,
     if not session_data:
         raise FileNotFoundError(f"Session not found: {session_id}")
 
-    action_items_md = session_data.get("action_items") or ""
-    if not action_items_md:
-        logger.info(f"Follow-up drafts: session {session_id} has no action_items, nothing to draft")
-        return 0
-
-    owners = _parse_action_items_by_owner(action_items_md)
-    if not owners:
-        logger.info(f"Follow-up drafts: no owner-attributed action items in session {session_id}")
-        return 0
+    plan = build_draft_plan(svc, session_id, session_data)
+    if not plan.ok:
+        return DraftResult.from_plan(plan)
+    owners = plan.owners
 
     meeting_title = session_data.get("display_name") or f"Session {session_id}"
     decisions_md = session_data.get("decisions") or ""
@@ -261,6 +235,6 @@ def draft_follow_up_emails(svc, session_id: str,
 
     logger.info(
         f"Follow-up drafts: created {created} of {len(owners)} drafts "
-        f"for session {session_id}"
+        f"for session {session_id} (source={plan.source})"
     )
-    return created
+    return DraftResult.from_plan(plan, created=created)

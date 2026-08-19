@@ -383,6 +383,7 @@ meeting-recorder-v2/
 │   │   ├── qa_service.py             # Cross-meeting Q&A retrieval + LLM
 │   │   ├── calendar_service.py       # Outlook COM (Win) / EventKit (Mac)
 │   │   ├── follow_up_email.py        # Outlook (Win) / Mail.app (Mac)
+│   │   ├── follow_up_owners.py       # Who a follow-up is addressed to
 │   │   ├── retention_service.py
 │   │   └── export_service.py
 │   ├── utils/
