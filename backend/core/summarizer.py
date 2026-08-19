@@ -26,6 +26,14 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from anthropic import AsyncAnthropic
 from core._coach_text import dedup_against as _dedup_against
+# One shared no-invented-precision rule, referenced by every prompt
+# builder below rather than paraphrased in each of them. `_grounding_rules`
+# is the date anchor plus that rule; see core/_precision.py for why.
+from core._precision import (
+    grounding_rules as _grounding_rules,
+    json_timing_note as _json_timing_note,
+    no_invented_precision as _no_invented_precision,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -191,86 +199,10 @@ def _with_user_notes(instruction: str, transcript: str, notes: str = "") -> str:
     )
 
 
-def _fmt_anchor_date(anchor: str) -> str:
-    """Render an anchor date for a prompt.
-
-    Accepts an ISO date or datetime (``2026-08-19``,
-    ``2026-08-19T14:03:11.412``) and returns
-    ``"Wednesday, 19 August 2026 (2026-08-19)"``. The weekday matters:
-    "next Tuesday" is only resolvable if the model knows what day the
-    anchor was. Anything unparseable is passed through verbatim rather
-    than dropped — a fuzzy anchor still beats none.
-    """
-    raw = (anchor or "").strip()
-    if not raw:
-        return ""
-    date_part = raw.split("T", 1)[0].strip()
-    try:
-        from datetime import date as _date_cls
-        d = _date_cls.fromisoformat(date_part)
-    except (ValueError, TypeError):
-        return raw
-    return f"{d.strftime('%A, %d %B %Y')} ({d.isoformat()})"
-
-
-def _date_anchor(anchor: str, kind: str = "meeting") -> str:
-    """Pin every date the model writes to a known real-world date.
-
-    Field repro (2026-08): a 43-minute recording contained one bare
-    relative reference — a speaker saying "come October", with no year
-    stated anywhere in the call. The summary asserted a year two years
-    in the PAST, twice, once as a section heading. Nothing in the prompt
-    carried the meeting's own date, so the model had no anchor for the
-    relative reference and supplied a year from nowhere. A summary that
-    gets forwarded to a customer turned a deadline six weeks out into a
-    missed one.
-
-    Two rules do the work, and they have to be stated together:
-    RESOLUTION (relative references resolve forward from the anchor) and
-    the PROHIBITION (never emit a date component that is neither stated
-    in the source nor derivable from the anchor). Resolution alone
-    invites the model to "helpfully" pin down dates it is guessing at;
-    the prohibition alone leaves "come October" unresolvable.
-
-    `kind` selects the lead sentence — "meeting" for a transcript being
-    summarized, "today" for a forward-looking brief generated now.
-    Returns "" for an empty anchor so every caller can pass through
-    whatever it has and callers with no date emit the prompt they
-    emitted before.
-    """
-    shown = _fmt_anchor_date(anchor)
-    if not shown:
-        return ""
-    lead = (
-        f"This meeting took place on {shown}."
-        if kind == "meeting"
-        else f"Today's date is {shown}."
-    )
-    return (
-        "\n\n=== DATE ANCHOR — read this before you write any date ===\n"
-        f"{lead}\n"
-        "Resolve every relative time reference against that date. "
-        '"Come October", "next Tuesday", "end of quarter", "in two '
-        'weeks", "later this year" all mean the next such point on or '
-        "after the anchor date above — never an earlier one.\n\n"
-        "NEVER state a year, month or day that is not either stated "
-        "explicitly in the source material or derived from the anchor "
-        "date above. Specifically:\n"
-        "- A bare month with no year stays bare, or is resolved forward "
-        'from the anchor. "Come October" becomes "October" or the '
-        "October on or after the anchor date — never a different "
-        "year.\n"
-        "- Do not add a year, quarter or day-of-month to a source "
-        "reference that did not carry one just to make it look "
-        "precise.\n"
-        "- Do not invent a date for an undated commitment. If the "
-        "source did not say when, write that the timing was not "
-        "specified.\n"
-        "- This applies to section headings and table cells exactly as "
-        "it applies to prose.\n"
-        "An unqualified date is correct. An invented one is a factual "
-        "error the reader cannot catch.\n"
-    )
+# `_date_anchor` / `_fmt_anchor_date` moved to core/_precision.py so the
+# date anchor and the general no-invented-precision rule live in one
+# place and compose there (`_grounding_rules`). Imported above under
+# their original names — the anchor text itself is unchanged.
 
 
 def _visual_instruction(n_imgs: int) -> str:
@@ -386,6 +318,20 @@ _COACH_OUTPUT_RULES = (
     "≤120 chars each.\n"
     '  "follow_ups": concrete next steps naming the artifact/person, '
     "≤120 chars each."
+    # COMPRESSED form of the shared no-invented-precision rule, not the
+    # full block. This prompt is re-sent in full on every tick — hot
+    # ticks fire ~every 15s against a 256-token budget and a 10s
+    # timeout — so ~190 tokens of instruction would be paid dozens of
+    # times per meeting and would dilute the "usually output nothing"
+    # bias the rest of these rules exist to create. The half the coach
+    # already had is specificity ("every item must name the specific
+    # system, vendor, number, person or decision from the transcript");
+    # what it lacked is the prohibition, which is what the compact form
+    # carries. Live output is also ≤2 bullets of ≤120 chars, so there is
+    # no enumerated list to miscount and no prose to sharpen a date in —
+    # the clause-by-clause detail of the full block would be spent on
+    # surfaces this builder cannot produce.
+    + _no_invented_precision(compact=True)
 )
 
 # Hot-tick variant: same wire format, but the rules emphasize urgency
@@ -639,8 +585,9 @@ class Summarizer:
 
         `meeting_date` is the session's own start date (ISO date or
         datetime). It anchors relative time references in the
-        transcript — see `_date_anchor`. Optional: "" emits the prompt
-        that was emitted before the anchor existed.
+        transcript — see `core._precision.date_anchor`. Optional: "" drops
+        the anchor half of the grounding rules (the no-invented-precision
+        half ships either way).
 
         `copilot_observations` is the deduplicated bullet-list output
         from the live co-pilot ticks fired during the recording. It is
@@ -663,7 +610,14 @@ class Summarizer:
                 f"{'s' if n_imgs != 1 else ''} captured during the meeting "
                 f"(shown above). Use them as additional context — refer to "
                 f"what they show where it sharpens the summary.")
-        instruction = f"{instruction}{_date_anchor(meeting_date)}"
+        # Full block. This is the builder that produced every observed
+        # instance: the invented year, the "seven candidate intents"
+        # above a list of six, the "By end of meeting" on an item the
+        # source never timed. Whatever the user's template says, the
+        # grounding rules ride along after it — including for templates
+        # the user wrote themselves, which is why this lives here and
+        # not in services/template_service.py's DEFAULT_TEMPLATES.
+        instruction = f"{instruction}{_grounding_rules(meeting_date)}"
         if copilot_observations.strip():
             # PROVENANCE. Everything below this line is generated text.
             #
@@ -993,7 +947,11 @@ class Summarizer:
             "to (things like 'need to follow up on X', 'reminder to send Y'), "
             "include those as action items owned by the user."
             + _visual_instruction(n_imgs)
-            + _date_anchor(meeting_date)
+            # Full block. An action item is where a manufactured
+            # deadline lands ("By end of meeting" on an item the source
+            # never timed), and the "Due: date if mentioned" format
+            # above is an open invitation to fill the slot.
+            + _grounding_rules(meeting_date)
         )
         try:
             result = await self._chat(
@@ -1035,7 +993,10 @@ class Summarizer:
             "If no decisions were made, write: 'No decisions made in this "
             "meeting.'"
             + _visual_instruction(n_imgs)
-            + _date_anchor(meeting_date)
+            # Full block. "Alternatives considered" and "Impact" are
+            # exactly the fields a model pads with plausible options
+            # nobody named, and "Owner" is an attribution slot.
+            + _grounding_rules(meeting_date)
         )
         try:
             result = await self._chat(
@@ -1094,17 +1055,19 @@ class Summarizer:
             'them with "source":"notes". Use "" for unknown string '
             'fields, [] for empty arrays. Output nothing but the JSON.'
             + visuals_hint
-            + _date_anchor(meeting_date)
-            + (
-                # The anchor block tells prose extractors to SAY the
-                # timing was unspecified. This path has no prose — an
-                # unknown "due" is "", and a guessed one is exactly the
-                # invented-date failure the anchor exists to stop.
-                '\n\nFor "due", an unstated or unclear deadline is "" — '
-                "never a guessed date. Still output nothing but the "
-                "JSON object."
-                if (meeting_date or "").strip() else ""
-            )
+            # Full block. The typed records feed the engagement layer,
+            # so an invented owner or requirement doesn't just read
+            # wrong — it becomes a row somebody works from.
+            + _grounding_rules(meeting_date)
+            # Both the anchor and the general TIMINGS clause tell prose
+            # extractors to SAY the timing was unspecified. This path
+            # has no prose — an unknown "due" is "", and a guessed one
+            # is exactly the invented-precision failure they exist to
+            # stop. Unconditional now: the timing rule ships whether or
+            # not we know the meeting's date, so the reconciliation has
+            # to ship with it (it used to be gated on having a date,
+            # because the anchor was).
+            + _json_timing_note("due")
         )
         prompt = _with_user_notes(instruction, transcript, notes)
         try:
@@ -1276,7 +1239,12 @@ class Summarizer:
                     "in the room.\n\n"
                     "Keep ALL sections tight — every bullet should "
                     "earn its place. Trim ruthlessly.\n"
-                    f"{_date_anchor(today_iso, kind='today')}\n"
+                    # Full block. This brief is read minutes before the
+                    # SA walks into the meeting and is the least
+                    # verifiable artifact in the app — the reader is
+                    # not going to re-listen to five prior calls to
+                    # check an invented commitment or owner.
+                    f"{_grounding_rules(today_iso, kind='today')}\n"
                     f"=== UPCOMING MEETING ===\n"
                     f"Subject: {upcoming_subject}\n"
                     f"When: {upcoming_when}\n"
@@ -1368,7 +1336,9 @@ class Summarizer:
                     "What you should raise or follow up on in this meeting.\n\n"
                     "Keep it tight and actionable. If a section has no content, "
                     "write 'None.'\n"
-                    f"{_date_anchor(today_iso, kind='today')}\n"
+                    # Full block — same reasoning as the calendar-based
+                    # cousin above.
+                    f"{_grounding_rules(today_iso, kind='today')}\n"
                     f"{doc_rule}"
                     f"Upcoming meeting: {upcoming_subject}"
                     f"{user_block}\n\n"
@@ -1410,7 +1380,10 @@ class Summarizer:
             "annotate their source in the Owner column as 'user notes'.\n"
             "If a section has no items, write 'None identified.'"
             + _visual_instruction(n_imgs)
-            + _date_anchor(meeting_date)
+            # Full block. The output is ID'd tables (FR-001, NFR-001),
+            # which is precision-shaped by construction: every row
+            # looks equally authoritative whether or not anyone said it.
+            + _grounding_rules(meeting_date)
         )
         try:
             result = await self._chat(
@@ -1449,7 +1422,19 @@ class Summarizer:
                     "or role. If nothing qualifies, return {}.\n\n"
                     "Example response: "
                     "{\"SPEAKER_00\": \"John Smith\", \"SPEAKER_02\": \"Sarah Jones\"}\n\n"
-                    f"Transcript:\n{transcript}"
+                    # DELIBERATELY PARTIAL. The output is a JSON map of
+                    # speaker labels to names: there is no list to
+                    # enumerate and no count to state, and no date,
+                    # deadline or timing appears anywhere in it — the
+                    # COUNTS and TIMINGS clauses would be instructions
+                    # about surfaces this builder cannot produce, and
+                    # padding a 1024-token call with them buys nothing.
+                    # What DOES apply is the whole failure mode here:
+                    # supplying a plausible name for a speaker nobody
+                    # named (IDENTIFIERS) and pinning a name to the
+                    # wrong turn (ATTRIBUTION).
+                    + _no_invented_precision(counts=False, timing=False)
+                    + f"\nTranscript:\n{transcript}"
                 ),
                 max_tokens=self._budget(1024), timeout=60.0,
             )).strip()
@@ -1624,8 +1609,18 @@ class Summarizer:
             "earlier one.\n"
             "- join_url: copy a Teams / Zoom / Google Meet URL verbatim "
             "if one appears with the meeting; empty string otherwise. "
-            "Never construct one.\n\n"
-            "=== BRIEFING TEXT ===\n"
+            "Never construct one.\n"
+            # Full block + the JSON reconciliation. This parse is the
+            # LLM step that puts events on the Record tab's timeline
+            # (services/extension_calendar_service.py consumes the dict
+            # it returns), so an invented time here is not a wrong
+            # sentence — it is a wrong meeting on the user's calendar.
+            # The per-field rules above already forbid a guessed clock
+            # time and a constructed join_url; the shared block is what
+            # covers the fields nobody thought to enumerate.
+            + _no_invented_precision()
+            + _json_timing_note("due")
+            + "\n\n=== BRIEFING TEXT ===\n"
             f"{text}\n"
             "=== END BRIEFING TEXT ==="
         )

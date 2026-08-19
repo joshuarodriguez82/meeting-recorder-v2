@@ -22,6 +22,7 @@ import asyncio
 import re
 from typing import Dict, List, Optional, Tuple
 
+from core._precision import no_invented_precision
 from utils.com_worker import run_com
 from utils.logger import get_logger
 
@@ -96,7 +97,15 @@ async def _compose_body(
         f"<email body in plain text, 4-8 sentences, mentioning their specific "
         f"action items as a short bulleted list, and thanking them. Do not "
         f"sign off with a name — the sender's signature is auto-appended.>\n\n"
-        f"Their action items:\n{bullets}\n\n"
+        f"Their action items:\n{bullets}\n"
+        # Full block. This is the ONLY artifact in the app that leaves
+        # the user's machine addressed to someone else — a fabricated
+        # deadline in a follow-up email is a commitment the recipient
+        # now believes they made. The "4-8 sentences ... and thanking
+        # them" instruction is itself pressure to pad, and padding an
+        # email is done with specifics: a date, a count, a system name.
+        + no_invented_precision()
+        + "\n"
     )
     if decisions_md and decisions_md.strip().lower() != \
             "no decisions made in this meeting.":

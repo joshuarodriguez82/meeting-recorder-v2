@@ -42,6 +42,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable, List, Optional
 
+from core._precision import json_timing_note, no_invented_precision
 from services.owner_service import AliasIndex, resolve_owners
 from utils.logger import get_logger
 
@@ -357,10 +358,33 @@ Reference date for resolving relative deadlines: {today_iso}
 
 Output ONLY a JSON array. No prose. If no commitments at all, output:
 []
+"""
+# Full block. A commitment record is the highest-consequence output in
+# the app: it is shown as "what they owe me", chased across meetings,
+# and read months later by someone who will not re-listen to the call.
+# Every clause has a slot to be violated in — "owner" (attribution),
+# "quote" (identifiers: it is supposed to be verbatim), "description"
+# (counts, in its prose), "due_date_iso" (timings).
+#
+# The TIMINGS clause and this prompt's resolution rule above are not in
+# tension: resolving "by Friday" against a stated reference date is
+# exactly the anchored resolution the date anchor endorses. What the
+# clause forbids is the other move — turning "a week or two out" into a
+# named date, or filling the field for a commitment that carried no
+# deadline at all. `json_timing_note` says how this schema spells that.
+#
+# Concatenated OUTSIDE the .format() template on purpose: the rule text
+# contains no {braces}, and keeping it out of the template makes that
+# invariant obvious rather than incidental.
+COMMITMENTS_EXTRACTION_PROMPT += (
+    no_invented_precision()
+    + json_timing_note("due_date_iso", container="array")
+    + """
 
 === TRANSCRIPT ===
 {transcript}
 """
+)
 
 
 def _resolve_due_date(text: str, today: datetime) -> str:
