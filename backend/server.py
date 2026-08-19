@@ -425,6 +425,8 @@ from services.session_service import SessionService
 from services.speaker_profile_service import (
     SpeakerProfile, SpeakerProfileService,
 )
+from utils import events
+from utils import diagnostics_bundle
 from utils.logger import get_logger
 
 # Heavy ML imports deferred to avoid blocking startup. These load torch +
@@ -7733,6 +7735,44 @@ def _extension_calendar_dropped_detail(stats: Dict[str, Any]) -> str:
     return f" ({', '.join(parts)})" if parts else ""
 
 
+def _emit_calendar_import_event(
+    log_path: str,
+    stats: Dict[str, Any],
+    dropped: int,
+    fallback_reason: Optional[str],
+    extension_version: Optional[str],
+    *,
+    calendar_only: bool,
+) -> None:
+    """Structured twin of the ``Extension calendar: path=...`` line.
+
+    Counts and reason codes only. Deliberately NOT emitted: any event
+    title, organiser, attendee or join URL — the whole payload this
+    endpoint receives is meeting content, and the only thing a
+    diagnosis has ever needed from it is which parser ran and how many
+    events survived it.
+    """
+    try:
+        drop_reasons = {
+            k[len("dropped_"):]: int(v)
+            for k, v in (stats or {}).items()
+            if k.startswith("dropped_") and v
+        }
+        events.emit(
+            events.CALENDAR_IMPORT,
+            path=log_path,
+            calendar_only=bool(calendar_only),
+            raw=int((stats or {}).get("raw") or 0),
+            kept=int((stats or {}).get("kept") or 0),
+            dropped=int(dropped or 0),
+            drop_reasons=drop_reasons,
+            fallback_reason=fallback_reason,
+            extension_version=extension_version,
+        )
+    except Exception:
+        pass
+
+
 @app.post("/briefing/extension-import")
 async def import_briefing_from_extension(req: ExtensionImportRequest):
     """Receives scraped OWA + Teams text from the Chrome extension,
@@ -7847,6 +7887,9 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
             f"Extension calendar: path={log_path}{fallback_note} "
             f"raw={stats.get('raw', 0)} kept={stats.get('kept', 0)} "
             f"dropped={dropped}{_extension_calendar_dropped_detail(stats)}")
+        _emit_calendar_import_event(
+            log_path, stats, dropped, fallback_reason,
+            req.extension_version, calendar_only=True)
         return {
             "ok": True,
             "path": path,
@@ -7958,6 +8001,9 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
                 f"raw={calendar_stats.get('raw', 0)} "
                 f"kept={calendar_stats.get('kept', 0)} dropped={dropped}"
                 f"{_extension_calendar_dropped_detail(calendar_stats)}")
+            _emit_calendar_import_event(
+                ext_log_path, calendar_stats, dropped, fallback_reason,
+                req.extension_version, calendar_only=False)
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 f"Extension calendar store update failed ({e}); "
@@ -8478,6 +8524,46 @@ async def get_diagnostics():
     return await asyncio.to_thread(_gather_diagnostics)
 
 
+@app.get("/diagnostics/export/preview")
+async def diagnostics_export_preview():
+    """What an export WOULD contain, without writing one.
+
+    The Settings card renders this before the user clicks, so nobody
+    ever finds out what they shared after they have already shared it.
+    """
+    return {
+        "members": diagnostics_bundle.preview_members(),
+        "descriptions": diagnostics_bundle.MEMBER_DESCRIPTIONS,
+        "excluded": diagnostics_bundle.EXCLUDED_STATEMENT,
+    }
+
+
+@app.post("/diagnostics/export")
+async def diagnostics_export():
+    """Write a single support zip and report exactly what went into it.
+
+    Replaces the five hand-written ``.bat`` scripts it used to take to
+    get this same material off a user's machine. Everything in it is
+    counts, versions, enums and log tails; the settings snapshot is
+    allow-list redacted (see utils/diagnostics_bundle.py).
+    """
+    svc.load_settings()
+    try:
+        result = await asyncio.to_thread(
+            diagnostics_bundle.build_diagnostics_zip,
+            settings=svc.settings,
+        )
+    except Exception as e:
+        logger.exception(f"Diagnostics export failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not build the diagnostics zip: {e}")
+    logger.info(
+        f"Diagnostics export written: {result['filename']} "
+        f"({result['bytes']} bytes, {len(result['members'])} members)")
+    return result
+
+
 class LLMTestRequest(BaseModel):
     # "main" (default) → svc.summarizer; "live" → svc.live_summarizer.
     # The Live Co-Pilot Settings card uses scope="live" to probe its
@@ -8832,6 +8918,45 @@ def _pid_alive(pid: int) -> bool:
 
 
 # ── Startup ──────────────────────────────────────────────────────────
+_BACKEND_STARTED_MONOTONIC = time.monotonic()
+
+
+def _emit_backend_start_event() -> None:
+    """``backend.start`` plus, when there is one, ``backend.prior_crash``.
+
+    The pairing is the point: the Rust watchdog respawns the backend
+    after a native crash, so a restart with no user action looks
+    identical in backend.log to a normal launch. Two adjacent lines in
+    events.jsonl — a start, and a prior-crash with an age in days —
+    turn the 0xC0000005 restart loop into something countable.
+    """
+    try:
+        import platform as _pf
+        events.emit(
+            events.BACKEND_START,
+            app_version=diagnostics_bundle.app_version(),
+            python_version=_pf.python_version(),
+            os_name=_pf.system(),
+            os_release=_pf.release(),
+            machine=_pf.machine(),
+        )
+    except Exception:
+        pass
+    try:
+        from utils.crash_log import last_crash_time, is_recent_crash
+        ts = last_crash_time()
+        if ts is not None:
+            age_days = max(
+                0.0, (datetime.now() - ts).total_seconds() / 86400.0)
+            events.emit(
+                events.BACKEND_PRIOR_CRASH,
+                age_days=age_days,
+                recent=bool(is_recent_crash(ts)),
+            )
+    except Exception:
+        pass
+
+
 @app.on_event("startup")
 async def startup():
     try:
@@ -8839,6 +8964,8 @@ async def startup():
         logger.info("Backend started")
     except Exception as e:
         logger.warning(f"Settings not yet configured: {e}")
+
+    _emit_backend_start_event()
 
     # PARENT-PID WATCHDOG — first thing after settings. If our Tauri
     # shell dies, we exit within ~5 seconds.
@@ -9141,6 +9268,28 @@ async def startup():
             logger.exception(f"Background backfill aborted: {e}")
 
     _t.Thread(target=_backfill_search_index, daemon=True).start()
+
+
+@app.on_event("shutdown")
+async def _shutdown_event_log():
+    """``backend.stop`` — the counterpart that makes ``backend.start``
+    readable.
+
+    A start with no preceding stop is an unclean exit: a native crash,
+    a force-quit, or the parent-PID watchdog firing. That distinction
+    currently requires eyeballing timestamps in backend.log against
+    rust.log, and it is the first question asked whenever a recording
+    goes missing. This handler does not run on a 0xC0000005 — that is
+    exactly what makes its absence informative."""
+    try:
+        events.emit(
+            events.BACKEND_STOP,
+            uptime_s=max(0.0, time.monotonic() - _BACKEND_STARTED_MONOTONIC),
+            recording_active=bool(
+                svc.recording_svc and svc.recording_svc.is_recording),
+        )
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

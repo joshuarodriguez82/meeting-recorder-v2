@@ -543,6 +543,7 @@ def index_folder(
         report["skipped"].append(
             {"file": str(folder), "reason": "folder does not exist",
              "expected": False})
+        _emit_index_event(report)
         return report
 
     doc_dir.mkdir(parents=True, exist_ok=True)
@@ -634,7 +635,76 @@ def index_folder(
             f"Indexed document {path.name}: {len(chunks)} chunks "
             f"({client}) -> {npz_path.name}")
 
+    _emit_index_event(report)
     return report
+
+
+# Skip reasons are written for humans and interpolate the offending
+# file's path and the library's exception message straight into the
+# string. Neither may ever reach events.jsonl, so skips are reduced to
+# this fixed set of categories before they are counted. The prose
+# reasons stay exactly as they are for the UI and backend.log.
+_SKIP_CATEGORY_MARKERS = (
+    ("not a text document", "not_a_text_document"),
+    ("unsupported file type", "unsupported_file_type"),
+    ("no extractable text", "no_extractable_text"),
+    ("no chunks produced", "no_chunks_produced"),
+    ("isn't installed", "missing_dependency"),
+    ("encrypted", "encrypted"),
+    ("corrupt or unreadable", "corrupt_or_unreadable"),
+    ("could not stat file", "could_not_stat"),
+    ("could not read file", "could_not_read"),
+    ("embedding failed", "embedding_failed"),
+    ("returned", "embedder_count_mismatch"),
+    ("folder does not exist", "folder_missing"),
+)
+
+
+def skip_reason_category(reason: str) -> str:
+    """Map a human skip reason onto a stable, path-free enum token."""
+    low = (reason or "").lower()
+    for marker, category in _SKIP_CATEGORY_MARKERS:
+        if marker in low:
+            return category
+    return "other"
+
+
+def _emit_index_event(report: dict) -> None:
+    """One ``documents.indexed`` event per reindex run.
+
+    Counts and file EXTENSIONS only. The client name is a real customer
+    name and the skipped files' paths are the user's directory tree —
+    neither goes in a file meant to be attached to a bug report, so
+    neither is passed here. The v2.28.0 field report ("87 skipped files
+    out of a whole corpus") is answerable from the by-reason and
+    by-extension histograms alone, which is the point.
+    """
+    try:
+        from utils import events
+        by_reason: Dict[str, int] = {}
+        by_extension: Dict[str, int] = {}
+        expected_skips = 0
+        for s in report.get("skipped") or []:
+            cat = skip_reason_category(str(s.get("reason") or ""))
+            by_reason[cat] = by_reason.get(cat, 0) + 1
+            if s.get("expected"):
+                expected_skips += 1
+            suffix = Path(str(s.get("file") or "")).suffix.lower()
+            key = (suffix.lstrip(".") or "none")
+            if key.isalnum() and len(key) <= 12:
+                by_extension[key] = by_extension.get(key, 0) + 1
+        events.emit(
+            events.DOCUMENTS_INDEXED,
+            indexed=int(report.get("indexed") or 0),
+            unchanged=int(report.get("unchanged") or 0),
+            skipped=len(report.get("skipped") or []),
+            expected_skips=expected_skips,
+            total_chunks=int(report.get("total_chunks") or 0),
+            skipped_by_reason=by_reason,
+            skipped_by_extension=by_extension,
+        )
+    except Exception:
+        pass
 
 
 def remove_stale(folder, client: str, recordings_dir) -> int:

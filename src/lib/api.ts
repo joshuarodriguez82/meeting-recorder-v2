@@ -1966,6 +1966,16 @@ export const api = {
   // Settings → Diagnostics so failures (Ollama down, dir not writable,
   // no mic) are visible without reading logs by hand.
   getDiagnostics: () => request<Diagnostics>("/diagnostics"),
+  // What an "Export diagnostics" zip WOULD contain, without writing
+  // one. Rendered before the user clicks so nobody finds out what they
+  // shared only after sharing it.
+  getDiagnosticsExportPreview: () =>
+    request<DiagnosticsExportPreview>("/diagnostics/export/preview"),
+  // Writes the support zip and reports exactly what went into it. The
+  // member list comes back read from the finished archive, not from
+  // the plan that built it, so what's shown is what's in the file.
+  exportDiagnostics: () =>
+    request<DiagnosticsExport>("/diagnostics/export", { method: "POST" }),
   // Fires a 1-token chat completion against the configured AI provider
   // so the user can validate the key + base URL + model BEFORE the
   // next summarize/extract fails opaquely. Returns ok + latency on
@@ -2031,6 +2041,28 @@ export interface Diagnostics {
   // this is the recency check (backend threshold, currently 7 days)
   // that decides whether the "backend crashed" banner shows at all.
   crash_is_recent?: boolean;
+}
+
+/**
+ * What a diagnostics export contains — shown to the user BEFORE they
+ * click, and again afterwards with the real archive's contents.
+ *
+ * `members` is the file list; `descriptions` explains each one in plain
+ * English; `excluded` is the explicit list of things the zip never
+ * carries (transcripts, audio, meeting titles, attendee names, API
+ * keys, file paths). Backend source of truth:
+ * backend/utils/diagnostics_bundle.py.
+ */
+export interface DiagnosticsExportPreview {
+  members: string[];
+  descriptions: Record<string, string>;
+  excluded: string[];
+}
+
+export interface DiagnosticsExport extends DiagnosticsExportPreview {
+  path: string;
+  filename: string;
+  bytes: number;
 }
 
 export interface Terminology {
