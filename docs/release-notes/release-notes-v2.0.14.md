@@ -14,7 +14,7 @@
 
 - **Calendar panel no longer "flashes away" when switching nav.** Meeting list is now owned by the app shell so moving between Record/Sessions/etc. doesn't drop the loaded list. Silent auto-refresh on window focus keeps the prior list on transient Outlook hiccups instead of blanking.
 - **Black CMD window flash on launch-on-startup toggle eliminated.** Startup shortcut now uses win32com COM automation directly instead of shelling out to `powershell.exe`. Also removes an AV-kill vector on locked-down corporate laptops.
-- **Project dropdown is scoped to the selected client.** You can no longer accidentally tag a Initech meeting with an Acme project — the Project autocomplete in Record view and the Session Detail dialog only lists projects that were previously tagged under the currently-selected client.
+- **Project dropdown is scoped to the selected client.** You can no longer accidentally tag an Initech meeting with an Acme project — the Project autocomplete in Record view and the Session Detail dialog only lists projects that were previously tagged under the currently-selected client.
 
 ## Features
 

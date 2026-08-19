@@ -2246,7 +2246,7 @@ export interface OpenActionItem {
   item_hash: string;
 }
 
-// A confirmed owner-name merge (e.g. "Joshua" -> "Josh"). `members` are
+// A confirmed owner-name merge (e.g. "Samantha" -> "Sam"). `members` are
 // tier-2 normalised keys (see src/lib/owner-grouping.ts). Backend:
 // services/owner_service.py's OwnerAliasStore.
 export interface OwnerAlias {

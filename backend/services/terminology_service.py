@@ -40,7 +40,7 @@ logger = get_logger(__name__)
 
 
 # Canonical terms — fed into Whisper's initial_prompt to bias decoding.
-# Curated for a Northwind Digital Solutions / Cloud / Enterprise Architect
+# Curated for a contact-center Solutions / Cloud / Enterprise Architect
 # working Amazon Connect + CCaaS migrations, plus the sales vocabulary
 # that shows up in pre-sales calls.
 DEFAULT_TERMS: List[str] = [
@@ -62,8 +62,8 @@ DEFAULT_TERMS: List[str] = [
     "queue", "omnichannel", "screen pop", "after-call work",
     "wrap-up", "agent desktop", "softphone", "SIP", "WebRTC",
     "chatbot", "virtual agent", "self-service", "deflection",
-    # SA / architecture / Northwind
-    "Northwind Digital", "Solutions Architect", "Enterprise Architect",
+    # SA / architecture / consulting
+    "managed services", "Solutions Architect", "Enterprise Architect",
     "Statement of Work", "SOW", "Contact Flow Design Document", "CFDD",
     "Solution Design Document", "SDD", "discovery", "proof of concept",
     "POC", "MVP", "RFP", "RFI", "professional services",

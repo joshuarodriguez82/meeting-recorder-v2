@@ -53,7 +53,7 @@ publishes **28 perfectly-formed meeting labels**, like:
 
 ```
 Globex, 8:30 AM to 9:00 AM, Friday, August 14, 2026,
-Microsoft Teams Meeting, By Mark Roe, Busy
+Microsoft Teams Meeting, By Riley Poe, Busy
 ```
 
 Every one of those matches the extension's own time-range parser.

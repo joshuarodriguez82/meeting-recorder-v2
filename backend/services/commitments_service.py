@@ -159,9 +159,9 @@ class CommitmentsService:
         owner filtering goes through services/owner_service.py's
         resolve_owners() rather than a raw string compare: a
         commitment's `owner` field may itself be a multi-owner string
-        ("Mark/Josh"), so `owner="Josh"` must match it. Pass
+        ("Mark/Sam"), so `owner="Sam"` must match it. Pass
         `alias_index` (see server.py) to also honour confirmed owner
-        aliases ("Joshua" -> "Josh"); omitting it still gets correct
+        aliases ("Samantha" -> "Sam"); omitting it still gets correct
         split + case/org-suffix matching, just without the
         user-confirmed judgement-call merges."""
         sessions = self._session_service.list_sessions()

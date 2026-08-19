@@ -47,7 +47,7 @@ Layout:
 - **Greeting header** — date, time, "Briefing imported at 7:14 AM" status when present.
 - **Top priority** — gradient hero card with the single most important thing today, why it matters, what to do.
 - **Right Now** — live recording status when you're mid-meeting (with a jump-to-Record button) or the next agenda item when you're idle.
-- **Needs your response** — checkbox cards for action items the briefing flagged (Mike Loe's reply, Umbrella ARV follow-up, etc). Tick them as you go; they're persisted across reloads.
+- **Needs your response** — checkbox cards for action items the briefing flagged (Chris Poe's reply, Umbrella ARV follow-up, etc). Tick them as you go; they're persisted across reloads.
 - **Today's agenda** — timeline cards with time / duration / meeting-type color tag (discovery / SOW / status / technical / demo / internal) and role badge (host / attendee / optional). Cancelled meetings stay visible with strike-through so you see the schedule change.
 - **Schedule notes** + **FYI** — two-column footer for soft context: schedule heads-ups (conflicts, packed afternoons) and the market/client/internal/personal items that don't need action but you'd want to glance at.
 

@@ -6,11 +6,12 @@ Purpose: everything a fresh Claude session needs to pick up this project and hel
 
 ## Who the user is and what they need
 
-- **User:** [scrubbed] — Solutions Architect at Northwind Digital
+- **User:** Sam Doe — Solutions Architect at Northwind Digital (names,
+  employer and machine paths in this historical handoff are placeholders)
 - **Primary use case:** Records customer / internal meetings, wants AI-generated summaries, action items, decisions, and requirements
 - **Two machines:**
   - **Dev PC** (`C:\Users\<you>\...`) — where development happens, runs fine against the v1 Python venv at `C:\meeting_recorder\.venv\`
-  - **Work laptop** (Northwind-managed, user `[scrubbed]`) — where he wants to use the app for actual work. This is where everything breaks.
+  - **Work laptop** (Northwind-managed, user `<you>`) — where he wants to use the app for actual work. This is where everything breaks.
 - **Non-negotiable:** the app must "just work" on the laptop the same as v1 did on dev. User is extremely frustrated with repeated failed install attempts.
 
 ---
@@ -149,8 +150,8 @@ The current `src-tauri/src/lib.rs` roughly does this already (`resolve_backend_d
 
 ### Laptop data
 - User made a recording on the laptop (session `02C84053`, 25.5 seconds of audio)
-- Data is still there at `C:\Users\[scrubbed]\AppData\Roaming\MeetingRecorder\recordings\session_02C84053.{wav,json}`
-- The v2.1.x app defaults to `%LOCALAPPDATA%` path, so the laptop's new install might not see that recording. If needed, set `RECORDINGS_DIR=C:\Users\[scrubbed]\AppData\Roaming\MeetingRecorder\recordings` in `%LOCALAPPDATA%\MeetingRecorder\config.env` on the laptop.
+- Data is still there at `C:\Users\<you>\AppData\Roaming\MeetingRecorder\recordings\session_02C84053.{wav,json}`
+- The v2.1.x app defaults to `%LOCALAPPDATA%` path, so the laptop's new install might not see that recording. If needed, set `RECORDINGS_DIR=C:\Users\<you>\AppData\Roaming\MeetingRecorder\recordings` in `%LOCALAPPDATA%\MeetingRecorder\config.env` on the laptop.
 
 ---
 

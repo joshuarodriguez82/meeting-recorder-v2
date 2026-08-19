@@ -344,15 +344,15 @@ def test_events_from_structured_realistic_day_all_five_captured():
     like the user's real subjects (pipe, slash, FW: prefix, trailing
     space) as already parsed client-side into start/end ISO strings."""
     raw = [
-        {"subject": "AWS Daily Pulse Call",
+        {"subject": "Acme Daily Pulse Call",
          "start": "2026-08-13T10:00:00", "end": "2026-08-13T10:15:00",
          "location": "Microsoft Teams Meeting", "organizer": "Zoë Døe"},
-        {"subject": "PRIORITY: AWS Sales| Active Project Status Reviews and Escalations",
+        {"subject": "PRIORITY: Acme Sales| Active Project Status Reviews and Escalations",
          "start": "2026-08-13T10:00:00", "end": "2026-08-13T10:30:00",
-         "organizer": "Will Poe"},
-        {"subject": "FW: AWS Connect - Italy / ECC next steps: weekly team connect",
+         "organizer": "Casey Roe"},
+        {"subject": "FW: Acme Connect - Italy / ACR next steps: weekly team connect",
          "start": "2026-08-13T11:30:00", "end": "2026-08-13T12:00:00"},
-        {"subject": "AWS/[scrubbed] - IVA PoC Sync-up",
+        {"subject": "Acme/CYB - IVA PoC Sync-up",
          "start": "2026-08-13T13:00:00", "end": "2026-08-13T13:30:00"},
         {"subject": "AI Transformation Stand Up",
          "start": "2026-08-13T07:30:00", "end": "2026-08-13T08:30:00"},
@@ -360,8 +360,8 @@ def test_events_from_structured_realistic_day_all_five_captured():
     events = events_from_structured(raw)
     assert len(events) == 5
     subjects = {e["subject"] for e in events}
-    assert "PRIORITY: AWS Sales| Active Project Status Reviews and Escalations" in subjects
-    assert "FW: AWS Connect - Italy / ECC next steps: weekly team connect" in subjects
+    assert "PRIORITY: Acme Sales| Active Project Status Reviews and Escalations" in subjects
+    assert "FW: Acme Connect - Italy / ACR next steps: weekly team connect" in subjects
     assert all(e["source"] == "extension" for e in events)
 
 

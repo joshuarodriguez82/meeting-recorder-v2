@@ -354,7 +354,7 @@ def gather_audio_devices() -> Dict[str, Any]:
     Device NAMES are included — they are what identifies a broken
     driver, and the task this module was written for asks for them
     explicitly. They are also the one thing in this zip that can carry
-    a personal name ("Josh's AirPods"), so the manifest says so out
+    a personal name ("Sam's AirPods"), so the manifest says so out
     loud rather than burying it.
     """
     out: Dict[str, Any] = {"inputs": [], "outputs": [], "error": None}

@@ -35,7 +35,7 @@ A polish + features release across the entire app. Most of this comes from a foc
 Before: generic "what to ask / what to flag" template that produced vanilla coaching, especially on Ollama.
 
 Now:
-- **Default prompt rewritten** to frame as a Northwind Digital SA on Amazon Connect / CCaaS migration work. Risk categories are explicit (scope creep, integration boundary, vendor lock-in, IVR/flow gotchas, IAM trust chains, hidden licensing) instead of "general risks." Should noticeably tighten Haiku and dramatically lift Ollama, which previously had no role grounding.
+- **Default prompt rewritten** to frame as a contact-center consultancy SA on Amazon Connect / CCaaS migration work. Risk categories are explicit (scope creep, integration boundary, vendor lock-in, IVR/flow gotchas, IAM trust chains, hidden licensing) instead of "general risks." Should noticeably tighten Haiku and dramatically lift Ollama, which previously had no role grounding.
 - **Settings → Coaching context** — paste anything the model can't infer ("currently focused on Genesys → Connect migration for a healthcare client, PHI compliance is everything, watch Salesforce screen-pop scope creep"). Appended to every co-pilot tick as authoritative framing. Persists across recordings. Empty by default.
 - **Tick memory** — each tick sees the previous tick's output and is explicitly told not to repeat. No more echo-chamber where every 45 seconds produces the same three bullets reworded.
 - **Copy buttons at three levels** — whole tick (header), one section, or a single bullet. Bullet-level appears on hover so the panel stays clean.

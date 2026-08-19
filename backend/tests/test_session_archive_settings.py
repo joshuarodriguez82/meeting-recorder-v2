@@ -93,10 +93,10 @@ def test_session_archive_dir_round_trips_through_config_env(tmp_path, monkeypatc
     settings_mod.Settings.save_to_env(
         anthropic_api_key="", hf_token="", whisper_model="base",
         max_speakers=10, recordings_dir=str(tmp_path / "recordings"),
-        session_archive_dir="~/Google Drive/MRv2 Archive",
+        session_archive_dir="/Users/sampleuser/Google Drive/MRv2 Archive",
     )
     loaded = settings_mod.Settings.from_env()
-    assert loaded.session_archive_dir == "~/Google Drive/MRv2 Archive"
+    assert loaded.session_archive_dir == "/Users/sampleuser/Google Drive/MRv2 Archive"
 
 
 def test_session_archive_dir_default_is_empty_string(tmp_path, monkeypatch):

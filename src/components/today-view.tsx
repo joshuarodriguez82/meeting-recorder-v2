@@ -328,7 +328,7 @@ export function TodayView({ onNavigate }: Props) {
       <div className="flex items-start justify-between gap-4 -mb-1">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-foreground">
-            Good {timeOfDay()}, Joshua
+            Good {timeOfDay()}
           </h1>
           <p className="mt-0.5 text-sm text-muted-foreground">
             {todayPretty()} · {timeNow()}

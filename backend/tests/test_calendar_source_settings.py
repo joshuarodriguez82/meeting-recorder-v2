@@ -1,7 +1,7 @@
 """
 `calendar_source` — the Outlook sign-in-prompt kill switch.
 
-Field report 2026-08-14: a user on a locked-down tenant ([scrubbed].com)
+Field report 2026-08-14: a user on a locked-down tenant (your-company.com)
 got a Microsoft sign-in prompt every time they opened the Record tab,
 because /calendar/upcoming's Outlook COM fetch ran unconditionally —
 `Dispatch("Outlook.Application")` is enough to trigger a conditional-

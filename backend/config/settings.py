@@ -159,7 +159,7 @@ def _normalize_diarization_device(value: str) -> str:
 
 
 # Field report 2026-08-14: a user on a locked-down corporate tenant
-# ([scrubbed].com) hit a Microsoft sign-in prompt every time they opened
+# hit a Microsoft sign-in prompt every time they opened
 # the Record tab, because /calendar/upcoming's Outlook COM fetch
 # (Dispatch("Outlook.Application") launches Outlook if it isn't already
 # running, which is enough to trigger the tenant's conditional-access

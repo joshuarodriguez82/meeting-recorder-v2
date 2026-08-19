@@ -278,9 +278,9 @@ def test_owner_speaker_gets_a_readable_name_but_never_overwrites_one():
     assert fresh.display_name == OWNER_SPEAKER_DISPLAY_NAME
 
     named = Speaker(speaker_id=OWNER_SPEAKER_LABEL,
-                    display_name="[scrubbed]")
+                    display_name="Samantha Doe")
     rs.RecordingService._name_owner_speaker(named)
-    assert named.display_name == "[scrubbed]"
+    assert named.display_name == "Samantha Doe"
 
     other = Speaker(speaker_id="SPEAKER_01")
     rs.RecordingService._name_owner_speaker(other)

@@ -4,6 +4,51 @@
 This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` before writing any code. Heed deprecation notices.
 <!-- END:nextjs-agent-rules -->
 
+# Never commit real names, customers, meeting content or personal paths
+
+This repo is **public**. Anyone can clone it. Nothing in it may identify a real
+person or a real customer — not in source, not in tests or fixtures, not in
+design mockups, not in release notes, not in commit messages, and not in PR
+descriptions.
+
+That means none of the following, anywhere:
+
+- **Real people.** Colleagues, meeting organisers, customer contacts. Not full
+  names, not surnames, not `Last, First [REGION]` calendar forms, not personal
+  usernames.
+- **Real organisations.** Customers, prospects, and the employer this app was
+  written at.
+- **Real meeting content.** Subjects, agendas, attendee lists, transcript
+  excerpts, action items — anything captured from an actual calendar or call.
+- **Personal identifiers.** Email addresses outside the reserved `example.*`
+  domains, and home-directory paths naming a real account
+  (`C:\Users\<real-user>\…`, `/Users/<real-user>/…`).
+
+**Field data must be anonymised before it is used as an example.** Real capture
+output is the best source of test fixtures precisely because it is awkward, and
+that is the trap: the awkwardness is the reason to keep the *shape* and the
+reason you must change the *content*. When you anonymise, preserve the property
+the example exists to exercise — the comma-and-suffix-and-bracket organiser
+form, the non-ASCII diacritics, the pipe or slash inside a subject — and swap in
+an obviously fictional name. The repo's placeholders are Acme, Globex, Initech,
+Umbrella, Hooli, Zorg and Northwind for organisations, and the Doe / Roe / Poe /
+Noh family for people; extend those rather than inventing new plausible-sounding
+ones. Replacing one real-looking name with another real-looking name fixes
+nothing. Use `C:\Users\<you>\…`, `~/…` and `user@example.com` for paths and
+mail.
+
+**Why this rule exists.** In August 2026 a scrub found real colleague and
+organiser names in 10 source and test files, real customer names in ~90 places
+across 25 files, and the author's personal email and home paths in 4 more. The
+worst of it was in `docs/release-notes/*.md` — which `release.yml` feeds to
+`body_path` — so those names were **published verbatim in GitHub Release bodies**
+and remain in git history. Scrubbing the working tree does not undo either.
+
+`security-scan.yml`'s `personal-data` job blocks a known name or a personal path
+from landing again; see `docs/ci-security-and-ai-review.md` for how to add a
+term. It only knows what it has been told, so it is a backstop, not a substitute
+for not writing the name in the first place.
+
 # Release notes must always include macOS install commands
 
 Release notes live at `docs/release-notes/release-notes-vX.Y.Z.md` (moved out of the repo root in June 2026 — 47 of them were the first thing anyone saw cloning the repo; release.yml's body_path points at the new location). Every release-notes file MUST contain the Mac Gatekeeper-bypass instructions in a callout block near the top. The build is unsigned, so users hit "damaged and can't be opened" on first launch and need explicit guidance.
