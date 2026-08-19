@@ -377,8 +377,11 @@ from services.daily_briefing_service import (
 )
 from services.extension_calendar_service import (
     ExtensionCalendarService, describe_structured_source, events_from_briefing,
-    events_from_structured, merge_meetings,
+    events_from_structured,
 )
+# The single merged two-source calendar view shared by
+# /calendar/upcoming and AutoRecordService — see its module docstring.
+from services import calendar_feed
 from services.extension_bundle_service import (
     bundled_extension_version, export_dir as extension_export_dir,
     export_extension_files, extension_version_status,
@@ -2274,6 +2277,45 @@ async def get_calendar_today():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def _merged_upcoming(hours: int) -> List[dict]:
+    """PANEL/HINT WINDOW — the merged two-source view, `hours` ahead.
+
+    THE call site for "which meetings exist in the next N hours".
+    `GET /calendar/upcoming` renders it and AutoRecordService uses it for
+    its "next: …" hint, so neither can develop its own idea of what's on
+    the calendar — see services/calendar_feed.py's module docstring for
+    why that mattered enough to centralize.
+
+    `get_upcoming_meetings` is looked up in this module's namespace on
+    every call (not captured at import) so calendar_service's
+    `calendar_source` gate — and the test suite's monkeypatches — stay
+    effective.
+    """
+    svc.load_settings()
+    return await calendar_feed.merged_upcoming(
+        hours,
+        source=_calendar_source(),
+        fetch_local=lambda: get_upcoming_meetings(hours),
+        extension_svc=svc.extension_calendar_svc,
+    )
+
+
+async def _merged_today() -> List[dict]:
+    """TRIGGER WINDOW — the same merged two-source view, today only and
+    including meetings already in progress.
+
+    THE call site AutoRecordService scans for its start trigger. Same
+    sources, same gating, same dedup, same naive-local timestamps as
+    `_merged_upcoming` above; only the window differs.
+    """
+    svc.load_settings()
+    return await calendar_feed.merged_today(
+        source=_calendar_source(),
+        fetch_local=get_todays_meetings,
+        extension_svc=svc.extension_calendar_svc,
+    )
+
+
 @app.get("/calendar/upcoming")
 async def get_calendar_upcoming(hours: int = 168, refresh: bool = False):
     """
@@ -2315,59 +2357,25 @@ async def get_calendar_upcoming(hours: int = 168, refresh: bool = False):
     other. `calendar_source` gates which side(s) run at all:
     "extension" skips the local fetch outright (never touches Outlook
     COM / EventKit), "off" skips both and returns [].
+
+    SHARED WITH AUTO-RECORD since the extension-source fix: everything
+    described above — gating, concurrency, the 45s local cap, dedup,
+    naive-local timestamps — now lives in services/calendar_feed.py and
+    is reached through `_merged_upcoming`, because AutoRecordService
+    needs the identical answer. It used to read the LOCAL calendar
+    directly, so an extension-only meeting rendered here as perfectly
+    recordable while auto-record could never see it at all. Read
+    calendar_feed's docstring before reintroducing any fetch/merge logic
+    into this handler.
     """
     try:
-        # Idempotent + cheap once loaded; needed here because the
-        # extension-calendar store is only constructed inside
-        # load_settings, and this endpoint used to touch no services at
-        # all.
-        svc.load_settings()
         if refresh:
             from services.calendar_service import invalidate_calendar_cache
             invalidate_calendar_cache()
-        source = _calendar_source()
-
-        async def _fetch_local() -> List[dict]:
-            if source in ("extension", "off"):
-                return []
-            try:
-                return await asyncio.wait_for(
-                    asyncio.to_thread(get_upcoming_meetings, hours),
-                    timeout=45.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    f"Calendar fetch ({hours}h) exceeded 45s — local calendar "
-                    f"omitted this round. Outlook/Exchange likely slow to "
-                    f"respond. Retry in a moment.")
-                return []
-
-        async def _fetch_extension() -> List[dict]:
-            # Extension-sourced events. Wrapped so a broken/unreadable
-            # store degrades to "local calendar only" rather than
-            # 500-ing the panel — this is an additive source, never a
-            # dependency (except under calendar_source="extension",
-            # where it's the ONLY source, but a read failure there
-            # still degrades to empty rather than a 500).
-            if source == "off":
-                return []
-            if not svc.extension_calendar_svc:
-                return []
-            try:
-                return await asyncio.to_thread(
-                    svc.extension_calendar_svc.get_events, hours)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(
-                    f"Extension calendar events unavailable ({e}); "
-                    f"showing local calendar only.")
-                return []
-
-        # Run both concurrently — see the CONCURRENT docstring section
-        # above for why this can no longer be two sequential awaits.
-        meetings, ext_events = await asyncio.gather(
-            _fetch_local(), _fetch_extension())
-
-        return _serialize_meetings(merge_meetings(meetings, ext_events))
+        # `_merged_upcoming` calls svc.load_settings() itself —
+        # idempotent + cheap once loaded, and needed because the
+        # extension-calendar store is only constructed inside it.
+        return _serialize_meetings(await _merged_upcoming(hours))
     except Exception as e:
         logger.exception("Upcoming calendar fetch failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2732,13 +2740,24 @@ def _auto_record_start(meeting: dict) -> None:
 def _ensure_auto_record_service() -> None:
     """Lazily build the AutoRecordService once settings exist, and
     start/stop its loop to match the current `auto_record_enabled` flag.
-    Safe to call from any HTTP handler — it's idempotent."""
+    Safe to call from any HTTP handler — it's idempotent.
+
+    The two meeting getters are the SAME merged two-source windows
+    `GET /calendar/upcoming` renders (`_merged_upcoming` /
+    `_merged_today` → services/calendar_feed.py). They used to be
+    `calendar_service.get_upcoming_meetings` / `get_todays_meetings` —
+    the LOCAL calendar only — which is why a user whose whole calendar
+    comes from the Chrome extension had an auto-record toggle that
+    worked and never fired: the panel listed every meeting, the trigger
+    loop could see none of them. Do not point these back at a single
+    source; the point is that the thing the user SEES and the thing that
+    ACTS are one list.
+    """
     from services.auto_record_service import AutoRecordService
-    from services import calendar_service
     if svc.auto_record_svc is None:
         svc.auto_record_svc = AutoRecordService(
-            get_upcoming_meetings=calendar_service.get_upcoming_meetings,
-            get_todays_meetings=calendar_service.get_todays_meetings,
+            get_upcoming_meetings=_merged_upcoming,
+            get_todays_meetings=_merged_today,
             is_recording=lambda: bool(
                 svc.recording_svc and svc.recording_svc.is_recording),
             start_recording=_auto_record_start,
