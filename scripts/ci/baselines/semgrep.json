@@ -1,0 +1,63 @@
+{
+  "schema": 2,
+  "tool": "semgrep",
+  "generated_utc": "2026-08-19T01:12:40Z",
+  "note": "Accepted pre-existing findings. CI fails only on findings absent from this list. Refresh deliberately with `scripts/ci/security_baseline.py update` and review the diff.",
+  "count": 6,
+  "findings": [
+    {
+      "fingerprint": "199b289a3dddcbb6",
+      "rule": "python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected",
+      "file": "backend/server.py",
+      "line": 1359,
+      "severity": "WARNING",
+      "message": "Detected a dynamic value being used with urllib. urllib supports 'file://' schemes, so a dynamic value controlled by a malicious actor may allow them to read arbitrary files. Audit uses of urllib calls to ensure user data cannot control the URLs, or consider using the 'requests' library instead.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "ad1e4ce576c4cf5b",
+      "rule": "python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected",
+      "file": "backend/server.py",
+      "line": 1445,
+      "severity": "WARNING",
+      "message": "Detected a dynamic value being used with urllib. urllib supports 'file://' schemes, so a dynamic value controlled by a malicious actor may allow them to read arbitrary files. Audit uses of urllib calls to ensure user data cannot control the URLs, or consider using the 'requests' library instead.",
+      "occurrence": 2
+    },
+    {
+      "fingerprint": "f10957768dcc44c7",
+      "rule": "python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected",
+      "file": "backend/server.py",
+      "line": 8292,
+      "severity": "WARNING",
+      "message": "Detected a dynamic value being used with urllib. urllib supports 'file://' schemes, so a dynamic value controlled by a malicious actor may allow them to read arbitrary files. Audit uses of urllib calls to ensure user data cannot control the URLs, or consider using the 'requests' library instead.",
+      "occurrence": 3
+    },
+    {
+      "fingerprint": "8fe8f2827852f3e4",
+      "rule": "python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1",
+      "file": "backend/services/document_service.py",
+      "line": 114,
+      "severity": "WARNING",
+      "message": "Detected SHA1 hash algorithm which is considered insecure. SHA1 is not collision resistant and is therefore not suitable as a cryptographic signature. Use SHA256 or SHA3 instead.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "288f490ada4497fb",
+      "rule": "python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1",
+      "file": "backend/services/item_status_service.py",
+      "line": 69,
+      "severity": "WARNING",
+      "message": "Detected SHA1 hash algorithm which is considered insecure. SHA1 is not collision resistant and is therefore not suitable as a cryptographic signature. Use SHA256 or SHA3 instead.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "55f4b23c0a91b737",
+      "rule": "python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1",
+      "file": "backend/services/prep_brief_cache_service.py",
+      "line": 48,
+      "severity": "WARNING",
+      "message": "Detected SHA1 hash algorithm which is considered insecure. SHA1 is not collision resistant and is therefore not suitable as a cryptographic signature. Use SHA256 or SHA3 instead.",
+      "occurrence": 1
+    }
+  ]
+}

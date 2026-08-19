@@ -66,7 +66,7 @@ def compute_item_hash(text: str) -> str:
     Frontend matches this with crypto.subtle.digest('SHA-1', utf8(text))
     over the same normalized string."""
     norm = _normalize_item_text(text)
-    return hashlib.sha1(norm.encode("utf-8")).hexdigest()
+    return hashlib.sha1(norm.encode("utf-8"), usedforsecurity=False).hexdigest()
 
 
 def _path_for(recordings_dir: Path, session_id: str) -> Path:

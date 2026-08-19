@@ -1,0 +1,218 @@
+# Static security analysis of THIS repo's own source code.
+#
+# Scope, and how this differs from dependency-audit.yml
+# -----------------------------------------------------
+# dependency-audit.yml scans THIRD-PARTY dependencies for published CVEs
+# (pip-audit / npm audit / cargo-audit) and is deliberately non-blocking,
+# because this repo pins ML libraries it cannot move. This workflow scans the
+# FIRST-PARTY source instead — the code we actually wrote and can actually
+# fix. Nothing here overlaps with that workflow:
+#
+#   * Rust dependency advisories are ALREADY covered — dependency-audit.yml's
+#     `rust-audit` job runs `cargo audit --file src-tauri/Cargo.lock`. This
+#     workflow deliberately does NOT add a second cargo-audit run; it adds
+#     `cargo clippy` over our own crate, which cargo-audit never looks at.
+#   * Python/Node dependency CVEs are covered there too. Here, bandit and
+#     semgrep read our source.
+#
+# Why this one CAN block a PR when the other cannot
+# -------------------------------------------------
+# A fresh scanner on a mature codebase reports a wall of pre-existing
+# findings, and a check that is red the day it lands gets ignored within a
+# week — strictly worse than no check. So instead of gating on "zero
+# findings", every job here gates on "no findings absent from the committed
+# baseline" (scripts/ci/baselines/*.json, compared by a line-number-independent
+# fingerprint — see scripts/ci/security_baseline.py). Pre-existing debt stays
+# visible in the job summary and in the baseline file, but only NEW findings
+# fail a build. Baselines at the time this landed (v2.32.0): bandit 159
+# (156 in application code + 3 in this workflow's own helper script),
+# semgrep 6, clippy 5.
+#
+# Refreshing a baseline is a deliberate, reviewable commit — never automatic.
+# See docs/ci-security-and-ai-review.md.
+#
+# Scanner versions are PINNED. An unpinned scanner picks up new rules on its
+# own release cadence and turns the check red on a PR that changed nothing —
+# the same broken-window failure the baseline exists to prevent. Bump the pins
+# in a dedicated PR that also refreshes the baselines.
+
+name: Security Scan
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Mondays 07:00 UTC — an hour after dependency-audit.yml so the two
+    # weekly scans don't contend for runners.
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-scan-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  BANDIT_VERSION: '1.9.4'
+  SEMGREP_VERSION: '1.173.0'
+
+jobs:
+  # Python first-party analysis. This backend spawns subprocesses (ffmpeg,
+  # the python sidecar), walks user-supplied filesystem paths, serializes
+  # session state, and holds provider API keys — B404/B602/B603/B607
+  # (subprocess), B105/B106 (secrets), B108 (temp paths), B301/B403 (pickle)
+  # and B324 (weak hashes) are exactly the rules that matter, and all of them
+  # are on. Config + the single documented skip (B101) live in
+  # scripts/ci/bandit.yaml.
+  python-bandit:
+    name: Python (bandit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install bandit
+        run: pip install --disable-pip-version-check "bandit==${BANDIT_VERSION}"
+      - name: Run bandit
+        # bandit exits 1 when it finds anything at all; that is not our gate,
+        # the baseline diff is. `|| true` keeps the raw report flowing to the
+        # next step. A scan that could not run at all produces no JSON file,
+        # which the baseline step reports as a hard error rather than as a
+        # clean pass — "couldn't read it" must never render as "nothing there".
+        run: |
+          bandit -c scripts/ci/bandit.yaml -f json -o bandit-report.json -q \
+            -r backend scripts tools setup.py zip-bundle.py make_shortcut.py || true
+          test -s bandit-report.json || { echo "::error::bandit produced no report — the scan did not run"; exit 1; }
+      - name: Compare against baseline
+        run: |
+          python scripts/ci/security_baseline.py check \
+            --tool bandit \
+            --report bandit-report.json \
+            --baseline scripts/ci/baselines/bandit.json \
+            --summary "$GITHUB_STEP_SUMMARY"
+      - name: Upload raw report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json
+          if-no-files-found: warn
+
+  # JS/TS/React first-party analysis via semgrep OSS.
+  #
+  # CodeQL was considered and not used: GitHub's default-setup CodeQL needs
+  # either a public repo or GitHub Advanced Security, neither of which this
+  # workflow can assume, and a CodeQL job that silently no-ops on a private
+  # repo without GHAS is worse than no job. semgrep OSS runs anywhere.
+  #
+  # Rulesets are the registry's standard security packs. Note semgrep's
+  # default .semgrepignore skips backend/tests/ (64 files here) — that gap is
+  # covered by the bandit job above, which deliberately does scan tests.
+  javascript-semgrep:
+    name: JS/TS + cross-language (semgrep)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install semgrep
+        run: pip install --disable-pip-version-check "semgrep==${SEMGREP_VERSION}"
+      - name: Run semgrep
+        env:
+          SEMGREP_SEND_METRICS: 'off'
+        run: |
+          semgrep scan \
+            --config=p/security-audit \
+            --config=p/secrets \
+            --config=p/owasp-top-ten \
+            --metrics=off \
+            --json -o semgrep-report.json \
+            backend src chrome-extension mobile scripts tools src-tauri || true
+          test -s semgrep-report.json || { echo "::error::semgrep produced no report — the scan did not run"; exit 1; }
+      - name: Compare against baseline
+        run: |
+          python scripts/ci/security_baseline.py check \
+            --tool semgrep \
+            --report semgrep-report.json \
+            --baseline scripts/ci/baselines/semgrep.json \
+            --summary "$GITHUB_STEP_SUMMARY"
+      - name: Upload raw report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: semgrep-report.json
+          if-no-files-found: warn
+
+  # Rust first-party analysis. cargo-audit (dependency advisories) is already
+  # run by dependency-audit.yml and is NOT repeated here. clippy is the
+  # closest thing to static analysis of our own Rust: it catches the
+  # correctness-class defects (unwrap on a fallible path, dropped Results,
+  # manual loops that mis-handle the empty case) that turn into runtime
+  # panics in a shipped desktop binary.
+  #
+  # LIMITATION, stated plainly: this runs on Linux only, so the #[cfg]-gated
+  # macOS and Windows branches of src-tauri/src/lib.rs are NOT linted here.
+  # pr-checks.yml already `cargo check`s all three platforms; adding two more
+  # clippy targets would roughly triple this job for lint-grade findings.
+  rust-clippy:
+    name: Rust (clippy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Tauri system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+      - name: Stub build artifacts
+        shell: bash
+        # Same two stubs pr-checks.yml creates: generate_context!() embeds
+        # ../out at compile time and tauri-build aborts on a missing
+        # ../backend-bundle.zip resource.
+        run: |
+          mkdir -p out
+          echo '<!doctype html><title>stub</title>' > out/index.html
+          printf 'PK\005\006\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0' > backend-bundle.zip
+      - name: Run clippy
+        run: |
+          cargo clippy --manifest-path src-tauri/Cargo.toml \
+            --message-format=json > clippy-report.json || true
+          test -s clippy-report.json || { echo "::error::clippy produced no report — the scan did not run"; exit 1; }
+      - name: Compare against baseline
+        run: |
+          python scripts/ci/security_baseline.py check \
+            --tool clippy \
+            --report clippy-report.json \
+            --baseline scripts/ci/baselines/clippy.json \
+            --summary "$GITHUB_STEP_SUMMARY"
+      - name: Upload raw report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clippy-report
+          path: clippy-report.json
+          if-no-files-found: warn
