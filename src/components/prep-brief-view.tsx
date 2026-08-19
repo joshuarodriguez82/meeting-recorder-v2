@@ -1,9 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { api, type Meeting, type SessionSummary } from "@/lib/api";
+import {
+  api, type Meeting, type ReferencedDocument, type SessionSummary,
+} from "@/lib/api";
 import { toast } from "sonner";
-import { Loader2, Sparkles, Copy, Info, Calendar as CalendarIcon } from "lucide-react";
+import {
+  Loader2, Sparkles, Copy, Info, Calendar as CalendarIcon, FileText,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -52,6 +56,12 @@ export function PrepBriefView({ sessions, meetings = [] }: Props) {
   const [project, setProject] = useState("");
   const [brief, setBrief] = useState("");
   const [relatedCount, setRelatedCount] = useState(0);
+  // Knowledge-Folder documents the brief drew on, alongside the prior
+  // meetings. Empty for a client with no indexed folder (or with no
+  // client selected at all — document retrieval is client-scoped),
+  // in which case nothing about documents renders.
+  const [referencedDocs, setReferencedDocs] =
+    useState<ReferencedDocument[]>([]);
   const [generating, setGenerating] = useState(false);
   // Free-text the user types in to feed the LLM extra situational
   // context the meeting history doesn't capture — exec asks, recent
@@ -135,11 +145,18 @@ export function PrepBriefView({ sessions, meetings = [] }: Props) {
     }
     setGenerating(true);
     setBrief("");
+    setReferencedDocs([]);
     try {
       const res = await api.prepBrief(subject, client, project, userContext);
       setBrief(res.brief);
       setRelatedCount(res.related_count);
-      toast.success(`Brief ready from ${res.related_count} prior meetings`);
+      const docs = res.referenced_documents || [];
+      setReferencedDocs(docs);
+      toast.success(
+        docs.length > 0
+          ? `Brief ready from ${res.related_count} prior meetings and ${docs.length} document${docs.length === 1 ? "" : "s"}`
+          : `Brief ready from ${res.related_count} prior meetings`,
+      );
     } catch (e) {
       toast.error(`Failed: ${e instanceof Error ? e.message : e}`);
     } finally {
@@ -164,6 +181,9 @@ export function PrepBriefView({ sessions, meetings = [] }: Props) {
               Tell Claude what meeting you&apos;re going into. Optionally filter by Client or Project
               to narrow the context. Claude reads every tagged meeting&apos;s summary, action items, and
               decisions, then generates: recent context, open items, risks, and suggested discussion points.
+              Pick a Client with a Knowledge Folder and the most relevant excerpts from their
+              documents (SOWs, requirements, notes) come along too — cited as <code>[DOC: …]</code>
+              so you can always tell a written commitment from something said on a call.
             </p>
           </div>
         </CardContent>
@@ -323,12 +343,41 @@ export function PrepBriefView({ sessions, meetings = [] }: Props) {
             </CardTitle>
             <p className="text-xs text-muted-foreground">
               Based on {relatedCount} prior meeting{relatedCount === 1 ? "" : "s"}
+              {referencedDocs.length > 0
+                ? ` and ${referencedDocs.length} knowledge-folder document${referencedDocs.length === 1 ? "" : "s"}`
+                : ""}
             </p>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-4">
             <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed rounded-lg bg-muted/40 p-4 max-w-full overflow-x-hidden">
               {brief}
             </pre>
+            {referencedDocs.length > 0 && (
+              <div className="rounded-lg border bg-muted/20 p-3 space-y-2">
+                <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                  Knowledge-folder documents used
+                </div>
+                <ul className="space-y-1">
+                  {referencedDocs.map((d) => (
+                    <li
+                      key={d.doc_path || d.doc_name}
+                      className="flex items-center gap-2 text-xs text-muted-foreground"
+                      title={d.doc_path || d.doc_name}
+                    >
+                      <FileText className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400" />
+                      <span className="flex-1 truncate">{d.doc_name}</span>
+                      <span className="shrink-0 text-[10px] tabular-nums">
+                        {d.chunk_count} excerpt{d.chunk_count === 1 ? "" : "s"}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-[10px] text-muted-foreground italic">
+                  Anything cited as <code>[DOC: …]</code> in the brief came
+                  from one of these documents, not from a meeting.
+                </p>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}

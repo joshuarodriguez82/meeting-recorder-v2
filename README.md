@@ -159,8 +159,9 @@ Mac feature parity vs. Windows:
 - **Session Detail dialog** — inline audio player, editable tags, rename speakers with one click, run any AI extraction on the fly
 - **Follow-Ups** — action items aggregated across every meeting, filterable by status/client/owner/text
 - **Decisions** — ADR-style decision log, list + detail pane
-- **Semantic search** — type a phrase and get hits where the wording differs but the meaning matches. Powered by a local 22 MB sentence-transformer (MiniLM-L6); embeddings never leave the machine.
-- **Cross-meeting Q&A** — ask natural-language questions across every transcript, get streamed answers with inline citations like `[ABC123 @ 12:34]` that jump to the source session. Scope by client or project.
+- **Knowledge Base** — one tab for both halves of retrieval (it replaced the separate Search and Ask tabs). Results render as you type, free and with no AI call, in either Keyword or Semantic mode; session hits open the session, Knowledge Folder document hits show their name, client and path.
+  - **Semantic search** — type a phrase and get hits where the wording differs but the meaning matches. Powered by a local 22 MB sentence-transformer (MiniLM-L6); embeddings never leave the machine.
+  - **Cross-meeting answers** — press **Answer** and the same query and scope go to the LLM, which streams back a synthesized response with inline citations like `[ABC123 @ 12:34]` that jump to the source session. Explicit by design: it is the only action here that costs money, so it never fires automatically. Follow-ups continue in the same thread; a stream can be cancelled mid-flight.
 - **Clients + nested Projects** — Projects live inside Clients (one-to-many). Client dashboard shows a chip row of its projects; click a chip to drill into just that project's meetings. AI-assisted tagging suggests which meetings belong to a given client.
 - **Engagements** — per-client (optionally per-project) register that rolls every meeting's requirements, decisions, action items, and open questions into one deduped, provenance-tagged view, and exports it to a hand-editable Excel workbook. Re-export after each meeting regenerates the same file in place, carrying your Status/Notes columns forward and adding a "Changes since last export" sheet.
 
@@ -342,8 +343,9 @@ meeting-recorder-v2/
 │   │   ├── sessions-view.tsx         # Session history + bulk process
 │   │   ├── follow-ups-view.tsx       # Action items aggregator
 │   │   ├── decisions-view.tsx        # Decision log
-│   │   ├── search-view.tsx           # Semantic search across meetings
-│   │   ├── qa-view.tsx               # Cross-meeting Q&A with citations
+│   │   ├── knowledge-view.tsx        # Search + on-demand cited answers (one tab)
+│   │   ├── knowledge-results.tsx     # Session / document result rows
+│   │   ├── knowledge-answer.tsx      # Streamed answer thread + citations
 │   │   ├── live-transcript-panel.tsx # Live transcript stream while recording
 │   │   ├── known-speakers-section.tsx# Speaker profile management (in Settings)
 │   │   ├── clients-view.tsx          # Per-client dashboard
