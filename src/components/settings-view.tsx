@@ -1076,6 +1076,10 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
       {/* Diagnostics — health checks + log tail */}
       <DiagnosticsCard />
 
+      {/* One-click support bundle — replaces the hand-written .bat
+          scripts field debugging used to need. */}
+      <DiagnosticsExportCard />
+
       {/* Domain terminology — biases transcription + fixes mis-hears */}
       <TerminologyCard />
 
@@ -3391,6 +3395,148 @@ function formatDaysAgo(d: Date): string {
 // backend.log by hand — live-model reachability (the silent Ollama
 // failure), provider config, mic/loopback, recordings-dir writability —
 // plus a log tail so the user never needs PowerShell.
+/**
+ * Export diagnostics — one zip a user can attach to a bug report.
+ *
+ * Replaces the five separate hand-written .bat scripts that field
+ * debugging used to require the user to run by hand.
+ *
+ * The contents list is shown BEFORE the export (from the preview
+ * endpoint) and again AFTER it, the second time read back out of the
+ * finished archive — so the user never has to wonder what they just
+ * shared. Same button-plus-result-line shape as the Chrome Extension
+ * card above.
+ */
+function DiagnosticsExportCard() {
+  const [preview, setPreview] = useState<import("@/lib/api").DiagnosticsExportPreview | null>(null);
+  const [result, setResult] = useState<import("@/lib/api").DiagnosticsExport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        setPreview(await api.getDiagnosticsExportPreview());
+      } catch {
+        // A backend too old to have the preview endpoint still exports;
+        // the contents list just isn't available up front.
+        setPreview(null);
+      }
+    })();
+  }, []);
+
+  const runExport = async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      const res = await api.exportDiagnostics();
+      setResult(res);
+      setMsg(`Wrote ${res.filename} (${(res.bytes / 1024).toFixed(0)} KB, ${res.members.length} files).`);
+    } catch (e) {
+      setMsg("");
+      toast.error(`Export failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const showInFolder = async () => {
+    if (!result?.path) return;
+    const folder = result.path.replace(/[\\/][^\\/]+$/, "");
+    try {
+      await api.openFolder({ kind: "path", path: folder });
+    } catch (e) {
+      toast.error(`Couldn't open the folder: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  const copyPath = () => {
+    if (!result?.path) return;
+    navigator.clipboard?.writeText(result.path).then(
+      () => toast.success("Path copied"),
+      () => toast.error("Couldn't copy"),
+    );
+  };
+
+  // After an export, describe what's actually in the archive; before
+  // one, describe what would be.
+  const contents = result ?? preview;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Export diagnostics</CardTitle>
+        <p className="text-xs text-muted-foreground mt-1">
+          Bundles everything a bug report needs into one zip: the
+          structured event log, recent backend and crash logs, versions,
+          your OS and audio devices, and your settings with secrets
+          redacted. Nothing here needs a terminal.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {contents && (
+          <div className="rounded-md border p-3 space-y-2">
+            <Label className="text-[11px] text-muted-foreground">
+              {result ? "What this zip contains" : "What the zip will contain"}
+            </Label>
+            <ul className="space-y-1.5">
+              {contents.members.map((m) => (
+                <li key={m} className="text-xs">
+                  <code className="font-mono text-[11px]">{m}</code>
+                  {contents.descriptions?.[m] && (
+                    <span className="text-muted-foreground">
+                      {" "}— {contents.descriptions[m]}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {contents?.excluded && contents.excluded.length > 0 && (
+          <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-2">
+            <div className="flex items-start gap-2 text-xs text-emerald-700 dark:text-emerald-400">
+              <CheckCircle2 className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+              <div>
+                <div className="font-medium">Deliberately not included</div>
+                <ul className="mt-1 space-y-0.5">
+                  {contents.excluded.map((x) => (
+                    <li key={x}>· {x}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <Button type="button" size="sm" onClick={runExport} disabled={busy}>
+          {busy
+            ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+            : <DownloadCloud className="h-4 w-4 mr-2" />}
+          Export diagnostics
+        </Button>
+        {msg && <p className="text-xs text-muted-foreground">{msg}</p>}
+
+        {result?.path && (
+          <div className="space-y-1">
+            <Label className="text-[11px] text-muted-foreground">Saved to</Label>
+            <div className="flex gap-2">
+              <Input value={result.path} readOnly className="font-mono text-xs" />
+              <Button type="button" variant="outline" size="sm" onClick={copyPath}>
+                <Copy className="h-3.5 w-3.5" />
+              </Button>
+              <Button type="button" variant="outline" size="sm" onClick={showInFolder}>
+                Show
+              </Button>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function DiagnosticsCard() {
   const [diag, setDiag] = useState<import("@/lib/api").Diagnostics | null>(null);
   const [loading, setLoading] = useState(false);

@@ -83,10 +83,17 @@ jobs:
       # tests/_app_import.py). `httpx` is added for the boot smoke test
       # (test_boot_smoke.py), which drives the app through FastAPI's
       # TestClient — that requires httpx even though the app itself
-      # never imports it. Heavier integration tests belong in a
-      # separate, optional job when they exist.
+      # never imports it. `olefile` is added for the legacy Word (.doc)
+      # extractor in services/document_service.py: that is a hand-written
+      # [MS-DOC] FIB/piece-table walk validated against a real Word
+      # 97-2003 fixture, and it is the single riskiest parser in the
+      # backend — without olefile here those tests silently SKIP and it
+      # ships untested. It earns its place on this list the same way the
+      # others do: pure Python, zero transitive dependencies, ~115 KB.
+      # Heavier integration tests belong in a separate, optional job
+      # when they exist.
       - name: Install test dependencies
-        run: pip install numpy scipy soundfile pytest fastapi httpx
+        run: pip install numpy scipy soundfile pytest fastapi httpx olefile
       - name: Run backend tests
         run: python -m pytest backend/tests -q
 
