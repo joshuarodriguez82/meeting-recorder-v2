@@ -216,6 +216,18 @@
   ]
  ],
  [
+  "/diagnostics/export",
+  [
+   "POST"
+  ]
+ ],
+ [
+  "/diagnostics/export/preview",
+  [
+   "GET"
+  ]
+ ],
+ [
   "/diagnostics/llm-test",
   [
    "POST"

@@ -369,6 +369,38 @@ def recover_orphans(
         for leftover in parent.glob("_lb16k_*.tmp.wav"):
             _safe_unlink(str(leftover))
 
+    # One structured line for the whole sweep, plus one per session that
+    # actually needed recovering. The human log only prints a count when
+    # something was merged, so "the recovery pass ran and found nothing"
+    # and "the recovery pass never ran" are currently indistinguishable
+    # after the fact — which is precisely the question you ask when a
+    # meeting has gone missing.
+    try:
+        from utils import events
+        by_status: Dict[str, int] = {}
+        for r in results:
+            key = str(r.get("status") or "unknown").split(":", 1)[0]
+            by_status[key] = by_status.get(key, 0) + 1
+        events.emit(
+            events.RECOVERY_SWEEP,
+            orphans_seen=len(results),
+            by_status=by_status,
+        )
+        for r in results:
+            # duration_s only; audio_path is deliberately never emitted.
+            try:
+                dur = float(r.get("duration_s")) if r.get("duration_s") else None
+            except (TypeError, ValueError):
+                dur = None
+            events.emit(
+                events.RECOVERY_SESSION,
+                r.get("session_id"),
+                status=str(r.get("status") or "unknown").split(":", 1)[0],
+                duration_s=dur,
+            )
+    except Exception:
+        pass
+
     return results
 
 

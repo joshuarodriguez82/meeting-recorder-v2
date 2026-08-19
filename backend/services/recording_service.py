@@ -26,6 +26,7 @@ from core.transcription import TranscriptionEngine
 from models.segment import Segment
 from models.session import Session
 from services.speaker_profile_service import SpeakerProfileService
+from utils import events
 from utils.audio_utils import finalize_recording_streaming
 from utils.finalize_gate import below_normal_priority_kwargs, finalize_slot
 from utils.logger import get_logger
@@ -789,6 +790,14 @@ class RecordingService:
             channel_attribution_requested = bool(
                 getattr(self._settings, "channel_attribution_enabled", True))
 
+            # Whether this stop ever had to wait behind another
+            # finalize. Recorded on the finalize.completed event because
+            # "the app looked stuck for four minutes" and "finalize took
+            # four minutes" are different bugs with the same symptom,
+            # and the human log only tells them apart by the presence
+            # of a separate "queued behind" line somewhere above.
+            was_queued = {"v": False}
+
             def _mark_queued() -> None:
                 # Invoked by finalize_slot() from this same thread,
                 # exactly once, ONLY when another finalize already holds
@@ -800,6 +809,7 @@ class RecordingService:
                 # silently stuck for however long that job takes.
                 # Reuses finalize_status / finalize_started_at — no
                 # parallel field.
+                was_queued["v"] = True
                 session.finalize_status = "queued"
                 session.finalize_started_at = datetime.now()
                 session.finalize_error = None
@@ -895,6 +905,30 @@ class RecordingService:
                 logger.info(
                     f"[stop] finalize done in {finalize_elapsed_s:.1f}s")
 
+                # STRUCTURED MIRROR of the line above plus the AEC
+                # outcome, which otherwise only exists as prose inside
+                # the child's mirrored stdout. `aec_outcome` is already
+                # the normalised three-case dict (not requested /
+                # decided / requested-but-no-decision) computed a few
+                # lines up — reuse it rather than re-deriving, so the
+                # event can never disagree with what was persisted.
+                _aec = session.aec_outcome or {}
+                events.emit(
+                    events.FINALIZE_COMPLETED,
+                    session.session_id,
+                    duration_s=float(finalize_elapsed_s),
+                    queued=bool(was_queued["v"]),
+                    aec_requested=bool(_aec.get("requested")),
+                    aec_accepted=_aec.get("accepted"),
+                    aec_reason=_aec.get("reason"),
+                    erle_db=_aec.get("erle_db"),
+                    residual_delay_ms=_aec.get("residual_delay_ms"),
+                    channel_attribution_requested=bool(
+                        channel_attribution_requested),
+                    conference_room_mode=bool(self._conference_room_mode),
+                    audio_duration_s=float(duration_s),
+                )
+
                 # AUDIO INTEGRITY CHECK — compare the actual WAV
                 # duration (returned by finalize_recording_streaming) to
                 # the TRUE capture window (ended_at - started_at, where
@@ -970,6 +1004,35 @@ class RecordingService:
                             f"expected={expected_s:.1f}s (possible stale "
                             f"file concat) finalize_s={finalize_elapsed_s:.1f}")
 
+                # Structured mirror. Emitted for EVERY stop, including
+                # the short ones the >30s gate above deliberately skips
+                # and the healthy ones that log nothing at all — "no
+                # AUDIO_INTEGRITY line" currently means both "fine" and
+                # "too short to judge" and "the check never ran", and
+                # that ambiguity is the thing this file exists to kill.
+                try:
+                    _ratio = ((expected_s - duration_s) / expected_s
+                              if expected_s > 0 else 0.0)
+                    if expected_s <= 30.0:
+                        _verdict = "not_evaluated_short_recording"
+                    elif _ratio > 0.10:
+                        _verdict = "deficit"
+                    elif duration_s > expected_s * 1.10:
+                        _verdict = "excess"
+                    else:
+                        _verdict = "ok"
+                    events.emit(
+                        events.AUDIO_INTEGRITY,
+                        session.session_id,
+                        actual_duration_s=float(duration_s),
+                        expected_duration_s=float(expected_s),
+                        deficit_ratio=float(_ratio),
+                        verdict=_verdict,
+                        finalize_duration_s=float(finalize_elapsed_s),
+                    )
+                except Exception:
+                    pass
+
                 # SYNC-INTEGRITY (read-only measurement). Compares each
                 # stream's delivered sample count to wall-clock elapsed: a
                 # stream that delivered fewer samples than real time fell
@@ -1029,10 +1092,36 @@ class RecordingService:
                                 f"{session.sync_warning}")
                 except Exception as e:
                     logger.warning(f"sync-integrity measurement failed: {e}")
+
+                # capture.stopped — the per-stream telemetry, emitted
+                # unconditionally rather than behind the >30s gate the
+                # human SYNC_INTEGRITY line uses. Computed from the same
+                # `capture_stats` snapshot taken before the teardown.
+                self._emit_capture_stopped(
+                    session, capture_stats, expected_s,
+                    loopback_start_offset_s, finalize_elapsed_s)
             except Exception as e:
                 finalize_elapsed_s = _t.monotonic() - t
                 logger.exception(
                     f"[stop] finalize failed after {finalize_elapsed_s:.1f}s")
+                # `type(e).__name__`, deliberately NOT str(e): finalize
+                # errors routinely embed the WAV's absolute path, which
+                # carries the user's account name. The full message is
+                # already in backend.log and in session.finalize_error;
+                # this file is the one that gets handed to strangers.
+                events.emit(
+                    events.FINALIZE_FAILED,
+                    session.session_id,
+                    duration_s=float(finalize_elapsed_s),
+                    queued=bool(was_queued["v"]),
+                    error_type=type(e).__name__,
+                    aec_requested=bool(echo_cancellation_requested),
+                )
+                self._emit_capture_stopped(
+                    session, capture_stats,
+                    ((session.ended_at - session.started_at).total_seconds()
+                     if session.started_at and session.ended_at else 0.0),
+                    loopback_start_offset_s, finalize_elapsed_s)
                 self._on_status(f"Error saving audio: {e}")
                 session.finalize_duration_s = float(finalize_elapsed_s)
                 # Record the failure distinctly from "still finalizing"
@@ -1241,6 +1330,54 @@ class RecordingService:
                 _purge_processing_temp, session.session_id)
 
     @staticmethod
+    def _emit_capture_stopped(
+        session: Session,
+        capture_stats: Optional[dict],
+        expected_s: float,
+        loopback_start_offset_s: Optional[float],
+        finalize_elapsed_s: float,
+    ) -> None:
+        """One ``capture.stopped`` event with the per-stream numbers.
+
+        Same arithmetic as the SYNC_INTEGRITY log line, minus its
+        ``expected_s > 30`` gate — a 20-second test recording that drops
+        half its frames is exactly the kind of thing you want a machine
+        to be able to see. ``capture_stats`` is None when the capture
+        object was already gone; that is recorded as a state, not
+        silently skipped."""
+        try:
+            stats = capture_stats or {}
+            msr = int(stats.get("mic_sr") or 0)
+            lsr = int(stats.get("loopback_sr") or 0)
+            mic_samples = int(stats.get("mic_samples") or 0)
+            lb_samples = int(stats.get("loopback_samples") or 0)
+            mic_secs = (mic_samples / msr) if msr > 0 else None
+            lb_secs = (lb_samples / lsr) if (lsr > 0 and lb_samples) else None
+            offset = loopback_start_offset_s or 0.0
+            drift = (abs(mic_secs - (lb_secs + offset))
+                     if (mic_secs is not None and lb_secs is not None)
+                     else None)
+            events.emit(
+                events.CAPTURE_STOPPED,
+                session.session_id if session else None,
+                stats_available=bool(capture_stats),
+                capture_window_s=float(expected_s or 0.0),
+                mic_seconds=mic_secs,
+                loopback_seconds=lb_secs,
+                mic_sample_rate=msr or None,
+                loopback_sample_rate=lsr or None,
+                mic_overflows=int(stats.get("mic_overflows") or 0),
+                loopback_overflows=int(stats.get("loopback_overflows") or 0),
+                mic_gap_s=((expected_s - mic_secs)
+                           if mic_secs is not None else None),
+                drift_s=drift,
+                loopback_start_offset_s=loopback_start_offset_s,
+                finalize_duration_s=float(finalize_elapsed_s or 0.0),
+            )
+        except Exception:
+            pass
+
+    @staticmethod
     def _load_channel_attribution(session: Session) -> Optional[dict]:
         """Read this session's channel-attribution sidecar, or None.
 
@@ -1249,14 +1386,47 @@ class RecordingService:
         predates the sidecar, finalize stood down (mic-only, conference
         room, speakerphone), or the file is unreadable. Every one of
         them means "diarize by voice alone, exactly as before"."""
+        doc = None
+        load_state = "loaded"
         try:
             from core.channel_attribution import load_sidecar_for_audio
-            return load_sidecar_for_audio(session.audio_path)
+            doc = load_sidecar_for_audio(session.audio_path)
+            if doc is None:
+                load_state = "absent"
         except Exception as e:
+            load_state = "unreadable"
             logger.warning(
                 f"Could not load channel-attribution sidecar for "
                 f"{session.session_id}: {e} — diarizing by voice alone")
-            return None
+
+        # This is the ONE place in the parent process that holds the
+        # attribution verdict for a session, and the verdict decides
+        # whether diarization gets ground truth or guesses. "No sidecar"
+        # and "sidecar says stand down" and "sidecar is trusted" all
+        # look identical downstream, so record which one it was.
+        try:
+            summary = (doc or {}).get("summary") or {}
+            events.emit(
+                events.CHANNEL_ATTRIBUTION,
+                session.session_id,
+                state=load_state,
+                usable=summary.get("usable"),
+                stand_down_reason=summary.get("stand_down_reason"),
+                overall_confidence=summary.get("overall_confidence"),
+                overlap_fraction=summary.get("overlap_fraction"),
+                mic_fraction=summary.get("mic_fraction"),
+                loopback_fraction=summary.get("loopback_fraction"),
+                silence_fraction=summary.get("silence_fraction"),
+                mean_mic_confidence=summary.get("mean_mic_confidence"),
+                span_count=summary.get("span_count"),
+                loopback_present=(doc or {}).get("loopback_present"),
+                conference_room_mode=(doc or {}).get("conference_room_mode"),
+                aec_applied=(doc or {}).get("aec_applied"),
+                alignment=(doc or {}).get("alignment"),
+            )
+        except Exception:
+            pass
+        return doc
 
     @staticmethod
     def _name_owner_speaker(speaker) -> None:
