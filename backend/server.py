@@ -6112,9 +6112,16 @@ async def process_full(session_id: str, req: ProcessFullRequest):
         if req.follow_up_drafts:
             try:
                 from services.follow_up_email import draft_follow_up_emails
-                count = await asyncio.to_thread(
+                result = await asyncio.to_thread(
                     draft_follow_up_emails, svc, session_id)
-                stages["follow_up_drafts"] = f"ok ({count} drafts)"
+                # `state` distinguishes "no action items" from "action
+                # items we could not read" from "all group-owned" — a
+                # zero here used to be indistinguishable from all three.
+                stages["follow_up_drafts"] = (
+                    f"ok ({result.created} drafts, state={result.state}"
+                    + (f", source={result.source}" if result.source else "")
+                    + ")"
+                )
             except Exception as e:
                 logger.exception("process_full: follow_up_drafts failed")
                 stages["follow_up_drafts"] = f"failed: {e}"
@@ -6265,9 +6272,13 @@ async def create_follow_up_drafts(session_id: str, req: FollowUpDraftsRequest):
     _raise_if_finalizing(session)
     try:
         from services.follow_up_email import draft_follow_up_emails
-        count = await asyncio.to_thread(
+        result = await asyncio.to_thread(
             draft_follow_up_emails, svc, session_id, tone=req.tone)
-        return {"ok": True, "drafts_created": count}
+        # `state` + `message` let the UI say WHICH empty case happened.
+        # `drafts_created == 0` used to be the only signal, so "we could
+        # not parse the action items" was reported to the user as
+        # "Claude didn't attribute any items to a specific person".
+        return {"ok": True, **result.to_dict()}
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
