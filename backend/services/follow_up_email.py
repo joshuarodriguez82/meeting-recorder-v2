@@ -16,13 +16,16 @@ from __future__ import annotations
 
 import sys
 
+from services.follow_up_owners import DraftResult
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+UNSUPPORTED_PLATFORM = "unsupported_platform"
+
 
 def draft_follow_up_emails(svc, session_id: str,
-                           tone: str = "friendly-professional") -> int:
+                           tone: str = "friendly-professional") -> DraftResult:
     if sys.platform.startswith("win"):
         from services._follow_up_email_outlook import (
             draft_follow_up_emails as _impl,
@@ -37,4 +40,12 @@ def draft_follow_up_emails(svc, session_id: str,
         f"Follow-up email drafting is not supported on platform "
         f"{sys.platform!r}. Returning 0 drafts."
     )
-    return 0
+    return DraftResult(
+        created=0,
+        state=UNSUPPORTED_PLATFORM,
+        message=(
+            f"Follow-up email drafting is not supported on "
+            f"{sys.platform} — it needs Outlook on Windows or "
+            f"Mail.app / Outlook on macOS."
+        ),
+    )

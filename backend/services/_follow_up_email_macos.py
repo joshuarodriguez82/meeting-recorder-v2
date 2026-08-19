@@ -7,8 +7,9 @@ installed/responsive we fall back to writing .eml files into the user's
 Downloads folder so the user can drag them into their email app.
 
 The Claude drafting logic is imported from _follow_up_email_outlook.py
-so we don't duplicate prompt + parser code — only the OS-side draft
-creation differs between platforms.
+and the owner attribution from services/follow_up_owners.py, so we don't
+duplicate prompt or parser code — only the OS-side draft creation
+differs between platforms.
 """
 
 from __future__ import annotations
@@ -22,14 +23,15 @@ from typing import List, Optional, Tuple
 
 from utils.logger import get_logger
 
-# Reuse the prompt + parsing helpers from the Outlook backend — they are
-# pure-Python and OS-agnostic.
+# Reuse the prompt + rendering helpers from the Outlook backend — they
+# are pure-Python and OS-agnostic. Owner attribution is shared one level
+# further out, in follow_up_owners.py, so neither platform carries its
+# own copy of the parser.
 from services._follow_up_email_outlook import (
-    _ACTION_ITEM_RE,                    # noqa: F401  re-used for tests
-    _parse_action_items_by_owner,
     _compose_body,
     _body_to_html,
 )
+from services.follow_up_owners import DraftResult, build_draft_plan
 
 logger = get_logger(__name__)
 
@@ -138,28 +140,25 @@ def _write_eml_fallback(to_addr: str, subject: str, html_body: str,
 
 
 def draft_follow_up_emails(svc, session_id: str,
-                           tone: str = "friendly-professional") -> int:
+                           tone: str = "friendly-professional") -> DraftResult:
     """
     Create a draft for each attendee with assigned action items. Mac path:
     routes to Mail.app, then Outlook for Mac, then .eml fallback in
     ~/Downloads.
 
-    Returns the number of drafts actually created (across whichever
-    backends ended up being used).
+    Returns a DraftResult: the number of drafts actually created (across
+    whichever backends ended up being used) plus the state explaining a
+    zero. Owner attribution is the shared commitments-first /
+    markdown-fallback plan from services/follow_up_owners.py.
     """
     session_data = svc.session_svc.load(session_id)
     if not session_data:
         raise FileNotFoundError(f"Session not found: {session_id}")
 
-    action_items_md = session_data.get("action_items") or ""
-    if not action_items_md:
-        logger.info(f"Follow-up drafts: session {session_id} has no action_items, nothing to draft")
-        return 0
-
-    owners = _parse_action_items_by_owner(action_items_md)
-    if not owners:
-        logger.info(f"Follow-up drafts: no owner-attributed action items in session {session_id}")
-        return 0
+    plan = build_draft_plan(svc, session_id, session_data)
+    if not plan.ok:
+        return DraftResult.from_plan(plan)
+    owners = plan.owners
 
     meeting_title = session_data.get("display_name") or f"Session {session_id}"
     decisions_md = session_data.get("decisions") or ""
@@ -235,6 +234,6 @@ def draft_follow_up_emails(svc, session_id: str,
 
     logger.info(
         f"Follow-up drafts: created {created} of {len(owners)} drafts "
-        f"for session {session_id}"
+        f"for session {session_id} (source={plan.source})"
     )
-    return created
+    return DraftResult.from_plan(plan, created=created)

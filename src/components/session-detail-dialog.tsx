@@ -48,6 +48,23 @@ const FALLBACK_TEMPLATES = [
   "Stakeholder Update",
 ];
 
+// Titles for the "zero drafts" outcomes of Draft follow-up emails, keyed
+// by the backend's `state` (services/follow_up_owners.py).
+//
+// Field repro 2026-08-19: a 43-minute meeting that plainly assigned work
+// to several named people produced "Claude didn't attribute any items to
+// a specific person". It had attributed them fine — the drafter's regex
+// only accepted `- [ ] **[Owner]**: task` and could not read the format
+// the model actually emitted. Something unparseable rendered as
+// something absent. These states keep the three cases apart: nothing to
+// read, could not read it, read it and every owner is a group.
+const FOLLOW_UP_EMPTY_TITLES: Record<string, string> = {
+  no_action_items: "No action items to draft from",
+  unreadable_format: "Couldn't read the action-item format",
+  generic_owners_only: "No individual owners to write to",
+  unsupported_platform: "Follow-up drafts aren't available on this platform",
+};
+
 // Field repro 2026-08-14: the user clicked Process twice in 15 seconds
 // because nothing told them a click was premature — the finalize
 // subprocess (WAV merge + echo cancellation) was still running. Every
@@ -311,10 +328,11 @@ export function SessionDetailDialog({
     setProcessing("follow_up_drafts");
     const toastId = toast.loading("Preparing follow-up drafts…");
     try {
-      // If action items haven't been extracted yet, do that first — the
-      // drafter parses per-owner tasks from the action_items markdown, so
-      // it can't produce anything useful without them. Running it inline
-      // means one click does the whole thing.
+      // If action items haven't been extracted yet, do that first. The
+      // drafter prefers this session's tracked commitments (which carry a
+      // real owner field), but falls back to parsing the action_items
+      // markdown — and a session with neither has nothing to draft from.
+      // Running extraction inline means one click does the whole thing.
       if (!session.action_items) {
         toast.loading("Extracting action items…", { id: toastId });
         await api.actionItems(sessionId);
@@ -328,12 +346,22 @@ export function SessionDetailDialog({
       if (r.drafts_created > 0) {
         toast.success(
           `${r.drafts_created} Outlook draft${r.drafts_created === 1 ? "" : "s"} created`,
-          { id: toastId, description: "Check your Drafts folder in Classic Outlook" },
+          {
+            id: toastId,
+            description:
+              (r.source === "commitments"
+                ? "Owners came from this session's tracked commitments. "
+                : "") + "Check your Drafts folder in Classic Outlook",
+          },
         );
       } else {
-        toast.info("No owner-attributed action items to draft from", {
+        // Three distinct empty states, three distinct messages. They used
+        // to be one toast that blamed the model for not attributing
+        // owners — which was wrong whenever the real problem was that we
+        // could not read the format it produced.
+        toast.info(FOLLOW_UP_EMPTY_TITLES[r.state] ?? "No follow-up drafts created", {
           id: toastId,
-          description: "Claude didn't attribute any items to a specific person",
+          description: r.message || undefined,
         });
       }
     } catch (e) {

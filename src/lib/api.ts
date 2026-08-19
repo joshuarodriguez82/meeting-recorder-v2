@@ -1148,8 +1148,20 @@ export const api = {
       },
     ),
 
+  // `state` says WHY drafts_created is zero — "no_action_items",
+  // "unreadable_format" (we had items but could not read an owner out of
+  // any of them), "generic_owners_only", or "unsupported_platform".
+  // Collapsing those into one "nobody was attributed" toast was the bug
+  // this field exists to fix. `source` is "commitments" | "action_items".
   followUpDrafts: (id: string, tone = "friendly-professional") =>
-    request<{ ok: boolean; drafts_created: number }>(
+    request<{
+      ok: boolean;
+      drafts_created: number;
+      state: string;
+      source: string;
+      message: string;
+      owners: number;
+    }>(
       `/sessions/${id}/follow_up_drafts`,
       { method: "POST", body: JSON.stringify({ tone }) },
     ),
