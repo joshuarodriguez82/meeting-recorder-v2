@@ -1,0 +1,43 @@
+# Bandit configuration for the Meeting Recorder backend.
+#
+# Scope note: this scans FIRST-PARTY source. Third-party dependency CVEs are
+# already covered by .github/workflows/dependency-audit.yml (pip-audit) — this
+# file is deliberately not duplicating that.
+
+# Directories bandit walks past. `tests` is NOT excluded: test code handles
+# secrets, temp paths and subprocesses too, and a credential accidentally
+# committed in a fixture is exactly the kind of thing this scan should catch.
+#
+# CAREFUL: bandit matches these as SUBSTRINGS of the full path, not as path
+# components. An entry of `out` silently swallowed backend/services/
+# outlook_web_scraper.py, _calendar_outlook.py and _follow_up_email_outlook.py
+# (verified: 139 findings with it, 156 without). Keep every entry long and
+# distinctive enough that it cannot collide with a real module name, and
+# re-check the file count after editing this list.
+exclude_dirs:
+  - '/.git/'
+  - '/node_modules/'
+  - '/__pycache__/'
+  - '/.venv/'
+  - '/site-packages/'
+
+# B101 (assert_used) is skipped globally.
+#
+# Verified on the tree at v2.32.0: bandit reports 1,824 findings across
+# backend/ + the root scripts, and 1,678 of them (92%) are B101 — almost
+# entirely `assert` statements inside backend/tests/, which is what pytest
+# assertions ARE. Only 3 B101 hits are in non-test code. Keeping the rule on
+# would bury the 146 findings that carry signal under a 1,678-line wall of
+# noise, and no amount of baselining makes that report readable again.
+#
+# The real risk B101 exists to flag — asserts silently vanishing under
+# `python -O` — does not apply here: the app launches the sidecar via a plain
+# `python server.py` (see src-tauri/src/lib.rs), never with -O, and pytest
+# rewrites test asserts itself.
+#
+# Nothing else is skipped. In particular B404/B603/B607 (subprocess) and
+# B105/B106/B108 (secrets, temp paths) stay ON — those are the rules that
+# matter for a backend that spawns ffmpeg/python subprocesses, walks
+# user-supplied paths, and holds API keys.
+skips:
+  - B101

