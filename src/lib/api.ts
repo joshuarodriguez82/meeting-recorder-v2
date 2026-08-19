@@ -1448,7 +1448,15 @@ export const api = {
     }),
 
   prepBrief: (subject: string, client: string, project: string, userContext = "") =>
-    request<{ brief: string; related_count: number }>("/prep-brief", {
+    request<{
+      brief: string;
+      related_count: number;
+      // Knowledge-Folder documents the brief was allowed to draw on.
+      // Empty when the client has no indexed folder — the brief then
+      // reads exactly as it did before document retrieval existed.
+      referenced_documents?: ReferencedDocument[];
+      document_count?: number;
+    }>("/prep-brief", {
       method: "POST",
       body: JSON.stringify({
         subject, client, project, user_context: userContext,
@@ -1539,7 +1547,15 @@ export const api = {
         display_name: string;
         started_at: string | null;
       }>;
+      // Document equivalent of referenced_sessions. Claude cites these
+      // inline as `[DOC: <doc_name>]`, which the modal renders as a
+      // document chip — visibly distinct from a session citation, so
+      // "the SOW says the cutover is in October" can't be mistaken for
+      // "they said on the last call the cutover is in October".
+      // Optional so an older backend (no field) still type-checks.
+      referenced_documents?: ReferencedDocument[];
       related_count: number;
+      document_count?: number;
       identified_client: string;
       identified_project: string;
       last_meeting_at: string | null;
@@ -2005,12 +2021,26 @@ export const api = {
       { method: "POST" }),
 };
 
+// A Knowledge-Folder document the prep brief drew on. One entry per
+// document (not per retrieved chunk); `similarity` is the best-matching
+// chunk's cosine score.
+export interface ReferencedDocument {
+  doc_name: string;
+  doc_path: string;
+  chunk_count: number;
+  similarity: number;
+}
+
 export interface AutoPrepBrief {
   key: string;
   subject: string;
   start_iso: string;
   markdown: string;
   related_count?: number;
+  // Distinct Knowledge-Folder documents the cached brief drew on.
+  // Recorded so a cached entry is self-describing; the auto path
+  // resolves no client today, so this is 0 there.
+  document_count?: number;
   minutes_before?: number;
   generated_at?: string;
   notified?: boolean;

@@ -374,8 +374,8 @@ const SECTIONS: Section[] = [
     content: (
       <>
         <p>
-          Clicking any session anywhere in the app (Sessions list, Follow-Ups, Decisions, Search,
-          Clients) opens its <strong>Session Detail</strong> dialog with tabs:
+          Clicking any session anywhere in the app (Sessions list, Follow-Ups, Decisions,
+          Knowledge Base, Clients) opens its <strong>Session Detail</strong> dialog with tabs:
         </p>
         <ul className="list-disc pl-5 space-y-1">
           <li><strong>Overview</strong> — audio player (scrub/replay), edit meeting name, template, client, project tags, and run any AI extraction.</li>
@@ -476,7 +476,7 @@ const SECTIONS: Section[] = [
           <li><strong>Follow-Ups</strong> — action items grouped by (meeting, owner). Five tasks for one person from one meeting = one expandable card. Click the external-link icon to jump to the source session&apos;s Actions tab. Each item has a <strong>checkbox</strong> to mark it done — state persists in a per-session sidecar so it survives re-processing.</li>
           <li><strong>Commitments</strong> — see the dedicated <strong>&quot;Tracking Commitments, Follow-Ups &amp; Decisions&quot;</strong> section below. Cross-meeting tracker for things people promised, with status, due dates, and overdue alerts.</li>
           <li><strong>Decisions</strong> — ADR log, click a decision to see full context. &quot;Open Meeting →&quot; to jump in. Status can be set to <strong>active</strong> (default), <strong>implemented</strong>, or <strong>superseded</strong> directly from the row — the state shows in the badge alongside.</li>
-          <li><strong>Search</strong> — type a phrase, it searches every transcript + summary + extraction. Click a result to open that session.</li>
+          <li><strong>Knowledge Base</strong> — one box for both halves of retrieval, replacing the old separate Search and Ask tabs. Type and results appear as you go, free and with no AI call: <strong>Keyword</strong> regex-matches titles, summaries and extractions (with an opt-in pass over transcript bodies), <strong>Semantic</strong> ranks chunks by meaning and also covers Knowledge Folder documents. Click a session result to open it; document results show their name, owning client and path. Press <strong>Answer</strong> (or ⌘/Ctrl+Enter) when you want Claude to read the same matches and write a cited answer instead — that&apos;s the only thing here that costs an AI call, and it never fires on its own. Follow-ups continue in the same thread, and the client/project scope applies to search and answer alike.</li>
           <li><strong>Clients</strong> — create clients, nest projects inside each one, tag meetings manually or via <strong>AI Suggest</strong>. Each client has a dashboard with stats, meetings, and a chip row for drilling into individual projects.</li>
           <li><strong>Prep Brief</strong> — filter by client and (optionally) project. The project dropdown is scoped to the selected client, so you can never cross-contaminate contexts. Generates a pre-meeting brief with recent context, open items, risks, and suggested discussion points.</li>
         </ul>
@@ -748,7 +748,7 @@ const SECTIONS: Section[] = [
 
         <p className="font-medium mt-4">Semantic search across meetings</p>
         <p>
-          The <strong>Search</strong> tab in the Knowledge Base now does meaning-based retrieval,
+          The <strong>Knowledge Base</strong> tab&apos;s Semantic mode does meaning-based retrieval,
           not just keyword match. Type <em>&quot;billing concerns from finance&quot;</em> and you get hits
           where someone said <em>&quot;the CFO is worried about invoice timing&quot;</em> — wording you
           never typed. Powered by a local 22 MB sentence-transformer (MiniLM-L6); no embeddings
@@ -757,7 +757,9 @@ const SECTIONS: Section[] = [
 
         <p className="font-medium mt-4">Cross-meeting Q&A with citations</p>
         <p>
-          New <strong>Q&A</strong> tab. Ask a natural-language question (&quot;what did we decide
+          The <strong>Answer</strong> button in the Knowledge Base tab (this was its own
+          <strong> Q&A</strong> tab until the two merged). Ask a natural-language question
+          (&quot;what did we decide
           about the migration phasing?&quot;) and the answer streams back inline with citations
           like <code>[ABC123 @ 12:34]</code> — click the citation to jump to that moment in
           the source session. Each turn is independent (no multi-turn memory yet); scope by
