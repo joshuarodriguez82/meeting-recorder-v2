@@ -734,7 +734,14 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
             </Select>
             <p className="text-xs text-muted-foreground">
               {settings.calendar_source === "extension"
-                ? "Never contacts Outlook — the Record tab shows only what the Chrome extension has scraped from Outlook Web. Use this if Outlook keeps asking you to sign in; switching here stops those sign-in prompts for good."
+                // The second sentence is the rest of the same promise.
+                // "Never contacts Outlook" used to be true of the
+                // calendar only: Draft follow-up emails still launched
+                // classic desktop Outlook (or Mail.app on macOS) and
+                // filed drafts into a mailbox this user never opens.
+                // It now hands back compose links instead, and the
+                // setting says so rather than leaving it a surprise.
+                ? "Never contacts Outlook — the Record tab shows only what the Chrome extension has scraped from Outlook Web. Use this if Outlook keeps asking you to sign in; switching here stops those sign-in prompts for good. Draft follow-up emails also stops using a desktop mail client: it gives you one Outlook Web compose link per recipient, which you open in your browser."
                 : settings.calendar_source === "outlook"
                 ? "Uses only the local calendar (Outlook COM on Windows, Calendar app on macOS). Chrome extension events are ignored even if the extension is connected."
                 : settings.calendar_source === "off"
