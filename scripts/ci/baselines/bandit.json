@@ -1,9 +1,9 @@
 {
   "schema": 2,
   "tool": "bandit",
-  "generated_utc": "2026-08-19T01:47:58Z",
+  "generated_utc": "2026-08-19T15:42:39Z",
   "note": "Accepted pre-existing findings. CI fails only on findings absent from this list. Refresh deliberately with `scripts/ci/security_baseline.py update` and review the diff.",
-  "count": 182,
+  "count": 185,
   "findings": [
     {
       "fingerprint": "88514f5283b843e6",
@@ -216,7 +216,7 @@
       "fingerprint": "62c1c8ef7dbc5b84",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 2031,
+      "line": 2041,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -225,7 +225,7 @@
       "fingerprint": "e8d36d21aa3d2751",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 2174,
+      "line": 2184,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -234,7 +234,7 @@
       "fingerprint": "016b7598137181a1",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 5742,
+      "line": 5803,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -243,7 +243,7 @@
       "fingerprint": "f39996b67a54697b",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 7772,
+      "line": 7937,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -252,7 +252,7 @@
       "fingerprint": "4ace3904e8738941",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 8458,
+      "line": 8623,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -261,7 +261,7 @@
       "fingerprint": "d3113a15fcdad96a",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 8943,
+      "line": 9138,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -270,7 +270,7 @@
       "fingerprint": "feb1effdd664f542",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 9093,
+      "line": 9288,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -279,7 +279,7 @@
       "fingerprint": "96c466860da40c77",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 8956,
+      "line": 9151,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 2
@@ -288,7 +288,7 @@
       "fingerprint": "8db86fc9c4bd91c6",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 9291,
+      "line": 9486,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 3
@@ -297,7 +297,7 @@
       "fingerprint": "7c88086c9a929115",
       "rule": "B112",
       "file": "backend/server.py",
-      "line": 7134,
+      "line": 7299,
       "severity": "LOW",
       "message": "Try, Except, Continue detected.",
       "occurrence": 1
@@ -306,7 +306,7 @@
       "fingerprint": "1ac42fcda9cc4100",
       "rule": "B310",
       "file": "backend/server.py",
-      "line": 1361,
+      "line": 1371,
       "severity": "MEDIUM",
       "message": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected.",
       "occurrence": 1
@@ -315,7 +315,7 @@
       "fingerprint": "116e9f5bbe46d981",
       "rule": "B310",
       "file": "backend/server.py",
-      "line": 1447,
+      "line": 1457,
       "severity": "MEDIUM",
       "message": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected.",
       "occurrence": 1
@@ -324,7 +324,7 @@
       "fingerprint": "deb33f3b0bdc5c63",
       "rule": "B310",
       "file": "backend/server.py",
-      "line": 8338,
+      "line": 8503,
       "severity": "MEDIUM",
       "message": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected.",
       "occurrence": 1
@@ -342,7 +342,7 @@
       "fingerprint": "7e347d37f76213ab",
       "rule": "B404",
       "file": "backend/server.py",
-      "line": 2063,
+      "line": 2073,
       "severity": "LOW",
       "message": "Consider possible security implications associated with the subprocess module.",
       "occurrence": 1
@@ -360,7 +360,7 @@
       "fingerprint": "07d497a2a1fc8eed",
       "rule": "B603",
       "file": "backend/server.py",
-      "line": 2071,
+      "line": 2081,
       "severity": "LOW",
       "message": "subprocess call - check for execution of untrusted input.",
       "occurrence": 1
@@ -369,7 +369,7 @@
       "fingerprint": "1eb687cdd1464834",
       "rule": "B603",
       "file": "backend/server.py",
-      "line": 2169,
+      "line": 2179,
       "severity": "LOW",
       "message": "subprocess call - check for execution of untrusted input.",
       "occurrence": 1
@@ -378,7 +378,7 @@
       "fingerprint": "dbd09d3816ec180b",
       "rule": "B603",
       "file": "backend/server.py",
-      "line": 5336,
+      "line": 5362,
       "severity": "LOW",
       "message": "subprocess call - check for execution of untrusted input.",
       "occurrence": 1
@@ -387,7 +387,7 @@
       "fingerprint": "feb18a79c2a456d6",
       "rule": "B603",
       "file": "backend/server.py",
-      "line": 5343,
+      "line": 5369,
       "severity": "LOW",
       "message": "subprocess call - check for execution of untrusted input.",
       "occurrence": 1
@@ -396,7 +396,7 @@
       "fingerprint": "38c1fa8e0659a7e0",
       "rule": "B606",
       "file": "backend/server.py",
-      "line": 5330,
+      "line": 5356,
       "severity": "LOW",
       "message": "Starting a process without a shell.",
       "occurrence": 1
@@ -405,7 +405,7 @@
       "fingerprint": "78132fc23c07edfe",
       "rule": "B607",
       "file": "backend/server.py",
-      "line": 5343,
+      "line": 5369,
       "severity": "LOW",
       "message": "Starting a process with a partial executable path",
       "occurrence": 1
@@ -909,7 +909,7 @@
       "fingerprint": "110b34769597b8ce",
       "rule": "B106",
       "file": "backend/tests/test_calendar_source_settings.py",
-      "line": 124,
+      "line": 125,
       "severity": "LOW",
       "message": "Possible hardcoded password: ''",
       "occurrence": 1
@@ -918,7 +918,7 @@
       "fingerprint": "77442d23c99a797f",
       "rule": "B106",
       "file": "backend/tests/test_calendar_source_settings.py",
-      "line": 136,
+      "line": 137,
       "severity": "LOW",
       "message": "Possible hardcoded password: ''",
       "occurrence": 1
@@ -927,7 +927,7 @@
       "fingerprint": "f74f7ea7d8a7841b",
       "rule": "B106",
       "file": "backend/tests/test_calendar_source_settings.py",
-      "line": 163,
+      "line": 164,
       "severity": "LOW",
       "message": "Possible hardcoded password: 'hf-test'",
       "occurrence": 1
@@ -1230,7 +1230,7 @@
       "occurrence": 1
     },
     {
-      "fingerprint": "dc7e49d0fabf9604",
+      "fingerprint": "25d715edd0b03cad",
       "rule": "B108",
       "file": "backend/tests/test_search_service.py",
       "line": 127,
@@ -1302,7 +1302,7 @@
       "occurrence": 1
     },
     {
-      "fingerprint": "3e605b5b327d572d",
+      "fingerprint": "08b74abdabb2792b",
       "rule": "B106",
       "file": "backend/tests/test_session_archive_settings.py",
       "line": 94,
@@ -1590,6 +1590,33 @@
       "occurrence": 1
     },
     {
+      "fingerprint": "339f2408e71b7d14",
+      "rule": "B404",
+      "file": "scripts/ci/personal_data_scan.py",
+      "line": 67,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with the subprocess module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "dfa88995de800031",
+      "rule": "B603",
+      "file": "scripts/ci/personal_data_scan.py",
+      "line": 120,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "e042f8261a0e15df",
+      "rule": "B607",
+      "file": "scripts/ci/personal_data_scan.py",
+      "line": 120,
+      "severity": "LOW",
+      "message": "Starting a process with a partial executable path",
+      "occurrence": 1
+    },
+    {
       "fingerprint": "f3bf5cfcc723309e",
       "rule": "B110",
       "file": "setup.py",
@@ -1638,7 +1665,7 @@
       "fingerprint": "778efcd923c430d5",
       "rule": "B105",
       "file": "tools/ui-harness/stub.py",
-      "line": 154,
+      "line": 273,
       "severity": "LOW",
       "message": "Possible hardcoded password: ''",
       "occurrence": 1
