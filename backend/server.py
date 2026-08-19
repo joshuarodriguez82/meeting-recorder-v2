@@ -392,6 +392,13 @@ from services.terminology_service import TerminologyService
 from services.prep_brief_cache_service import (
     PrepBriefCacheService, meeting_key as _prep_meeting_key,
 )
+from services.prep_brief_context import (
+    MAX_CONTEXT_SESSIONS as _PREP_MAX_SESSIONS,
+    MAX_FALLBACK_SESSIONS as _PREP_MAX_FALLBACK_SESSIONS,
+    format_document_context as _prep_format_documents,
+    referenced_documents as _prep_referenced_documents,
+    retrieve_for_brief as _prep_retrieve_documents,
+)
 from models.session import Session
 from services.calendar_service import (
     get_todays_meetings, get_upcoming_meetings, is_outlook_available,
@@ -6876,6 +6883,13 @@ class PrepBriefFromMeetingRequest(BaseModel):
 @app.post("/prep-brief/from-meeting")
 async def prep_brief_from_meeting(req: PrepBriefFromMeetingRequest):
     """Generate a meeting-specific prep brief for a calendar entry.
+
+    Context comes from two independent sources, budgeted separately
+    (see services/prep_brief_context.py): the most recent sessions in
+    scope, and semantically-retrieved excerpts from this client's
+    Knowledge Folder. Documents never come out of the session budget —
+    recent calls stay the spine of the brief.
+
     Returns:
         {
           "markdown": str,            # The brief itself (markdown body)
@@ -6883,7 +6897,14 @@ async def prep_brief_from_meeting(req: PrepBriefFromMeetingRequest):
             {"session_id", "display_name", "started_at"},  # frontend
             ...                       # uses these to render
           ],                          # click-to-jump on the [id]
+          "referenced_documents": [   # Knowledge-Folder documents
+            {"doc_name", "doc_path",  # Claude COULD cite, as
+             "chunk_count",           # [DOC: <doc_name>]. Empty list
+             "similarity"},           # when the client has no
+            ...                       # Knowledge Folder — which reads
+          ],                          # identically to the old shape.
           "related_count": int,       # citations.
+          "document_count": int,      # distinct documents referenced.
           "identified_client": str,   # echoed back so the modal can
           "identified_project": str,  # show the resolved scope.
           "last_meeting_at": str|null # ISO of the most recent prior
@@ -6906,20 +6927,42 @@ async def prep_brief_from_meeting(req: PrepBriefFromMeetingRequest):
         related.append(s)
 
     # Sort by started_at desc so the brief sees the most recent context
-    # first — the LLM prioritises the head of its context. Cap at 8 to
-    # keep the prompt under 6-8 KB which is comfortably under any
-    # provider's context limit.
+    # first — the LLM prioritises the head of its context. Cap at
+    # MAX_CONTEXT_SESSIONS (8) to keep this half of the prompt under
+    # 6-8 KB, comfortably inside any provider's context limit. Document
+    # retrieval below has its own separate budget and never eats into
+    # this one.
     related.sort(key=lambda s: s.get("started_at") or "", reverse=True)
-    related = related[:8]
+    related = related[:_PREP_MAX_SESSIONS]
 
     if not related:
         # No client-scoped material AND no project-scoped material —
         # fall back to the most recent processed sessions across the
         # entire corpus. Less precise but still gives the user
         # something actionable rather than a blank brief.
-        related = [s for s in sessions if s.get("has_summary")][:5]
+        related = [s for s in sessions
+                   if s.get("has_summary")][:_PREP_MAX_FALLBACK_SESSIONS]
 
-    if not related:
+    # Knowledge-Folder retrieval. Gated on a resolved client: documents
+    # carry a client and nothing else, so without one there is no way to
+    # keep another account's SOW out of this brief — an unscoped pull
+    # would be actively harmful, not merely noisy. Retrieval-only; this
+    # never indexes or touches the source folder. Off-thread because
+    # SearchService is CPU-bound numpy plus a sentence-transformers
+    # encode. Returns [] on every failure path, so a missing folder,
+    # empty index, disconnected Drive or absent embedding model all
+    # land on "brief exactly as it was before".
+    doc_hits = await asyncio.to_thread(
+        _prep_retrieve_documents,
+        svc.search_svc,
+        req.client,
+        req.subject,
+        req.project,
+        req.body or "",
+        req.user_context,
+    )
+
+    if not related and not doc_hits:
         return {
             "markdown": (
                 "_No prior meetings with summaries are available yet. "
@@ -6927,7 +6970,9 @@ async def prep_brief_from_meeting(req: PrepBriefFromMeetingRequest):
                 "to work from._"
             ),
             "referenced_sessions": [],
+            "referenced_documents": [],
             "related_count": 0,
+            "document_count": 0,
             "identified_client": req.client,
             "identified_project": req.project,
             "last_meeting_at": None,
@@ -6988,6 +7033,12 @@ async def prep_brief_from_meeting(req: PrepBriefFromMeetingRequest):
         )
 
     prior_notes = "\n\n---\n\n".join(parts)
+    if not prior_notes:
+        # Reachable only on the new "documents but no sessions" path —
+        # a client whose Knowledge Folder is indexed but who has no
+        # processed meetings yet. Say so explicitly rather than handing
+        # the model an empty section it might hallucinate into.
+        prior_notes = "(No prior meetings with this client yet.)"
 
     # Friendly time string for the prompt — Claude does better with
     # natural-language dates than ISO timestamps.
@@ -7009,11 +7060,15 @@ async def prep_brief_from_meeting(req: PrepBriefFromMeetingRequest):
             prior_notes=prior_notes,
             agenda=req.body or "",
             user_context=req.user_context,
+            # "" when nothing was retrieved — the summarizer then emits
+            # the exact prompt it emitted before documents existed.
+            document_notes=_prep_format_documents(doc_hits),
         )
     except Exception as e:
         logger.exception("Calendar prep brief failed")
         raise HTTPException(status_code=500, detail=str(e))
 
+    ref_docs = _prep_referenced_documents(doc_hits)
     return {
         "markdown": markdown,
         "referenced_sessions": [
@@ -7024,7 +7079,14 @@ async def prep_brief_from_meeting(req: PrepBriefFromMeetingRequest):
             }
             for s in related
         ],
+        # Document equivalent of referenced_sessions, so the UI can show
+        # which Knowledge-Folder files the brief was allowed to draw on
+        # and render `[DOC: <name>]` citations as document chips rather
+        # than as broken session links. Empty list when the client has
+        # no indexed folder.
+        "referenced_documents": ref_docs,
         "related_count": len(related),
+        "document_count": len(ref_docs),
         "identified_client": req.client,
         "identified_project": req.project,
         "last_meeting_at": (related[0].get("started_at") if related else None),
@@ -7033,6 +7095,13 @@ async def prep_brief_from_meeting(req: PrepBriefFromMeetingRequest):
 
 @app.post("/prep-brief")
 async def prep_brief(req: PrepBriefRequest):
+    """Manual prep brief (Prep Brief tab): subject + optional
+    client/project scope.
+
+    Same two-source context as /prep-brief/from-meeting — recent
+    in-scope sessions plus retrieved Knowledge-Folder excerpts — with a
+    thinner query, since this entry point has no invite body and no
+    attendees to work from (see services/prep_brief_context.py)."""
     svc.load_settings()
     if not svc.summarizer:
         raise HTTPException(status_code=400, detail="Anthropic API key required")
@@ -7049,14 +7118,33 @@ async def prep_brief(req: PrepBriefRequest):
             related.append(s)
     if not related:
         # Fallback: use the 8 most recent processed sessions
-        related = [s for s in sessions if s.get("has_summary")][:8]
-    if not related:
+        related = [s for s in sessions
+                   if s.get("has_summary")][:_PREP_MAX_SESSIONS]
+
+    # Knowledge-Folder retrieval, keyed on the client exactly as in
+    # /prep-brief/from-meeting. Deliberately NOT run for the unscoped
+    # fallback: with no client there is nothing to filter documents by,
+    # and pulling another account's SOW into this brief would be worse
+    # than no documents at all. Never raises — [] on every failure.
+    doc_hits = await asyncio.to_thread(
+        _prep_retrieve_documents,
+        svc.search_svc,
+        req.client,
+        req.subject,
+        req.project,
+        "",                 # no invite body on this entry point
+        req.user_context,
+    )
+
+    if not related and not doc_hits:
         return {"brief": "No prior meetings with summaries found to brief from.",
-                "related_count": 0}
+                "related_count": 0,
+                "referenced_documents": [],
+                "document_count": 0}
 
     # Build context blob
     parts = []
-    for s in related[:8]:
+    for s in related[:_PREP_MAX_SESSIONS]:
         block = [f"### {s.get('display_name', 'Meeting')} "
                  f"({(s.get('started_at') or '')[:10]})"]
         if s.get("summary"):
@@ -7067,11 +7155,20 @@ async def prep_brief(req: PrepBriefRequest):
             block.append(f"**Decisions:**\n{s['decisions']}")
         parts.append("\n\n".join(block))
     prior_notes = "\n\n---\n\n".join(parts)
+    if not prior_notes:
+        prior_notes = "(No prior meetings with this client yet.)"
 
+    ref_docs = _prep_referenced_documents(doc_hits)
     try:
         brief = await svc.summarizer.meeting_prep_brief(
-            prior_notes, req.subject, user_context=req.user_context)
-        return {"brief": brief, "related_count": len(related)}
+            prior_notes, req.subject, user_context=req.user_context,
+            # "" when nothing was retrieved — the summarizer then emits
+            # the exact prompt it emitted before documents existed.
+            document_notes=_prep_format_documents(doc_hits))
+        return {"brief": brief,
+                "related_count": len(related),
+                "referenced_documents": ref_docs,
+                "document_count": len(ref_docs)}
     except Exception as e:
         logger.exception("Prep brief failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -8760,6 +8857,23 @@ async def _auto_prep_brief_loop():
                     # In the lead window and not already started.
                     if mins_until <= 0 or mins_until > lead:
                         continue
+                    # Cache key stays subject+start — i.e. one entry per
+                    # meeting OCCURRENCE — even though the brief now
+                    # also depends on Knowledge-Folder content that can
+                    # be re-indexed at any time. Deliberate: this cache
+                    # is a "have we notified about this meeting yet?"
+                    # marker, and the markdown it stores is never
+                    # rendered (page.tsx reads only key/subject/
+                    # minutes_before to fire the notification; opening
+                    # the brief re-hits /prep-brief/from-meeting, which
+                    # re-retrieves documents live). Mixing an index
+                    # fingerprint into the key would therefore buy no
+                    # freshness the user can see, while making a mid-
+                    # window re-index fire a duplicate notification for
+                    # the same meeting. The generate→consume window is
+                    # bounded by auto_prep_brief_lead_min anyway
+                    # (default 10 min). document_count is stored below
+                    # so a cached entry is still self-describing.
                     key = _prep_meeting_key(subject, start_iso)
                     if svc.prep_brief_cache_svc.has(key):
                         continue  # already briefed this occurrence
@@ -8767,6 +8881,18 @@ async def _auto_prep_brief_loop():
                     logger.info(
                         f"[auto-brief] generating brief for '{subject}' "
                         f"(~{int(mins_until)} min out)")
+                    # NOTE: client/project are empty here — attendee-
+                    # domain → client resolution lives in the frontend
+                    # (meeting-brief-modal.tsx), so this loop has no
+                    # account scope. Consequence, pre-dating and
+                    # unchanged by Knowledge-Folder retrieval: auto
+                    # briefs use the corpus-wide recent-sessions
+                    # fallback rather than client-scoped history, and
+                    # they retrieve no documents (document retrieval is
+                    # gated on a resolved client, since documents can
+                    # only be filtered by client). Auto-brief token cost
+                    # is therefore unchanged. Porting the resolver
+                    # server-side would fix both at once.
                     req = PrepBriefFromMeetingRequest(
                         subject=subject,
                         attendees=list(m.get("attendees") or []),
@@ -8792,6 +8918,7 @@ async def _auto_prep_brief_loop():
                             "start_iso": start_iso,
                             "markdown": result.get("markdown", ""),
                             "related_count": result.get("related_count", 0),
+                            "document_count": result.get("document_count", 0),
                             "minutes_before": int(mins_until),
                         },
                     )
