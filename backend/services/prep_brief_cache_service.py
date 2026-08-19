@@ -45,7 +45,7 @@ def meeting_key(subject: str, start_iso: str) -> str:
     """Stable key for a meeting occurrence. Hash so it's filesystem- and
     JSON-key-safe regardless of subject characters."""
     raw = f"{(subject or '').strip().lower()}|{(start_iso or '').strip()}"
-    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha1(raw.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
 
 class PrepBriefCacheService:
