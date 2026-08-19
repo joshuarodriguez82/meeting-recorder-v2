@@ -8,9 +8,32 @@ the normalized meeting subject rather than a single occurrence's
 (subject, start) tuple — a recurring "Weekly 1:1" should stay blocked
 every week once the user flags it once.
 
+WHY SUBJECT IS THE RIGHT KEY FOR EXTENSION-SOURCED MEETINGS TOO
+---------------------------------------------------------------
+Extension-sourced events (the Chrome extension's Outlook Web scrape)
+carry NO stable identifier: the store is replaced wholesale on every
+capture, there is no Outlook EntryID / iCal UID in what the scrape can
+see, and even the start time can move by a minute or two between
+imports. The subject is the only thing that survives a re-import — so
+it is what this list matches on, exactly as it already did for local
+meetings. An opt-out that reset itself on the next capture would be
+worse than no opt-out at all.
+
+One wrinkle that only shows up on the extension path: Outlook Web
+DECORATES a changed invite's subject ("Updated! Weekly Sync"), and a
+forwarded/replied invite arrives as "FW: "/"RE: ". A user who blocked
+"Weekly Sync" must stay blocked when the next capture calls it
+"Updated! Weekly Sync". So alongside the original exact key we also
+match on the CANONICAL subject — `extension_calendar_service.
+normalize_subject`, the same prefix-stripping/casefolding used to decide
+two calendar rows are the same meeting. Both keys are checked, so no
+pre-existing blocklist entry stops matching what it matched before.
+
 Storage mirrors speaker_profile_service: a small JSON file in the user
 data dir, atomically rewritten under a lock. Volume is tiny (a handful
-of recurring meetings), so a flat list is plenty.
+of recurring meetings), so a flat list is plenty. The on-disk shape is
+unchanged — the canonical index is derived at load time, never
+persisted, so a downgrade reads the same file fine.
 """
 
 from __future__ import annotations
@@ -20,6 +43,9 @@ import threading
 from pathlib import Path
 from typing import List
 
+from services.extension_calendar_service import (
+    normalize_subject as canonical_subject,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -45,6 +71,11 @@ class AutoRecordBlocklistService:
         # case-insensitive at check time. Example pattern: "canceled"
         # blocks "Canceled: Weekly Sync", "Project X (Canceled)", etc.
         self._patterns: list[str] = []
+        # Derived, never persisted: canonical_subject() of every entry's
+        # display value. Lets a blocked "Weekly Sync" keep matching when
+        # a re-import decorates it as "Updated! Weekly Sync" — see the
+        # module docstring. Rebuilt on every mutation.
+        self._canonical: set[str] = set()
         self._load()
 
     def _load(self) -> None:
@@ -86,6 +117,7 @@ class AutoRecordBlocklistService:
             else:
                 self._entries = {}
                 self._patterns = []
+            self._rebuild_canonical()
             logger.info(
                 f"Loaded {len(self._entries)} auto-record blocklist "
                 f"entries + {len(self._patterns)} patterns "
@@ -95,6 +127,15 @@ class AutoRecordBlocklistService:
                              f"Starting empty; file left in place.")
             self._entries = {}
             self._patterns = []
+            self._canonical = set()
+
+    def _rebuild_canonical(self) -> None:
+        """Derive the canonical-subject index from the entries. Caller
+        holds _lock (or is still in __init__)."""
+        self._canonical = {
+            c for c in (canonical_subject(v) for v in self._entries.values())
+            if c
+        }
 
     def _save(self) -> None:
         """Atomic write via tmp + rename. Caller must hold _lock."""
@@ -111,12 +152,33 @@ class AutoRecordBlocklistService:
     # ── Public API ───────────────────────────────────────────────────
 
     def is_blocked(self, meeting: dict) -> bool:
+        """True for a meeting the user flagged "never auto-record".
+
+        Source-blind: an extension-sourced meeting is matched by exactly
+        the same rules as a local one, which is what makes the
+        per-meeting opt-out on an Outlook-Web-only row real rather than
+        decorative.
+
+        Two subject keys are tried, in this order:
+          1. the historical exact key (whitespace-collapsed, lowercased)
+             — so every entry written by any previous version keeps
+             matching precisely what it used to;
+          2. the CANONICAL key (`extension_calendar_service.
+             normalize_subject`: also strips "Updated!"/"RE:"/"FW:"
+             decoration and casefolds) — so a block survives Outlook
+             Web re-decorating the subject on the next capture. Without
+             this the opt-out silently resets itself, which is the one
+             failure mode worse than not offering it.
+        """
         raw = str(meeting.get("subject", ""))
         key = _normalize(raw)
         if not key:
             return False
         with self._lock:
             if key in self._entries:
+                return True
+            canon = canonical_subject(raw)
+            if canon and canon in self._canonical:
                 return True
             raw_lower = raw.lower()
             for pat in self._patterns:
@@ -136,22 +198,44 @@ class AutoRecordBlocklistService:
         key = _normalize(subject)
         if not key:
             return False
+        canon = canonical_subject(subject)
         with self._lock:
             if key in self._entries:
                 return True
+            if canon and canon in self._canonical:
+                # Already blocked under a differently-decorated form of
+                # the same subject ("Updated! Weekly Sync" vs "Weekly
+                # Sync"). is_blocked() already says True for both, so
+                # adding a second entry would only give the user two
+                # rows to remove before the block actually lifts.
+                return True
             self._entries[key] = subject.strip()
+            self._rebuild_canonical()
             self._save()
         logger.info(f"auto-record blocklist + '{subject.strip()}'")
         return True
 
     def remove(self, subject: str) -> bool:
+        """Un-block. Falls back to the canonical subject so a block the
+        user can SEE (is_blocked matched it through the canonical index)
+        is always one they can actually lift — otherwise a meeting whose
+        subject picked up an "Updated!" prefix since it was blocked
+        would render as blocked with a button that does nothing."""
         key = _normalize(subject)
+        canon = canonical_subject(subject)
         with self._lock:
-            if key not in self._entries:
+            removed: List[str] = []
+            if key in self._entries:
+                removed.append(self._entries.pop(key))
+            elif canon:
+                for k in [k for k, v in self._entries.items()
+                          if canonical_subject(v) == canon]:
+                    removed.append(self._entries.pop(k))
+            if not removed:
                 return False
-            removed = self._entries.pop(key)
+            self._rebuild_canonical()
             self._save()
-        logger.info(f"auto-record blocklist - '{removed}'")
+        logger.info(f"auto-record blocklist - {', '.join(repr(r) for r in removed)}")
         return True
 
     def add_pattern(self, pattern: str) -> bool:

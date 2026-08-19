@@ -206,10 +206,37 @@ export function RecordView({
   // Rows sourced from the Chrome extension's Outlook Web scrape rather
   // than the local Outlook/EventKit calendar. They exist precisely
   // BECAUSE the local calendar can't see them, so anything that reaches
-  // back into the local calendar (meeting-detail lookup, auto-record)
-  // has nothing to resolve against — see the badge + disabled controls
-  // below (field report 2026-08-11).
+  // back into the LOCAL CALENDAR — the /calendar/meeting-detail lookup
+  // for agenda/attendees — has nothing to resolve against (field report
+  // 2026-08-11).
+  //
+  // Auto-record is NO LONGER in that category: the backend's trigger
+  // loop and this panel now read one merged two-source list
+  // (backend/services/calendar_feed.py), so an extension row can
+  // auto-start exactly like a local one and gets the same per-meeting
+  // opt-out below.
   const isExtensionSourced = (m: Meeting) => m.source === "extension";
+
+  // Mirrors backend/services/auto_record_service.py's `_is_all_day`:
+  // starts at local midnight and runs a whole number of days. Those are
+  // birthdays / OOO / travel blocks — auto-record skips them outright,
+  // whichever calendar they came from, so this is the one row type that
+  // still has to say "Manual only" and mean it.
+  const isAllDay = (m: Meeting) => {
+    const start = new Date(m.start);
+    const end = new Date(m.end);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return false;
+    if (start.getHours() !== 0 || start.getMinutes() !== 0) return false;
+    const seconds = (end.getTime() - start.getTime()) / 1000;
+    return seconds >= 23 * 3600 && seconds % (24 * 3600) < 60;
+  };
+
+  // True when auto-record can actually act on this row. Kept as one
+  // named predicate so the tile can never imply a capability the
+  // backend doesn't have (or hide one it does) — the "Manual only"
+  // label that used to sit here was correct when auto-record read only
+  // the local calendar and became a lie the moment it stopped.
+  const canAutoRecord = (m: Meeting) => !isAllDay(m);
 
   const toggleMeetingDetail = (m: Meeting) => {
     const key = meetingKey(m);
@@ -1015,11 +1042,38 @@ export function RecordView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recording]);
 
+  // Canonical subject key — mirrors backend
+  // services/extension_calendar_service.py's `normalize_subject`, which
+  // is what the blocklist ALSO matches on (see that service's module
+  // docstring). Strips Outlook/OWA's reply/forward/update decoration,
+  // collapses whitespace, lowercases. Needed here because extension
+  // rows are re-scraped from Outlook Web on every capture and OWA
+  // relabels a changed invite "Updated! Weekly Sync" — without this the
+  // tile would show a meeting as un-blocked that the backend is (still,
+  // correctly) refusing to auto-record.
+  const canonicalSubject = (subject: string) => {
+    let s = subject || "";
+    const prefix = /^\s*(?:re|fw|fwd|updated!?|canceled|cancelled|accepted|declined|tentative)\s*[:!]\s*/i;
+    for (;;) {
+      const stripped = s.replace(prefix, "");
+      if (stripped === s) break;
+      s = stripped;
+    }
+    return s.replace(/\s+/g, " ").trim().toLowerCase();
+  };
+
   // Exact-match block: the user flagged THIS specific subject via the
-  // tile's "No auto" toggle. Removable per-meeting.
-  const isExactBlocked = (subject: string) =>
-    blockedSubjects.some(
-      (s) => s.trim().toLowerCase() === (subject || "").trim().toLowerCase());
+  // tile's "No auto" toggle. Removable per-meeting. Matched on the raw
+  // subject OR its canonical form — same two keys the backend's
+  // `is_blocked` tries, so the tile and the trigger loop never disagree
+  // about whether a meeting is opted out.
+  const isExactBlocked = (subject: string) => {
+    const raw = (subject || "").trim().toLowerCase();
+    const canon = canonicalSubject(subject);
+    return blockedSubjects.some(
+      (s) => s.trim().toLowerCase() === raw
+        || (!!canon && canonicalSubject(s) === canon));
+  };
 
   // Pattern block: a Settings substring pattern matches this subject.
   // Mirrors the backend's is_blocked() pattern check exactly (case-
@@ -1664,8 +1718,9 @@ export function RecordView({
                 htmlFor="auto-record-toggle"
                 className="text-xs font-medium cursor-pointer select-none"
                 title={
-                  "Auto-start recording at each calendar meeting's scheduled time. " +
-                  "Filters: skip all-day events; require a Teams/Zoom/Meet link. " +
+                  "Auto-start recording at each calendar meeting's scheduled time — from this machine's " +
+                  "calendar AND from meetings the Chrome extension sees in Outlook Web. " +
+                  "Filters: skip all-day events, and anything you flagged 'No auto'. " +
                   "Manual recordings always win — auto-start won't fire while you're already recording."
                 }
               >
@@ -1785,8 +1840,9 @@ export function RecordView({
                           className="shrink-0 text-[10px] font-normal text-muted-foreground"
                           title={
                             "Seen by the Chrome extension in Outlook Web, not by the calendar on this machine. " +
-                            "You can still start a recording with Use — but auto-record can't fire for it, " +
-                            "because the auto-record loop reads the local calendar directly."
+                            "Auto-record treats it like any other meeting — the trigger reads the same merged " +
+                            "list this panel does. Only the agenda/attendee details are missing, because those " +
+                            "come from the local calendar."
                           }
                         >
                           From Outlook Web
@@ -1806,20 +1862,29 @@ export function RecordView({
                             <Sparkles className="h-3.5 w-3.5 mr-1" />
                             Brief
                           </Button>
-                          {/* Auto-record controls are meaningless for an
-                              extension-only row: AutoRecordService polls
-                              calendar_service.get_todays_meetings (the LOCAL
-                              calendar) for its start trigger, so a meeting
-                              only Outlook Web can see will never come up
-                              for auto-start — and therefore blocking it
-                              would be theatre. Say so rather than offering
-                              a control that does nothing. */}
-                          {isExtensionSourced(m) ? (
+                          {/* "Manual only" is now reserved for rows
+                              auto-record genuinely cannot start. That used
+                              to include every extension-sourced row —
+                              AutoRecordService polled the LOCAL calendar for
+                              its trigger, so an Outlook-Web-only meeting
+                              never came up for auto-start and offering a
+                              block control would have been theatre. It reads
+                              the same merged two-source list as this panel
+                              now (backend/services/calendar_feed.py), so
+                              extension rows get the real control.
+
+                              What remains honestly manual-only: ALL-DAY
+                              events. auto_record_service._is_all_day
+                              excludes them from the trigger regardless of
+                              source (birthdays, OOO and travel blocks are
+                              not meetings), so a block button on one would
+                              be the same theatre, just moved. */}
+                          {!canAutoRecord(m) ? (
                             <span
                               className="px-2 text-xs text-muted-foreground select-none"
                               title={
-                                "Auto-record only fires for meetings on this machine's calendar. " +
-                                "This one is visible only in Outlook Web, so start it manually with Use."
+                                "Auto-record never fires for all-day events — they're OOO/travel/birthday " +
+                                "blocks, not meetings. Start it manually with Use if you need it recorded."
                               }
                             >
                               Manual only

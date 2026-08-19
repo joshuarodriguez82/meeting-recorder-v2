@@ -171,7 +171,7 @@ def normalize_subject(subject: Any) -> str:
     return _WS_RE.sub(" ", s).strip().casefold()
 
 
-def _coerce_dt(value: Any) -> Optional[datetime]:
+def to_naive_local(value: Any) -> Optional[datetime]:
     """Accept a datetime or an ISO string; return a NAIVE-LOCAL
     datetime or None.
 
@@ -181,6 +181,14 @@ def _coerce_dt(value: Any) -> Optional[datetime]:
     An aware timestamp from the LLM (it likes appending "Z") is
     converted to local and stripped, so we never mix aware and naive
     and blow up on a comparison.
+
+    PUBLIC because ``services/calendar_feed.py`` re-asserts this exact
+    invariant across BOTH calendar sources before either the Record
+    tab's panel or the auto-record trigger sees a meeting — mixing an
+    aware start with ``datetime.now()`` raises ``TypeError`` inside the
+    auto-record tick, which is swallowed as "tick failed" and silently
+    disables auto-record for good. ``_coerce_dt`` remains as the
+    module-internal alias so the call sites below read unchanged.
     """
     if isinstance(value, datetime):
         dt = value
@@ -199,6 +207,11 @@ def _coerce_dt(value: Any) -> Optional[datetime]:
     if dt.tzinfo is not None:
         dt = dt.astimezone().replace(tzinfo=None)
     return dt
+
+
+# Module-internal alias — every call site below predates the rename and
+# reads better short. Same function object.
+_coerce_dt = to_naive_local
 
 
 def parse_duration_minutes(text: Any,
