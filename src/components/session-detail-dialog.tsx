@@ -344,16 +344,34 @@ export function SessionDetailDialog({
                     { id: toastId });
       const r = await api.followUpDrafts(sessionId);
       if (r.drafts_created > 0) {
-        toast.success(
-          `${r.drafts_created} Outlook draft${r.drafts_created === 1 ? "" : "s"} created`,
-          {
-            id: toastId,
-            description:
-              (r.source === "commitments"
-                ? "Owners came from this session's tracked commitments. "
-                : "") + "Check your Drafts folder in Classic Outlook",
-          },
-        );
+        // Field repro 2026-08-19 (same session as the parser bug above):
+        // "created 10 of 10 drafts", HTTP 200 — and nine of the ten had
+        // no email address, because the GAL was handed bare first names.
+        // The user opened Outlook to ten drafts they could not send. On
+        // top of that, `mail.Save()` names no folder, so the drafts were
+        // not even in the mailbox they were looking at. So this toast
+        // now leads with what needs doing and always says where the
+        // drafts are: `r.message` is assembled backend-side (one source
+        // of truth, tested there) and carries the folder, the account
+        // and the unaddressed count.
+        const stuck = r.unaddressed ?? 0;
+        const title =
+          stuck > 0
+            ? `${r.drafts_created} draft${r.drafts_created === 1 ? "" : "s"} created — ${stuck} need${stuck === 1 ? "s" : ""} a recipient`
+            : `${r.drafts_created} Outlook draft${r.drafts_created === 1 ? "" : "s"} created`;
+        const description =
+          (r.source === "commitments"
+            ? "Owners came from this session's tracked commitments. "
+            : "") +
+          (r.message ||
+            "Check your Drafts folder in Classic Outlook.");
+        // A run with unsendable drafts is not a plain success — saying
+        // so in the toast's colour is the cheapest way to stop the user
+        // assuming the work is done.
+        (stuck > 0 ? toast.warning : toast.success)(title, {
+          id: toastId,
+          description,
+        });
       } else {
         // Three distinct empty states, three distinct messages. They used
         // to be one toast that blamed the model for not attributing

@@ -10,24 +10,35 @@ Design choices:
 - Uses Claude Haiku to draft per-attendee body (personalised wording).
 - Uses Outlook COM (win32com) to create the draft in the user's default
   Drafts folder.
-- Silently skips attendees we can't resolve to an email address — we do
-  a best-effort GAL (Global Address List) resolve for names from the
-  transcript, and fall back to using their display name only if the
-  resolve fails (user can still edit the To: field).
+- Never skips an attendee we can't resolve to an email address: the body
+  is useful either way and the user can fill in the To: field. What we
+  do NOT do any more is report such a draft as finished — see
+  `services/follow_up_recipients.py` for the resolution ladder and for
+  the delivery read-back that tells the user which folder and which
+  account the drafts actually landed in.
 """
 
 from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from core._precision import no_invented_precision
 from services.follow_up_owners import DraftResult, build_draft_plan
+from services.follow_up_recipients import (
+    DraftDelivery, draft_result, resolve_recipient,
+)
 from utils.com_worker import run_com
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Used in the user-facing message when the folder read-back below comes
+# back empty. Deliberately vague — naming a folder we did not verify is
+# the mistake this whole module is being corrected for.
+FALLBACK_LOCATION = "your Outlook Drafts folder"
 
 
 def _resolve_email(outlook_ns, name: str) -> Optional[str]:
@@ -53,6 +64,129 @@ def _resolve_email(outlook_ns, name: str) -> Optional[str]:
     except Exception as e:
         logger.debug(f"GAL resolve failed for {name!r}: {e}")
     return None
+
+
+# ── Where did the draft actually land? ───────────────────────────────
+#
+# `mail.Save()` takes no folder argument: the item goes to the default
+# Drafts folder of whichever profile/store COM attached to. On a machine
+# with more than one account — or where the user lives in the Outlook
+# PWA and COM is driving classic desktop Outlook against a different
+# profile — that is not the Drafts folder they are looking at, and the
+# app used to report "created 10 of 10" with no idea where "created"
+# meant. Every getter below is individually guarded: a missing read-back
+# degrades to "we could not confirm the folder", never to an exception
+# and never to a guess.
+
+
+def _safe_str(obj, attr: str) -> str:
+    try:
+        return str(getattr(obj, attr, "") or "")
+    except Exception:
+        return ""
+
+
+def _safe_attr(obj, attr: str):
+    """`getattr` that survives a COM property raising, not just missing."""
+    try:
+        return getattr(obj, attr, None)
+    except Exception:
+        return None
+
+
+def _store_account(outlook_ns, store) -> str:
+    """SMTP address of the account that owns `store`.
+
+    Outlook exposes no "which account is this folder in" property, so we
+    match the folder's Store against each Account's DeliveryStore by
+    StoreID — the one identifier that is stable across both. Falls back
+    to the store's display name (often the mailbox address anyway) and
+    finally to "", which the message reports honestly.
+    """
+    if store is None:
+        return ""
+    store_id = _safe_str(store, "StoreID")
+    if store_id:
+        try:
+            for account in outlook_ns.Accounts:
+                delivery = _safe_attr(account, "DeliveryStore")
+                if delivery is not None and \
+                        _safe_str(delivery, "StoreID") == store_id:
+                    smtp = _safe_str(account, "SmtpAddress")
+                    if smtp:
+                        return smtp
+        except Exception as e:
+            logger.debug(f"Could not enumerate Outlook accounts: {e}")
+    return _safe_str(store, "DisplayName")
+
+
+def _draft_location(outlook_ns, mail) -> Tuple[str, str, str]:
+    """(folder name, full folder path, owning account) for a saved item.
+
+    `mail.Parent` is the MAPIFolder the item was filed into — read AFTER
+    Save(), so it reflects where Outlook actually put it rather than
+    where we assumed it would go.
+    """
+    try:
+        folder = mail.Parent
+    except Exception as e:
+        logger.debug(f"Could not read the saved draft's parent folder: {e}")
+        return "", "", ""
+    if folder is None:
+        return "", "", ""
+    name = _safe_str(folder, "Name")
+    path = _safe_str(folder, "FolderPath")
+    try:
+        store = folder.Store
+    except Exception:
+        store = None
+    return name, path, _store_account(outlook_ns, store)
+
+
+def _account_count(outlook_ns) -> int:
+    try:
+        return int(outlook_ns.Accounts.Count)
+    except Exception:
+        return 0
+
+
+@dataclass
+class SavedDraft:
+    """A draft we have *verified* is in a folder."""
+
+    entry_id: str
+    folder_name: str = ""
+    folder_path: str = ""
+    account: str = ""
+
+    @property
+    def location(self) -> str:
+        return self.folder_name or self.folder_path
+
+
+def save_draft(outlook, outlook_ns, to_field: str, subject: str,
+               html_body: str) -> Optional[SavedDraft]:
+    """Create one draft and confirm it persisted. None if it did not.
+
+    `Save()` on a MailItem is not a promise. An item that actually
+    landed in a folder has an `EntryID`; one that did not, does not. The
+    caller treats None as "not created" rather than counting it, because
+    the alternative is what produced a "created 10 of 10" for drafts the
+    user could not find.
+    """
+    mail = outlook.CreateItem(0)  # 0 = olMailItem
+    mail.To = to_field
+    mail.Subject = subject
+    mail.HTMLBody = html_body
+    # Save to Drafts, never Send — and never Display(), which would open
+    # one window per owner.
+    mail.Save()
+    entry_id = _safe_str(mail, "EntryID")
+    if not entry_id:
+        return None
+    folder_name, folder_path, account = _draft_location(outlook_ns, mail)
+    return SavedDraft(entry_id=entry_id, folder_name=folder_name,
+                      folder_path=folder_path, account=account)
 
 
 async def _compose_body(
@@ -141,7 +275,9 @@ def draft_follow_up_emails(svc, session_id: str,
     Create an Outlook draft for each attendee with assigned action items.
     Returns a DraftResult — the draft count plus WHY the count is what it
     is, so the caller can tell "no action items" from "action items we
-    couldn't read" from "nobody individual owns anything".
+    couldn't read" from "nobody individual owns anything" — and, for a
+    run that did produce drafts, how many carry a real address and which
+    folder/account they went to.
 
     Owner attribution comes from services/follow_up_owners.py: the
     session's commitments sidecar when it has open, individually-owned
@@ -154,7 +290,8 @@ def draft_follow_up_emails(svc, session_id: str,
     runs on the process's single COM worker thread (utils/com_worker.py)
     — the Claude drafting calls above it are plain async network I/O and
     have no business serializing behind Outlook. Nothing returned from
-    the run_com() closure is a COM object; `created` is a plain int.
+    the run_com() closure is a COM object: `DraftDelivery` holds ints
+    and strings that were already copied out of COM inside the closure.
     """
     session_data = svc.session_svc.load(session_id)
     if not session_data:
@@ -168,6 +305,10 @@ def draft_follow_up_emails(svc, session_id: str,
     meeting_title = session_data.get("display_name") or f"Session {session_id}"
     decisions_md = session_data.get("decisions") or ""
     summary_md = session_data.get("summary") or ""
+    # Names only — `session.attendees` is a List[str] and there are no
+    # email addresses anywhere in the app. Used purely to widen a bare
+    # first name before it goes to the GAL.
+    attendees = list(session_data.get("attendees") or [])
 
     # Run Claude drafting calls concurrently (bounded by asyncio.gather)
     async def _gather():
@@ -197,7 +338,7 @@ def draft_follow_up_emails(svc, session_id: str,
             continue
         drafted_bodies.append((owner, tasks, res))
 
-    def _create_drafts() -> int:
+    def _create_drafts() -> DraftDelivery:
         import win32com.client  # Windows-only; imported lazily
 
         # Attach COM to the running Outlook instance (same pattern
@@ -208,33 +349,69 @@ def draft_follow_up_emails(svc, session_id: str,
             outlook = win32com.client.Dispatch("Outlook.Application")
         ns = outlook.GetNamespace("MAPI")
 
-        created = 0
+        # We deliberately do NOT pick a store to save into. Outlook gives
+        # us no reliable way to know which of several accounts a meeting's
+        # follow-ups belong in — the owners are names, not mailboxes, and
+        # the one address that resolved in the field report was on a
+        # different domain from the user's own mailbox, so "the account
+        # whose domain matches" would have picked wrong. Guessing a store
+        # would move drafts somewhere the user is even less likely to look.
+        # So: keep the default profile's Drafts folder, and report exactly
+        # where that turned out to be (below) instead of assuming.
+        accounts = _account_count(ns)
+        if accounts > 1:
+            logger.info(
+                f"Follow-up drafts: Outlook COM reports {accounts} accounts. "
+                f"Drafts go to the default profile's Drafts folder; the "
+                f"folder and account actually used are read back per item "
+                f"and reported to the user.")
+
+        delivery = DraftDelivery()
         for owner, tasks, (subject, body) in drafted_bodies:
             try:
-                email_addr = _resolve_email(ns, owner)
-                mail = outlook.CreateItem(0)  # 0 = olMailItem
-                if email_addr:
-                    mail.To = email_addr
-                else:
-                    # Couldn't resolve — put the name in the To field so SA sees who
-                    mail.To = owner
-                mail.Subject = subject
-                mail.HTMLBody = _body_to_html(body)
-                # Save to Drafts (not Send)
-                mail.Save()
-                created += 1
+                # Richest known form of this person's name first — a bare
+                # first name is what a GAL is worst at. See
+                # services/follow_up_recipients.py.
+                recipient = resolve_recipient(
+                    owner,
+                    resolver=lambda name: _resolve_email(ns, name),
+                    alias_index=plan.alias_index,
+                    attendees=attendees,
+                )
+                # Address when we have one; otherwise the fullest name we
+                # know, so the user has something to autocomplete from.
+                saved = save_draft(outlook, ns, recipient.to_field,
+                                   subject, _body_to_html(body))
+                if saved is None:
+                    delivery.note_unverified()
+                    logger.warning(
+                        f"Follow-up draft for {owner} has no EntryID after "
+                        f"Save() — it did not persist; not counting it")
+                    continue
+
+                delivery.note_created(
+                    addressed=recipient.addressed,
+                    location=saved.location,
+                    account=saved.account,
+                )
                 logger.info(
                     f"Follow-up draft created for {owner} "
-                    f"({email_addr or 'unresolved'})"
+                    f"({recipient.address or 'unresolved — name only'}) "
+                    f"in {saved.folder_path or saved.folder_name or 'unknown folder'}"
+                    + (f" [{saved.account}]" if saved.account else "")
                 )
             except Exception as e:
                 logger.warning(f"Could not create draft for {owner}: {e}")
-        return created
+        return delivery
 
-    created = run_com(_create_drafts, timeout=90.0)
+    delivery = run_com(_create_drafts, timeout=90.0)
 
     logger.info(
-        f"Follow-up drafts: created {created} of {len(owners)} drafts "
-        f"for session {session_id} (source={plan.source})"
+        f"Follow-up drafts: created {delivery.created} of {len(owners)} "
+        f"drafts for session {session_id} (source={plan.source}, "
+        f"addressed={delivery.addressed}, "
+        f"unaddressed={delivery.unaddressed}, "
+        f"unverified={delivery.unverified}, "
+        f"location={delivery.location or 'unconfirmed'})"
     )
-    return DraftResult.from_plan(plan, created=created)
+    return draft_result(plan, delivery, FALLBACK_LOCATION)

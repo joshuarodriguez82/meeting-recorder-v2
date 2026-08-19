@@ -305,3 +305,98 @@ def test_preview_omits_members_that_may_not_be_there():
     # Still fully described, for the post-export listing.
     for name in preview:
         assert db.MEMBER_DESCRIPTIONS[name]
+
+
+# ── app_version: the field that was null in every real bundle ────────
+#
+# A real exported bundle came back with `"app_version": null` and every
+# other field in versions.json populated. That file exists to say which
+# build produced a report, so a null there costs a round trip on every
+# single one.
+#
+# Root cause: only the third source below was ever implemented, and it
+# only works in a dev checkout. A release build runs the backend out of
+# the extracted runtime directory — which contains no `src-tauri/` and
+# no `package.json` — and nothing set the env var. Both of the first two
+# sources are new.
+
+
+def test_app_version_prefers_the_value_the_shell_handed_down(monkeypatch):
+    monkeypatch.setenv("MEETING_RECORDER_APP_VERSION", "9.9.9")
+    assert db.app_version() == "9.9.9"
+
+
+def test_app_version_reads_the_stamp_shipped_in_the_runtime_bundle(
+        tmp_path, monkeypatch):
+    """zip-bundle.py writes app_version.txt next to server.py, so a
+    packaged backend can name its own build with no help from the shell
+    and no checkout on disk."""
+    monkeypatch.delenv("MEETING_RECORDER_APP_VERSION", raising=False)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / db.APP_VERSION_FILE).write_text("2.37.0\n", encoding="utf-8")
+    monkeypatch.setattr(db, "_backend_dir", lambda: runtime)
+    assert db.app_version() == "2.37.0"
+
+
+def test_app_version_falls_back_to_the_dev_checkout(tmp_path, monkeypatch):
+    monkeypatch.delenv("MEETING_RECORDER_APP_VERSION", raising=False)
+    checkout = tmp_path / "checkout"
+    (checkout / "src-tauri").mkdir(parents=True)
+    (checkout / "src-tauri" / "tauri.conf.json").write_text(
+        json.dumps({"version": "2.37.0"}), encoding="utf-8")
+    monkeypatch.setattr(db, "_backend_dir", lambda: checkout / "backend")
+    assert db.app_version() == "2.37.0"
+
+
+def test_app_version_is_none_rather_than_a_guess(tmp_path, monkeypatch):
+    """A wrong version in a bug report is worse than a missing one —
+    the lesson of the 2.7.5/2.7.6/2.7.7 tag incident in AGENTS.md."""
+    monkeypatch.delenv("MEETING_RECORDER_APP_VERSION", raising=False)
+    monkeypatch.setattr(db, "_backend_dir", lambda: tmp_path / "nowhere")
+    assert db.app_version() is None
+
+
+def test_gather_versions_populates_app_version(monkeypatch):
+    monkeypatch.setenv("MEETING_RECORDER_APP_VERSION", "2.37.0")
+    assert db.gather_versions()["app_version"] == "2.37.0"
+
+
+def test_exported_versions_json_carries_the_app_version(tmp_path, monkeypatch):
+    """The end the user actually sees: the file inside the zip."""
+    root = _make_log_dir(tmp_path)
+    monkeypatch.setenv("MEETING_RECORDER_LOG_DIR", str(root))
+    monkeypatch.setenv("MEETING_RECORDER_APP_VERSION", "2.37.0")
+    result = db.build_diagnostics_zip(
+        settings=_Settings(), log_dir=root, out_dir=tmp_path / "out")
+    with zipfile.ZipFile(result["path"]) as zf:
+        versions = json.loads(zf.read("versions.json"))
+    assert versions["app_version"] == "2.37.0"
+
+
+def test_the_shell_passes_the_app_version_to_the_backend():
+    """The env var above only helps if something sets it. Nothing did —
+    that is the whole bug — so this pins the Rust side of the contract
+    the way the log-rotation tests pin the shell's append-mode handle.
+    """
+    lib_rs = (Path(__file__).resolve().parents[2]
+              / "src-tauri" / "src" / "lib.rs")
+    if not lib_rs.exists():  # pragma: no cover - source-tree-only check
+        pytest.skip("Tauri shell source not present in this tree")
+    source = lib_rs.read_text(encoding="utf-8")
+    assert '.env("MEETING_RECORDER_APP_VERSION"' in source, (
+        "src-tauri/src/lib.rs must pass MEETING_RECORDER_APP_VERSION to the "
+        "Python backend — without it a packaged build has no way to know "
+        "its own version and versions.json goes back to null.")
+    assert "app.package_info().version" in source
+
+
+def test_zip_bundle_stamps_the_version_into_the_runtime_bundle():
+    """The other half of the same contract: the stamp only exists if the
+    packaging step writes it."""
+    zip_bundle = Path(__file__).resolve().parents[2] / "zip-bundle.py"
+    if not zip_bundle.exists():  # pragma: no cover - source-tree-only check
+        pytest.skip("Packaging script not present in this tree")
+    source = zip_bundle.read_text(encoding="utf-8")
+    assert 'VERSION_FILE = "app_version.txt"' in source
+    assert "zf.writestr(VERSION_FILE" in source
