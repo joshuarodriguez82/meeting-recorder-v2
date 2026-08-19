@@ -15,6 +15,19 @@ the notification.
 Per-day JSON storage mirrors DailyBriefingService. Keyed by a stable
 meeting key (subject + start) so a meeting is briefed once even across
 multiple loop ticks.
+
+Staleness (asked when Knowledge-Folder retrieval was added to the
+brief in 2026-08): the key is deliberately NOT extended with a
+document-index fingerprint. The stored markdown is a snapshot for the
+notification and for diagnostics — nothing renders it. page.tsx reads
+only `key`, `subject` and `minutes_before` off /prep-brief/auto/pending
+to fire the "prep brief ready" toast; when the user actually opens the
+brief, MeetingBriefModal re-hits /prep-brief/from-meeting and gets a
+freshly generated one with documents retrieved at that moment. So a
+cached entry going stale cannot reach the user, while making the key
+depend on index state WOULD make a mid-window re-index re-notify the
+same meeting. `document_count` is stored alongside `related_count` so a
+cached entry still says what it was built from.
 """
 
 from __future__ import annotations

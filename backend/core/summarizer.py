@@ -1003,6 +1003,7 @@ class Summarizer:
         prior_notes: str,
         agenda: str = "",
         user_context: str = "",
+        document_notes: str = "",
     ) -> str:
         """Richer prep brief used by the click-from-calendar-tile flow.
         Includes hot-topics + suggested-questions sections and asks
@@ -1013,6 +1014,22 @@ class Summarizer:
         for the existing /prep-brief endpoint; this one is its
         structurally-richer cousin that knows about a specific
         upcoming meeting.
+
+        `document_notes` is the retrieved Knowledge-Folder context
+        (see services/prep_brief_context.py) — `### [DOC: <name>]`
+        blocks of excerpts from this client's SOWs / requirements /
+        notes. It is optional and defaults to "": when empty, the
+        prompt emitted here is byte-for-byte the prompt that was
+        emitted before documents existed, so a client with no
+        Knowledge Folder gets exactly the brief they got before.
+
+        Attribution matters more here than anywhere else in the app.
+        "The SOW says the cutover is in October" and "they said on the
+        last call the cutover is in October" are different claims with
+        different authority, so when documents are present the prompt
+        gains an explicit rule: document-sourced material is cited
+        `[DOC: <file name>]`, meeting-sourced material `[session_id]`,
+        and the two are never blended into one unattributed claim.
         """
         logger.info(
             f"Generating calendar-based prep brief: "
@@ -1041,6 +1058,34 @@ class Summarizer:
                 "questions / discussion points around it.\n"
                 f"{user_context.strip()}\n"
             )
+        # Retrieved Knowledge-Folder excerpts. Both the rule and the
+        # block are conditional on there being documents, so the
+        # zero-document prompt is unchanged from before this feature.
+        document_notes = (document_notes or "").strip()
+        doc_rule = ""
+        document_block = ""
+        if document_notes:
+            doc_rule = (
+                "Some context below comes from this client's Knowledge "
+                "Folder — written documents (SOWs, requirements, notes), "
+                "NOT things anyone said in a meeting. Keep the two "
+                "apart: a document records what was *contracted or "
+                "written down*, a meeting records what was *said*, and "
+                "they carry different authority. Cite a document "
+                "inline as `[DOC: <file name>]` using the literal file "
+                "name from its header, exactly as you cite a meeting "
+                "with `[id]`. Never attribute a document's contents to "
+                "a meeting or vice versa, never merge them into one "
+                "unattributed claim, and when a document and a meeting "
+                "disagree, say so explicitly and cite both.\n\n"
+            )
+            document_block = (
+                "\n\n=== CLIENT KNOWLEDGE FOLDER — DOCUMENT EXCERPTS ===\n"
+                "Excerpts retrieved from documents in this client's "
+                "Knowledge Folder, ranked by relevance to this meeting. "
+                "Cite each as `[DOC: <file name>]`.\n\n"
+                f"{document_notes}"
+            )
         try:
             result = await self._chat(
                 (
@@ -1056,6 +1101,7 @@ class Summarizer:
                     "`[ABC123]` using the literal session ID from the "
                     "header of that meeting's notes — the frontend "
                     "turns those into click-to-jump links.\n\n"
+                    f"{doc_rule}"
                     "Sections (use these exact headers):\n\n"
                     "## The story so far\n"
                     "3-5 bullets. The arc across these prior meetings — "
@@ -1085,6 +1131,7 @@ class Summarizer:
                     f"{agenda_block}"
                     f"{user_context_block}\n\n"
                     f"=== PRIOR MEETING NOTES ===\n{prior_notes}"
+                    f"{document_block}"
                 ),
                 max_tokens=self._budget(4096), timeout=120.0,
             )
@@ -1096,6 +1143,7 @@ class Summarizer:
     async def meeting_prep_brief(
         self, prior_notes: str, upcoming_subject: str,
         user_context: str = "",
+        document_notes: str = "",
     ) -> str:
         """Generate a prep brief from prior meeting notes for an upcoming meeting.
 
@@ -1103,7 +1151,12 @@ class Summarizer:
         situational context — exec asks, customer mood, specific agenda
         items, redlines just received, etc. It's treated as authoritative
         (the SA knows things the meeting history doesn't capture) so the
-        prompt instructs the model to weave it in explicitly."""
+        prompt instructs the model to weave it in explicitly.
+
+        document_notes is retrieved Knowledge-Folder context — see
+        meeting_prep_brief_from_calendar's docstring for the attribution
+        rules. Defaults to "", in which case the prompt is identical to
+        the pre-documents prompt."""
         logger.info(f"Generating prep brief for: {upcoming_subject} via {self._provider}/{self._model}")
         # Optional user-provided context block. Anchored with a heading
         # the prompt explicitly tells the model to honor; without that
@@ -1117,6 +1170,30 @@ class Summarizer:
                 "the appropriate brief sections and call it out under "
                 "'Suggested Discussion Points' when actionable.\n"
                 f"{user_context.strip()}\n"
+            )
+        # Knowledge-Folder excerpts, when the client has an indexed
+        # folder. Conditional so the no-documents prompt is unchanged.
+        document_notes = (document_notes or "").strip()
+        doc_rule = ""
+        document_block = ""
+        if document_notes:
+            doc_rule = (
+                "Some of the context below comes from this client's "
+                "Knowledge Folder — written documents (SOWs, requirements, "
+                "notes), not things anyone said in a meeting. A document "
+                "records what was contracted or written down; a meeting "
+                "records what was said. Keep them distinct: cite a "
+                "document inline as `[DOC: <file name>]` using the "
+                "literal file name from its header, never attribute a "
+                "document's contents to a meeting or vice versa, and when "
+                "the two disagree, say so and cite both.\n\n"
+            )
+            document_block = (
+                "\n\n=== CLIENT KNOWLEDGE FOLDER — DOCUMENT EXCERPTS ===\n"
+                "Excerpts retrieved from documents in this client's "
+                "Knowledge Folder, ranked by relevance to this meeting. "
+                "Cite each as `[DOC: <file name>]`.\n\n"
+                f"{document_notes}"
             )
         try:
             result = await self._chat(
@@ -1136,9 +1213,11 @@ class Summarizer:
                     "What you should raise or follow up on in this meeting.\n\n"
                     "Keep it tight and actionable. If a section has no content, "
                     "write 'None.'\n\n"
+                    f"{doc_rule}"
                     f"Upcoming meeting: {upcoming_subject}"
                     f"{user_block}\n\n"
                     f"=== PRIOR MEETING NOTES ===\n{prior_notes}"
+                    f"{document_block}"
                 ),
                 max_tokens=self._budget(4096), timeout=120.0,
             )
