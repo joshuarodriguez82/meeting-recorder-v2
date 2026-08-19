@@ -191,6 +191,88 @@ def _with_user_notes(instruction: str, transcript: str, notes: str = "") -> str:
     )
 
 
+def _fmt_anchor_date(anchor: str) -> str:
+    """Render an anchor date for a prompt.
+
+    Accepts an ISO date or datetime (``2026-08-19``,
+    ``2026-08-19T14:03:11.412``) and returns
+    ``"Wednesday, 19 August 2026 (2026-08-19)"``. The weekday matters:
+    "next Tuesday" is only resolvable if the model knows what day the
+    anchor was. Anything unparseable is passed through verbatim rather
+    than dropped — a fuzzy anchor still beats none.
+    """
+    raw = (anchor or "").strip()
+    if not raw:
+        return ""
+    date_part = raw.split("T", 1)[0].strip()
+    try:
+        from datetime import date as _date_cls
+        d = _date_cls.fromisoformat(date_part)
+    except (ValueError, TypeError):
+        return raw
+    return f"{d.strftime('%A, %d %B %Y')} ({d.isoformat()})"
+
+
+def _date_anchor(anchor: str, kind: str = "meeting") -> str:
+    """Pin every date the model writes to a known real-world date.
+
+    Field repro (2026-08): a 43-minute recording contained one bare
+    relative reference — a speaker saying "come October", with no year
+    stated anywhere in the call. The summary asserted a year two years
+    in the PAST, twice, once as a section heading. Nothing in the prompt
+    carried the meeting's own date, so the model had no anchor for the
+    relative reference and supplied a year from nowhere. A summary that
+    gets forwarded to a customer turned a deadline six weeks out into a
+    missed one.
+
+    Two rules do the work, and they have to be stated together:
+    RESOLUTION (relative references resolve forward from the anchor) and
+    the PROHIBITION (never emit a date component that is neither stated
+    in the source nor derivable from the anchor). Resolution alone
+    invites the model to "helpfully" pin down dates it is guessing at;
+    the prohibition alone leaves "come October" unresolvable.
+
+    `kind` selects the lead sentence — "meeting" for a transcript being
+    summarized, "today" for a forward-looking brief generated now.
+    Returns "" for an empty anchor so every caller can pass through
+    whatever it has and callers with no date emit the prompt they
+    emitted before.
+    """
+    shown = _fmt_anchor_date(anchor)
+    if not shown:
+        return ""
+    lead = (
+        f"This meeting took place on {shown}."
+        if kind == "meeting"
+        else f"Today's date is {shown}."
+    )
+    return (
+        "\n\n=== DATE ANCHOR — read this before you write any date ===\n"
+        f"{lead}\n"
+        "Resolve every relative time reference against that date. "
+        '"Come October", "next Tuesday", "end of quarter", "in two '
+        'weeks", "later this year" all mean the next such point on or '
+        "after the anchor date above — never an earlier one.\n\n"
+        "NEVER state a year, month or day that is not either stated "
+        "explicitly in the source material or derived from the anchor "
+        "date above. Specifically:\n"
+        "- A bare month with no year stays bare, or is resolved forward "
+        'from the anchor. "Come October" becomes "October" or the '
+        "October on or after the anchor date — never a different "
+        "year.\n"
+        "- Do not add a year, quarter or day-of-month to a source "
+        "reference that did not carry one just to make it look "
+        "precise.\n"
+        "- Do not invent a date for an undated commitment. If the "
+        "source did not say when, write that the timing was not "
+        "specified.\n"
+        "- This applies to section headings and table cells exactly as "
+        "it applies to prose.\n"
+        "An unqualified date is correct. An invented one is a factual "
+        "error the reader cannot catch.\n"
+    )
+
+
 def _visual_instruction(n_imgs: int) -> str:
     """Standard appendix telling the model to use any attached screenshots.
 
@@ -543,7 +625,8 @@ class Summarizer:
     async def summarize(self, transcript: str, prompt: str,
                          notes: str = "", template_name: str = "",
                          image_paths: Optional[List[str]] = None,
-                         copilot_observations: str = "") -> str:
+                         copilot_observations: str = "",
+                         meeting_date: str = "") -> str:
         """
         Summarize a transcript against a caller-supplied prompt. The
         server-side templates service resolves the template name into
@@ -554,19 +637,24 @@ class Summarizer:
         meeting — passed to Claude as visual context so the summary can
         reference what was on screen (diagrams, dashboards, slides).
 
+        `meeting_date` is the session's own start date (ISO date or
+        datetime). It anchors relative time references in the
+        transcript — see `_date_anchor`. Optional: "" emits the prompt
+        that was emitted before the anchor existed.
+
         `copilot_observations` is the deduplicated bullet-list output
-        from the live co-pilot ticks fired during the recording. When
-        present it's added to the prompt with explicit "you noted these
-        in-meeting" framing so the model can incorporate the SA's
-        real-time coaching into the final summary instead of re-deriving
-        everything from the raw transcript.
+        from the live co-pilot ticks fired during the recording. It is
+        the co-pilot MODEL'S OWN generated suggestions, not a record of
+        anything a participant said, and the prompt below is explicit
+        about that — see the provenance note there.
         """
         label = template_name or "custom"
         n_imgs = len(image_paths or [])
         logger.info(
             f"Requesting meeting summary (template={label}, "
             f"screenshots={n_imgs}, "
-            f"copilot_observations={'yes' if copilot_observations.strip() else 'no'}"
+            f"copilot_observations={'yes' if copilot_observations.strip() else 'no'}, "
+            f"meeting_date={meeting_date or 'unknown'}"
             f") via {self._provider}/{self._model}")
         instruction = prompt
         if n_imgs:
@@ -575,19 +663,67 @@ class Summarizer:
                 f"{'s' if n_imgs != 1 else ''} captured during the meeting "
                 f"(shown above). Use them as additional context — refer to "
                 f"what they show where it sharpens the summary.")
+        instruction = f"{instruction}{_date_anchor(meeting_date)}"
         if copilot_observations.strip():
+            # PROVENANCE. Everything below this line is generated text.
+            #
+            # Field repro (2026-08): a summary listed four "open routing
+            # questions raised by co-pilot". Exactly ONE matched something
+            # a participant actually asked; the other three appear nowhere
+            # in the 43-minute transcript. They were the co-pilot's own
+            # inventions, relayed to the reader as meeting content — in a
+            # summary that gets forwarded to the customer.
+            #
+            # The prompt used to end with "prefer the co-pilot's phrasing
+            # if it's clearer than the transcript evidence", which is
+            # precisely the instruction that launders speculation into
+            # record. "Do not invent details" was inert against it: the
+            # invention happened upstream, in the co-pilot, and the
+            # summarizer was being told to copy it out verbatim.
+            #
+            # The rule now is provenance, not tone: every factual claim in
+            # the body of a summary must be traceable to the transcript.
+            # Co-pilot output may direct ATTENTION; it may not become
+            # CONTENT. Anything that survives on co-pilot authority alone
+            # is quarantined in a section whose heading says so, placed
+            # last, so a reader forwarding the summary cannot mistake a
+            # generated question for one a participant asked.
             instruction = (
                 f"{instruction}\n\n"
-                "The user had a live co-pilot running during this meeting. "
-                "These are the deduplicated observations it surfaced in "
-                "real time (clarifying questions raised, risks flagged, "
-                "follow-ups suggested). Use them as a corroborating second "
-                "pass on the transcript — incorporate items that hold up "
-                "against the full transcript; do not invent details. When "
-                "you cover a follow-up the co-pilot flagged, prefer the "
-                "co-pilot's phrasing if it's clearer than the transcript "
-                "evidence.\n\n"
-                f"=== CO-PILOT IN-MEETING OBSERVATIONS ===\n"
+                "An AI co-pilot ran during this meeting. The lines below "
+                "are THAT MODEL'S OWN SUGGESTIONS, generated live from "
+                "partial transcript — questions it thought were worth "
+                "asking, risks it thought were worth flagging, follow-ups "
+                "it proposed. They are NOT a record of what anyone said. "
+                "No participant necessarily raised any of them, and some "
+                "of them are wrong.\n\n"
+                "Treat them ONLY as a checklist pointing you at parts of "
+                "the transcript you might otherwise skim past. Then:\n"
+                "- A co-pilot line may inform the body of the summary "
+                "ONLY where the transcript independently supports it. "
+                "Verify it against the transcript first, every time.\n"
+                "- Where it is supported, WRITE IT IN THE TRANSCRIPT'S "
+                "OWN WORDS, at the transcript's level of detail. Follow "
+                "the participants' phrasing, never the co-pilot's. Never "
+                "carry over a name, number, system, date or specific "
+                "that appears only in a co-pilot line.\n"
+                "- A co-pilot line the transcript does NOT support must "
+                "not appear anywhere that reads as a record of the "
+                "meeting — not in the narrative, not among decisions, "
+                "not among questions raised, not among action items.\n"
+                "- If such a line is still worth the reader's time, put "
+                "it at the very END of the summary, under exactly this "
+                "heading:\n"
+                "  ## Suggested follow-ups (AI-generated — not raised in "
+                "the meeting)\n"
+                "  Word each as a suggestion to the reader. Never "
+                "attribute one to a participant. Omit the whole section "
+                "if nothing qualifies; never pad it.\n"
+                "- Never write that the co-pilot's suggestions were "
+                "'raised', 'asked' or 'discussed' in the meeting.\n\n"
+                "=== AI CO-PILOT SUGGESTIONS "
+                "(machine-generated during the call — NOT meeting "
+                "content, NOT said by anyone) ===\n"
                 f"{copilot_observations.strip()}\n"
             )
         try:
@@ -835,6 +971,7 @@ class Summarizer:
     async def extract_action_items(
         self, transcript: str, notes: str = "",
         image_paths: Optional[List[str]] = None,
+        meeting_date: str = "",
     ) -> str:
         n_imgs = len(image_paths or [])
         logger.info(
@@ -856,6 +993,7 @@ class Summarizer:
             "to (things like 'need to follow up on X', 'reminder to send Y'), "
             "include those as action items owned by the user."
             + _visual_instruction(n_imgs)
+            + _date_anchor(meeting_date)
         )
         try:
             result = await self._chat(
@@ -871,6 +1009,7 @@ class Summarizer:
     async def extract_decisions(
         self, transcript: str, notes: str = "",
         image_paths: Optional[List[str]] = None,
+        meeting_date: str = "",
     ) -> str:
         """Extract decisions made with rationale — an auto-generated ADR log."""
         n_imgs = len(image_paths or [])
@@ -896,6 +1035,7 @@ class Summarizer:
             "If no decisions were made, write: 'No decisions made in this "
             "meeting.'"
             + _visual_instruction(n_imgs)
+            + _date_anchor(meeting_date)
         )
         try:
             result = await self._chat(
@@ -911,6 +1051,7 @@ class Summarizer:
     async def extract_structured(
         self, transcript: str, notes: str = "",
         image_paths: Optional[List[str]] = None,
+        meeting_date: str = "",
     ) -> dict:
         """One call → typed records for the engagement layer.
 
@@ -953,6 +1094,17 @@ class Summarizer:
             'them with "source":"notes". Use "" for unknown string '
             'fields, [] for empty arrays. Output nothing but the JSON.'
             + visuals_hint
+            + _date_anchor(meeting_date)
+            + (
+                # The anchor block tells prose extractors to SAY the
+                # timing was unspecified. This path has no prose — an
+                # unknown "due" is "", and a guessed one is exactly the
+                # invented-date failure the anchor exists to stop.
+                '\n\nFor "due", an unstated or unclear deadline is "" — '
+                "never a guessed date. Still output nothing but the "
+                "JSON object."
+                if (meeting_date or "").strip() else ""
+            )
         )
         prompt = _with_user_notes(instruction, transcript, notes)
         try:
@@ -1004,6 +1156,7 @@ class Summarizer:
         agenda: str = "",
         user_context: str = "",
         document_notes: str = "",
+        today_iso: str = "",
     ) -> str:
         """Richer prep brief used by the click-from-calendar-tile flow.
         Includes hot-topics + suggested-questions sections and asks
@@ -1122,7 +1275,8 @@ class Summarizer:
                     "and pressure-test decisions. Specific to the people "
                     "in the room.\n\n"
                     "Keep ALL sections tight — every bullet should "
-                    "earn its place. Trim ruthlessly.\n\n"
+                    "earn its place. Trim ruthlessly.\n"
+                    f"{_date_anchor(today_iso, kind='today')}\n"
                     f"=== UPCOMING MEETING ===\n"
                     f"Subject: {upcoming_subject}\n"
                     f"When: {upcoming_when}\n"
@@ -1144,6 +1298,7 @@ class Summarizer:
         self, prior_notes: str, upcoming_subject: str,
         user_context: str = "",
         document_notes: str = "",
+        today_iso: str = "",
     ) -> str:
         """Generate a prep brief from prior meeting notes for an upcoming meeting.
 
@@ -1212,7 +1367,8 @@ class Summarizer:
                     "## Suggested Discussion Points\n"
                     "What you should raise or follow up on in this meeting.\n\n"
                     "Keep it tight and actionable. If a section has no content, "
-                    "write 'None.'\n\n"
+                    "write 'None.'\n"
+                    f"{_date_anchor(today_iso, kind='today')}\n"
                     f"{doc_rule}"
                     f"Upcoming meeting: {upcoming_subject}"
                     f"{user_block}\n\n"
@@ -1229,6 +1385,7 @@ class Summarizer:
     async def extract_requirements(
         self, transcript: str, notes: str = "",
         image_paths: Optional[List[str]] = None,
+        meeting_date: str = "",
     ) -> str:
         n_imgs = len(image_paths or [])
         logger.info(
@@ -1253,6 +1410,7 @@ class Summarizer:
             "annotate their source in the Owner column as 'user notes'.\n"
             "If a section has no items, write 'None identified.'"
             + _visual_instruction(n_imgs)
+            + _date_anchor(meeting_date)
         )
         try:
             result = await self._chat(
@@ -1459,6 +1617,11 @@ class Summarizer:
             "the time, emit empty strings — do NOT guess a time. These "
             "fields place the meeting on the Record tab's timeline, so a "
             "wrong timestamp is worse than a missing one.\n"
+            "- Never state a year, month or day that is not either in "
+            "the briefing text or derived from today's date above. A "
+            "relative reference (\"Friday\", \"next week\", \"come "
+            "October\") resolves FORWARD from today's date, never to an "
+            "earlier one.\n"
             "- join_url: copy a Teams / Zoom / Google Meet URL verbatim "
             "if one appears with the meeting; empty string otherwise. "
             "Never construct one.\n\n"
