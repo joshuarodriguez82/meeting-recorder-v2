@@ -106,7 +106,11 @@ def test_extract_text_txt_and_md(tmp_path):
 
 
 def test_extract_text_unsupported_extension_is_skipped_with_reason(tmp_path):
-    p = tmp_path / "notes.csv"
+    # Was ".csv" until 2026-08-19, when CSV gained a real extractor (a
+    # field report found a knowledge folder indexing .xlsx while
+    # reporting "unsupported file type: .csv"). Uses a genuinely
+    # unknown extension now, so the test still means what it says.
+    p = tmp_path / "notes.xyz"
     p.write_text("a,b,c", encoding="utf-8")
     text, reason = extract_text(p)
     assert text == ""
@@ -278,7 +282,9 @@ def test_index_folder_report_counts_and_skip_reasons(tmp_path):
     folder.mkdir()
     (folder / "sow.txt").write_text("word " * 500, encoding="utf-8")
     (folder / "notes.md").write_text("meeting notes " * 5, encoding="utf-8")
-    (folder / "ignore.csv").write_text("a,b", encoding="utf-8")
+    # .csv is indexable as of 2026-08-19 — see the note on
+    # test_extract_text_unsupported_extension_is_skipped_with_reason.
+    (folder / "ignore.xyz").write_text("a,b", encoding="utf-8")
 
     recordings = tmp_path / "recordings"
     recordings.mkdir()
@@ -287,7 +293,7 @@ def test_index_folder_report_counts_and_skip_reasons(tmp_path):
     assert report["indexed"] == 2
     assert report["unchanged"] == 0
     assert len(report["skipped"]) == 1
-    assert report["skipped"][0]["file"].endswith("ignore.csv")
+    assert report["skipped"][0]["file"].endswith("ignore.xyz")
     assert "unsupported" in report["skipped"][0]["reason"].lower()
     assert report["total_chunks"] > 0
 
