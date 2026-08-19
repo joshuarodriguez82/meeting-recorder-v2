@@ -1153,6 +1153,21 @@ export const api = {
   // any of them), "generic_owners_only", or "unsupported_platform".
   // Collapsing those into one "nobody was attributed" toast was the bug
   // this field exists to fix. `source` is "commitments" | "action_items".
+  //
+  // A NON-zero drafts_created is not automatically good news either, so
+  // the run also reports what those drafts are and where they went:
+  //   addressed / unaddressed — a draft whose recipient could not be
+  //     resolved is still created (the body is useful, the user fills in
+  //     the To: field) but it CANNOT be sent, and rendering it as
+  //     finished is the same unreadable-vs-absent bug in a new place.
+  //   unverified — items the mail client accepted but did not confirm
+  //     persisting. Excluded from drafts_created on purpose.
+  //   location / account — which folder and which mailbox they landed
+  //     in. `mail.Save()` takes no folder, so this is read back after
+  //     the fact rather than assumed; either can be "" when the read-back
+  //     failed, and `message` then says so rather than naming a folder
+  //     nobody checked.
+  // `message` is the assembled sentence and is the string to show.
   followUpDrafts: (id: string, tone = "friendly-professional") =>
     request<{
       ok: boolean;
@@ -1161,6 +1176,11 @@ export const api = {
       source: string;
       message: string;
       owners: number;
+      addressed: number;
+      unaddressed: number;
+      unverified: number;
+      location: string;
+      account: string;
     }>(
       `/sessions/${id}/follow_up_drafts`,
       { method: "POST", body: JSON.stringify({ tone }) },

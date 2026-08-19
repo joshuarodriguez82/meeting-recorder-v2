@@ -6117,9 +6117,16 @@ async def process_full(session_id: str, req: ProcessFullRequest):
                 # `state` distinguishes "no action items" from "action
                 # items we could not read" from "all group-owned" — a
                 # zero here used to be indistinguishable from all three.
+                # `unaddressed` is the same idea one level on: a non-zero
+                # count is not automatically a good outcome, because a
+                # draft with no recipient cannot be sent.
                 stages["follow_up_drafts"] = (
                     f"ok ({result.created} drafts, state={result.state}"
                     + (f", source={result.source}" if result.source else "")
+                    + (f", unaddressed={result.unaddressed}"
+                       if result.unaddressed else "")
+                    + (f", unverified={result.unverified}"
+                       if result.unverified else "")
                     + ")"
                 )
             except Exception as e:
