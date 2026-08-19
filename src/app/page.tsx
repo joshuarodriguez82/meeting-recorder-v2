@@ -5,9 +5,9 @@ import { toast } from "sonner";
 import { api, formatBytes, openExternal, type Meeting, type SessionSummary } from "@/lib/api";
 import { refreshRecordingStatus, useRecordingStatus } from "@/lib/recording-status";
 import {
-  Mic, History, CheckSquare, Target, Search,
+  Mic, History, CheckSquare, Target, Library,
   LayoutDashboard, Settings as SettingsIcon, HelpCircle, Loader2,
-  Sparkles, MessageCircle, Handshake, BarChart3, FileSpreadsheet,
+  Sparkles, Handshake, BarChart3, FileSpreadsheet,
   Sun, PanelLeftClose, PanelLeftOpen, CheckCircle2,
 } from "lucide-react";
 import {
@@ -21,11 +21,10 @@ import { SettingsView } from "@/components/settings-view";
 import { SessionsView } from "@/components/sessions-view";
 import { FollowUpsView } from "@/components/follow-ups-view";
 import { DecisionsView } from "@/components/decisions-view";
-import { SearchView } from "@/components/search-view";
+import { KnowledgeView } from "@/components/knowledge-view";
 import { ClientsView } from "@/components/clients-view";
 import { EngagementView } from "@/components/engagement-view";
 import { PrepBriefView } from "@/components/prep-brief-view";
-import { QAView } from "@/components/qa-view";
 import { CommitmentsView } from "@/components/commitments-view";
 import { UsageGuideView } from "@/components/usage-guide-view";
 import { CalendarMonitor } from "@/components/calendar-monitor";
@@ -42,13 +41,22 @@ const NAV_ITEMS = [
   { id: "follow-ups", label: "Follow-Ups", icon: CheckSquare },
   { id: "commitments", label: "Commitments", icon: Handshake },
   { id: "decisions", label: "Decisions", icon: Target },
-  { id: "search", label: "Search", icon: Search },
-  { id: "qa", label: "Ask", icon: MessageCircle },
+  { id: "knowledge-base", label: "Knowledge Base", icon: Library },
   { id: "clients", label: "Clients", icon: LayoutDashboard },
   { id: "engagements", label: "Engagements", icon: FileSpreadsheet },
   { id: "insights", label: "Insights", icon: BarChart3 },
   { id: "prep-brief", label: "Prep Brief", icon: Sparkles },
 ];
+
+// Retired nav ids, mapped to their replacement. "search" and "qa" were
+// two tabs over one semantic index; they merged into "knowledge-base".
+// Anything still asking for the old ids (an onboarding CTA, a Today
+// card, a stored value from an older build) resolves here instead of
+// rendering a blank pane.
+const LEGACY_NAV: Record<string, string> = {
+  search: "knowledge-base",
+  qa: "knowledge-base",
+};
 
 // localStorage key for the nav rail's expanded/collapsed choice.
 const NAV_COLLAPSED_KEY = "navCollapsed";
@@ -118,7 +126,13 @@ function RailButton({
 
 export default function Home() {
   const [backendReady, setBackendReady] = useState(false);
-  const [nav, setNav] = useState<string>("record");
+  // `nav` is the resolved id every consumer below reads; `setNav` still
+  // accepts retired ids, which LEGACY_NAV rewrites on the way out.
+  // Deriving rather than normalising inside the setter keeps this a
+  // plain const — no extra hook, no new dependency for the effects
+  // keyed on `nav`.
+  const [navRaw, setNav] = useState<string>("record");
+  const nav = LEGACY_NAV[navRaw] ?? navRaw;
   // Nav rail expanded (icons + labels) vs. collapsed (icon-only).
   // Persisted so the choice survives an app restart. The initial state
   // is hard-coded to `false` and the stored value is applied in an
@@ -1066,8 +1080,7 @@ export default function Home() {
               {nav === "follow-ups" && "Track action items across every meeting"}
               {nav === "commitments" && "Every promise made in your meetings — who owes what, by when, status"}
               {nav === "decisions" && "Every decision, auto-generated ADR log"}
-              {nav === "search" && "Search across all transcripts"}
-              {nav === "qa" && "Ask Claude questions about your meetings — answers come with citations"}
+              {nav === "knowledge-base" && "Search every transcript and document — then have Claude answer from the same results, with citations"}
               {nav === "clients" && "Clients and their projects — drill in to see meetings"}
               {nav === "engagements" && "Per-client engagement register — requirements, decisions, actions & open questions rolled up across every meeting, exportable to Excel"}
               {nav === "insights" && "Cross-meeting analytics — time allocation, recurring topics, open loops"}
@@ -1132,14 +1145,9 @@ export default function Home() {
               <DecisionsView sessions={sessions} onOpenSession={openSession} />
             </ViewErrorBoundary>
           )}
-          {nav === "search" && (
-            <ViewErrorBoundary viewName="Search">
-              <SearchView onOpenSession={openSession} />
-            </ViewErrorBoundary>
-          )}
-          {nav === "qa" && (
-            <ViewErrorBoundary viewName="Ask">
-              <QAView onOpenSession={openSession} />
+          {nav === "knowledge-base" && (
+            <ViewErrorBoundary viewName="Knowledge Base">
+              <KnowledgeView onOpenSession={openSession} />
             </ViewErrorBoundary>
           )}
           {nav === "clients" && (

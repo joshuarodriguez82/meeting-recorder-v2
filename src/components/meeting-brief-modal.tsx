@@ -1,14 +1,19 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { api, type Meeting, type SessionSummary } from "@/lib/api";
+import {
+  api, type Meeting, type ReferencedDocument, type SessionSummary,
+} from "@/lib/api";
 import { toast } from "sonner";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Loader2, Sparkles, Copy, Mic, Clock, Users, Building2, RefreshCw } from "lucide-react";
+import {
+  Loader2, Sparkles, Copy, Mic, Clock, Users, Building2, RefreshCw,
+  FileText,
+} from "lucide-react";
 
 // One-click pre-meeting brief, opened from a calendar tile in the
 // Upcoming Meetings list.
@@ -25,6 +30,17 @@ import { Loader2, Sparkles, Copy, Mic, Clock, Users, Building2, RefreshCw } from
 //      The story so far / Hot topics / Open commitments / Suggested
 //      questions. Inline `[id]` citations are rendered as click-to-jump
 //      buttons by AnswerWithCitations in this file.
+//   4. The backend ALSO semantically retrieves excerpts from this
+//      client's Knowledge Folder (SOWs, requirements, notes) and hands
+//      them to Claude under their own header, cited inline as
+//      `[DOC: <file name>]`. Those render below as document chips —
+//      deliberately a different affordance from a session citation,
+//      because "the SOW says the cutover is in October" and "they said
+//      on the last call the cutover is in October" are different claims
+//      with different authority. `referenced_documents` is the document
+//      equivalent of `referenced_sessions`; it comes back empty for a
+//      client with no Knowledge Folder, and everything below then
+//      renders exactly as it did before.
 //
 // The "Open commitments" section will be empty until the commitments
 // tracker ships — Claude will dutifully write "None." which is the
@@ -58,6 +74,8 @@ export function MeetingBriefModal({
     display_name: string;
     started_at: string | null;
   }>>([]);
+  const [referencedDocs, setReferencedDocs] =
+    useState<ReferencedDocument[]>([]);
   const [lastMeetingAt, setLastMeetingAt] = useState<string | null>(null);
   // Free-text the user types in to feed the LLM context the invite +
   // meeting history can't see (exec asks, recent emails, customer mood,
@@ -121,6 +139,7 @@ export function MeetingBriefModal({
       });
       setBrief(res.markdown || "");
       setReferenced(res.referenced_sessions || []);
+      setReferencedDocs(res.referenced_documents || []);
       setLastMeetingAt(res.last_meeting_at);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -135,6 +154,7 @@ export function MeetingBriefModal({
     if (!open || !meeting) return;
     setBrief("");
     setReferenced([]);
+    setReferencedDocs([]);
     setLastMeetingAt(null);
     setUserContext("");
     void generateBrief("");
@@ -173,6 +193,7 @@ export function MeetingBriefModal({
               project={project}
               lastMeetingAt={lastMeetingAt}
               referencedCount={referenced.length}
+              documentCount={referencedDocs.length}
             />
           )}
 
@@ -235,11 +256,14 @@ export function MeetingBriefModal({
           )}
 
           {!loading && !error && brief && (
-            <BriefBody
-              markdown={brief}
-              referenced={referenced}
-              onOpenSession={onOpenSession}
-            />
+            <>
+              <BriefBody
+                markdown={brief}
+                referenced={referenced}
+                onOpenSession={onOpenSession}
+              />
+              <SourceDocuments documents={referencedDocs} />
+            </>
           )}
         </div>
 
@@ -258,7 +282,10 @@ export function MeetingBriefModal({
             Use for recording
           </Button>
           <span className="text-[10px] text-muted-foreground ml-auto italic">
-            Brief generated from {referenced.length} prior session{referenced.length === 1 ? "" : "s"}.
+            Brief generated from {referenced.length} prior session{referenced.length === 1 ? "" : "s"}
+            {referencedDocs.length > 0
+              ? ` and ${referencedDocs.length} knowledge-folder document${referencedDocs.length === 1 ? "" : "s"}`
+              : ""}.
           </span>
         </div>
       </DialogContent>
@@ -269,13 +296,14 @@ export function MeetingBriefModal({
 // ── Meeting context header ──────────────────────────────────────────
 
 function MeetingHeader({
-  meeting, client, project, lastMeetingAt, referencedCount,
+  meeting, client, project, lastMeetingAt, referencedCount, documentCount,
 }: {
   meeting: Meeting;
   client: string;
   project: string;
   lastMeetingAt: string | null;
   referencedCount: number;
+  documentCount: number;
 }) {
   const start = new Date(meeting.start);
   const startStr = start.toLocaleString(undefined, {
@@ -309,7 +337,10 @@ function MeetingHeader({
       </div>
       {lastMeetingDelta && (
         <div className="text-[11px] text-muted-foreground pt-1">
-          Last meeting in scope: {lastMeetingDelta} · Briefing on {referencedCount} prior session{referencedCount === 1 ? "" : "s"}.
+          Last meeting in scope: {lastMeetingDelta} · Briefing on {referencedCount} prior session{referencedCount === 1 ? "" : "s"}
+          {documentCount > 0
+            ? ` + ${documentCount} knowledge-folder document${documentCount === 1 ? "" : "s"}`
+            : ""}.
         </div>
       )}
     </div>
@@ -324,8 +355,21 @@ function MeetingHeader({
 // section structure is still legible. Adding a real markdown renderer
 // would be ~10 KB of dependency and the existing app uses the same
 // preformatted approach throughout, so we're staying consistent.
+//
+// Two citation forms, rendered two different ways on purpose:
+//
+//   [ABC123]              a prior meeting     → clickable, jumps to it
+//   [DOC: ACME SOW.docx]  a knowledge-folder  → file chip, names the
+//                         document              document, not clickable
+//                                               (there's no timestamp
+//                                               to jump to)
+//
+// The visual split is the point: a claim sourced from a signed SOW and
+// a claim sourced from something someone said on a call carry very
+// different authority, and the reader has to be able to tell which is
+// which without re-reading the sentence.
 
-const CITATION_RE = /\[([A-Za-z0-9]{4,16})\]/g;
+const CITATION_RE = /\[DOC:\s*([^\]]{1,120})\]|\[([A-Za-z0-9]{4,16})\]/g;
 
 function BriefBody({
   markdown, referenced, onOpenSession,
@@ -349,23 +393,43 @@ function BriefBody({
   let match: RegExpExecArray | null;
   CITATION_RE.lastIndex = 0;
   while ((match = CITATION_RE.exec(markdown)) !== null) {
-    const sid = match[1];
-    // Only treat it as a citation if Claude actually referenced a
-    // session we know about. Otherwise it's something else in
-    // brackets (e.g. the original action-item template's "[Owner]").
-    if (!byId[sid]) continue;
+    const docName = match[1];
+    const sid = match[2];
+    // `[DOC: …]` is unambiguous syntax the prompt asks for explicitly,
+    // so it renders as a document chip whether or not the exact file
+    // name round-trips through referenced_documents.
+    if (docName === undefined) {
+      // Only treat it as a session citation if Claude actually
+      // referenced a session we know about. Otherwise it's something
+      // else in brackets (e.g. the action-item template's "[Owner]").
+      if (!byId[sid]) continue;
+    }
     if (match.index > lastIdx) parts.push(markdown.slice(lastIdx, match.index));
-    const meta = byId[sid];
-    parts.push(
-      <button
-        key={`${sid}-${match.index}`}
-        onClick={() => onOpenSession(sid)}
-        className="inline-flex items-center px-1.5 mx-0.5 rounded bg-primary/10 hover:bg-primary/20 text-primary text-[11px] font-medium tabular-nums transition-colors align-baseline"
-        title={`Open ${meta.display_name}${meta.started_at ? ` · ${(meta.started_at || "").slice(0, 10)}` : ""}`}
-      >
-        {sid}
-      </button>
-    );
+    if (docName !== undefined) {
+      const name = docName.trim();
+      parts.push(
+        <span
+          key={`doc-${name}-${match.index}`}
+          className="inline-flex items-center gap-1 px-1.5 mx-0.5 rounded bg-amber-500/10 text-amber-700 dark:text-amber-400 text-[11px] font-medium transition-colors align-baseline"
+          title={`From the client's Knowledge Folder: ${name}`}
+        >
+          <FileText className="h-2.5 w-2.5 shrink-0" />
+          {name}
+        </span>
+      );
+    } else {
+      const meta = byId[sid];
+      parts.push(
+        <button
+          key={`${sid}-${match.index}`}
+          onClick={() => onOpenSession(sid)}
+          className="inline-flex items-center px-1.5 mx-0.5 rounded bg-primary/10 hover:bg-primary/20 text-primary text-[11px] font-medium tabular-nums transition-colors align-baseline"
+          title={`Open ${meta.display_name}${meta.started_at ? ` · ${(meta.started_at || "").slice(0, 10)}` : ""}`}
+        >
+          {sid}
+        </button>
+      );
+    }
     lastIdx = match.index + match[0].length;
   }
   if (lastIdx < markdown.length) parts.push(markdown.slice(lastIdx));
@@ -374,6 +438,39 @@ function BriefBody({
     <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed bg-muted/30 rounded-lg p-4">
       {parts}
     </pre>
+  );
+}
+
+// ── Knowledge-Folder provenance ─────────────────────────────────────
+//
+// The document counterpart of the "briefing on N prior sessions" line.
+// Renders nothing at all when the client has no Knowledge Folder, so a
+// client without one sees exactly what they saw before — no empty
+// section, no "no documents found".
+
+function SourceDocuments({ documents }: { documents: ReferencedDocument[] }) {
+  if (documents.length === 0) return null;
+  return (
+    <div className="rounded-lg border bg-muted/20 p-3 space-y-2">
+      <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+        Knowledge-folder documents used
+      </div>
+      <ul className="space-y-1">
+        {documents.map((d) => (
+          <li
+            key={d.doc_path || d.doc_name}
+            className="flex items-center gap-2 text-xs text-muted-foreground"
+            title={d.doc_path || d.doc_name}
+          >
+            <FileText className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400" />
+            <span className="flex-1 truncate">{d.doc_name}</span>
+            <span className="shrink-0 text-[10px] tabular-nums">
+              {d.chunk_count} excerpt{d.chunk_count === 1 ? "" : "s"}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
