@@ -5652,6 +5652,22 @@ async def _llm_call_with_retry(coro_factory, op_name: str,
     raise RuntimeError(f"{op_name}: unreachable retry exit")
 
 
+def _meeting_date(session) -> str:
+    """The session's own start date, for the summarizer's date anchor.
+
+    Without this the prompt carries no real-world date and a bare
+    relative reference in the transcript ("come October") gets a year
+    invented for it — see `core.summarizer._date_anchor`. Returns "" for
+    a session with no start time, which makes every summarizer path fall
+    back to the un-anchored prompt rather than anchoring on a wrong date.
+    """
+    started = getattr(session, "started_at", None)
+    try:
+        return started.isoformat() if started else ""
+    except AttributeError:
+        return str(started or "")
+
+
 async def _run_extraction(session_id: str, extractor_name: str, field_name: str,
                            export_fn_name: str, extra_arg=None):
     svc.load_settings()
@@ -5675,10 +5691,14 @@ async def _run_extraction(session_id: str, extractor_name: str, field_name: str,
         # Wrap the actual LLM call in the retry helper. Coro factory
         # rebuilds the coroutine on each retry — coroutines can't be
         # awaited twice.
+        meeting_date = _meeting_date(session)
+
         async def _invoke():
             if extra_arg is not None:
-                return await method(transcript, extra_arg, notes=user_notes)
-            return await method(transcript, notes=user_notes)
+                return await method(transcript, extra_arg, notes=user_notes,
+                                    meeting_date=meeting_date)
+            return await method(transcript, notes=user_notes,
+                                meeting_date=meeting_date)
         result = await _llm_call_with_retry(_invoke, extractor_name)
         setattr(session, field_name, result)
         await asyncio.to_thread(svc.session_svc.save, session)
@@ -5706,14 +5726,28 @@ def _copilot_observations_blob(session) -> str:
     Dedupe is normalized-substring-aware: an earlier tick that said
     'Ask about VPC peering' won't repeat later as 'ask about vpc
     peering' — same observation surfaces once. We preserve original
-    casing from the first occurrence."""
+    casing from the first occurrence.
+
+    The section headers carry provenance on purpose. They used to read
+    "Clarifying questions raised" / "Risks flagged" / "Follow-ups
+    suggested" — passive phrasings that read as though a PARTICIPANT
+    raised or flagged them. They didn't: every line here is the
+    co-pilot model's own generated suggestion. A summary duly reported
+    four "open routing questions raised by co-pilot" of which three
+    were never said by anyone. Each header now names the co-pilot as
+    the author, so the framing can't launder speculation into record
+    even before the summarizer's own provenance rules apply."""
     ticks = list(getattr(session, "copilot_ticks", []) or [])
     if not ticks:
         return ""
     sections = (
-        ("clarifying_questions", "Clarifying questions raised"),
-        ("risks", "Risks flagged"),
-        ("follow_ups", "Follow-ups suggested"),
+        ("clarifying_questions",
+         "Questions the AI co-pilot suggested asking "
+         "(generated, not asked by anyone)"),
+        ("risks",
+         "Risks the AI co-pilot generated (not raised by anyone)"),
+        ("follow_ups",
+         "Follow-ups the AI co-pilot proposed (not agreed by anyone)"),
     )
     out_lines: list[str] = []
     for key, header in sections:
@@ -5758,6 +5792,7 @@ async def summarize_session(session_id: str, req: TemplateRequest):
                 template_name=req.template,
                 image_paths=list(session.screenshots or []),
                 copilot_observations=_copilot_observations_blob(session),
+                meeting_date=_meeting_date(session),
             )
         result = await _llm_call_with_retry(_summarize, "summarize")
         session.summary = result
@@ -6004,6 +6039,7 @@ async def process_full(session_id: str, req: ProcessFullRequest):
         transcript = session.full_transcript()
         notes = session.notes or ""
         images = list(session.screenshots or [])
+        meeting_date = _meeting_date(session)
 
         async def _do_summary():
             prompt_text = await asyncio.to_thread(
@@ -6012,18 +6048,21 @@ async def process_full(session_id: str, req: ProcessFullRequest):
                 lambda: svc.summarizer.summarize(
                     transcript, prompt=prompt_text, notes=notes,
                     template_name=req.template, image_paths=images,
-                    copilot_observations=_copilot_observations_blob(session)),
+                    copilot_observations=_copilot_observations_blob(session),
+                    meeting_date=meeting_date),
                 "summarize")
 
         async def _do_markdown(method_name):
             method = getattr(svc.summarizer, method_name)
             return await _llm_call_with_retry(
-                lambda: method(transcript, notes=notes, image_paths=images),
+                lambda: method(transcript, notes=notes, image_paths=images,
+                               meeting_date=meeting_date),
                 method_name)
 
         async def _do_structured():
             parsed = await svc.summarizer.extract_structured(
-                transcript, notes=notes, image_paths=images)
+                transcript, notes=notes, image_paths=images,
+                meeting_date=meeting_date)
             created_at = session.started_at.isoformat() if session.started_at else ""
             return stamp_records(parsed, session.session_id, created_at)
 
@@ -6148,7 +6187,8 @@ async def _extract_and_save(
                 transcript, prompt=prompt_text,
                 notes=notes, template_name=template,
                 image_paths=list(session.screenshots or []),
-                copilot_observations=_copilot_observations_blob(session))
+                copilot_observations=_copilot_observations_blob(session),
+                meeting_date=_meeting_date(session))
         result = await _llm_call_with_retry(_summarize, method_name)
         session.template = template
     else:
@@ -6161,6 +6201,7 @@ async def _extract_and_save(
             return await method(
                 transcript, notes=notes,
                 image_paths=list(session.screenshots or []),
+                meeting_date=_meeting_date(session),
             )
         result = await _llm_call_with_retry(_extract, method_name)
     setattr(session, field_name, result)
@@ -6186,7 +6227,8 @@ async def _extract_structured_and_save(session_id: str) -> dict:
     parsed = await svc.summarizer.extract_structured(
         session.full_transcript(),
         notes=session.notes or "",
-        image_paths=list(session.screenshots or []))
+        image_paths=list(session.screenshots or []),
+        meeting_date=_meeting_date(session))
     created_at = session.started_at.isoformat() if session.started_at else ""
     stamped = stamp_records(parsed, session.session_id, created_at)
     counts: dict = {}
@@ -7082,6 +7124,10 @@ async def prep_brief_from_meeting(req: PrepBriefFromMeetingRequest):
             # "" when nothing was retrieved — the summarizer then emits
             # the exact prompt it emitted before documents existed.
             document_notes=_prep_format_documents(doc_hits),
+            # A brief is written NOW about a meeting in the FUTURE, so
+            # today is the anchor a relative reference in the prior
+            # notes or the agenda resolves against.
+            today_iso=datetime.now().date().isoformat(),
         )
     except Exception as e:
         logger.exception("Calendar prep brief failed")
@@ -7183,7 +7229,10 @@ async def prep_brief(req: PrepBriefRequest):
             prior_notes, req.subject, user_context=req.user_context,
             # "" when nothing was retrieved — the summarizer then emits
             # the exact prompt it emitted before documents existed.
-            document_notes=_prep_format_documents(doc_hits))
+            document_notes=_prep_format_documents(doc_hits),
+            # See the from-meeting endpoint: today anchors any relative
+            # date the prior notes carry.
+            today_iso=datetime.now().date().isoformat())
         return {"brief": brief,
                 "related_count": len(related),
                 "referenced_documents": ref_docs,
