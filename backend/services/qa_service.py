@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from typing import AsyncIterator, List, Optional
 
+from core._precision import no_invented_precision
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -126,8 +127,16 @@ class QAService:
             "3. If the transcript doesn't cover it, say so plainly: "
             "\"I don't see that in this call yet.\"\n"
             "4. Don't add any [citation @ mm:ss] markers — the user "
-            "can scroll the live transcript themselves.\n\n"
-            f"USER QUESTION: {query}\n\n"
+            "can scroll the live transcript themselves.\n"
+            # Full block despite the short answer. This is the panel the
+            # user opens mid-call to ask "what was that number she just
+            # said?" — a fabricated figure here gets repeated out loud
+            # to the room seconds later, which is the least recoverable
+            # place in the app for one. Unlike coach_tick this is
+            # user-initiated and one-shot, not a poll loop, so the block
+            # is paid once per question rather than every 15 seconds.
+            + no_invented_precision()
+            + f"\nUSER QUESTION: {query}\n\n"
             f"LIVE TRANSCRIPT:\n{context}\n\n"
             "ANSWER:"
         )
@@ -236,8 +245,16 @@ class QAService:
             "5. Be concise — 2-5 sentences usually suffices. Use bullet "
             "points only if the user asked for a list.\n"
             "6. If multiple sources (meetings, documents, or both) "
-            "disagree or evolved over time, say so and cite each.\n\n"
-            f"USER QUESTION: {query}\n\n"
+            "disagree or evolved over time, say so and cite each.\n"
+            # Full block. Rules 1, 2 and 4 above already cover invented
+            # IDs, invented document names and answering beyond the
+            # excerpts — but "she identified seven candidate intents"
+            # over a list of six violates none of them: every cited ID
+            # is real and every claim is in the excerpts. The count is
+            # the invention. Same for a deadline synthesised out of a
+            # vague one. The shared block is what closes that.
+            + no_invented_precision()
+            + f"\nUSER QUESTION: {query}\n\n"
             f"EXCERPTS:\n{excerpts_str}\n\n"
             "ANSWER:"
         )

@@ -365,6 +365,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from config.settings import Settings, USER_DATA_DIR
 from core.audio_capture import list_input_devices, list_output_devices
+from core._precision import no_invented_precision
 from services.template_service import TemplateService
 from services.copilot_mode_service import CoPilotModeService
 from services.copilot_meeting_type_service import CoPilotMeetingTypeService
@@ -4488,8 +4489,15 @@ async def suggest_tagging(req: SuggestTaggingRequest):
         "to this client based on its title and/or summary.\n\n"
         "Return ONLY a JSON array, no other text:\n"
         '[{"id": "ABC123", "confidence": 0.0-1.0, "reason": "short why"}]\n\n'
-        "Only include items with confidence >= 0.5.\n\n"
-        "Meetings:\n" + "\n".join(candidate_lines)
+        "Only include items with confidence >= 0.5.\n"
+        # The applicable half of the shared rule. The output is a JSON
+        # array of ids drawn from a list we supplied, so IDENTIFIERS is
+        # the load-bearing clause — an id the model composes rather than
+        # copies silently drops a suggestion (it won't match `by_id`
+        # below), and a "reason" naming a client or system nobody
+        # mentioned is what makes a wrong suggestion look researched.
+        + no_invented_precision()
+        + "\nMeetings:\n" + "\n".join(candidate_lines)
     )
 
     try:
@@ -5657,7 +5665,7 @@ def _meeting_date(session) -> str:
 
     Without this the prompt carries no real-world date and a bare
     relative reference in the transcript ("come October") gets a year
-    invented for it — see `core.summarizer._date_anchor`. Returns "" for
+    invented for it — see `core._precision.date_anchor`. Returns "" for
     a session with no start time, which makes every summarizer path fall
     back to the un-anchored prompt rather than anchoring on a wrong date.
     """
