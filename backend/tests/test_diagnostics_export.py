@@ -49,8 +49,8 @@ class _Settings:
     live_openai_api_key: str = "sk-proj-DDDDDDDDDDDDDDDDDDDDDD"
     live_anthropic_api_key: str = "sk-ant-api03-EEEEEEEEEEEEEEEEEEEE"
     # personal data that is not a credential
-    email_to: str = "joshua.p.rodriguez@example.com"
-    recordings_dir: str = r"C:\Users\jrodriguez\AppData\Local\MeetingRecorder"
+    email_to: str = "user@example.com"
+    recordings_dir: str = r"C:\Users\sampleuser\AppData\Local\MeetingRecorder"
     cloud_mirror_dir: str = r"G:\Shared drives\Contoso\Recordings"
     session_archive_dir: str = ""
     openai_base_url: str = "https://openrouter.ai/api/v1"
@@ -104,7 +104,7 @@ def test_personal_data_is_reduced_to_presence_booleans():
     out = db.redact_settings(_Settings())
     blob = json.dumps(out)
 
-    assert "jrodriguez" not in blob
+    assert "sampleuser" not in blob
     assert "example.com" not in blob
     assert "Contoso" not in blob
     assert "Jane Doe" not in blob
@@ -255,8 +255,8 @@ def test_zip_contains_no_secrets_or_transcript_text(tmp_path, monkeypatch):
     for forbidden in (
         "sk-ant-api03-AAAA", "hf_BBBB", "sk-proj-CCCC",
         "nk-FUTURE-SECRET-9999",          # the newly added secret
-        "joshua.p.rodriguez@example.com",  # email
-        "jrodriguez",                      # username inside paths
+        "user@example.com",  # email
+        "sampleuser",                      # username inside paths
         "Contoso",                         # client name
         "Jane Doe",                        # a person
     ):

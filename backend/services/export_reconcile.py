@@ -1,7 +1,7 @@
 """Reconciliation for per-client Designated Folder exports.
 
 Why this exists (field report 2026-08-07): a user set a client's
-Designated Folder to `G:\\My Drive\\Aon`, tagged meetings to that
+Designated Folder to `G:\\My Drive\\Zorg`, tagged meetings to that
 client, and found the folder holding only a subset of the expected
 files. Nothing was broken in the copy path — `ExportWorker` had simply
 never been *told* about those sessions.
@@ -159,9 +159,9 @@ def normalize_client(name: str) -> str:
 
     The 2026-08-07 report also exposed a split between this and the
     Clients UI, which compared `session.client === selected` with an
-    exact, case-sensitive `===`. A session tagged "AON" therefore
-    exported into the "Aon" folder (resolved case-insensitively) while
-    being invisible under "Aon" in the UI (compared case-sensitively).
+    exact, case-sensitive `===`. A session tagged "ZORG" therefore
+    exported into the "Zorg" folder (resolved case-insensitively) while
+    being invisible under "Zorg" in the UI (compared case-sensitively).
     Everything that groups sessions by client goes through this.
     """
     return (name or "").strip().lower()

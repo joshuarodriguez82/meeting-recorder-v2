@@ -14,7 +14,7 @@ The five built-in templates (General, Requirements Gathering, Design Review, Spr
 Clicking **Use** on a calendar meeting now auto-fills the Client field when attendee email domains match a client you've tagged before.
 
 - Learns from your own history — no setup, no config. First few times you tag meetings with `@acme.com` attendees to "Acme," the next matching meeting auto-fills.
-- Internal domain (your own `@ttecdigital.com`) is auto-detected as the one that appears in the most sessions and excluded — otherwise every client would look like a match.
+- Internal domain (your own `@your-company.com`) is auto-detected as the one that appears in the most sessions and excluded — otherwise every client would look like a match.
 - Ties or no overlap → leaves Client blank, you pick manually as before.
 
 ## Internals

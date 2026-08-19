@@ -1006,7 +1006,7 @@ function _dateAtomToParts(atom, fallbackYear) {
 // A date atom ANYWHERE in the label, not just immediately hugging a
 // time. Outlook Web writes the date AFTER the time range:
 //
-//   "Homeserve, 8:30 AM to 9:00 AM, Friday, August 14, 2026, ..."
+//   "Globex, 8:30 AM to 9:00 AM, Friday, August 14, 2026, ..."
 //
 // TIME_RANGE_RE only captures a date atom directly preceding each time
 // atom, so on a real week view it matched the times and saw no date at

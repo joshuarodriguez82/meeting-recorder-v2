@@ -41,10 +41,10 @@ SESSION_HIT = {
 DOCUMENT_HIT = {
     "source": "document",
     "doc_name": "ACME_SOW_v3.docx",
-    "doc_path": "/Users/j/Knowledge/ACME/ACME_SOW_v3.docx",
+    "doc_path": "/Users/sampleuser/Knowledge/ACME/ACME_SOW_v3.docx",
     "client": "ACME",
     "text": "Cutover is scheduled for the first weekend of October 2026. "
-            "TTEC Digital provides 40 hours of hypercare.",
+            "Northwind Digital provides 40 hours of hypercare.",
     "similarity": 0.7710,
 }
 
@@ -55,14 +55,14 @@ LEGACY_SESSION_HIT["display_name"] = "ACME — Kickoff"
 
 CLIENT_CONFIGS = {
     "ACME": {
-        "export_folder": "/Users/j/Drive/ACME/Exports",
-        "knowledge_folder": "/Users/j/Knowledge/ACME",
+        "export_folder": "/Users/sampleuser/Drive/ACME/Exports",
+        "knowledge_folder": "/Users/sampleuser/Knowledge/ACME",
         "display_name": "ACME Health",
     },
     # The double-indexing trap: knowledge folder == export folder.
     "Globex": {
-        "export_folder": "/Users/j/Drive/Globex/Exports",
-        "knowledge_folder": "/Users/j/Drive/Globex/Exports",
+        "export_folder": "/Users/sampleuser/Drive/Globex/Exports",
+        "knowledge_folder": "/Users/sampleuser/Drive/Globex/Exports",
         "display_name": "Globex",
     },
     "Initech": {
@@ -75,14 +75,14 @@ CLIENT_CONFIGS = {
 KNOWLEDGE = {
     "ACME": {
         "client": "ACME",
-        "knowledge_folder": "/Users/j/Knowledge/ACME",
+        "knowledge_folder": "/Users/sampleuser/Knowledge/ACME",
         "folder_present": True,
         "indexed_documents": 12,
         "total_chunks": 341,
     },
     "Globex": {
         "client": "Globex",
-        "knowledge_folder": "/Users/j/Drive/Globex/Exports",
+        "knowledge_folder": "/Users/sampleuser/Drive/Globex/Exports",
         "folder_present": False,
         "indexed_documents": 88,
         "total_chunks": 1904,
@@ -148,11 +148,11 @@ FULL_SESSION: Dict[str, Any] = {
     "client": "ACME",
     "project": "CCaaS Migration",
     "template": "Discovery",
-    "attendees": ["priya@acme.example", "josh@ttec.example"],
+    "attendees": ["priya@acme.example", "sam@northwind.example"],
     "notes": "Priya joined 10 minutes late; the Genesys license question "
              "is still open.",
     "speakers": {
-        "SPEAKER_00": {"display_name": "Josh Rodriguez"},
+        "SPEAKER_00": {"display_name": "Sam Doe"},
         "SPEAKER_01": {"display_name": "Priya Raman"},
     },
     "segments": [
@@ -170,7 +170,7 @@ FULL_SESSION: Dict[str, Any] = {
                "Amazon Connect. Cutover targeted for the first weekend of "
                "October 2026.",
     "action_items": "- Priya: produce the Genesys decommission plan (due "
-                    "2026-08-01)\n- Josh: size the hypercare window",
+                    "2026-08-01)\n- Sam: size the hypercare window",
     "decisions": "- Cutover window: first weekend of October 2026\n"
                  "- Single Connect instance, four routing profiles",
     "requirements": None,

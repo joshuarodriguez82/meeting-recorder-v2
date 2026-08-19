@@ -23,7 +23,7 @@ from utils.embedding_store import save_payload
 _DIM = 8
 
 
-def _write_session_json(recordings, sid, client="Aon", display_name="Call"):
+def _write_session_json(recordings, sid, client="Zorg", display_name="Call"):
     (recordings / f"session_{sid}.json").write_text(json.dumps({
         "session_id": sid,
         "display_name": display_name,
@@ -126,7 +126,7 @@ def test_legacy_doc_pickle_is_never_loaded(tmp_path, monkeypatch, _spy_pickle_lo
         "model_id": MODEL_ID,
         "doc_path": "/tmp/whatever.docx",
         "doc_name": "whatever.docx",
-        "client": "Aon",
+        "client": "Zorg",
         "file_mtime": 0.0,
         "chunks": [{"text": "legacy doc chunk"}],
         "embeddings": np.ones((1, _DIM), dtype=np.float32),

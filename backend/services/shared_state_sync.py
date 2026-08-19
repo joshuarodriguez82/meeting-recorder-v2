@@ -44,11 +44,11 @@ because ClientConfig carries per-machine, absolute filesystem paths —
 (per-client document folder) — alongside the roam-worthy identity
 fields (the client key + `display_name`). The user runs Windows and a
 Mac sharing one archive folder; the Windows config's paths
-(`G:\\My Drive\\Aon`) roamed onto the Mac by whole-file copy, and the
+(`G:\\My Drive\\Zorg`) roamed onto the Mac by whole-file copy, and the
 Mac started repeatedly queuing exports against a drive letter that can
 never exist there:
 
-    Reconcile 'Aon': queued 1 session(s) for export to G:\\My Drive\\Aon
+    Reconcile 'Zorg': queued 1 session(s) for export to G:\\My Drive\\Zorg
 
 So client_configs.json now gets a FIELD-AWARE MERGE instead of a raw
 copy, in both directions:
@@ -102,13 +102,13 @@ CLIENT_CONFIGS_FILE = "client_configs.json"
 # status()/push()/pull() a stable, deterministic report order.
 #
 # owner_aliases.json (services/owner_service.py's OwnerAliasStore —
-# confirmed owner-name merges like "Joshua" -> "Josh") is a whole-file,
+# confirmed owner-name merges like "Samantha" -> "Sam") is a whole-file,
 # newest-wins copy same as summary_templates.json, NOT the field-aware
 # merge client_configs.json needs: its only content is `{"aliases": {id:
 # {canonical, members, created_at}}, "rejected": [[key, key], ...]}` —
 # no absolute filesystem paths anywhere in that shape, so there is
 # nothing machine-specific to blank or protect. A user curating aliases
-# on one machine (say, merging Josh's spelling variants) must see the
+# on one machine (say, merging Sam's spelling variants) must see the
 # same grouping on their other machine against the same shared session
 # library, or the two machines would silently show different owners for
 # identical Follow Ups/Commitments data.
@@ -306,12 +306,12 @@ def sanitize_local_paths(recordings_dir: str) -> List[dict]:
 
     Field report 2026-08-07: this is the after-the-fact half of the fix
     — push()/pull() above stop NEW foreign paths from landing, but the
-    user's Mac already had `G:\\My Drive\\Aon` / `G:\\My Drive\\Ricoh`
+    user's Mac already had `G:\\My Drive\\Zorg` / `G:\\My Drive\\Hooli`
     written into its local client_configs.json (roamed there by the
     pre-fix whole-file copy) and the app was actively re-queuing exports
     against them every reconcile sweep:
 
-        Reconcile 'Aon': queued 1 session(s) for export to G:\\My Drive\\Aon
+        Reconcile 'Zorg': queued 1 session(s) for export to G:\\My Drive\\Zorg
 
     Detection is deliberately conservative — see _is_foreign_local_path
     — so a merely-missing-but-plausible local path is never touched.

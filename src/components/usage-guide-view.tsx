@@ -446,7 +446,7 @@ const SECTIONS: Section[] = [
         <ul className="list-disc pl-5 space-y-1">
           <li>Off-call context — what was said in the hallway after the call ended, what someone
             told you in a private chat, decisions that happened over email.</li>
-          <li>Reminders to yourself — &quot;call Ricoh Friday about pricing&quot;, &quot;don&apos;t forget
+          <li>Reminders to yourself — &quot;call Hooli Friday about pricing&quot;, &quot;don&apos;t forget
             the SOW needs legal review before sending.&quot;</li>
           <li>Your own follow-ups — commitments you made that weren&apos;t verbalized on-mic.</li>
           <li>Corrections — if the transcript mis-heard a proper noun or decision, note the truth

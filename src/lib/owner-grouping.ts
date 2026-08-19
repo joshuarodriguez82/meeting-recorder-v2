@@ -28,8 +28,9 @@ export interface OwnerAlias {
 //
 // Split on '/', '&', and the standalone word "and". Deliberately do
 // NOT split on comma: real names in this data contain commas (calendar
-// organisers show up as "McDonnell, Bob Jr. [US-US]"), and a comma
-// split would shred a single name into two fake people. If you're
+// organisers show up as "Last, First Suffix [REGION]" — e.g. the
+// fictional "Roe, Pat Jr. [US-US]"), and a comma split would shred a
+// single name into two fake people. If you're
 // tempted to "improve" this by adding comma — don't.
 
 const SPLIT_RE = /\s*(?:\/|&|\band\b)\s*/gi;
@@ -128,9 +129,9 @@ export function buildAliasIndex(
  * owner filter dropdown, its counts, and its item-membership checks
  * are all built on.
  *
- * "Mark/Josh" with no aliases       -> ["Mark", "Josh"]
- * "Josh (AWS)"                      -> ["Josh"]
- * "Joshua" with a Josh/Joshua alias -> ["Josh"]
+ * "Mark/Sam" with no aliases           -> ["Mark", "Sam"]
+ * "Sam (AWS)"                          -> ["Sam"]
+ * "Samantha" with a Sam/Samantha alias -> ["Sam"]
  */
 export function resolveOwners(
   raw: string | null | undefined,

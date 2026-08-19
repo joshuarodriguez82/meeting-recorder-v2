@@ -43,7 +43,7 @@ def test_no_root_no_folder_means_no_export():
 def test_client_name_sanitized_for_path_use():
     # Windows-reserved characters and trailing dots can't survive as a
     # folder component; slashes especially must not escape the root.
-    assert sanitize_folder_name("ACME / UPS: Phase 2?") == "ACME - UPS- Phase 2-"
+    assert sanitize_folder_name("ACME / TYR: Phase 2?") == "ACME - TYR- Phase 2-"
     assert sanitize_folder_name("Trailing dots...") == "Trailing dots"
     assert sanitize_folder_name("") == "Unfiled"
     got = resolve_export_folder("", "A/B\\C", "/root")

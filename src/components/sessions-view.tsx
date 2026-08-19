@@ -765,7 +765,7 @@ function ImportSessionDialog({
               <Input
                 value={path}
                 onChange={(e) => setPath(e.target.value)}
-                placeholder="C:\Users\joshu\Downloads\teams-recording.mp4"
+                placeholder="C:\Users\<you>\Downloads\teams-recording.mp4"
                 autoFocus
                 autoComplete="off"
                 className="flex-1"

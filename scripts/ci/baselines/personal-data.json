@@ -1,0 +1,8 @@
+{
+  "schema": 2,
+  "tool": "personal-data",
+  "generated_utc": "2026-08-19T03:10:10Z",
+  "note": "Accepted pre-existing findings. CI fails only on findings absent from this list. Refresh deliberately with `scripts/ci/security_baseline.py update` and review the diff.",
+  "count": 0,
+  "findings": []
+}

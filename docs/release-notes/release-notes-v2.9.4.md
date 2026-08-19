@@ -30,7 +30,7 @@ Audio-integrity follow-up to v2.9.3. The six-layer defense in v2.9.3 prevents mo
 
 ## Why this release
 
-A user's morning Ricoh meeting had `session.json` claim 1 hour of audio but the actual WAV contained only ~30 minutes (the last segment of the call, the rest silently lost). v2.9.3 fixes the most likely cause (orphan processes contending for the same mic), but does NOT detect when this happens. v2.9.4 fixes the detection so you find out at stop time, not when you go to listen back.
+A user's morning Hooli meeting had `session.json` claim 1 hour of audio but the actual WAV contained only ~30 minutes (the last segment of the call, the rest silently lost). v2.9.3 fixes the most likely cause (orphan processes contending for the same mic), but does NOT detect when this happens. v2.9.4 fixes the detection so you find out at stop time, not when you go to listen back.
 
 ---
 

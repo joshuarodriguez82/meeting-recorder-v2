@@ -80,19 +80,19 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
   // ClientConfigService._normalize (strip + lowercase), which is what
   // resolves a session's Designated Folder. Before 2026-08-07 the
   // export path matched case-insensitively while this view compared
-  // `s.client === selected` exactly, so a meeting tagged "AON"
-  // exported into the "Aon" folder yet never appeared under "Aon".
+  // `s.client === selected` exactly, so a meeting tagged "ZORG"
+  // exported into the "Zorg" folder yet never appeared under "Zorg".
   const norm = (v: string | null | undefined) => (v || "").trim().toLowerCase();
 
   // Client names actually used on sessions, deduped case-insensitively
-  // so "AON" and "Aon" can't become two rows for one real client.
+  // so "ZORG" and "Zorg" can't become two rows for one real client.
   const taggedClients = useMemo(() => {
     const seen = new Map<string, string>();
     for (const raw of sessions.map((s) => s.client).filter(Boolean)) {
       const key = norm(raw);
       const prev = seen.get(key);
       // Prefer a mixed-case spelling over an ALL-CAPS or all-lower one
-      // so the sidebar shows "Aon" rather than "AON" when both exist.
+      // so the sidebar shows "Zorg" rather than "ZORG" when both exist.
       if (!prev || (prev === prev.toUpperCase() && raw !== raw!.toUpperCase())) {
         seen.set(key, raw!);
       }
@@ -935,7 +935,7 @@ function NewClientDialog({
             <Input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. SimpliSafe"
+              placeholder="e.g. Initech"
               autoFocus
               onKeyDown={(e) => e.key === "Enter" && onCreate()}
             />

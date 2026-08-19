@@ -41,8 +41,8 @@ copied across verbatim.
 The result, straight from a real log on a Mac:
 
 ```
-Reconcile 'Aon':   queued 1 session(s) for export to G:\My Drive\Aon
-Reconcile 'Ricoh': queued 1 session(s) for export to G:\My Drive\Ricoh
+Reconcile 'Zorg':   queued 1 session(s) for export to G:\My Drive\Zorg
+Reconcile 'Hooli': queued 1 session(s) for export to G:\My Drive\Hooli
 ```
 
 `G:\` is a Windows drive letter. That Mac was queuing work against

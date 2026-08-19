@@ -60,7 +60,7 @@ def test_base_name_matches_export_service():
     svc = ExportService.__new__(ExportService)  # no __init__: avoid mkdir
     for display, sid in (
         ("Quarterly Review", "ABC123"),
-        ("AWS AON Italy Call 08032026", "DEF456"),
+        ("AWS ZORG Italy Call 08032026", "DEF456"),
         ("weird/name:with*chars", "GHI789"),
         ("", "JKL012"),
         ("!!!", "MNO345"),  # sanitizes to empty -> falls back to id
@@ -151,7 +151,7 @@ def test_no_folder_configured_owes_nothing():
 # ── client matching (the case-sensitivity split) ──────────────────────
 
 @pytest.mark.parametrize("a,b", [
-    ("Aon", "AON"), ("Aon", "aon"), ("Aon", " Aon "), ("UPS", "ups"),
+    ("Zorg", "ZORG"), ("Zorg", "zorg"), ("Zorg", " Zorg "), ("TYR", "tyr"),
 ])
 def test_client_matching_is_case_and_space_insensitive(a, b):
     assert normalize_client(a) == normalize_client(b)
@@ -159,22 +159,22 @@ def test_client_matching_is_case_and_space_insensitive(a, b):
 
 def test_sessions_for_client_matches_regardless_of_casing():
     """The exact bug behind the field report: export resolved the folder
-    case-insensitively (so files landed in G:\\My Drive\\Aon) while the
-    UI filtered `s.client === "Aon"` case-sensitively (so those meetings
-    were invisible under Aon)."""
+    case-insensitively (so files landed in G:\\My Drive\\Zorg) while the
+    UI filtered `s.client === "Zorg"` case-sensitively (so those meetings
+    were invisible under Zorg)."""
     rows = [
-        _summary(session_id="1", client="Aon"),
-        _summary(session_id="2", client="AON"),
-        _summary(session_id="3", client="aon "),
+        _summary(session_id="1", client="Zorg"),
+        _summary(session_id="2", client="ZORG"),
+        _summary(session_id="3", client="zorg "),
         _summary(session_id="4", client="Acme"),
         _summary(session_id="5", client=""),
     ]
-    got = {r["session_id"] for r in sessions_for_client(rows, "Aon")}
+    got = {r["session_id"] for r in sessions_for_client(rows, "Zorg")}
     assert got == {"1", "2", "3"}
 
 
 def test_sessions_for_client_empty_name_matches_nothing():
-    rows = [_summary(session_id="1", client="Aon"),
+    rows = [_summary(session_id="1", client="Zorg"),
             _summary(session_id="2", client="")]
     assert sessions_for_client(rows, "") == []
     assert sessions_for_client(rows, "   ") == []

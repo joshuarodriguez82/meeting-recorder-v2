@@ -660,7 +660,7 @@ export function SessionDetailDialog({
                     <textarea
                       value={notes}
                       onChange={(e) => { setNotes(e.target.value); setDirty(true); }}
-                      placeholder="e.g. Jane mentioned off-call that legal needs the SOW by Friday. I need to circle back with Ricoh on pricing next week."
+                      placeholder="e.g. Jane mentioned off-call that legal needs the SOW by Friday. I need to circle back with Hooli on pricing next week."
                       className="w-full min-h-[320px] rounded-md border border-input bg-background px-3 py-2 text-sm font-mono leading-relaxed focus:outline-none focus:ring-1 focus:ring-ring resize-y"
                     />
                     <div className="flex items-center justify-between text-xs text-muted-foreground">

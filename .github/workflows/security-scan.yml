@@ -14,6 +14,14 @@
 #     `cargo clippy` over our own crate, which cargo-audit never looks at.
 #   * Python/Node dependency CVEs are covered there too. Here, bandit and
 #     semgrep read our source.
+#   * The `personal-data` job is not a security scanner at all in the CVE
+#     sense — it is a disclosure gate. This repo is PUBLIC and meant to be
+#     cloneable, and in 2026-08 real colleague names, real customer names,
+#     real meeting subjects, a personal email address and personal home-dir
+#     paths were found across source, tests, fixtures, design mockups and 15
+#     published release-notes files (whose text release.yml copies verbatim
+#     into the GitHub Release body). It lives here because it wants exactly
+#     the same triggers and the same baseline mechanism as its neighbours.
 #
 # Why this one CAN block a PR when the other cannot
 # -------------------------------------------------
@@ -35,6 +43,11 @@
 # own release cadence and turns the check red on a PR that changed nothing —
 # the same broken-window failure the baseline exists to prevent. Bump the pins
 # in a dedicated PR that also refreshes the baselines.
+#
+# The personal-data job has no third-party scanner to pin: it is stdlib-only
+# Python reading a committed, schema-versioned deny-list
+# (scripts/ci/personal-data-terms.json). Editing that file IS the version
+# bump, and it is reviewed like any other change.
 
 name: Security Scan
 
@@ -215,4 +228,71 @@ jobs:
         with:
           name: clippy-report
           path: clippy-report.json
+          if-no-files-found: warn
+
+  # Personal / customer data disclosure gate.
+  #
+  # THE INCIDENT: real colleague and organiser names, real customer names,
+  # real meeting subjects, the author's personal email address and personal
+  # Windows/macOS home paths were committed to this PUBLIC repo — including
+  # into docs/release-notes/*.md, which release.yml publishes verbatim as the
+  # GitHub Release body. The 2026-08 scrub removed them; this job is what
+  # stops them coming back.
+  #
+  # Deliberately a CURATED DENY-LIST, not a general PII detector. A regex for
+  # "a person's name" either misses most of them or fires on every capitalised
+  # word, and a noisy check gets switched off within a week. The list holds the
+  # identities that actually leaked here plus three precise pattern classes
+  # (Windows home path, POSIX home path, non-example email address). It must
+  # stay quiet on the fictional placeholders the fixtures now use — Acme,
+  # Globex, Initech, Umbrella, Hooli, Zorg, Northwind, and the Doe/Roe/Poe/Noh
+  # placeholder people.
+  #
+  # The deny-list is stored as salted hashes, not words: a plain-text roster
+  # of the colleagues' names in scripts/ci/ would re-publish exactly what the
+  # scrub removed. That also means a finding cannot quote the term it matched
+  # — job summaries on a public repo are public. It reports the file and line;
+  # `personal_data_scan.py test-term "<the string you just typed>"` confirms.
+  #
+  # THE BASELINE IS EMPTY AND SHOULD STAY EMPTY. The other three jobs baseline
+  # a backlog of accepted static-analysis debt; a real name in a public repo is
+  # never accepted debt. The baseline file exists so the mechanism matches its
+  # neighbours, and so a genuinely deliberate exception is possible as a
+  # reviewed commit — not as a routine refresh.
+  #
+  # Adding a term: edit scripts/ci/personal-data-terms.json, then re-run the
+  # scan and confirm it still reports zero on a clean tree. Rules and rationale
+  # are in that file's `note` block and in docs/ci-security-and-ai-review.md.
+  personal-data:
+    name: Personal / customer data (deny-list)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The scanner walks `git ls-files`, so it only ever sees tracked
+          # files — build output and node_modules cannot produce findings.
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run personal-data scan
+        # stdlib only — nothing to install, nothing to pin. The deny-list
+        # itself is the versioned input, and it is committed.
+        run: |
+          python scripts/ci/personal_data_scan.py --report personal-data-report.json
+          test -s personal-data-report.json || { echo "::error::personal-data scan produced no report — the scan did not run"; exit 1; }
+      - name: Compare against baseline
+        run: |
+          python scripts/ci/security_baseline.py check \
+            --tool personal-data \
+            --report personal-data-report.json \
+            --baseline scripts/ci/baselines/personal-data.json \
+            --summary "$GITHUB_STEP_SUMMARY"
+      - name: Upload raw report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: personal-data-report
+          path: personal-data-report.json
           if-no-files-found: warn

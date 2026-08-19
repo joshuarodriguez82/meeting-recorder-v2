@@ -16,10 +16,10 @@ from services.session_service import SessionService
 
 def _make_session(session_id: str) -> Session:
     session = Session(session_id=session_id)
-    session.display_name = "Guardian ASM Workflow Review"
-    session.client = "Guardian"
+    session.display_name = "Umbrella ASM Workflow Review"
+    session.client = "Umbrella"
     session.project = "Email Automation POC"
-    session.notes = "Follow up on ACGR multi-region DR question"
+    session.notes = "Follow up on ARV multi-region DR question"
     session.audio_path = f"/recordings/session_{session_id}.wav"
     return session
 
@@ -30,9 +30,9 @@ def test_save_then_load_round_trips_core_fields(recordings_dir: Path):
 
     assert Path(saved_path).name == "session_rt1.json"
     loaded = svc.load("rt1")
-    assert loaded["display_name"] == "Guardian ASM Workflow Review"
-    assert loaded["client"] == "Guardian"
-    assert loaded["notes"] == "Follow up on ACGR multi-region DR question"
+    assert loaded["display_name"] == "Umbrella ASM Workflow Review"
+    assert loaded["client"] == "Umbrella"
+    assert loaded["notes"] == "Follow up on ARV multi-region DR question"
 
     rebuilt = svc.load_full("rt1")
     assert isinstance(rebuilt, Session)

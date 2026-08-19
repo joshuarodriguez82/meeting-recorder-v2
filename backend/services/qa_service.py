@@ -227,7 +227,7 @@ class QAService:
             "2. Cite each document claim with the inline form "
             "[DOC: <document name>], using the exact name from the "
             "DOCUMENT header above that excerpt — e.g. "
-            "[DOC: Aon-SOW.docx]. Don't invent a document name.\n"
+            "[DOC: Zorg-SOW.docx]. Don't invent a document name.\n"
             "3. Quote the exact wording when the excerpt has the answer "
             "verbatim. Paraphrase only when synthesising across excerpts.\n"
             "4. If the excerpts don't cover the question, say so plainly: "

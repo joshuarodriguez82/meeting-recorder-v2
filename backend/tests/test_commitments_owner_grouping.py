@@ -1,8 +1,8 @@
 """
 Integration tests: CommitmentsService.list_all()'s owner filter goes
 through services/owner_service.py's split/normalise/alias resolution
-instead of a raw string compare — so "Josh" finds a commitment owned
-by "Mark/Josh" or (once aliased) "Joshua".
+instead of a raw string compare — so "Sam" finds a commitment owned
+by "Mark/Sam" or (once aliased) "Samantha".
 """
 
 from __future__ import annotations
@@ -46,13 +46,13 @@ class TestOwnerFilterSplitsMultiOwnerStrings:
         svc = _make_service(tmp_path)
         _write_session(tmp_path, "s1")
         svc.replace_session_commitments(
-            "s1", [_commitment("s1", "Mark/Josh", "c1")])
+            "s1", [_commitment("s1", "Mark/Sam", "c1")])
 
-        by_josh = svc.list_all(owner="Josh")
+        by_sam = svc.list_all(owner="Sam")
         by_mark = svc.list_all(owner="Mark")
         by_other = svc.list_all(owner="Craig")
 
-        assert [c["commitment_id"] for c in by_josh] == ["c1"]
+        assert [c["commitment_id"] for c in by_sam] == ["c1"]
         assert [c["commitment_id"] for c in by_mark] == ["c1"]
         assert by_other == []
 
@@ -60,23 +60,23 @@ class TestOwnerFilterSplitsMultiOwnerStrings:
         svc = _make_service(tmp_path)
         _write_session(tmp_path, "s1")
         svc.replace_session_commitments(
-            "s1", [_commitment("s1", "Josh (AWS)", "c1")])
+            "s1", [_commitment("s1", "Sam (AWS)", "c1")])
 
-        assert [c["commitment_id"] for c in svc.list_all(owner="Josh")] == ["c1"]
+        assert [c["commitment_id"] for c in svc.list_all(owner="Sam")] == ["c1"]
 
     def test_comma_containing_owner_is_not_split(self, tmp_path: Path):
         svc = _make_service(tmp_path)
         _write_session(tmp_path, "s1")
         svc.replace_session_commitments(
-            "s1", [_commitment("s1", "McDonnell, Bob Jr.", "c1")])
+            "s1", [_commitment("s1", "Roe, Pat Jr.", "c1")])
 
         # Filtering by the full (comma-containing) name still matches.
         assert [c["commitment_id"]
-                for c in svc.list_all(owner="McDonnell, Bob Jr")] == ["c1"]
-        # It must NOT be findable under just "Bob" or "McDonnell" —
+                for c in svc.list_all(owner="Roe, Pat Jr")] == ["c1"]
+        # It must NOT be findable under just "Pat" or "Roe" —
         # those would only work if the comma had been split.
-        assert svc.list_all(owner="Bob") == []
-        assert svc.list_all(owner="McDonnell") == []
+        assert svc.list_all(owner="Pat") == []
+        assert svc.list_all(owner="Roe") == []
 
 
 class TestOwnerFilterWithAliases:
@@ -84,32 +84,32 @@ class TestOwnerFilterWithAliases:
         svc = _make_service(tmp_path)
         _write_session(tmp_path, "s1")
         _write_session(tmp_path, "s2")
-        svc.replace_session_commitments("s1", [_commitment("s1", "Josh", "c1")])
-        svc.replace_session_commitments("s2", [_commitment("s2", "Joshua", "c2")])
+        svc.replace_session_commitments("s1", [_commitment("s1", "Sam", "c1")])
+        svc.replace_session_commitments("s2", [_commitment("s2", "Samantha", "c2")])
 
-        # Without an alias, "Joshua" isn't found under "Josh".
-        assert {c["commitment_id"] for c in svc.list_all(owner="Josh")} == {"c1"}
+        # Without an alias, "Samantha" isn't found under "Sam".
+        assert {c["commitment_id"] for c in svc.list_all(owner="Sam")} == {"c1"}
 
         store = OwnerAliasStore(tmp_path)
-        store.create("Josh", ["Josh", "Joshua"])
+        store.create("Sam", ["Sam", "Samantha"])
         idx = load_alias_index(store)
 
         assert {c["commitment_id"]
-                for c in svc.list_all(owner="Josh", alias_index=idx)} == {"c1", "c2"}
+                for c in svc.list_all(owner="Sam", alias_index=idx)} == {"c1", "c2"}
 
     def test_removing_alias_ungroups_the_filter(self, tmp_path: Path):
         svc = _make_service(tmp_path)
         _write_session(tmp_path, "s1")
-        svc.replace_session_commitments("s1", [_commitment("s1", "Joshua", "c1")])
+        svc.replace_session_commitments("s1", [_commitment("s1", "Samantha", "c1")])
 
         store = OwnerAliasStore(tmp_path)
-        alias = store.create("Josh", ["Josh", "Joshua"])
+        alias = store.create("Sam", ["Sam", "Samantha"])
         idx = load_alias_index(store)
         assert {c["commitment_id"]
-                for c in svc.list_all(owner="Josh", alias_index=idx)} == {"c1"}
+                for c in svc.list_all(owner="Sam", alias_index=idx)} == {"c1"}
 
         store.delete(alias.id)
         idx_after = load_alias_index(store)
-        assert svc.list_all(owner="Josh", alias_index=idx_after) == []
+        assert svc.list_all(owner="Sam", alias_index=idx_after) == []
         assert {c["commitment_id"]
-                for c in svc.list_all(owner="Joshua", alias_index=idx_after)} == {"c1"}
+                for c in svc.list_all(owner="Samantha", alias_index=idx_after)} == {"c1"}

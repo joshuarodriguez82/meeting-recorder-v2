@@ -190,10 +190,41 @@ def parse_clippy(report: dict) -> list[Finding]:
     return findings
 
 
+def parse_personal_data(report: dict) -> list[Finding]:
+    """Parse scripts/ci/personal_data_scan.py's report.
+
+    Every finding is HIGH on purpose. The other three tools baseline a backlog
+    of accepted static-analysis debt; a real name or a personal path in a public
+    repo is never accepted debt, so there is nothing here to rank below it.
+    """
+    findings = []
+    for r in report.get("results", []) or []:
+        message = r.get("message", "")
+        matched = r.get("match", "")
+        # Deny-list hits report "<redacted>" — quoting the matched name in a
+        # job summary on a PUBLIC repo would re-disclose it. Pattern hits (a
+        # home path, an email) quote freely: that text is already in the
+        # author's own diff, and without it the finding isn't actionable.
+        if matched and matched != "<redacted>":
+            message = f"{message} (matched {matched!r})"
+        findings.append(
+            _make(
+                rule=r.get("rule", "?"),
+                path=r.get("path", "?"),
+                line=r.get("line"),
+                severity="HIGH",
+                message=message,
+                snippet=r.get("text", ""),
+            )
+        )
+    return findings
+
+
 PARSERS: dict[str, Callable[[dict], list[Finding]]] = {
     "bandit": parse_bandit,
     "semgrep": parse_semgrep,
     "clippy": parse_clippy,
+    "personal-data": parse_personal_data,
 }
 
 

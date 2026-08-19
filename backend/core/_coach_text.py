@@ -18,7 +18,7 @@ from typing import List
 # Filler phrases that are content-free for an SA co-pilot. An item is
 # dropped when its normalized text is *dominated* by one of these (i.e.
 # the phrase makes up most of the item), so "request an update" dies but
-# "request UPS's IDT carrier commitment before the SOW locks" survives.
+# "request TYR's IDT carrier commitment before the SOW locks" survives.
 _FILLER_PATTERNS = (
     "request an update",
     "schedule a follow-up",

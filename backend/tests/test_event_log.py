@@ -112,11 +112,11 @@ def test_file_paths_cannot_reach_the_file(event_log):
     events.emit(
         "finalize.failed", "SESS0001",
         error_type="RuntimeError",
-        detail=r"C:\Users\jrodriguez\AppData\Local\MeetingRecorder\x.wav",
-        posix_detail="/Users/jrodriguez/Library/Application Support/x.wav",
+        detail=r"C:\Users\sampleuser\AppData\Local\MeetingRecorder\x.wav",
+        posix_detail="/Users/sampleuser/Library/Application Support/x.wav",
     )
     raw = event_log.read_text(encoding="utf-8")
-    assert "jrodriguez" not in raw
+    assert "sampleuser" not in raw
     assert "Users" not in raw
     # The genuinely useful part survives.
     assert _read(event_log)[0]["error_type"] == "RuntimeError"
@@ -330,7 +330,7 @@ def test_finalize_failure_records_the_type_not_the_message(
     carry the exception TYPE and nothing else."""
     def fake_finalize(**kwargs):
         raise RuntimeError(
-            r"could not write C:\Users\jrodriguez\...\session_X.wav")
+            r"could not write C:\Users\sampleuser\...\session_X.wav")
 
     monkeypatch.setattr(rs.RecordingService, "_run_finalize_subprocess",
                         staticmethod(fake_finalize))
@@ -341,7 +341,7 @@ def test_finalize_failure_records_the_type_not_the_message(
     svc.stop_recording()
 
     raw = event_log.read_text(encoding="utf-8")
-    assert "jrodriguez" not in raw
+    assert "sampleuser" not in raw
     failed = _by_name(_read(event_log), events.FINALIZE_FAILED)
     assert len(failed) == 1
     assert failed[0]["error_type"] == "RuntimeError"
@@ -412,12 +412,12 @@ def test_document_indexing_counts_are_emitted_without_paths(
     report = {
         "indexed": 12, "unchanged": 3, "total_chunks": 480,
         "skipped": [
-            {"file": r"C:\Users\jrodriguez\Docs\logo.png",
+            {"file": r"C:\Users\sampleuser\Docs\logo.png",
              "reason": "not a text document — images aren't indexed",
              "expected": True},
-            {"file": r"C:\Users\jrodriguez\Docs\model.csv",
+            {"file": r"C:\Users\sampleuser\Docs\model.csv",
              "reason": "unsupported file type: .csv", "expected": False},
-            {"file": r"C:\Users\jrodriguez\Docs\deck.pptx",
+            {"file": r"C:\Users\sampleuser\Docs\deck.pptx",
              "reason": "corrupt or unreadable pptx: bad zip",
              "expected": False},
         ],
@@ -425,7 +425,7 @@ def test_document_indexing_counts_are_emitted_without_paths(
     ds._emit_index_event(report)
 
     raw = event_log.read_text(encoding="utf-8")
-    assert "jrodriguez" not in raw
+    assert "sampleuser" not in raw
     assert "logo" not in raw and "model" not in raw
 
     rec = _by_name(_read(event_log), events.DOCUMENTS_INDEXED)[0]

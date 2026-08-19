@@ -2335,7 +2335,7 @@ function ReadinessRow({
  * Sum up per-client matches across all sessions, pick the winner.
  *
  * Why external only: every session the user is in includes their own
- * work email (e.g. @ttecdigital.com). Counting that would make every
+ * work email (e.g. @your-company.com). Counting that would make every
  * meeting "look like" every client the user has worked with. Internal
  * domains are detected as "the domain that appears most across ALL
  * sessions" — your own email — and filtered out.

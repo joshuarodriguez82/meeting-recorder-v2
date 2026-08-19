@@ -133,7 +133,7 @@ already use — so one search covers both.
 - **Formats:** PDF, Word (`.docx`), plain text, and Markdown.
 - **Ask across both.** "What did we commit to on latency?" can now
   answer from the SOW *and* the call where you discussed it. Documents
-  cite as `[DOC: Aon-SOW.docx]`; meeting citations stay clickable as
+  cite as `[DOC: Zorg-SOW.docx]`; meeting citations stay clickable as
   before.
 - **Incremental.** Only new or modified files are re-read. Delete a
   document and it drops out of the index on the next run.

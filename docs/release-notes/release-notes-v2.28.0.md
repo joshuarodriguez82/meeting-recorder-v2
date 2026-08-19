@@ -46,8 +46,8 @@ next.
 **It was reading the calendar as text and guessing.** The capture
 flattened the calendar to a block of text and had a language model
 reconstruct meetings from it. That's why delimiters in your own meeting
-titles broke it: a pipe in "AWS Sales**|** Active Project Status
-Reviews", brackets in "McDonnell, Bob Jr. **[US-US]**", or a meeting
+titles broke it: a pipe in "Acme Sales**|** Active Project Status
+Reviews", brackets in "Roe, Pat Jr. **[US-US]**", or a meeting
 rendered across three lines each defeated the reconstruction — the
 subject survived but the **start time didn't**, and a meeting with no
 time can't be placed in a 7-day window.

@@ -158,7 +158,7 @@ def test_recovery_preserves_user_metadata_from_stub_json(recordings_dir: Path, t
     (recordings_dir / "session_stub1.json").write_text(_j.dumps({
         "session_id": "stub1",
         "display_name": "Important Customer Call",
-        "client": "Guardian",
+        "client": "Umbrella",
         "project": "Phase 2 Discovery",
         "notes": "User picked this name before the crash",
         "started_at": "2026-06-15T10:00:00",
@@ -179,7 +179,7 @@ def test_recovery_preserves_user_metadata_from_stub_json(recordings_dir: Path, t
     assert loaded is not None
     # User-visible fields preserved from stub.
     assert loaded["display_name"] == "Important Customer Call"
-    assert loaded["client"] == "Guardian"
+    assert loaded["client"] == "Umbrella"
     assert loaded["project"] == "Phase 2 Discovery"
     assert loaded["notes"] == "User picked this name before the crash"
     # ended_at + audio_path overwritten by recovery.

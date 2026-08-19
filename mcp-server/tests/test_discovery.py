@@ -100,8 +100,8 @@ def test_hex64_token_is_not_flagged(monkeypatch, tmp_path):
 
 def test_windows_dirs(monkeypatch):
     monkeypatch.setattr(discovery, "_is_windows", lambda: True)
-    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\j\AppData\Local")
-    monkeypatch.setenv("APPDATA", r"C:\Users\j\AppData\Roaming")
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\sampleuser\AppData\Local")
+    monkeypatch.setenv("APPDATA", r"C:\Users\sampleuser\AppData\Roaming")
     dirs = [str(d) for d in discovery.candidate_data_dirs()]
     # LOCALAPPDATA first — that's what lib.rs::data_root_dir prefers,
     # and APPDATA is the OneDrive-redirected one the app avoids.
@@ -122,11 +122,11 @@ def test_linux_probes_both_data_and_config_dirs(monkeypatch):
     # the Python backend writes config.env under XDG_CONFIG_HOME.
     monkeypatch.setattr(discovery, "_is_windows", lambda: False)
     monkeypatch.setattr(discovery, "_is_macos", lambda: False)
-    monkeypatch.setenv("XDG_DATA_HOME", "/home/j/.local/share")
-    monkeypatch.setenv("XDG_CONFIG_HOME", "/home/j/.config")
+    monkeypatch.setenv("XDG_DATA_HOME", "/home/sampleuser/.local/share")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/home/sampleuser/.config")
     dirs = [str(d) for d in discovery.candidate_data_dirs()]
-    assert dirs[0] == "/home/j/.local/share/MeetingRecorder"
-    assert "/home/j/.config/MeetingRecorder" in dirs
+    assert dirs[0] == "/home/sampleuser/.local/share/MeetingRecorder"
+    assert "/home/sampleuser/.config/MeetingRecorder" in dirs
 
 
 def test_data_dir_override_is_probed_first(monkeypatch):

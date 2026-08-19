@@ -103,13 +103,13 @@ def _wire(monkeypatch, *, summarizer=None, save_parsed=None, replace_all=None,
 
 
 REALISTIC_STRUCTURED_EVENTS = [
-    {"subject": "AWS Daily Pulse Call",
+    {"subject": "Acme Daily Pulse Call",
      "start": "2026-08-13T10:00:00", "end": "2026-08-13T10:15:00"},
-    {"subject": "PRIORITY: AWS Sales| Active Project Status Reviews and Escalations",
+    {"subject": "PRIORITY: Acme Sales| Active Project Status Reviews and Escalations",
      "start": "2026-08-13T10:00:00", "end": "2026-08-13T10:30:00"},
-    {"subject": "FW: AWS Connect - Italy / ECC next steps: weekly team connect",
+    {"subject": "FW: Acme Connect - Italy / ACR next steps: weekly team connect",
      "start": "2026-08-13T11:30:00", "end": "2026-08-13T12:00:00"},
-    {"subject": "AWS/PGE - IVA PoC Sync-up",
+    {"subject": "Acme/CYB - IVA PoC Sync-up",
      "start": "2026-08-13T13:00:00", "end": "2026-08-13T13:30:00"},
     {"subject": "AI Transformation Stand Up",
      "start": "2026-08-13T07:30:00", "end": "2026-08-13T08:30:00"},
@@ -136,7 +136,7 @@ def test_calendar_only_structured_path_skips_llm_and_briefing_save(monkeypatch):
     assert len(replace_all.calls) == 1
     assert len(replace_all.calls[0]) == 5
     subjects = {e["subject"] for e in replace_all.calls[0]}
-    assert "FW: AWS Connect - Italy / ECC next steps: weekly team connect" in subjects
+    assert "FW: Acme Connect - Italy / ACR next steps: weekly team connect" in subjects
 
 
 def test_calendar_only_text_fallback_uses_llm_but_still_skips_briefing_save(monkeypatch):

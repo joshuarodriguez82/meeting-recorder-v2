@@ -50,7 +50,7 @@ why:
 on labels that each carry a fully-qualified date in their own text:
 
 ```
-Homeserve, 8:30 AM to 9:00 AM, Friday, August 14, 2026, ...
+Globex, 8:30 AM to 9:00 AM, Friday, August 14, 2026, ...
 ```
 
 Outlook Web writes the date **after** the time range. The parser's

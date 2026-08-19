@@ -6,11 +6,12 @@ Purpose: everything a fresh Claude session needs to pick up this project and hel
 
 ## Who the user is and what they need
 
-- **User:** Joshua Rodriguez — Solutions Architect at TTEC Digital
+- **User:** Sam Doe — Solutions Architect at Northwind Digital (names,
+  employer and machine paths in this historical handoff are placeholders)
 - **Primary use case:** Records customer / internal meetings, wants AI-generated summaries, action items, decisions, and requirements
 - **Two machines:**
-  - **Dev PC** (`C:\Users\joshu\...`) — where development happens, runs fine against the v1 Python venv at `C:\meeting_recorder\.venv\`
-  - **Work laptop** (TTEC-managed, user `Joshua.Rodriguez`) — where he wants to use the app for actual work. This is where everything breaks.
+  - **Dev PC** (`C:\Users\<you>\...`) — where development happens, runs fine against the v1 Python venv at `C:\meeting_recorder\.venv\`
+  - **Work laptop** (Northwind-managed, user `<you>`) — where he wants to use the app for actual work. This is where everything breaks.
 - **Non-negotiable:** the app must "just work" on the laptop the same as v1 did on dev. User is extremely frustrated with repeated failed install attempts.
 
 ---
@@ -72,7 +73,7 @@ The dev PC and the work laptop are running the app under fundamentally different
 
 - Source code lives at `C:\meeting-recorder-v2\` (git checkout)
 - Has a legacy v1 venv at `C:\meeting_recorder\.venv\` that works
-- System Python 3.13 installed at `C:\Users\joshu\AppData\Local\Programs\Python\Python313\`
+- System Python 3.13 installed at `C:\Users\<you>\AppData\Local\Programs\Python\Python313\`
 - Developer runs the app from `C:\meeting-recorder-v2\src-tauri\target\release\meeting-recorder.exe`
 - Rust shell should:
   - Find `server.py` at `C:\meeting-recorder-v2\backend\server.py`
@@ -149,8 +150,8 @@ The current `src-tauri/src/lib.rs` roughly does this already (`resolve_backend_d
 
 ### Laptop data
 - User made a recording on the laptop (session `02C84053`, 25.5 seconds of audio)
-- Data is still there at `C:\Users\Joshua.Rodriguez\AppData\Roaming\MeetingRecorder\recordings\session_02C84053.{wav,json}`
-- The v2.1.x app defaults to `%LOCALAPPDATA%` path, so the laptop's new install might not see that recording. If needed, set `RECORDINGS_DIR=C:\Users\Joshua.Rodriguez\AppData\Roaming\MeetingRecorder\recordings` in `%LOCALAPPDATA%\MeetingRecorder\config.env` on the laptop.
+- Data is still there at `C:\Users\<you>\AppData\Roaming\MeetingRecorder\recordings\session_02C84053.{wav,json}`
+- The v2.1.x app defaults to `%LOCALAPPDATA%` path, so the laptop's new install might not see that recording. If needed, set `RECORDINGS_DIR=C:\Users\<you>\AppData\Roaming\MeetingRecorder\recordings` in `%LOCALAPPDATA%\MeetingRecorder\config.env` on the laptop.
 
 ---
 
@@ -159,7 +160,7 @@ The current `src-tauri/src/lib.rs` roughly does this already (`resolve_backend_d
 ### 1. `speechbrain` LazyModule + `pytorch-lightning` `is_scripting()` = infinite recursion
 - **Only happens on Python embeddable distributions**, not on regular Python installs
 - speechbrain 1.0+ wraps modules in a `LazyModule` whose `__getattr__` calls `inspect.getframeinfo`. When lightning 2.3+ calls `inspect.stack()` during module import, `inspect.getmodule()` walks sys.modules and hits LazyModule → infinite recursion
-- v1 doesn't hit this because it uses a regular Python install (`C:\Users\joshu\AppData\Local\Programs\Python\Python313\`) where `inspect`'s behavior is slightly different
+- v1 doesn't hit this because it uses a regular Python install (`C:\Users\<you>\AppData\Local\Programs\Python\Python313\`) where `inspect`'s behavior is slightly different
 - I tried monkey-patching, eager-loading submodules, pinning lightning 2.2.5 — none fully worked on embeddable Python
 - **Conclusion**: embeddable Python approach is probably a dead end for this dep stack. Ship a real Python installer instead (see "proposed path forward").
 
@@ -201,7 +202,7 @@ The current `src-tauri/src/lib.rs` roughly does this already (`resolve_backend_d
 - Default is `claude-haiku-4-5`. Default lives in `backend/config/settings.py` AND `backend/setup.py`. Keep both consistent.
 
 ### 10. OneDrive Known Folder Move
-- User's laptop has `%APPDATA%` (Roaming) redirected to OneDrive by TTEC policy — NO WAIT, this turned out to be wrong. I initially assumed redirect, but user was just manually copying logs to OneDrive to share them. `%APPDATA%` is NOT redirected on his laptop.
+- User's laptop has `%APPDATA%` (Roaming) redirected to OneDrive by Northwind policy — NO WAIT, this turned out to be wrong. I initially assumed redirect, but user was just manually copying logs to OneDrive to share them. `%APPDATA%` is NOT redirected on his laptop.
 - I already switched logs + config to `%LOCALAPPDATA%` anyway, which is architecturally correct (non-roaming data) regardless.
 
 ---
@@ -390,7 +391,7 @@ Each step should **log what was detected and what path was chosen**, so when thi
 
 - **Dev PC already has a working v1 venv** (`C:\meeting_recorder\.venv\`) — installer should detect and reuse it, not create another one
 - **Work laptop has nothing** — needs the full bundled install path
-- **Future TTEC SAs' laptops** — some will have Python 3.13 system-wide from their dev tooling, others won't. Detect, don't assume.
+- **Future Northwind SAs' laptops** — some will have Python 3.13 system-wide from their dev tooling, others won't. Detect, don't assume.
 
 ### Installer size estimate
 
@@ -457,8 +458,8 @@ If `/health` returns `{"status":"ok"}`, the v1 venv fallback is working. Session
 
 ## Open questions (things I don't know that matter)
 
-1. **Can we install Python 3.13 silently on the laptop without admin rights?** `InstallAllUsers=0` should work for per-user installs but I haven't tested on a locked-down TTEC machine.
-2. **Does the laptop have internet access to PyPI?** If TTEC blocks PyPI, the "download deps on first launch" plan dies. Would need to pre-bundle wheels.
+1. **Can we install Python 3.13 silently on the laptop without admin rights?** `InstallAllUsers=0` should work for per-user installs but I haven't tested on a locked-down Northwind machine.
+2. **Does the laptop have internet access to PyPI?** If Northwind blocks PyPI, the "download deps on first launch" plan dies. Would need to pre-bundle wheels.
 3. **What's SentinelOne's policy on creating new processes from a venv?** If they treat `%LOCALAPPDATA%\MeetingRecorder\.venv\Scripts\pythonw.exe` as suspicious too, we're back in the same hole.
 4. **Does the user have admin on the laptop?** If so, installing Python system-wide simplifies things dramatically.
 

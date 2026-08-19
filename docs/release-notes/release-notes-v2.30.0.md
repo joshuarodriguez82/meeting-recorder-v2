@@ -52,8 +52,8 @@ The meetings were never the problem. On a real week view, Outlook Web
 publishes **28 perfectly-formed meeting labels**, like:
 
 ```
-Homeserve, 8:30 AM to 9:00 AM, Friday, August 14, 2026,
-Microsoft Teams Meeting, By Mark Lefky, Busy
+Globex, 8:30 AM to 9:00 AM, Friday, August 14, 2026,
+Microsoft Teams Meeting, By Riley Poe, Busy
 ```
 
 Every one of those matches the extension's own time-range parser.

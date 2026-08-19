@@ -179,7 +179,7 @@ Semantic search for 'when is the cutover?'
 
 [2] DOCUMENT — ACME_SOW_v3.docx
     client: ACME    similarity: 0.771
-    path: /Users/j/Knowledge/ACME/ACME_SOW_v3.docx
+    path: /Users/sampleuser/Knowledge/ACME/ACME_SOW_v3.docx
     excerpt: Cutover is scheduled for the first weekend of October 2026. ...
     (this is a Knowledge Folder document, NOT a meeting — it has no session_id
      and cannot be passed to get_session; cite it by filename)
@@ -325,8 +325,8 @@ expected skip.)
 
 ```
 - Globex
-    designated (export) folder: /Users/j/Drive/Globex/Exports
-    knowledge folder: /Users/j/Drive/Globex/Exports
+    designated (export) folder: /Users/sampleuser/Drive/Globex/Exports
+    knowledge folder: /Users/sampleuser/Drive/Globex/Exports
     WARNING: this client's knowledge folder is the same as (or inside) its
     designated export folder, so exported transcripts are indexed twice —
     once as meetings, once as documents. Searches will return near-duplicates.

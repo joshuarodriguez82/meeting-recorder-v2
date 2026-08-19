@@ -161,8 +161,8 @@ async def test_get_session_parts(part):
 
 async def test_transcript_uses_speaker_names_and_timestamps():
     out = await srv.get_session("session_20260714_101500", part="transcript")
-    assert "[00:00 -> 00:06] Josh Rodriguez:" in out
-    assert "[06:52 -> 07:28] Josh Rodriguez:" in out
+    assert "[00:00 -> 00:06] Sam Doe:" in out
+    assert "[06:52 -> 07:28] Sam Doe:" in out
     assert "Priya Raman:" in out
 
 
@@ -176,7 +176,7 @@ async def test_absent_extraction_is_empty_not_failed():
 async def test_metadata_flags_populated_parts_and_notes():
     out = await srv.get_session("session_20260714_101500", part="metadata")
     assert "transcript segments: 3" in out
-    assert "speakers: Josh Rodriguez, Priya Raman" in out
+    assert "speakers: Sam Doe, Priya Raman" in out
     assert "populated parts: Transcript, Summary, Action items, Decisions" in out
     assert "user notes:" in out
 

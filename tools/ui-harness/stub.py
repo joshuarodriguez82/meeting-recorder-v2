@@ -54,27 +54,27 @@ _EMPTY_LISTS = (
 _FOLLOW_UPS_MD = "\n".join([
     "- [ ] **All Sales Team Members**: Prep the QBR deck",
     "- [ ] **Dale/Dan**: Confirm renewal terms",
-    "- [ ] **Dan Fallon**: Send updated pricing",
+    "- [ ] **Dan Doe**: Send updated pricing",
     "- [ ] **Emily**: Schedule kickoff call",
     "- [ ] **Jake (AWS)**: Provision sandbox account",
     "- [ ] **Jeremy**: Review architecture diagram",
-    "- [ ] **Josh**: Follow up on SOW",
-    "- [ ] **Josh (AWS)**: Loop in AWS TAM",
-    "- [ ] **Josh Rodriguez**: Send meeting notes",
-    "- [ ] **Joshua**: Confirm timeline with client",
-    "- [ ] **Kamal (Guardian)**: Share security questionnaire",
+    "- [ ] **Sam**: Follow up on SOW",
+    "- [ ] **Sam (AWS)**: Loop in AWS TAM",
+    "- [ ] **Sam Doe**: Send meeting notes",
+    "- [ ] **Samantha**: Confirm timeline with client",
+    "- [ ] **Kamal (Umbrella)**: Share security questionnaire",
     "- [ ] **Karthik**: Review data model",
     "- [ ] **Ken (AWS)**: Set up VPC peering",
     "- [ ] **Lisa**: Draft onboarding checklist",
-    "- [ ] **Madonna Jagenthu**: Approve budget",
+    "- [ ] **Rowan Doe**: Approve budget",
     "- [ ] **Mark**: Sign contract",
-    "- [ ] **Mark/Josh**: Coordinate go-live date",
+    "- [ ] **Mark/Sam**: Coordinate go-live date",
     "- [ ] **Melissa**: Update runbook",
     "- [ ] **Melissa & Kendra**: Finalize training materials",
     "- [ ] **Osmo/Craig**: Review network diagram",
-    "- [ ] **Osmo/Craig/Josh**: Plan cutover window",
+    "- [ ] **Osmo/Craig/Sam**: Plan cutover window",
     "- [ ] **Paul**: Approve change request",
-    "- [ ] **Paul/Craig/Josh**: Coordinate DR test",
+    "- [ ] **Paul/Craig/Sam**: Coordinate DR test",
     "- [ ] **Quincy**: Send invoice",
 ])
 
@@ -160,13 +160,13 @@ _QA_FRAGMENTS = [
 # that clicking Answer bills exactly one.
 _QA_CALLS = 0
 
-# One confirmed group (Josh's spelling variants already merged) plus
+# One confirmed group (Sam's spelling variants already merged) plus
 # two pending suggestions, so the management dialog has something in
 # every section to screenshot.
 _OWNER_ALIASES = {"aliases": [{
-    "id": "alias-josh",
-    "canonical": "Josh",
-    "members": ["josh", "josh rodriguez", "joshua"],
+    "id": "alias-sam",
+    "canonical": "Sam",
+    "members": ["sam", "sam doe", "samantha"],
 }]}
 _OWNER_SUGGESTIONS = {"groups": [
     {
@@ -174,7 +174,7 @@ _OWNER_SUGGESTIONS = {"groups": [
         "suggested_canonical": "Dan",
         "members": [
             {"key": "dan", "display": "Dan", "count": 1},
-            {"key": "dan fallon", "display": "Dan Fallon", "count": 1},
+            {"key": "dan doe", "display": "Dan Doe", "count": 1},
         ],
     },
     {
@@ -267,7 +267,7 @@ def body_for(path: str) -> dict | list:
 
     if path == "/settings":
         return {
-            "recordings_dir": r"C:\Users\joshu\MeetingRecordings",
+            "recordings_dir": r"C:\Users\<you>\MeetingRecordings",
             "session_archive_dir": r"G:\My Drive\MRv2-Archive",
             "cloud_mirror_dir": r"G:\My Drive\MRv2",
             "anthropic_api_key": "", "openai_api_key": "", "hf_token": "",
@@ -299,13 +299,13 @@ def body_for(path: str) -> dict | list:
             "last_seen_version": "1.1.0",
             "last_seen_at": "2026-08-13T13:00:00",
             "status": "update_available",
-            "install_path": r"C:\Users\joshu\AppData\Local\MeetingRecorder\chrome-extension",
+            "install_path": r"C:\Users\<you>\AppData\Local\MeetingRecorder\chrome-extension",
         }
 
     if path == "/extension/install":
         return {
             "ok": True,
-            "path": r"C:\Users\joshu\AppData\Local\MeetingRecorder\chrome-extension",
+            "path": r"C:\Users\<you>\AppData\Local\MeetingRecorder\chrome-extension",
             "files": [
                 "background.js", "manifest.json", "options.html",
                 "options.js", "popup.html", "popup.js",

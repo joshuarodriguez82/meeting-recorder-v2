@@ -324,16 +324,16 @@ for (const depth of [35, 50]) {
   test(`a meeting label at nesting depth ${depth} is reachable by the DOM scan`, () => {
     const leaf = el("div", {
       role: "button",
-      "aria-label": "Homeserve, 8:30 AM to 9:00 AM, Friday, August 14, 2026, Microsoft Teams Meeting, By Mark Lefky, Busy",
+      "aria-label": "Globex, 8:30 AM to 9:00 AM, Friday, August 14, 2026, Microsoft Teams Meeting, By Riley Poe, Busy",
     });
     const chain = buildChain(depth, leaf);
     setDocument(doc([chain]));
 
     const { candidates, diag } = sandbox._calendarDomScanFunc();
-    const found = candidates.find((c) => c.label.startsWith("Homeserve"));
+    const found = candidates.find((c) => c.label.startsWith("Globex"));
     assert.ok(
       found,
-      `expected the depth-${depth} "Homeserve" candidate to be found, got ` +
+      `expected the depth-${depth} "Globex" candidate to be found, got ` +
       `${candidates.length} candidate(s); diag=${JSON.stringify(diag)}`,
     );
   });
@@ -423,19 +423,19 @@ test("classifyZeroReason: singular phrasing for exactly one candidate", () => {
 });
 
 // ── extractEventsFromCandidates / parseMeetingLabel: regression set ──
-// (condensed from the prior scratch harness's fixtures, built from the
-// user's own field-reported subjects — pipe, slash, FW: prefix,
-// trailing space, all-day, multi-day, nested duplicates.)
+// (condensed from the prior scratch harness's fixtures; the shapes come
+// from field-reported subjects — pipe, slash, FW: prefix, trailing
+// space, all-day, multi-day, nested duplicates — with fictional names.)
 
 const FALLBACK_YEAR = 2026;
 const COLUMN_DATE = "2026-08-13";
 
 test("realistic single-day fixture: all 5 real meetings captured (was 1 of 5 pre-v1.2)", () => {
   const dayLabels = [
-    "AWS Daily Pulse Call, 10:00 AM to 10:15 AM, Microsoft Teams Meeting, Gulsah Goymen",
-    "PRIORITY: AWS Sales| Active Project Status Reviews and Escalations, 10:00 AM to 10:30 AM, Microsoft Teams Meeting, Will Treacy",
-    "FW: AWS Connect - Italy / ECC next steps: weekly team connect, 11:30 AM to 12:00 PM",
-    "AWS/PGE - IVA PoC Sync-up, 1:00 PM to 1:30 PM, Microsoft Teams Meeting",
+    "Acme Daily Pulse Call, 10:00 AM to 10:15 AM, Microsoft Teams Meeting, Zoe Doe",
+    "PRIORITY: Acme Sales| Active Project Status Reviews and Escalations, 10:00 AM to 10:30 AM, Microsoft Teams Meeting, Casey Roe",
+    "FW: Acme Connect - Italy / ACR next steps: weekly team connect, 11:30 AM to 12:00 PM",
+    "Acme/CYB - IVA PoC Sync-up, 1:00 PM to 1:30 PM, Microsoft Teams Meeting",
     "AI Transformation Stand Up , 7:30 AM to 8:30 AM",
   ];
   const candidates = dayLabels.map((label) => ({ label, columnDateIso: COLUMN_DATE, layer: "aria-label" }));
@@ -443,12 +443,12 @@ test("realistic single-day fixture: all 5 real meetings captured (was 1 of 5 pre
   assert.equal(result.events.length, 5, JSON.stringify(result.stats));
 
   const subjects = result.events.map((e) => e.subject).sort();
-  assert.ok(subjects.includes("PRIORITY: AWS Sales| Active Project Status Reviews and Escalations"));
-  assert.ok(subjects.includes("FW: AWS Connect - Italy / ECC next steps: weekly team connect"));
-  assert.ok(subjects.includes("AWS/PGE - IVA PoC Sync-up"));
+  assert.ok(subjects.includes("PRIORITY: Acme Sales| Active Project Status Reviews and Escalations"));
+  assert.ok(subjects.includes("FW: Acme Connect - Italy / ACR next steps: weekly team connect"));
+  assert.ok(subjects.includes("Acme/CYB - IVA PoC Sync-up"));
   assert.ok(subjects.includes("AI Transformation Stand Up"));
 
-  const pulseCall = result.events.find((e) => e.subject === "AWS Daily Pulse Call");
+  const pulseCall = result.events.find((e) => e.subject === "Acme Daily Pulse Call");
   assert.ok(pulseCall);
   assert.equal(pulseCall.start, "2026-08-13T10:00:00");
   assert.equal(pulseCall.end, "2026-08-13T10:15:00");
@@ -478,7 +478,7 @@ test("multi-day span parses as a single event with correct start/end days", () =
 });
 
 test("3 nested-duplicate candidates for the same event collapse to exactly 1", () => {
-  const dupLabel = "AWS Daily Pulse Call, 10:00 AM to 10:15 AM, Microsoft Teams Meeting";
+  const dupLabel = "Acme Daily Pulse Call, 10:00 AM to 10:15 AM, Microsoft Teams Meeting";
   const candidates = [
     { label: dupLabel, columnDateIso: COLUMN_DATE, layer: "aria-label" },
     { label: dupLabel, columnDateIso: COLUMN_DATE, layer: "aria-label" },
@@ -674,15 +674,17 @@ test("captureCalendarOnly persists a traceable result even when called directly 
 // label — a position TIME_RANGE_RE never looks at. The field
 // diagnostic reported "47 unresolved date/time" against labels that
 // each carried a fully-qualified date in their own text.
-// These labels are verbatim from that report.
+// These labels reproduce that report's exact shapes (date after the
+// time range, comma-and-bracket organiser names, pipes and slashes in
+// subjects) with the names and clients replaced by fictional ones.
 const FIELD_LABELS = [
-  "Homeserve, 8:30 AM to 9:00 AM, Friday, August 14, 2026, Microsoft Teams Meeting, By Mark Lefky, Busy",
-  "PRIORITY: AWS Sales| Active Project Status Reviews and Escalations, 10:00 AM to 10:30 AM, Friday, August 14, 2026, Microsoft Teams Meeting, By Will Treacy, Busy, Exception to recurring event",
-  "Discuss the TTEC collection script concerns and develop a path forward, 10:30 AM to 11:00 AM, Friday, August 14, 2026, Microsoft Teams Meeting, By McDonnell, Bob Jr. [US-US], Busy",
-  "Ricoh/AWS <> TTEC | workforce management and quality management, 1:30 PM to 2:25 PM, Wednesday, August 12, 2026, By Justin Iverson, Busy",
-  "AWS Daily Pulse Call , 9:30 AM to 9:45 AM, Friday, August 14, 2026, Microsoft Teams Meeting, By Gülşah Göymen, Busy, Recurring event",
-  "Q3 Quarterly Management Meeting, 10:00 AM to 11:30 AM, Wednesday, August 12, 2026, By TTEC Evite, Tentative",
-  "Guardian/AWS/TTEC Sync, 9:30 AM to 10:30 AM, Thursday, August 13, 2026, By Kreitzer, Ken, Busy",
+  "Globex, 8:30 AM to 9:00 AM, Friday, August 14, 2026, Microsoft Teams Meeting, By Riley Poe, Busy",
+  "PRIORITY: Acme Sales| Active Project Status Reviews and Escalations, 10:00 AM to 10:30 AM, Friday, August 14, 2026, Microsoft Teams Meeting, By Casey Roe, Busy, Exception to recurring event",
+  "Discuss the Northwind collection script concerns and develop a path forward, 10:30 AM to 11:00 AM, Friday, August 14, 2026, Microsoft Teams Meeting, By Roe, Pat Jr. [US-US], Busy",
+  "Hooli/Acme <> Northwind | workforce management and quality management, 1:30 PM to 2:25 PM, Wednesday, August 12, 2026, By Devon Poe, Busy",
+  "Acme Daily Pulse Call , 9:30 AM to 9:45 AM, Friday, August 14, 2026, Microsoft Teams Meeting, By Zoë Døe, Busy, Recurring event",
+  "Q3 Quarterly Management Meeting, 10:00 AM to 11:30 AM, Wednesday, August 12, 2026, By Northwind Evite, Tentative",
+  "Umbrella/Acme/Northwind Sync, 9:30 AM to 10:30 AM, Thursday, August 13, 2026, By Noh, Kim, Busy",
 ];
 
 test("FIELD: date after the time range resolves with NO column date", () => {
@@ -696,16 +698,16 @@ test("FIELD: date after the time range resolves with NO column date", () => {
     `expected every field label to produce an event; stats=${JSON.stringify(result.stats)}`);
   assert.equal(result.stats.dateUnresolved, 0);
 
-  const home = result.events.find((e) => e.subject === "Homeserve");
-  assert.ok(home, "Homeserve missing");
+  const home = result.events.find((e) => e.subject === "Globex");
+  assert.ok(home, "Globex missing");
   assert.equal(home.start, "2026-08-14T08:30:00");
   assert.equal(home.end, "2026-08-14T09:00:00");
 
   // Each event must land on ITS OWN date, not all collapsed onto one.
-  const ricoh = result.events.find((e) => e.subject.startsWith("Ricoh/AWS"));
-  assert.equal(ricoh.start, "2026-08-12T13:30:00");
-  const guardian = result.events.find((e) => e.subject === "Guardian/AWS/TTEC Sync");
-  assert.equal(guardian.start, "2026-08-13T09:30:00");
+  const acme = result.events.find((e) => e.subject.startsWith("Hooli/Acme"));
+  assert.equal(acme.start, "2026-08-12T13:30:00");
+  const umbrella = result.events.find((e) => e.subject === "Umbrella/Acme/Northwind Sync");
+  assert.equal(umbrella.start, "2026-08-13T09:30:00");
 });
 
 test("FIELD: a month name in the SUBJECT loses to the real date after the time", () => {

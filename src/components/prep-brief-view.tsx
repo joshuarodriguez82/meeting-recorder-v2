@@ -239,7 +239,7 @@ export function PrepBriefView({ sessions, meetings = [] }: Props) {
             <Input
               value={subject}
               onChange={(e) => setSubject(e.target.value)}
-              placeholder="e.g. Weekly Sync with SimpliSafe"
+              placeholder="e.g. Weekly Sync with Initech"
               autoComplete="off"
             />
             <p className="text-xs text-muted-foreground">

@@ -180,8 +180,8 @@ an otherwise light app. They now follow the app's theme.
 
 ## Grouping people who are the same person
 
-Speaker names arrive in whatever form the source used — "Josh",
-"Joshua Rodriguez", "Rodriguez, Joshua" — and each variant counted as a
+Speaker names arrive in whatever form the source used — "Sam",
+"Samantha Doe", "Doe, Samantha" — and each variant counted as a
 separate person across a client's meetings. Variants can now be grouped
 so one person reads as one person.
 

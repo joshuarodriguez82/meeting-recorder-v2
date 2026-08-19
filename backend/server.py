@@ -697,7 +697,7 @@ class Services:
         self.session_svc: Optional[SessionService] = None
         self.export_svc: Optional[ExportService] = None
         self.client_cfg_svc: Optional[ClientConfigService] = None
-        # Confirmed owner-name merges (e.g. "Joshua" -> "Josh"). Same
+        # Confirmed owner-name merges (e.g. "Samantha" -> "Sam"). Same
         # directory, same lifecycle as client_cfg_svc — see
         # services/owner_service.py's OwnerAliasStore docstring.
         self.owner_alias_store: Optional[OwnerAliasStore] = None
@@ -4918,7 +4918,7 @@ def _reconcile_archive() -> int:
     SANITIZE FIRST (field report 2026-08-07, second incident same day):
     before either side of the roam runs, clear any per-machine folder
     path in the LOCAL client_configs.json that is structurally foreign
-    to this platform (e.g. `G:\\My Drive\\Aon` on macOS) — damage done by
+    to this platform (e.g. `G:\\My Drive\\Zorg` on macOS) — damage done by
     the pre-fix whole-file copy (or any other route) that would
     otherwise keep getting queued against every reconcile sweep. See
     services/shared_state_sync.py:sanitize_local_paths for the
@@ -6366,8 +6366,8 @@ async def list_commitments(
         [s.strip() for s in status.split(",") if s.strip()]
         if status else None
     )
-    # owner filtering resolves multi-owner strings ("Mark/Josh") and
-    # confirmed aliases ("Joshua" -> "Josh") — see owner_service.py.
+    # owner filtering resolves multi-owner strings ("Mark/Sam") and
+    # confirmed aliases ("Samantha" -> "Sam") — see owner_service.py.
     alias_index = load_alias_index(svc.owner_alias_store)
     items = await asyncio.to_thread(
         svc.commitments_svc.list_all,

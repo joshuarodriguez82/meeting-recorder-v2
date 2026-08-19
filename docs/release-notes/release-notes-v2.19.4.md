@@ -12,8 +12,8 @@
 >    client that had no meetings yet, and showed "No clients yet"
 >    instead.
 > 3. **Meetings tagged with different capitalization went missing.** A
->    meeting tagged `AON` exported into the `Aon` folder but never
->    appeared under `Aon` in the app.
+>    meeting tagged `ZORG` exported into the `Zorg` folder but never
+>    appeared under `Zorg` in the app.
 
 ## Install (macOS)
 
@@ -112,12 +112,12 @@ That fix only covered the Today tab. This one covers the Clients list.
 ## Capitalization no longer hides meetings
 
 Copying resolved a client's folder case-insensitively, but the Clients
-list matched exactly. A meeting tagged `AON` therefore copied into the
-`Aon` folder and then never showed up under `Aon` — the files were on
+list matched exactly. A meeting tagged `ZORG` therefore copied into the
+`Zorg` folder and then never showed up under `Zorg` — the files were on
 disk the whole time, just invisible in the app.
 
 Client matching is now case- and whitespace-insensitive everywhere, and
-`AON` / `Aon` / `aon ` collapse into one client instead of splitting
+`ZORG` / `Zorg` / `zorg ` collapse into one client instead of splitting
 your meetings across near-identical entries.
 
 ## Unchanged

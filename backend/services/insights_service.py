@@ -86,7 +86,7 @@ _TOPIC_STOP = {
 }
 
 # Match a capitalized run of 1-4 words. Picks up "AWS Connect",
-# "SimpliSafe", "Salesforce Marketing Cloud" etc. while ignoring
+# "Initech", "Salesforce Marketing Cloud" etc. while ignoring
 # sentence-leading "The …".
 _TOPIC_PHRASE_RE = re.compile(
     r"(?<![A-Za-z])"

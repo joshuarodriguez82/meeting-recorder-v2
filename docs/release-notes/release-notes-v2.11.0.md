@@ -65,18 +65,18 @@ Five user-visible changes:
 ### 1. Meeting-overwrite data loss — root cause + fix
 
 **Field repro (2026-06-15):** user recorded a 56-minute customer call
-("NLX Training"), stopped it, immediately started a second meeting
-("Ricoh Go Forward Sync"), and after both finished:
+("VDL Training"), stopped it, immediately started a second meeting
+("Hooli Go Forward Sync"), and after both finished:
 
-- The 56-min NLX recording's WAV had been overwritten with the
-  Ricoh meeting's 32-min audio.
-- NLX's session JSON now showed `ended_at` equal to Ricoh's stop
-  time + audio_duration fields stamped from Ricoh's recording, so
+- The 56-min VDL recording's WAV had been overwritten with the
+  Hooli meeting's 32-min audio.
+- VDL's session JSON now showed `ended_at` equal to Hooli's stop
+  time + audio_duration fields stamped from Hooli's recording, so
   the UI displayed *"You got 32 min of audio in a 93-min recording
   — about 61 min appears to be missing"*.
-- Ricoh's session JSON had NLX's transcript and AI summary attached.
+- Hooli's session JSON had VDL's transcript and AI summary attached.
 
-The smoking gun is in Ricoh's per-session log:
+The smoking gun is in Hooli's per-session log:
 
 ```
 10:02:36  Session 3E15357E recording started.
@@ -87,9 +87,9 @@ The smoking gun is in Ricoh's per-session log:
 10:35:02  SYNC_INTEGRITY: session 56105413 mic=1937.6s …
 ```
 
-Ricoh's stop ran with `self._session.session_id = 56105413` —
-NLX's session id — so finalize wrote Ricoh's 32-min audio to NLX's
-final WAV path and the sync-integrity stamping landed on NLX.
+Hooli's stop ran with `self._session.session_id = 56105413` —
+VDL's session id — so finalize wrote Hooli's 32-min audio to VDL's
+final WAV path and the sync-integrity stamping landed on VDL.
 
 **Root cause.** `self._session` on the recording service was a
 single shared-mutable variable that two paths both wrote to:
@@ -99,15 +99,15 @@ single shared-mutable variable that two paths both wrote to:
    `process_session()` to bind the session being transcribed.
 
 The v2.10.3 `_PROCESSING_LOCK` serialized two concurrent processings
-but did NOT cover the recording-vs-processing race. While NLX's
+but did NOT cover the recording-vs-processing race. While VDL's
 auto-process was still running in the background, the user started
-the Ricoh meeting. NLX's auto-process's `set_session(NLX)` had
-aliased `_session` to NLX. The subsequent Ricoh `stop_recording()`
-read the aliased `_session` and wrote everything to NLX. In
-parallel, NLX's `process_session()` body kept reading `self._session`
+the Hooli meeting. VDL's auto-process's `set_session(VDL)` had
+aliased `_session` to VDL. The subsequent Hooli `stop_recording()`
+read the aliased `_session` and wrote everything to VDL. In
+parallel, VDL's `process_session()` body kept reading `self._session`
 across its `await` points — by then `_session` had been reassigned
-to Ricoh by the user starting the next meeting, so NLX's transcript
-ended up appended to Ricoh's session object.
+to Hooli by the user starting the next meeting, so VDL's transcript
+ended up appended to Hooli's session object.
 
 **Fix.** Pass the session by parameter through the entire processing
 path, and snapshot it into a local in `stop_recording()` on entry.

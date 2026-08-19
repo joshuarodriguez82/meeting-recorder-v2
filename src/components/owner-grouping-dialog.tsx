@@ -310,7 +310,7 @@ export function OwnerGroupingDialog({
                   </div>
                   <div className="flex items-center gap-2">
                     <Input
-                      placeholder="Canonical name (e.g. Josh)"
+                      placeholder="Canonical name (e.g. Sam)"
                       value={manualCanonical}
                       onChange={(e) => setManualCanonical(e.target.value)}
                       className="h-8 flex-1 max-w-xs"

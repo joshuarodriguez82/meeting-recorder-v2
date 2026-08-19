@@ -224,7 +224,7 @@ def test_index_folder_flags_non_text_skips_as_expected(tmp_path):
     recordings = tmp_path / "recordings"
     recordings.mkdir()
 
-    report = index_folder(folder, "Aon", fake_embed, recordings)
+    report = index_folder(folder, "Zorg", fake_embed, recordings)
     by_file = {s["file"]: s for s in report["skipped"]}
     jpg_skip = next(s for f, s in by_file.items() if f.endswith("photo.jpg"))
     xyz_skip = next(s for f, s in by_file.items() if f.endswith("weird.xyz"))
@@ -289,7 +289,7 @@ def test_index_folder_report_counts_and_skip_reasons(tmp_path):
     recordings = tmp_path / "recordings"
     recordings.mkdir()
 
-    report = index_folder(folder, "Aon", fake_embed, recordings)
+    report = index_folder(folder, "Zorg", fake_embed, recordings)
     assert report["indexed"] == 2
     assert report["unchanged"] == 0
     assert len(report["skipped"]) == 1
@@ -310,7 +310,7 @@ def test_index_folder_skips_hidden_dirs(tmp_path):
     recordings = tmp_path / "recordings"
     recordings.mkdir()
 
-    report = index_folder(folder, "Aon", fake_embed, recordings)
+    report = index_folder(folder, "Zorg", fake_embed, recordings)
     assert report["indexed"] == 1
     assert report["skipped"] == []
 
@@ -318,7 +318,7 @@ def test_index_folder_skips_hidden_dirs(tmp_path):
 def test_index_folder_nonexistent_folder_is_reported_not_raised(tmp_path):
     recordings = tmp_path / "recordings"
     recordings.mkdir()
-    report = index_folder(tmp_path / "does-not-exist", "Aon", fake_embed, recordings)
+    report = index_folder(tmp_path / "does-not-exist", "Zorg", fake_embed, recordings)
     assert report["indexed"] == 0
     assert len(report["skipped"]) == 1
     assert "does not exist" in report["skipped"][0]["reason"]
@@ -332,11 +332,11 @@ def test_index_folder_unchanged_on_second_run(tmp_path):
     recordings = tmp_path / "recordings"
     recordings.mkdir()
 
-    r1 = index_folder(folder, "Aon", fake_embed, recordings)
+    r1 = index_folder(folder, "Zorg", fake_embed, recordings)
     assert r1["indexed"] == 1
     assert r1["unchanged"] == 0
 
-    r2 = index_folder(folder, "Aon", fake_embed, recordings)
+    r2 = index_folder(folder, "Zorg", fake_embed, recordings)
     assert r2["indexed"] == 0
     assert r2["unchanged"] == 1
 
@@ -350,7 +350,7 @@ def test_index_folder_reembeds_after_file_modified(tmp_path):
     recordings = tmp_path / "recordings"
     recordings.mkdir()
 
-    r1 = index_folder(folder, "Aon", fake_embed, recordings)
+    r1 = index_folder(folder, "Zorg", fake_embed, recordings)
     assert r1["indexed"] == 1
 
     # Deterministic "modified later" via explicit mtime rather than a
@@ -359,7 +359,7 @@ def test_index_folder_reembeds_after_file_modified(tmp_path):
     p.write_text("version two has different, longer content", encoding="utf-8")
     os.utime(p, (future, future))
 
-    r2 = index_folder(folder, "Aon", fake_embed, recordings)
+    r2 = index_folder(folder, "Zorg", fake_embed, recordings)
     assert r2["indexed"] == 1
     assert r2["unchanged"] == 0
 
@@ -373,12 +373,12 @@ def test_remove_stale_removes_orphan_sidecar(tmp_path):
     recordings = tmp_path / "recordings"
     recordings.mkdir()
 
-    index_folder(folder, "Aon", fake_embed, recordings)
+    index_folder(folder, "Zorg", fake_embed, recordings)
     doc_dir = recordings / "doc_index"
     assert len(list(doc_dir.glob("doc_*.npz"))) == 1
 
     p.unlink()
-    removed = remove_stale(folder, "Aon", recordings)
+    removed = remove_stale(folder, "Zorg", recordings)
     assert removed == 1
     assert len(list(doc_dir.glob("doc_*.npz"))) == 0
 
@@ -417,7 +417,7 @@ def test_search_merges_session_and_document_hits(tmp_path, monkeypatch):
     recordings.mkdir()
 
     sid = "SESS01"
-    _write_session_json(recordings, sid, "Aon", "Kickoff Call")
+    _write_session_json(recordings, sid, "Zorg", "Kickoff Call")
 
     query_vec = np.zeros(_FAKE_DIM, dtype=np.float32)
     query_vec[0] = 1.0
@@ -438,9 +438,9 @@ def test_search_merges_session_and_document_hits(tmp_path, monkeypatch):
     doc_dir.mkdir()
     doc_meta = {
         "model_id": MODEL_ID,
-        "doc_path": str(tmp_path / "Aon-SOW.docx"),
-        "doc_name": "Aon-SOW.docx",
-        "client": "Aon",
+        "doc_path": str(tmp_path / "Zorg-SOW.docx"),
+        "doc_name": "Zorg-SOW.docx",
+        "client": "Zorg",
         "file_mtime": 0.0,
         "chunks": [{"text": "pricing is $50k per phase per the SOW"}],
     }
@@ -465,8 +465,8 @@ def test_search_merges_session_and_document_hits(tmp_path, monkeypatch):
 
     doc_hits = [r for r in results if r["source"] == "document"]
     assert len(doc_hits) == 1
-    assert doc_hits[0]["doc_name"] == "Aon-SOW.docx"
-    assert doc_hits[0]["client"] == "Aon"
+    assert doc_hits[0]["doc_name"] == "Zorg-SOW.docx"
+    assert doc_hits[0]["client"] == "Zorg"
     assert "text" in doc_hits[0] and "similarity" in doc_hits[0]
 
     sess_hits = [r for r in results if r["source"] == "session"]
@@ -479,7 +479,7 @@ def test_search_merges_session_and_document_hits(tmp_path, monkeypatch):
     assert sess_hits[0]["session_id"] == sid
 
     # Client filter narrows document hits too, not just session hits.
-    results_match = search.search("pricing", top_k=10, client="Aon")
+    results_match = search.search("pricing", top_k=10, client="Zorg")
     assert {r["source"] for r in results_match} == {"session", "document"}
 
     results_nomatch = search.search("pricing", top_k=10, client="SomeoneElse")
@@ -532,14 +532,14 @@ def test_index_folder_ignores_legacy_pickle_and_rebuilds_from_source(
         "model_id": MODEL_ID,
         "doc_path": str((folder / "a.txt").resolve()),
         "doc_name": "a.txt",
-        "client": "Aon",
+        "client": "Zorg",
         "file_mtime": 0.0,
         "chunks": [{"text": "stale legacy chunk"}],
         "embeddings": np.ones((1, _FAKE_DIM), dtype=np.float32),
     }
     legacy_path.write_bytes(pickle.dumps(legacy_payload, protocol=4))
 
-    report = index_folder(folder, "Aon", fake_embed, recordings)
+    report = index_folder(folder, "Zorg", fake_embed, recordings)
 
     assert len(_spy_pickle_loads) == 0, "legacy pickle must never be unpickled"
     # Rebuilt from source, not read from the legacy pickle — indexed,
@@ -590,10 +590,10 @@ def test_index_folder_unchanged_skip_never_touches_pickle(
     recordings = tmp_path / "recordings"
     recordings.mkdir()
 
-    r1 = index_folder(folder, "Aon", fake_embed, recordings)
+    r1 = index_folder(folder, "Zorg", fake_embed, recordings)
     assert r1["indexed"] == 1
 
-    r2 = index_folder(folder, "Aon", fake_embed, recordings)
+    r2 = index_folder(folder, "Zorg", fake_embed, recordings)
     assert r2["unchanged"] == 1
     assert r2["total_chunks"] == r1["total_chunks"]
     assert len(_spy_pickle_loads) == 0

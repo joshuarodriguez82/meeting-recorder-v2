@@ -543,7 +543,7 @@ class RecordingService:
         # capture thread for file-lock + write bandwidth: every audio
         # sample queues, the ring buffer overflows, samples are dropped
         # silently, and the result is exactly the field repro on the
-        # SimpliSafe 2h25m call — "you got 28 min of audio in a 149-min
+        # Initech 2h25m call — "you got 28 min of audio in a 149-min
         # recording — about 121 min appears to be missing", with
         # mic↔loopback drift of multiple thousand seconds. The final
         # merged WAV still writes to recordings_dir on stop (one-shot
@@ -653,12 +653,12 @@ class RecordingService:
         # path (audio_path assignment, ended_at, sync-integrity stamping,
         # final-path computation). If a concurrent processing path called
         # `set_session(other)` while stop_recording was running (the
-        # exact race that fired on 2026-06-15 when NLX's auto-process
-        # called set_session(NLX) mid-Ricoh-recording), every later
+        # exact race that fired on 2026-06-15 when VDL's auto-process
+        # called set_session(VDL) mid-Hooli-recording), every later
         # `self._session` read would resolve to the WRONG session — and
         # `_build_audio_path(self._session.session_id)` then wrote
-        # Ricoh's audio to NLX's WAV path, while `self._session.ended_at
-        # = ...` stamped NLX's JSON with Ricoh's stop time. Both halves
+        # Hooli's audio to VDL's WAV path, while `self._session.ended_at
+        # = ...` stamped VDL's JSON with Hooli's stop time. Both halves
         # of the visible bug came from this single shared-mutable-state
         # read. Capture `_session` exactly once here; the local survives
         # any concurrent reassignment.
@@ -1203,14 +1203,14 @@ class RecordingService:
         # the previous meeting's transcript, and the original meeting's
         # WAV got overwritten by the new meeting's audio when stop_
         # recording later finalized through the now-aliased reference.
-        # Field repro on 2026-06-15: NLX Training (56105413) had its
+        # Field repro on 2026-06-15: VDL Training (56105413) had its
         # session_56105413.wav overwritten by the next meeting's 32-min
-        # audio, and the Ricoh session ended up with NLX's transcript +
-        # summary attached. Ricoh's session log carries the smoking gun:
+        # audio, and the Hooli session ended up with VDL's transcript +
+        # summary attached. Hooli's session log carries the smoking gun:
         #   [stop] finalize_recording_streaming → ...\session_56105413.wav
-        # written from inside Ricoh's stop, because Ricoh's `_session`
-        # had been reassigned to NLX by the auto-process path that ran
-        # while Ricoh was still recording.
+        # written from inside Hooli's stop, because Hooli's `_session`
+        # had been reassigned to VDL by the auto-process path that ran
+        # while Hooli was still recording.
         #
         # The fix is to never read `self._session` here — the caller
         # passes the exact session to process. The optional default
@@ -1466,7 +1466,7 @@ class RecordingService:
         populated. Takes the session as an explicit parameter — same
         data-loss-bug rationale as process_session above; never read
         self._session here, that race is exactly how the 2026-06-15
-        NLX/Ricoh meeting overwrite happened. Safe to call when
+        VDL/Hooli meeting overwrite happened. Safe to call when
         self._profile_service is None (skips matching, still computes +
         stores embeddings so a future session can match them later if
         profiling gets enabled).
