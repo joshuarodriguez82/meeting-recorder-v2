@@ -464,14 +464,15 @@ def test_follow_up_email_draft_gets_the_full_block():
 
     prompts: list[str] = []
 
-    class _Messages:
-        async def create(self, **kwargs):
-            prompts.append(kwargs["messages"][0]["content"])
-            return SimpleNamespace(
-                content=[SimpleNamespace(text="SUBJECT: x\nBODY:\nbody")])
+    # Goes through the provider-agnostic `_chat`, not a raw Anthropic
+    # client. The previous shape called `summarizer._client`, which
+    # `Summarizer` does not define — so this path raised AttributeError
+    # for every user until it was routed here.
+    async def _chat(prompt, **kwargs):
+        prompts.append(prompt)
+        return "SUBJECT: x\nBODY:\nbody"
 
-    fake = SimpleNamespace(_client=SimpleNamespace(messages=_Messages()),
-                           _model="claude-haiku-4-5")
+    fake = SimpleNamespace(_chat=_chat, _model="claude-haiku-4-5")
     subject, body = _run(fu._compose_body(
         fake, meeting_title="Globex discovery", owner="Jane Doe",
         tasks=["Send the routing map"], decisions_md="", summary_md="",

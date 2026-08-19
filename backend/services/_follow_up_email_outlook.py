@@ -113,15 +113,17 @@ async def _compose_body(
     if summary_md:
         prompt += f"Meeting summary (for context):\n{summary_md[:1500]}\n"
 
-    msg = await asyncio.wait_for(
-        summarizer._client.messages.create(
-            model=summarizer._model,
-            max_tokens=600,
-            messages=[{"role": "user", "content": prompt}],
-        ),
-        timeout=45.0,
-    )
-    text = msg.content[0].text.strip()
+    # Routed through the provider-agnostic `_chat` helper rather than a
+    # raw client call. This used to be
+    # `summarizer._client.messages.create(...)`, but `Summarizer` has no
+    # `_client` — only `_anthropic_client` and `_openai_client` — so
+    # drafting a follow-up raised AttributeError on every platform and
+    # every provider. `_chat` also means this now works for
+    # OpenAI-compatible providers, which the raw Anthropic call never
+    # could. `_follow_up_email_macos.py` imports this same function, so
+    # the fix covers both.
+    text = (await summarizer._chat(
+        prompt, max_tokens=600, timeout=45.0)).strip()
 
     subject = ""
     body = text
