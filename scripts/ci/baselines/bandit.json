@@ -1,10 +1,28 @@
 {
   "schema": 2,
   "tool": "bandit",
-  "generated_utc": "2026-08-19T01:23:12Z",
+  "generated_utc": "2026-08-19T01:47:58Z",
   "note": "Accepted pre-existing findings. CI fails only on findings absent from this list. Refresh deliberately with `scripts/ci/security_baseline.py update` and review the diff.",
-  "count": 159,
+  "count": 182,
   "findings": [
+    {
+      "fingerprint": "88514f5283b843e6",
+      "rule": "B110",
+      "file": "backend/config/settings.py",
+      "line": 110,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "62e8def632dac2d5",
+      "rule": "B110",
+      "file": "backend/config/settings.py",
+      "line": 119,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
     {
       "fingerprint": "bd2dfda71e883f14",
       "rule": "B110",
@@ -198,7 +216,7 @@
       "fingerprint": "62c1c8ef7dbc5b84",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 2029,
+      "line": 2031,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -207,7 +225,7 @@
       "fingerprint": "e8d36d21aa3d2751",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 2172,
+      "line": 2174,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -216,7 +234,16 @@
       "fingerprint": "016b7598137181a1",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 5740,
+      "line": 5742,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "f39996b67a54697b",
+      "rule": "B110",
+      "file": "backend/server.py",
+      "line": 7772,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -225,7 +252,16 @@
       "fingerprint": "4ace3904e8738941",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 8412,
+      "line": 8458,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "d3113a15fcdad96a",
+      "rule": "B110",
+      "file": "backend/server.py",
+      "line": 8943,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -234,16 +270,34 @@
       "fingerprint": "feb1effdd664f542",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 8966,
+      "line": 9093,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
     },
     {
+      "fingerprint": "96c466860da40c77",
+      "rule": "B110",
+      "file": "backend/server.py",
+      "line": 8956,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 2
+    },
+    {
+      "fingerprint": "8db86fc9c4bd91c6",
+      "rule": "B110",
+      "file": "backend/server.py",
+      "line": 9291,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 3
+    },
+    {
       "fingerprint": "7c88086c9a929115",
       "rule": "B112",
       "file": "backend/server.py",
-      "line": 7132,
+      "line": 7134,
       "severity": "LOW",
       "message": "Try, Except, Continue detected.",
       "occurrence": 1
@@ -252,7 +306,7 @@
       "fingerprint": "1ac42fcda9cc4100",
       "rule": "B310",
       "file": "backend/server.py",
-      "line": 1359,
+      "line": 1361,
       "severity": "MEDIUM",
       "message": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected.",
       "occurrence": 1
@@ -261,7 +315,7 @@
       "fingerprint": "116e9f5bbe46d981",
       "rule": "B310",
       "file": "backend/server.py",
-      "line": 1445,
+      "line": 1447,
       "severity": "MEDIUM",
       "message": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected.",
       "occurrence": 1
@@ -270,7 +324,7 @@
       "fingerprint": "deb33f3b0bdc5c63",
       "rule": "B310",
       "file": "backend/server.py",
-      "line": 8292,
+      "line": 8338,
       "severity": "MEDIUM",
       "message": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected.",
       "occurrence": 1
@@ -288,7 +342,7 @@
       "fingerprint": "7e347d37f76213ab",
       "rule": "B404",
       "file": "backend/server.py",
-      "line": 2061,
+      "line": 2063,
       "severity": "LOW",
       "message": "Consider possible security implications associated with the subprocess module.",
       "occurrence": 1
@@ -306,7 +360,7 @@
       "fingerprint": "07d497a2a1fc8eed",
       "rule": "B603",
       "file": "backend/server.py",
-      "line": 2069,
+      "line": 2071,
       "severity": "LOW",
       "message": "subprocess call - check for execution of untrusted input.",
       "occurrence": 1
@@ -315,7 +369,7 @@
       "fingerprint": "1eb687cdd1464834",
       "rule": "B603",
       "file": "backend/server.py",
-      "line": 2167,
+      "line": 2169,
       "severity": "LOW",
       "message": "subprocess call - check for execution of untrusted input.",
       "occurrence": 1
@@ -324,7 +378,7 @@
       "fingerprint": "dbd09d3816ec180b",
       "rule": "B603",
       "file": "backend/server.py",
-      "line": 5334,
+      "line": 5336,
       "severity": "LOW",
       "message": "subprocess call - check for execution of untrusted input.",
       "occurrence": 1
@@ -333,7 +387,7 @@
       "fingerprint": "feb18a79c2a456d6",
       "rule": "B603",
       "file": "backend/server.py",
-      "line": 5341,
+      "line": 5343,
       "severity": "LOW",
       "message": "subprocess call - check for execution of untrusted input.",
       "occurrence": 1
@@ -342,7 +396,7 @@
       "fingerprint": "38c1fa8e0659a7e0",
       "rule": "B606",
       "file": "backend/server.py",
-      "line": 5328,
+      "line": 5330,
       "severity": "LOW",
       "message": "Starting a process without a shell.",
       "occurrence": 1
@@ -351,7 +405,7 @@
       "fingerprint": "78132fc23c07edfe",
       "rule": "B607",
       "file": "backend/server.py",
-      "line": 5341,
+      "line": 5343,
       "severity": "LOW",
       "message": "Starting a process with a partial executable path",
       "occurrence": 1
@@ -573,12 +627,21 @@
       "occurrence": 1
     },
     {
-      "fingerprint": "40a3d7f03e97bfa1",
-      "rule": "B324",
+      "fingerprint": "5ab455c221724d5e",
+      "rule": "B110",
       "file": "backend/services/document_service.py",
-      "line": 114,
-      "severity": "HIGH",
-      "message": "Use of weak SHA1 hash for security. Consider usedforsecurity=False",
+      "line": 588,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "df83b31cd6b671dc",
+      "rule": "B110",
+      "file": "backend/services/document_service.py",
+      "line": 1140,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
       "occurrence": 1
     },
     {
@@ -609,15 +672,6 @@
       "occurrence": 1
     },
     {
-      "fingerprint": "7e5fa2260641c033",
-      "rule": "B324",
-      "file": "backend/services/item_status_service.py",
-      "line": 69,
-      "severity": "HIGH",
-      "message": "Use of weak SHA1 hash for security. Consider usedforsecurity=False",
-      "occurrence": 1
-    },
-    {
       "fingerprint": "f13c3be3b58b89f1",
       "rule": "B110",
       "file": "backend/services/outlook_web_scraper.py",
@@ -645,19 +699,28 @@
       "occurrence": 2
     },
     {
-      "fingerprint": "e20e46d00b4f86a0",
-      "rule": "B324",
-      "file": "backend/services/prep_brief_cache_service.py",
-      "line": 48,
-      "severity": "HIGH",
-      "message": "Use of weak SHA1 hash for security. Consider usedforsecurity=False",
+      "fingerprint": "a901dfad51ebc00d",
+      "rule": "B110",
+      "file": "backend/services/recording_service.py",
+      "line": 1033,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "e250cea7ea52438d",
+      "rule": "B110",
+      "file": "backend/services/recording_service.py",
+      "line": 1427,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
       "occurrence": 1
     },
     {
       "fingerprint": "8c5dc6d1e9b6a69b",
       "rule": "B110",
       "file": "backend/services/recording_service.py",
-      "line": 1695,
+      "line": 1865,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -666,10 +729,19 @@
       "fingerprint": "9ad3b95b261a5bc4",
       "rule": "B110",
       "file": "backend/services/recording_service.py",
-      "line": 1764,
+      "line": 1934,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
+    },
+    {
+      "fingerprint": "b22afa58b9aea5bd",
+      "rule": "B110",
+      "file": "backend/services/recording_service.py",
+      "line": 1377,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 2
     },
     {
       "fingerprint": "1ee048bed8981965",
@@ -684,7 +756,7 @@
       "fingerprint": "82f60ae175f7336e",
       "rule": "B603",
       "file": "backend/services/recording_service.py",
-      "line": 2020,
+      "line": 2190,
       "severity": "LOW",
       "message": "subprocess call - check for execution of untrusted input.",
       "occurrence": 1
@@ -693,9 +765,18 @@
       "fingerprint": "b3ceee534c6fcd24",
       "rule": "B603",
       "file": "backend/services/recording_service.py",
-      "line": 2038,
+      "line": 2208,
       "severity": "LOW",
       "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "1cb1980b09cf60ce",
+      "rule": "B110",
+      "file": "backend/services/recovery_service.py",
+      "line": 401,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
       "occurrence": 1
     },
     {
@@ -933,6 +1014,15 @@
       "occurrence": 1
     },
     {
+      "fingerprint": "85d9067ad5078ff1",
+      "rule": "B108",
+      "file": "backend/tests/test_event_log.py",
+      "line": 234,
+      "severity": "MEDIUM",
+      "message": "Probable insecure usage of temp file/directory.",
+      "occurrence": 1
+    },
+    {
       "fingerprint": "af245f6d233db5b4",
       "rule": "B108",
       "file": "backend/tests/test_finalize_gate.py",
@@ -1065,6 +1155,24 @@
       "line": 115,
       "severity": "LOW",
       "message": "Possible hardcoded password: 'hf-test'",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "3294670da007ec9c",
+      "rule": "B404",
+      "file": "backend/tests/test_log_rotation.py",
+      "line": 24,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with the subprocess module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "70044168a814bb8f",
+      "rule": "B603",
+      "file": "backend/tests/test_log_rotation.py",
+      "line": 192,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
       "occurrence": 1
     },
     {
@@ -1257,6 +1365,87 @@
       "occurrence": 1
     },
     {
+      "fingerprint": "c311be2d7c97dd1b",
+      "rule": "B110",
+      "file": "backend/utils/diagnostics_bundle.py",
+      "line": 166,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "deb51450573e1b2c",
+      "rule": "B110",
+      "file": "backend/utils/diagnostics_bundle.py",
+      "line": 305,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "8afa04c0085c077e",
+      "rule": "B110",
+      "file": "backend/utils/diagnostics_bundle.py",
+      "line": 310,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "00e9dfb6a27529bb",
+      "rule": "B110",
+      "file": "backend/utils/diagnostics_bundle.py",
+      "line": 339,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "fee06d21216633b9",
+      "rule": "B112",
+      "file": "backend/utils/diagnostics_bundle.py",
+      "line": 176,
+      "severity": "LOW",
+      "message": "Try, Except, Continue detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "1a21918b49abe07d",
+      "rule": "B112",
+      "file": "backend/utils/diagnostics_bundle.py",
+      "line": 203,
+      "severity": "LOW",
+      "message": "Try, Except, Continue detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "8f980cce6f5d66ff",
+      "rule": "B112",
+      "file": "backend/utils/diagnostics_bundle.py",
+      "line": 287,
+      "severity": "LOW",
+      "message": "Try, Except, Continue detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "5c3615386c6fd185",
+      "rule": "B110",
+      "file": "backend/utils/events.py",
+      "line": 232,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "c4bea368c34497cc",
+      "rule": "B110",
+      "file": "backend/utils/events.py",
+      "line": 303,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
       "fingerprint": "218fc0109af3dc04",
       "rule": "B110",
       "file": "backend/utils/finalize_gate.py",
@@ -1287,7 +1476,25 @@
       "fingerprint": "ea1a835415a7a878",
       "rule": "B110",
       "file": "backend/utils/logger.py",
-      "line": 14,
+      "line": 103,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "278187f521ba1004",
+      "rule": "B110",
+      "file": "backend/utils/logger.py",
+      "line": 193,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "7ee782641cd0e089",
+      "rule": "B110",
+      "file": "backend/utils/logger.py",
+      "line": 345,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
