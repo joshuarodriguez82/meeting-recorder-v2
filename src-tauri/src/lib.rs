@@ -2080,6 +2080,20 @@ fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
        // parent-PID watchdog detects this within seconds and shuts
        // itself down — preventing the orphan-recording scenario.
        .env("MEETING_RECORDER_PARENT_PID", std::process::id().to_string())
+       // The shipped app version, straight from the compiled Tauri
+       // context (i.e. src-tauri/tauri.conf.json's `version` — the same
+       // value release.yml's verify-version job checks the tag against,
+       // and the same one the frontend shows via getVersion()).
+       //
+       // Without this the Python side had no way to know it: a release
+       // build runs the backend out of the extracted runtime dir, which
+       // contains no tauri.conf.json and no package.json, so
+       // diagnostics_bundle.app_version() fell through every branch and
+       // wrote "app_version": null into every exported bundle. A null
+       // there costs a round trip on every bug report just to establish
+       // which build produced it.
+       .env("MEETING_RECORDER_APP_VERSION",
+            app.package_info().version.to_string())
        // Intel Fortran runtime workarounds — Windows-only but harmless on
        // POSIX (FOR_DISABLE_* are simply ignored when MKL isn't present).
        .env("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "1")

@@ -1,5 +1,6 @@
 """Create backend-bundle.zip using Python's zipfile with DEFLATE compression.
 Much faster than Compress-Archive for large trees (~3 min vs ~7 min for 1.9GB)."""
+import json
 import os
 import sys
 import zipfile
@@ -8,6 +9,16 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 BACKEND = ROOT / "backend"
 OUT = ROOT / "backend-bundle.zip"
+
+# Written into the zip (never onto disk) as a sibling of server.py so the
+# backend can name its own build. A release build runs the backend out of
+# the extracted runtime dir, which has no tauri.conf.json and no
+# package.json in it — that is why every exported diagnostics bundle
+# carried "app_version": null. The Tauri shell also passes
+# MEETING_RECORDER_APP_VERSION now; this file is the belt to that
+# braces, and it covers a backend started outside the shell.
+VERSION_FILE = "app_version.txt"
+VERSION_SOURCE = ROOT / "src-tauri" / "tauri.conf.json"
 
 INCLUDE_DIRS = ["config", "core", "meeting_recorder", "models", "scripts", "services", "utils"]
 # Both requirements files ship in the bundle so the Rust shell can pick the
@@ -59,6 +70,18 @@ with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
             zf.write(src, f)
             total_bytes += src.stat().st_size
             file_count += 1
+    try:
+        version = json.loads(
+            VERSION_SOURCE.read_text(encoding="utf-8"))["version"]
+        zf.writestr(VERSION_FILE, f"{version}\n")
+        file_count += 1
+        print(f"Stamped {VERSION_FILE} = {version}")
+    except Exception as e:
+        # Not fatal — the shell's env var still carries the version, and
+        # a missing marker degrades to the same None the export already
+        # handles. But say so loudly in the build log.
+        print(f"WARN: could not stamp {VERSION_FILE} from "
+              f"{VERSION_SOURCE}: {e}")
     for d in EXTRA_ROOT_DIRS:
         src_dir = ROOT / d
         if not src_dir.exists():

@@ -569,6 +569,12 @@ class DraftPlan:
     state: str = NO_ACTION_ITEMS
     source: str = ""          # "commitments" | "action_items" | ""
     message: str = ""
+    # The alias snapshot used to resolve these owners, handed on to the
+    # backends so `follow_up_recipients` can widen a bare first name to
+    # a fuller *confirmed* form of the same identity without re-reading
+    # owner_aliases.json. None when there is no store (see
+    # `load_alias_index`, which degrades rather than raising).
+    alias_index: Optional[AliasIndex] = None
 
     @property
     def ok(self) -> bool:
@@ -604,6 +610,12 @@ def build_draft_plan(svc, session_id: str, session_data: dict) -> DraftPlan:
     happened instead of always blaming the model for not attributing.
     """
     commitments, alias_index = _load_commitments(svc, session_id)
+    if alias_index is None:
+        # No commitments service (or it failed) — we still want the
+        # confirmed-alias snapshot, because the markdown path needs it
+        # too: `follow_up_recipients` uses it to widen a bare first name
+        # to a fuller form the user has confirmed is the same person.
+        alias_index = load_alias_index(getattr(svc, "owner_alias_store", None))
     commitment_owners, commitments_considered = owners_from_commitments(
         commitments, alias_index)
     if commitment_owners:
@@ -612,7 +624,7 @@ def build_draft_plan(svc, session_id: str, session_data: dict) -> DraftPlan:
             f"{commitments_considered} open commitment(s) → "
             f"{len(commitment_owners)} owner(s)")
         return DraftPlan(owners=commitment_owners, state=READY,
-                         source="commitments")
+                         source="commitments", alias_index=alias_index)
 
     action_items_md = (session_data.get("action_items") or "")
     parse = parse_action_items_by_owner(action_items_md)
@@ -629,7 +641,7 @@ def build_draft_plan(svc, session_id: str, session_data: dict) -> DraftPlan:
             f"({parse.parsed_items} item(s) read, "
             f"{parse.generic_items} group-owned)")
         return DraftPlan(owners=parse.by_owner, state=READY,
-                         source="action_items")
+                         source="action_items", alias_index=alias_index)
 
     # ── Nothing to draft. Which of the three is it? ──────────────────
 
@@ -671,13 +683,30 @@ class DraftResult:
 
     `created` is what the old `int` return was; `state`/`source`/`message`
     are what the UI needs to stop collapsing three different outcomes
-    into one toast."""
+    into one toast.
+
+    The delivery fields below are the second half of the same idea, and
+    they exist because "created 10 of 10" was true and useless. A count
+    on its own says nothing about whether those drafts can be *sent*
+    (`addressed` vs `unaddressed` — an unaddressed draft looks finished
+    right up until Send) or about where they are (`location`, `account`
+    — `mail.Save()` takes no folder, so they land in whichever profile
+    COM attached to, which need not be the mailbox on the user's
+    screen). `unverified` counts items the mail client accepted but did
+    not confirm persisting; those are excluded from `created`, because
+    counting them is exactly the overclaim this shape exists to stop.
+    """
 
     created: int = 0
     state: str = NO_ACTION_ITEMS
     source: str = ""
     message: str = ""
     owners: int = 0
+    addressed: int = 0
+    unaddressed: int = 0
+    unverified: int = 0
+    location: str = ""
+    account: str = ""
 
     @classmethod
     def from_plan(cls, plan: DraftPlan, created: int = 0) -> "DraftResult":
@@ -691,4 +720,9 @@ class DraftResult:
             "source": self.source,
             "message": self.message,
             "owners": self.owners,
+            "addressed": self.addressed,
+            "unaddressed": self.unaddressed,
+            "unverified": self.unverified,
+            "location": self.location,
+            "account": self.account,
         }

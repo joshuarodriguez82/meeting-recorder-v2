@@ -63,6 +63,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
 EXPORT_SUBDIR = "diagnostics"
 
 #: backend.log can be 200 MB+. The tail is what carries the failure.
@@ -264,19 +268,47 @@ def _backend_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+# Stamped into the runtime bundle by zip-bundle.py, landing next to
+# server.py once the shell extracts it. See the comment there.
+APP_VERSION_FILE = "app_version.txt"
+
+
 def app_version() -> Optional[str]:
     """The shipped app version.
 
-    ``MEETING_RECORDER_APP_VERSION`` first (so the Tauri shell can hand
-    down the authoritative value), then the dev checkout's
-    ``src-tauri/tauri.conf.json`` / ``package.json``. None rather than a
-    guess when neither is readable — a wrong version in a bug report is
-    worse than a missing one, which is the exact lesson of the
-    2.7.5/2.7.6/2.7.7 tag incident in AGENTS.md.
+    Sources, in order:
+
+    1. ``MEETING_RECORDER_APP_VERSION`` — set by the Tauri shell when it
+       spawns the backend, from the compiled ``package_info().version``
+       (i.e. ``src-tauri/tauri.conf.json``). Authoritative.
+    2. ``app_version.txt`` beside ``server.py`` — stamped into
+       ``backend-bundle.zip`` at build time from the same
+       ``tauri.conf.json``.
+    3. The dev checkout's ``src-tauri/tauri.conf.json`` / ``package.json``
+       one level above ``backend/``.
+
+    None rather than a guess when none of them is readable — a wrong
+    version in a bug report is worse than a missing one, which is the
+    exact lesson of the 2.7.5/2.7.6/2.7.7 tag incident in AGENTS.md.
+
+    Why (1) and (2) both exist: only (3) was ever implemented, and it
+    only ever works in a dev checkout. A release build runs the backend
+    out of the extracted runtime directory, which contains neither
+    ``src-tauri/`` nor ``package.json``, and nothing set the env var —
+    so every field-exported ``versions.json`` said ``"app_version":
+    null`` while every other field was populated, costing a round trip
+    per bug report just to establish which build it came from.
     """
     env = (os.environ.get("MEETING_RECORDER_APP_VERSION") or "").strip()
     if env:
         return env
+    try:
+        stamped = (_backend_dir() / APP_VERSION_FILE).read_text(
+            encoding="utf-8").strip()
+    except Exception:
+        stamped = ""
+    if stamped:
+        return stamped
     base = _backend_dir().parent
     for rel in ("src-tauri/tauri.conf.json", "package.json"):
         try:
@@ -286,6 +318,11 @@ def app_version() -> Optional[str]:
                 return str(v)
         except Exception:
             continue
+    logger.warning(
+        "Diagnostics export could not determine the app version — the shell "
+        "did not pass MEETING_RECORDER_APP_VERSION, there is no "
+        f"{APP_VERSION_FILE} in the runtime directory, and no checkout "
+        "manifest is readable. versions.json will say null.")
     return None
 
 
