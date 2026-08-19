@@ -206,7 +206,7 @@ export function FollowUpsView({ sessions, onOpenSession }: Props) {
 
   // Each item's raw owner string resolved to the canonical person/people
   // it belongs to — split on multi-owner separators, safe-normalised,
-  // and merged through any confirmed alias. A "Mark/Josh" item carries
+  // and merged through any confirmed alias. A "Mark/Sam" item carries
   // BOTH ids, so it counts under (and is findable under) either person.
   const itemsWithOwnerIds = useMemo(
     () => itemsWithOverrides.map((i) => ({

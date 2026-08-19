@@ -83,7 +83,7 @@ def test_format_blob_joins_action_items():
     out = ows.format_for_briefing_parser(
         owa_text="10:30 AM Status with Globex",
         open_actions=[
-            {"title": "Send updated SOW", "who": "Joshua", "due": "today",
+            {"title": "Send updated SOW", "who": "Samantha", "due": "today",
              "source": "Acme discovery 6/26"},
             {"title": "Review architecture diagram", "who": "Sarah"},
         ],
@@ -92,7 +92,7 @@ def test_format_blob_joins_action_items():
     assert "10:30 AM Status with Globex" in out
     assert "Open action items from recent meetings" in out
     assert "Send updated SOW" in out
-    assert "(owner: Joshua)" in out
+    assert "(owner: Samantha)" in out
     assert "due today" in out
     assert "[from: Acme discovery 6/26]" in out
     # Action with only a title (no who/due/source) shouldn't sprout
@@ -144,7 +144,7 @@ def test_format_blob_joins_teams_text_with_owa():
     out = ows.format_for_briefing_parser(
         owa_text="9:00 AM Sync with Acme",
         teams_text=(
-            "Sarah @Joshua mentioned you 8:42 AM: please review the SOW\n"
+            "Sarah @Samantha mentioned you 8:42 AM: please review the SOW\n"
             "Missed call from Bob, 8:55 AM"
         ),
     )
@@ -153,7 +153,7 @@ def test_format_blob_joins_teams_text_with_owa():
     assert "9:00 AM Sync with Acme" in out
     # Teams section is present, labeled, and contains the raw text.
     assert "Teams Activity" in out
-    assert "Sarah @Joshua mentioned you" in out
+    assert "Sarah @Samantha mentioned you" in out
     assert "Missed call from Bob" in out
     # Section order matters for the LLM prompt — Teams sits between
     # calendar and action items so the agenda + needs_response
@@ -182,8 +182,8 @@ def test_format_blob_full_combination():
     consistent layout."""
     out = ows.format_for_briefing_parser(
         owa_text="10am standup",
-        teams_text="@Joshua please review",
-        open_actions=[{"title": "Send proposal", "who": "Joshua"}],
+        teams_text="@Samantha please review",
+        open_actions=[{"title": "Send proposal", "who": "Samantha"}],
     )
     owa_idx = out.find("Today's Outlook Calendar")
     teams_idx = out.find("Teams Activity")

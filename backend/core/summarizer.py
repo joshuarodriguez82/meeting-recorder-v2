@@ -323,9 +323,9 @@ _COACH_OUTPUT_RULES_HOT = (
 )
 
 _FALLBACK_MODE_PROMPT = (
-    "You are a live in-call co-pilot for a Solutions Architect at "
-    "Northwind Digital, focused on Amazon Connect / CCaaS / contact-center "
-    "work. Coach in real time."
+    "You are a live in-call co-pilot for a Solutions Architect at a "
+    "contact-center consultancy, focused on Amazon Connect / CCaaS / "
+    "contact-center work. Coach in real time."
 )
 
 _FALLBACK_MEETING_TYPE_PROMPT = (

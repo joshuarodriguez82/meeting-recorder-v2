@@ -2,7 +2,7 @@
 
 ## Fix: phantom "pythonw.exe" console window
 
-Long-standing laptop bug, present since day 1. Actual cause (confirmed via Joshua describing the popup as "a black prompt window with pythonw.exe in the tab, close the X, it comes right back"):
+Long-standing laptop bug, present since day 1. Actual cause (confirmed via the user describing the popup as "a black prompt window with pythonw.exe in the tab, close the X, it comes right back"):
 
 Intel MKL / OpenMP / CUDA runtime libraries in some configurations call `AllocConsole()` during their first real use to install a console control handler. On `pythonw.exe` (GUI subsystem, no console by default) `AllocConsole` creates a **visible conhost window titled with the parent EXE name** — hence "pythonw.exe" in the tab. Closing the window kills conhost, but any next call to `AllocConsole` creates a new one, so it looks like the window keeps coming back.
 

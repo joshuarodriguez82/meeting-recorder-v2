@@ -134,22 +134,22 @@ class TestRegexSourceLock:
 # Shared fixtures — a subset of test_owner_service.py's cases, run
 # through BOTH implementations for real (not just pattern-compared).
 _SPLIT_FIXTURES = [
-    "Mark/Josh",
-    "Osmo/Craig/Josh",
+    "Mark/Sam",
+    "Osmo/Craig/Sam",
     "Melissa & Kendra",
     "Melissa and Kendra",
     "melissa AND kendra",
     "Andrew and Sanders",
-    "Roe, Bob Jr. [US-US]",
+    "Roe, Pat Jr. [US-US]",
     "Smith, John",
     "",
     "   ",
-    "Josh / josh",
-    "Josh",
+    "Sam / sam",
+    "Sam",
 ]
 _NORMALIZE_FIXTURES = [
-    "  Josh  ", "JOSH", "Josh.", "Josh,", "Josh (AWS)", "Josh (Umbrella)",
-    "Jake (AWS)", "Josh   Rodriguez", "Roe, Bob Jr.",
+    "  Sam  ", "SAM", "Sam.", "Sam,", "Sam (AWS)", "Sam (Umbrella)",
+    "Jake (AWS)", "Sam   Doe", "Roe, Pat Jr.",
 ]
 
 _NODE_HARNESS = """

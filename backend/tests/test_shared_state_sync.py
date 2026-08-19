@@ -74,8 +74,8 @@ def test_push_blanks_export_and_knowledge_folder_keeps_keys_and_display_name(tmp
         local / "client_configs.json",
         {
             "acme": {
-                "export_folder": "/Users/josh/Acme",
-                "knowledge_folder": "/Users/josh/Acme/Docs",
+                "export_folder": "/Users/sampleuser/Acme",
+                "knowledge_folder": "/Users/sampleuser/Acme/Docs",
                 "display_name": "Acme Corp",
             }
         },
@@ -93,7 +93,7 @@ def test_push_blanks_export_and_knowledge_folder_keeps_keys_and_display_name(tmp
     }
     # Local copy is untouched — only the archive's copy is blanked.
     local_data = json.loads((local / "client_configs.json").read_text())
-    assert local_data["acme"]["export_folder"] == "/Users/josh/Acme"
+    assert local_data["acme"]["export_folder"] == "/Users/sampleuser/Acme"
 
 
 def test_push_copies_when_archive_absent(tmp_path):
@@ -273,9 +273,9 @@ def test_pull_preserves_local_folder_paths_even_when_archive_has_foreign_ones(tm
     _write(
         local / "client_configs.json",
         {
-            "aon": {
-                "export_folder": "/Users/josh/Documents/Zorg",
-                "knowledge_folder": "/Users/josh/Documents/Zorg/Docs",
+            "zorg": {
+                "export_folder": "/Users/sampleuser/Documents/Zorg",
+                "knowledge_folder": "/Users/sampleuser/Documents/Zorg/Docs",
                 "display_name": "Zorg",
             }
         },
@@ -284,7 +284,7 @@ def test_pull_preserves_local_folder_paths_even_when_archive_has_foreign_ones(tm
     _write(
         archive / "client_configs.json",
         {
-            "aon": {
+            "zorg": {
                 "export_folder": r"G:\My Drive\Zorg",
                 "knowledge_folder": r"G:\My Drive\Zorg\Docs",
                 "display_name": "Zorg",
@@ -295,8 +295,8 @@ def test_pull_preserves_local_folder_paths_even_when_archive_has_foreign_ones(tm
     copied = pull(str(local), str(archive))
     assert copied == ["client_configs.json"]
     local_data = json.loads((local / "client_configs.json").read_text())
-    assert local_data["aon"]["export_folder"] == "/Users/josh/Documents/Zorg"
-    assert local_data["aon"]["knowledge_folder"] == "/Users/josh/Documents/Zorg/Docs"
+    assert local_data["zorg"]["export_folder"] == "/Users/sampleuser/Documents/Zorg"
+    assert local_data["zorg"]["knowledge_folder"] == "/Users/sampleuser/Documents/Zorg/Docs"
 
 
 def test_pull_adds_archive_only_clients_with_empty_folder_fields(tmp_path):
@@ -308,14 +308,14 @@ def test_pull_adds_archive_only_clients_with_empty_folder_fields(tmp_path):
     archive = tmp_path / "archive"
     _write(
         local / "client_configs.json",
-        {"aon": {"export_folder": "/local/Zorg", "display_name": "Zorg"}},
+        {"zorg": {"export_folder": "/local/Zorg", "display_name": "Zorg"}},
         mtime=1000,
     )
     _write(
         archive / "client_configs.json",
         {
-            "aon": {"export_folder": "/local/Zorg", "display_name": "Zorg"},
-            "ricoh": {
+            "zorg": {"export_folder": "/local/Zorg", "display_name": "Zorg"},
+            "hooli": {
                 "export_folder": r"G:\My Drive\Hooli",
                 "knowledge_folder": r"G:\My Drive\Hooli\Docs",
                 "display_name": "Hooli",
@@ -326,10 +326,10 @@ def test_pull_adds_archive_only_clients_with_empty_folder_fields(tmp_path):
     copied = pull(str(local), str(archive))
     assert copied == ["client_configs.json"]
     local_data = json.loads((local / "client_configs.json").read_text())
-    assert local_data["aon"]["export_folder"] == "/local/Zorg"
-    assert local_data["ricoh"]["export_folder"] == ""
-    assert local_data["ricoh"]["knowledge_folder"] == ""
-    assert local_data["ricoh"]["display_name"] == "Hooli"
+    assert local_data["zorg"]["export_folder"] == "/local/Zorg"
+    assert local_data["hooli"]["export_folder"] == ""
+    assert local_data["hooli"]["knowledge_folder"] == ""
+    assert local_data["hooli"]["display_name"] == "Hooli"
 
 
 def test_pull_never_deletes_local_client_missing_from_archive(tmp_path):
@@ -340,14 +340,14 @@ def test_pull_never_deletes_local_client_missing_from_archive(tmp_path):
     _write(
         local / "client_configs.json",
         {
-            "aon": {"export_folder": "/local/Zorg", "display_name": "Zorg"},
+            "zorg": {"export_folder": "/local/Zorg", "display_name": "Zorg"},
             "only-local": {"export_folder": "/local/OnlyLocal", "display_name": "Only Local"},
         },
         mtime=1000,
     )
     _write(
         archive / "client_configs.json",
-        {"aon": {"export_folder": "", "display_name": "Zorg"}},
+        {"zorg": {"export_folder": "", "display_name": "Zorg"}},
         mtime=5000,
     )
     copied = pull(str(local), str(archive))
@@ -362,20 +362,20 @@ def test_pull_updates_display_name_from_newer_archive(tmp_path):
     archive = tmp_path / "archive"
     _write(
         local / "client_configs.json",
-        {"aon": {"export_folder": "/local/Zorg", "display_name": "Zorg"}},
+        {"zorg": {"export_folder": "/local/Zorg", "display_name": "Zorg"}},
         mtime=1000,
     )
     _write(
         archive / "client_configs.json",
-        {"aon": {"export_folder": "", "display_name": "ZORG (renamed)"}},
+        {"zorg": {"export_folder": "", "display_name": "ZORG (renamed)"}},
         mtime=5000,
     )
     copied = pull(str(local), str(archive))
     assert copied == ["client_configs.json"]
     local_data = json.loads((local / "client_configs.json").read_text())
-    assert local_data["aon"]["display_name"] == "ZORG (renamed)"
+    assert local_data["zorg"]["display_name"] == "ZORG (renamed)"
     # folder path is still untouched by the (newer) archive
-    assert local_data["aon"]["export_folder"] == "/local/Zorg"
+    assert local_data["zorg"]["export_folder"] == "/local/Zorg"
 
 
 def test_pull_does_not_update_display_name_from_older_archive(tmp_path):
@@ -383,18 +383,18 @@ def test_pull_does_not_update_display_name_from_older_archive(tmp_path):
     archive = tmp_path / "archive"
     _write(
         local / "client_configs.json",
-        {"aon": {"export_folder": "/local/Zorg", "display_name": "Zorg"}},
+        {"zorg": {"export_folder": "/local/Zorg", "display_name": "Zorg"}},
         mtime=5000,
     )
     _write(
         archive / "client_configs.json",
-        {"aon": {"export_folder": "", "display_name": "Stale Name"}},
+        {"zorg": {"export_folder": "", "display_name": "Stale Name"}},
         mtime=1000,
     )
     copied = pull(str(local), str(archive))
     assert copied == []
     local_data = json.loads((local / "client_configs.json").read_text())
-    assert local_data["aon"]["display_name"] == "Zorg"
+    assert local_data["zorg"]["display_name"] == "Zorg"
 
 
 # ── sanitize_local_paths() ──────────────────────────────────────────────
@@ -405,7 +405,7 @@ def test_sanitize_clears_windows_drive_letter_path(tmp_path, monkeypatch):
     _write(
         local / "client_configs.json",
         {
-            "aon": {
+            "zorg": {
                 "export_folder": r"G:\My Drive\Zorg",
                 "knowledge_folder": r"G:\My Drive\Zorg\Docs",
                 "display_name": "Zorg",
@@ -420,8 +420,8 @@ def test_sanitize_clears_windows_drive_letter_path(tmp_path, monkeypatch):
         assert c["client"] == "Zorg"
         assert c["old_value"] in (r"G:\My Drive\Zorg", r"G:\My Drive\Zorg\Docs")
     data = json.loads((local / "client_configs.json").read_text())
-    assert data["aon"]["export_folder"] == ""
-    assert data["aon"]["knowledge_folder"] == ""
+    assert data["zorg"]["export_folder"] == ""
+    assert data["zorg"]["knowledge_folder"] == ""
 
 
 def test_sanitize_clears_unc_path_on_posix(tmp_path, monkeypatch):
@@ -429,12 +429,12 @@ def test_sanitize_clears_unc_path_on_posix(tmp_path, monkeypatch):
     local = tmp_path / "recordings"
     _write(
         local / "client_configs.json",
-        {"aon": {"export_folder": r"\\server\share\Zorg", "display_name": "Zorg"}},
+        {"zorg": {"export_folder": r"\\server\share\Zorg", "display_name": "Zorg"}},
     )
     cleared = sanitize_local_paths(str(local))
     assert len(cleared) == 1
     data = json.loads((local / "client_configs.json").read_text())
-    assert data["aon"]["export_folder"] == ""
+    assert data["zorg"]["export_folder"] == ""
 
 
 def test_sanitize_leaves_plausible_local_path_alone(tmp_path, monkeypatch):
@@ -442,12 +442,12 @@ def test_sanitize_leaves_plausible_local_path_alone(tmp_path, monkeypatch):
     local = tmp_path / "recordings"
     _write(
         local / "client_configs.json",
-        {"aon": {"export_folder": "/Users/josh/Documents/Zorg", "display_name": "Zorg"}},
+        {"zorg": {"export_folder": "/Users/sampleuser/Documents/Zorg", "display_name": "Zorg"}},
     )
     cleared = sanitize_local_paths(str(local))
     assert cleared == []
     data = json.loads((local / "client_configs.json").read_text())
-    assert data["aon"]["export_folder"] == "/Users/josh/Documents/Zorg"
+    assert data["zorg"]["export_folder"] == "/Users/sampleuser/Documents/Zorg"
 
 
 def test_sanitize_leaves_existing_but_currently_missing_local_path_alone(tmp_path, monkeypatch):
@@ -458,12 +458,12 @@ def test_sanitize_leaves_existing_but_currently_missing_local_path_alone(tmp_pat
     local = tmp_path / "recordings"
     _write(
         local / "client_configs.json",
-        {"aon": {"export_folder": "/Volumes/UnpluggedDrive/Zorg", "display_name": "Zorg"}},
+        {"zorg": {"export_folder": "/Volumes/UnpluggedDrive/Zorg", "display_name": "Zorg"}},
     )
     cleared = sanitize_local_paths(str(local))
     assert cleared == []
     data = json.loads((local / "client_configs.json").read_text())
-    assert data["aon"]["export_folder"] == "/Volumes/UnpluggedDrive/Zorg"
+    assert data["zorg"]["export_folder"] == "/Volumes/UnpluggedDrive/Zorg"
 
 
 def test_sanitize_noop_when_no_client_configs_file(tmp_path):
@@ -494,11 +494,11 @@ def test_is_foreign_local_path_windows_dispatch(tmp_path, monkeypatch):
 
     monkeypatch.setattr("services.shared_state_sync.os.name", "nt")
     # A POSIX-style path that can't exist is foreign on "Windows".
-    assert _is_foreign_local_path("/Users/josh/Documents/Zorg-does-not-exist") is True
+    assert _is_foreign_local_path("/Users/sampleuser/Documents/Zorg-does-not-exist") is True
     # A POSIX-style path that DOES resolve (e.g. WSL interop) is left alone.
     assert _is_foreign_local_path(str(tmp_path)) is False
     # A plain Windows-style path is never foreign on Windows.
-    assert _is_foreign_local_path(r"C:\Users\josh\Documents\Zorg") is False
+    assert _is_foreign_local_path(r"C:\Users\sampleuser\Documents\Zorg") is False
 
 
 def test_sanitize_returns_cleared_list_shape(tmp_path, monkeypatch):
@@ -506,7 +506,7 @@ def test_sanitize_returns_cleared_list_shape(tmp_path, monkeypatch):
     local = tmp_path / "recordings"
     _write(
         local / "client_configs.json",
-        {"ricoh": {"export_folder": r"G:\My Drive\Hooli", "display_name": "Hooli"}},
+        {"hooli": {"export_folder": r"G:\My Drive\Hooli", "display_name": "Hooli"}},
     )
     cleared = sanitize_local_paths(str(local))
     assert cleared == [{
@@ -624,7 +624,7 @@ def test_status_no_archive_configured(tmp_path):
 # ── owner_aliases.json roaming ──────────────────────────────────────
 #
 # Added alongside client_configs.json / summary_templates.json so a
-# user curating owner-name merges (e.g. Josh's spelling variants) on
+# user curating owner-name merges (e.g. Sam's spelling variants) on
 # one machine sees the same grouping on their other machine against
 # the same shared session library — otherwise the two machines would
 # silently disagree about who owns what from identical underlying
@@ -644,8 +644,8 @@ def test_owner_aliases_push_copies_plain_whole_file(tmp_path):
     archive = tmp_path / "archive"
     archive.mkdir()
     payload = {
-        "aliases": {"a1": {"canonical": "Josh",
-                            "members": ["josh", "joshua"],
+        "aliases": {"a1": {"canonical": "Sam",
+                            "members": ["sam", "samantha"],
                             "created_at": "2026-08-01T00:00:00"}},
         "rejected": [["dan", "mark"]],
     }
@@ -668,8 +668,8 @@ def test_owner_aliases_round_trip_push_then_pull_identical_bytes(tmp_path):
     machine_b.mkdir()
 
     payload = {
-        "aliases": {"a1": {"canonical": "Josh",
-                            "members": ["josh", "joshua", "josh rodriguez"],
+        "aliases": {"a1": {"canonical": "Sam",
+                            "members": ["sam", "samantha", "sam doe"],
                             "created_at": "2026-08-01T00:00:00"}},
         "rejected": [],
     }
@@ -699,7 +699,7 @@ def test_owner_aliases_round_trip_through_the_real_store(tmp_path):
     machine_b.mkdir()
 
     store_a = OwnerAliasStore(machine_a)
-    store_a.create("Josh", ["Josh", "Joshua", "Josh Rodriguez"])
+    store_a.create("Sam", ["Sam", "Samantha", "Sam Doe"])
 
     pushed = push(str(machine_a), str(archive))
     assert "owner_aliases.json" in pushed
@@ -708,8 +708,8 @@ def test_owner_aliases_round_trip_through_the_real_store(tmp_path):
 
     store_b = OwnerAliasStore(machine_b)
     idx_b = load_alias_index(store_b)
-    assert resolve_owners("Joshua", idx_b) == ["Josh"]
-    assert resolve_owners("Josh Rodriguez", idx_b) == ["Josh"]
+    assert resolve_owners("Samantha", idx_b) == ["Sam"]
+    assert resolve_owners("Sam Doe", idx_b) == ["Sam"]
 
 
 def test_owner_aliases_pull_refuses_corrupt_archive_copy(tmp_path):
@@ -722,7 +722,7 @@ def test_owner_aliases_pull_refuses_corrupt_archive_copy(tmp_path):
     local = tmp_path / "recordings"
     archive = tmp_path / "archive"
     good = {
-        "aliases": {"a1": {"canonical": "Josh", "members": ["josh", "joshua"],
+        "aliases": {"a1": {"canonical": "Sam", "members": ["sam", "samantha"],
                             "created_at": ""}},
         "rejected": [],
     }
@@ -735,7 +735,7 @@ def test_owner_aliases_pull_refuses_corrupt_archive_copy(tmp_path):
 
     store = OwnerAliasStore(local)
     idx = load_alias_index(store)
-    assert resolve_owners("Joshua", idx) == ["Josh"]  # local alias intact
+    assert resolve_owners("Samantha", idx) == ["Sam"]  # local alias intact
 
 
 def test_owner_aliases_missing_on_both_sides_degrades_to_no_grouping(tmp_path):
@@ -754,7 +754,7 @@ def test_owner_aliases_missing_on_both_sides_degrades_to_no_grouping(tmp_path):
     store = OwnerAliasStore(local)
     assert store.list_all() == []
     idx = load_alias_index(store)
-    assert resolve_owners("Joshua", idx) == ["Joshua"]  # no grouping applied
+    assert resolve_owners("Samantha", idx) == ["Samantha"]  # no grouping applied
 
 
 def test_owner_aliases_corrupt_local_file_does_not_block_push_of_others(tmp_path):

@@ -18,7 +18,7 @@ wasn't captured back then).
 
 Action-item completion state is stored INSIDE the briefing JSON
 (under the action's `done_at` field) rather than in a sidecar — keeps
-all of "what did Joshua see today + what did he finish" co-located.
+all of "what the user saw today + what they finished" co-located.
 
 Atomic write + threading lock match TemplateService / CoPilotModeService.
 """

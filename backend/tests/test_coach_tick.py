@@ -54,7 +54,7 @@ def test_empty_model_output_surfaces_error():
     # Gemini-2.5 "reasoning ate the budget → empty content" case.
     s = _summarizer("")
     out = _run(s.coach_tick(
-        segments=[{"speaker": "A", "text": "discussing the APG endpoint"}]))
+        segments=[{"speaker": "A", "text": "discussing the ZTX endpoint"}]))
     assert out["error"] == "no_output"
     assert out["clarifying_questions"] == []
 
@@ -68,14 +68,14 @@ def test_unparseable_output_surfaces_error():
 
 def test_total_output_capped_at_three():
     reply = (
-        '{"clarifying_questions":["APG rate limits and failover?",'
+        '{"clarifying_questions":["ZTX rate limits and failover?",'
         '"India in-country carrier via which SBC?","Philippines Connect region?"],'
         '"risks":["Bedrock agent-core scope not pinned to a phase"],'
         '"follow_ups":["Name the VDL endpoint owner"]}'
     )
     s = _summarizer(reply)
     out = _run(s.coach_tick(
-        segments=[{"speaker": "A", "text": "APG India Philippines Bedrock VDL"}]))
+        segments=[{"speaker": "A", "text": "ZTX India Philippines Bedrock VDL"}]))
     total = (len(out["clarifying_questions"]) + len(out["risks"])
              + len(out["follow_ups"]))
     assert total <= 3

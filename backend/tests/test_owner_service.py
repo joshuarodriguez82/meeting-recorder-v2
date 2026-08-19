@@ -27,8 +27,8 @@ from services.owner_service import (
 
 class TestSplitOwners:
     def test_splits_on_slash(self):
-        assert split_owners("Mark/Josh") == ["Mark", "Josh"]
-        assert split_owners("Osmo/Craig/Josh") == ["Osmo", "Craig", "Josh"]
+        assert split_owners("Mark/Sam") == ["Mark", "Sam"]
+        assert split_owners("Osmo/Craig/Sam") == ["Osmo", "Craig", "Sam"]
 
     def test_splits_on_ampersand(self):
         assert split_owners("Melissa & Kendra") == ["Melissa", "Kendra"]
@@ -46,12 +46,13 @@ class TestSplitOwners:
 
     def test_comma_is_not_split(self):
         """THE important negative test. Real names in this data contain
-        commas — calendar organisers show up as
-        "Roe, Bob Jr. [US-US]" — so splitting on comma would
+        commas — Outlook renders calendar organisers as
+        "Last, First Suffix [REGION]", e.g. the (fictional) organiser
+        "Roe, Pat Jr. [US-US]" — so splitting on comma would
         shred a single name into two fake people. Do not add comma to
         the split pattern."""
-        assert split_owners("Roe, Bob Jr. [US-US]") == [
-            "Roe, Bob Jr. [US-US]"
+        assert split_owners("Roe, Pat Jr. [US-US]") == [
+            "Roe, Pat Jr. [US-US]"
         ]
         assert split_owners("Smith, John") == ["Smith, John"]
 
@@ -61,10 +62,10 @@ class TestSplitOwners:
         assert split_owners(None) == []  # type: ignore[arg-type]
 
     def test_dedupes_case_insensitively_within_one_string(self):
-        assert split_owners("Josh / josh") == ["Josh"]
+        assert split_owners("Sam / sam") == ["Sam"]
 
     def test_single_owner_passthrough(self):
-        assert split_owners("Josh") == ["Josh"]
+        assert split_owners("Sam") == ["Sam"]
 
 
 # ── Tier 2: safe normalisation ──────────────────────────────────────────
@@ -72,40 +73,40 @@ class TestSplitOwners:
 
 class TestNormalizeOwner:
     def test_case_and_whitespace(self):
-        assert normalize_owner("  Josh  ") == ("josh", "Josh")
-        assert normalize_owner("JOSH") == ("josh", "JOSH")
+        assert normalize_owner("  Sam  ") == ("sam", "Sam")
+        assert normalize_owner("SAM") == ("sam", "SAM")
 
     def test_trailing_punctuation(self):
-        assert normalize_owner("Josh.") == ("josh", "Josh")
-        assert normalize_owner("Josh,") == ("josh", "Josh")
+        assert normalize_owner("Sam.") == ("sam", "Sam")
+        assert normalize_owner("Sam,") == ("sam", "Sam")
 
     def test_org_suffix_stripped(self):
-        assert normalize_owner("Josh (AWS)") == ("josh", "Josh")
-        assert normalize_owner("Josh (Umbrella)") == ("josh", "Josh")
+        assert normalize_owner("Sam (AWS)") == ("sam", "Sam")
+        assert normalize_owner("Sam (Umbrella)") == ("sam", "Sam")
 
     def test_org_suffix_same_key_as_bare_name(self):
-        # "Josh (AWS)" and "Josh" must land on the identical key so
+        # "Sam (AWS)" and "Sam" must land on the identical key so
         # they group automatically.
-        key_a, _ = normalize_owner("Josh (AWS)")
-        key_b, _ = normalize_owner("Josh")
-        assert key_a == key_b == "josh"
+        key_a, _ = normalize_owner("Sam (AWS)")
+        key_b, _ = normalize_owner("Sam")
+        assert key_a == key_b == "sam"
 
     def test_different_base_names_do_not_share_a_key(self):
-        # "Josh (AWS)" and "Jake (AWS)" must NOT collapse just because
+        # "Sam (AWS)" and "Jake (AWS)" must NOT collapse just because
         # they share an org suffix.
-        key_josh, _ = normalize_owner("Josh (AWS)")
+        key_sam, _ = normalize_owner("Sam (AWS)")
         key_jake, _ = normalize_owner("Jake (AWS)")
-        assert key_josh != key_jake
+        assert key_sam != key_jake
 
     def test_internal_whitespace_collapsed(self):
-        assert normalize_owner("Josh   Rodriguez") == (
-            "josh rodriguez", "Josh Rodriguez")
+        assert normalize_owner("Sam   Doe") == (
+            "sam doe", "Sam Doe")
 
     def test_comma_preserved_within_a_single_piece(self):
         # normalize_owner operates on an already-split piece; a comma
         # inside it (e.g. from an un-split calendar name) must survive.
-        key, display = normalize_owner("Roe, Bob Jr.")
-        assert display == "Roe, Bob Jr"  # trailing period stripped
+        key, display = normalize_owner("Roe, Pat Jr.")
+        assert display == "Roe, Pat Jr"  # trailing period stripped
         assert "," in key
 
 
@@ -113,41 +114,41 @@ class TestNormalizeOwner:
 
 
 class TestSuggestGroups:
-    def test_suggests_josh_joshua_and_josh_rodriguez(self):
+    def test_suggests_sam_samantha_and_sam_doe(self):
         counts, display = aggregate_raw_owners(
-            ["Josh", "Josh (AWS)", "Josh Rodriguez", "Joshua"])
+            ["Sam", "Sam (AWS)", "Sam Doe", "Samantha"])
         groups = suggest_groups(counts, display)
         assert len(groups) == 1
         member_displays = {m.display for m in groups[0].members}
-        assert member_displays == {"Josh", "Josh Rodriguez", "Joshua"}
+        assert member_displays == {"Sam", "Sam Doe", "Samantha"}
 
     def test_suggestions_are_not_applied(self):
         """Suggesting a merge must never itself change what
         resolve_owners() returns — only an accepted alias can do that."""
-        raw_items = ["Josh", "Joshua", "Josh Rodriguez"]
+        raw_items = ["Sam", "Samantha", "Sam Doe"]
         counts, display = aggregate_raw_owners(raw_items)
         groups = suggest_groups(counts, display)
         assert groups  # sanity: a suggestion exists
 
         # Without any alias, each raw owner still resolves to itself —
         # the suggestion changed nothing.
-        assert resolve_owners("Josh") == ["Josh"]
-        assert resolve_owners("Joshua") == ["Joshua"]
-        assert resolve_owners("Josh Rodriguez") == ["Josh Rodriguez"]
+        assert resolve_owners("Sam") == ["Sam"]
+        assert resolve_owners("Samantha") == ["Samantha"]
+        assert resolve_owners("Sam Doe") == ["Sam Doe"]
 
-    def test_josh_aws_and_jake_aws_not_suggested_together(self):
-        counts, display = aggregate_raw_owners(["Josh (AWS)", "Jake (AWS)"])
+    def test_sam_aws_and_jake_aws_not_suggested_together(self):
+        counts, display = aggregate_raw_owners(["Sam (AWS)", "Jake (AWS)"])
         groups = suggest_groups(counts, display)
         assert groups == []
 
     def test_excludes_already_aliased_keys(self):
-        counts, display = aggregate_raw_owners(["Josh", "Joshua"])
-        groups = suggest_groups(counts, display, already_grouped_keys={"josh", "joshua"})
+        counts, display = aggregate_raw_owners(["Sam", "Samantha"])
+        groups = suggest_groups(counts, display, already_grouped_keys={"sam", "samantha"})
         assert groups == []
 
     def test_excludes_rejected_pairs(self):
-        counts, display = aggregate_raw_owners(["Josh", "Joshua"])
-        groups = suggest_groups(counts, display, rejected_pairs=[("josh", "joshua")])
+        counts, display = aggregate_raw_owners(["Sam", "Samantha"])
+        groups = suggest_groups(counts, display, rejected_pairs=[("sam", "samantha")])
         assert groups == []
 
 
@@ -156,38 +157,40 @@ class TestSuggestGroups:
 
 class TestAggregateRawOwners:
     def test_one_item_several_owners_counts_once_per_person(self):
-        # "Mark/Josh" is ONE item but names two people; each should get
+        # "Mark/Sam" is ONE item but names two people; each should get
         # +1, not the item being double counted overall.
-        counts, _ = aggregate_raw_owners(["Mark/Josh"])
+        counts, _ = aggregate_raw_owners(["Mark/Sam"])
         assert counts["mark"] == 1
-        assert counts["josh"] == 1
+        assert counts["sam"] == 1
 
     def test_totals_do_not_imply_duplicated_items(self):
-        raw_items = ["Josh", "Mark/Josh", "Osmo/Craig/Josh"]
+        raw_items = ["Sam", "Mark/Sam", "Osmo/Craig/Sam"]
         counts, _ = aggregate_raw_owners(raw_items)
-        # 3 raw items total, but "josh" appears in all 3 -> count 3,
+        # 3 raw items total, but "sam" appears in all 3 -> count 3,
         # which legitimately can equal (or, with more people, exceed)
         # len(raw_items) — callers must report the item total (3)
         # separately rather than summing per-person counts and calling
         # it "items".
-        assert counts["josh"] == 3
+        assert counts["sam"] == 3
         assert len(raw_items) == 3
-        assert sum(counts.values()) > len(raw_items)  # mark + craig + osmo + josh*3
+        assert sum(counts.values()) > len(raw_items)  # mark + craig + osmo + sam*3
 
     def test_duplicate_person_within_one_item_counts_once(self):
-        counts, _ = aggregate_raw_owners(["Josh / josh"])
-        assert counts["josh"] == 1
+        counts, _ = aggregate_raw_owners(["Sam / sam"])
+        assert counts["sam"] == 1
 
     def test_real_owner_list_before_after(self):
-        """The real client's Follow Ups owner list from the bug
-        report: before/after counts should show the fix helps."""
+        """An anonymised copy of the Follow Ups owner list from the bug
+        report — same shapes (multi-owner slashes, ampersands, org
+        suffixes, first-name/full-name/prefix variants of one person),
+        fictional names. Before/after counts show the fix helps."""
         raw_list = [
-            "All Sales Team Members", "Dale/Dan", "Dan Fallon", "Emily",
-            "Jake (AWS)", "Jeremy", "Josh", "Josh (AWS)", "Josh Rodriguez",
-            "Joshua", "Kamal (Umbrella)", "Karthik", "Ken (AWS)", "Lisa",
-            "Madonna Jagenthu", "Mark", "Mark/Josh", "Melissa",
-            "Melissa & Kendra", "Osmo/Craig", "Osmo/Craig/Josh", "Paul",
-            "Paul/Craig/Josh", "Quincy",
+            "All Sales Team Members", "Dale/Dan", "Dan Doe", "Emily",
+            "Jake (AWS)", "Jeremy", "Sam", "Sam (AWS)", "Sam Doe",
+            "Samantha", "Kamal (Umbrella)", "Karthik", "Ken (AWS)", "Lisa",
+            "Rowan Doe", "Mark", "Mark/Sam", "Melissa",
+            "Melissa & Kendra", "Osmo/Craig", "Osmo/Craig/Sam", "Paul",
+            "Paul/Craig/Sam", "Quincy",
         ]
         before = len(raw_list)  # 24 opaque filter entries today
         counts, display = aggregate_raw_owners(raw_list)
@@ -195,15 +198,15 @@ class TestAggregateRawOwners:
         assert before == 24
         assert after_safe == 22  # safe (tier-1 + tier-2) auto-grouping only
         assert after_safe < before
-        # Josh is directly findable now, including via the multi-owner
+        # Sam is directly findable now, including via the multi-owner
         # strings that used to hide him entirely.
-        assert counts["josh"] == 5  # Josh, Josh (AWS), Mark/Josh,
-        # Osmo/Craig/Josh, Paul/Craig/Josh
+        assert counts["sam"] == 5  # Sam, Sam (AWS), Mark/Sam,
+        # Osmo/Craig/Sam, Paul/Craig/Sam
         groups = suggest_groups(counts, display)
-        josh_group = next(
-            g for g in groups if "Josh" in {m.display for m in g.members})
-        assert {m.display for m in josh_group.members} == {
-            "Josh", "Josh Rodriguez", "Joshua"}
+        sam_group = next(
+            g for g in groups if "Sam" in {m.display for m in g.members})
+        assert {m.display for m in sam_group.members} == {
+            "Sam", "Sam Doe", "Samantha"}
 
 
 # ── resolve_owners() — the function both call sites share ──────────────
@@ -211,27 +214,27 @@ class TestAggregateRawOwners:
 
 class TestResolveOwners:
     def test_multi_owner_resolves_to_both_people(self):
-        assert resolve_owners("Mark/Josh") == ["Mark", "Josh"]
+        assert resolve_owners("Mark/Sam") == ["Mark", "Sam"]
 
     def test_org_suffix_resolves_to_bare_name(self):
-        assert resolve_owners("Josh (AWS)") == ["Josh"]
+        assert resolve_owners("Sam (AWS)") == ["Sam"]
 
     def test_no_alias_index_keeps_variants_separate(self):
-        assert resolve_owners("Joshua") == ["Joshua"]
-        assert resolve_owners("Josh") == ["Josh"]
+        assert resolve_owners("Samantha") == ["Samantha"]
+        assert resolve_owners("Sam") == ["Sam"]
 
     def test_alias_groups_items(self):
         store_aliases = [
-            _fake_alias("a1", "Josh", ["josh", "joshua", "josh rodriguez"]),
+            _fake_alias("a1", "Sam", ["sam", "samantha", "sam doe"]),
         ]
         idx = AliasIndex(store_aliases)
-        assert resolve_owners("Joshua", idx) == ["Josh"]
-        assert resolve_owners("Josh Rodriguez", idx) == ["Josh"]
-        assert resolve_owners("Josh", idx) == ["Josh"]
+        assert resolve_owners("Samantha", idx) == ["Sam"]
+        assert resolve_owners("Sam Doe", idx) == ["Sam"]
+        assert resolve_owners("Sam", idx) == ["Sam"]
 
     def test_multi_owner_with_alias(self):
-        idx = AliasIndex([_fake_alias("a1", "Josh", ["josh", "joshua"])])
-        assert resolve_owners("Mark/Joshua", idx) == ["Mark", "Josh"]
+        idx = AliasIndex([_fake_alias("a1", "Sam", ["sam", "samantha"])])
+        assert resolve_owners("Mark/Samantha", idx) == ["Mark", "Sam"]
 
 
 def _fake_alias(id_: str, canonical: str, members: list[str]):
@@ -245,45 +248,45 @@ def _fake_alias(id_: str, canonical: str, members: list[str]):
 class TestOwnerAliasStore:
     def test_create_and_list_roundtrip(self, tmp_path: Path):
         store = OwnerAliasStore(tmp_path)
-        alias = store.create("Josh", ["Josh", "Joshua", "Josh Rodriguez"])
-        assert alias.canonical == "Josh"
-        assert set(alias.members) == {"josh", "joshua", "josh rodriguez"}
+        alias = store.create("Sam", ["Sam", "Samantha", "Sam Doe"])
+        assert alias.canonical == "Sam"
+        assert set(alias.members) == {"sam", "samantha", "sam doe"}
 
         all_aliases = store.list_all()
         assert len(all_aliases) == 1
-        assert all_aliases[0].canonical == "Josh"
+        assert all_aliases[0].canonical == "Sam"
 
     def test_persists_across_new_store_instances(self, tmp_path: Path):
-        OwnerAliasStore(tmp_path).create("Josh", ["Josh", "Joshua"])
+        OwnerAliasStore(tmp_path).create("Sam", ["Sam", "Samantha"])
         # A brand-new instance pointed at the same directory must see
         # what the first instance wrote — this is the "roams with the
         # recordings dir" contract.
         reloaded = OwnerAliasStore(tmp_path)
         aliases = reloaded.list_all()
         assert len(aliases) == 1
-        assert set(aliases[0].members) == {"josh", "joshua"}
+        assert set(aliases[0].members) == {"sam", "samantha"}
         assert (tmp_path / "owner_aliases.json").exists()
 
     def test_accepted_alias_groups_items(self, tmp_path: Path):
         store = OwnerAliasStore(tmp_path)
-        store.create("Josh", ["Josh", "Joshua", "Josh Rodriguez"])
+        store.create("Sam", ["Sam", "Samantha", "Sam Doe"])
         idx = load_alias_index(store)
-        assert resolve_owners("Joshua", idx) == ["Josh"]
-        assert resolve_owners("Josh Rodriguez", idx) == ["Josh"]
+        assert resolve_owners("Samantha", idx) == ["Sam"]
+        assert resolve_owners("Sam Doe", idx) == ["Sam"]
 
     def test_removing_alias_ungroups_items(self, tmp_path: Path):
         store = OwnerAliasStore(tmp_path)
-        alias = store.create("Josh", ["Josh", "Joshua"])
+        alias = store.create("Sam", ["Sam", "Samantha"])
         idx = load_alias_index(store)
-        assert resolve_owners("Joshua", idx) == ["Josh"]
+        assert resolve_owners("Samantha", idx) == ["Sam"]
 
         deleted = store.delete(alias.id)
         assert deleted is True
         idx_after = load_alias_index(store)
         # Reverts to the original (tier-2) unaliased entries — grouping
         # is fully reversible.
-        assert resolve_owners("Joshua", idx_after) == ["Joshua"]
-        assert resolve_owners("Josh", idx_after) == ["Josh"]
+        assert resolve_owners("Samantha", idx_after) == ["Samantha"]
+        assert resolve_owners("Sam", idx_after) == ["Sam"]
 
     def test_delete_missing_alias_returns_false(self, tmp_path: Path):
         store = OwnerAliasStore(tmp_path)
@@ -291,24 +294,24 @@ class TestOwnerAliasStore:
 
     def test_update_removes_a_member_splitting_it_back_out(self, tmp_path: Path):
         store = OwnerAliasStore(tmp_path)
-        alias = store.create("Josh", ["Josh", "Joshua", "Mark"])
+        alias = store.create("Sam", ["Sam", "Samantha", "Mark"])
         store.update(alias.id, remove_members=["mark"])
         idx = load_alias_index(store)
         assert resolve_owners("Mark", idx) == ["Mark"]  # split back out
-        assert resolve_owners("Joshua", idx) == ["Josh"]  # still grouped
+        assert resolve_owners("Samantha", idx) == ["Sam"]  # still grouped
 
     def test_update_removing_last_member_deletes_the_group(self, tmp_path: Path):
         store = OwnerAliasStore(tmp_path)
-        alias = store.create("Josh", ["Josh", "Joshua"])
-        store.update(alias.id, remove_members=["josh", "joshua"])
+        alias = store.create("Sam", ["Sam", "Samantha"])
+        store.update(alias.id, remove_members=["sam", "samantha"])
         assert store.list_all() == []
 
     def test_update_rename_canonical(self, tmp_path: Path):
         store = OwnerAliasStore(tmp_path)
-        alias = store.create("Josh", ["Josh", "Joshua"])
-        updated = store.update(alias.id, canonical="Josh R.")
+        alias = store.create("Sam", ["Sam", "Samantha"])
+        updated = store.update(alias.id, canonical="Sam R.")
         assert updated is not None
-        assert updated.canonical == "Josh R."
+        assert updated.canonical == "Sam R."
 
     def test_a_member_cannot_belong_to_two_aliases(self, tmp_path: Path):
         store = OwnerAliasStore(tmp_path)
@@ -322,16 +325,16 @@ class TestOwnerAliasStore:
 
     def test_reject_records_a_pair(self, tmp_path: Path):
         store = OwnerAliasStore(tmp_path)
-        store.reject("Josh", "Mark")
+        store.reject("Sam", "Mark")
         pairs = store.rejected_pairs()
-        assert ("josh", "mark") in pairs or ("mark", "josh") in pairs
+        assert ("sam", "mark") in pairs or ("mark", "sam") in pairs
 
     def test_missing_file_degrades_to_no_grouping(self, tmp_path: Path):
         store = OwnerAliasStore(tmp_path / "does-not-exist-yet")
         assert store.list_all() == []
         assert store.rejected_pairs() == []
         idx = load_alias_index(store)
-        assert resolve_owners("Josh", idx) == ["Josh"]
+        assert resolve_owners("Sam", idx) == ["Sam"]
 
     def test_corrupt_file_degrades_to_no_grouping(self, tmp_path: Path):
         path = tmp_path / "owner_aliases.json"
@@ -340,7 +343,7 @@ class TestOwnerAliasStore:
         assert store.list_all() == []
         idx = load_alias_index(store)
         # No raise, and no grouping applied — degrades safely.
-        assert resolve_owners("Joshua", idx) == ["Joshua"]
+        assert resolve_owners("Samantha", idx) == ["Samantha"]
 
     def test_non_dict_json_degrades_to_no_grouping(self, tmp_path: Path):
         path = tmp_path / "owner_aliases.json"
@@ -350,11 +353,11 @@ class TestOwnerAliasStore:
 
     def test_load_alias_index_handles_none_store(self):
         idx = load_alias_index(None)
-        assert resolve_owners("Josh", idx) == ["Josh"]
+        assert resolve_owners("Sam", idx) == ["Sam"]
 
     def test_create_requires_canonical_and_members(self, tmp_path: Path):
         store = OwnerAliasStore(tmp_path)
         with pytest.raises(ValueError):
-            store.create("", ["Josh"])
+            store.create("", ["Sam"])
         with pytest.raises(ValueError):
-            store.create("Josh", [])
+            store.create("Sam", [])

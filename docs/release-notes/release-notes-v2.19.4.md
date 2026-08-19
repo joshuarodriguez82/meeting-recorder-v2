@@ -117,7 +117,7 @@ list matched exactly. A meeting tagged `ZORG` therefore copied into the
 disk the whole time, just invisible in the app.
 
 Client matching is now case- and whitespace-insensitive everywhere, and
-`ZORG` / `Zorg` / `aon ` collapse into one client instead of splitting
+`ZORG` / `Zorg` / `zorg ` collapse into one client instead of splitting
 your meetings across near-identical entries.
 
 ## Unchanged

@@ -151,7 +151,7 @@ def test_no_folder_configured_owes_nothing():
 # ── client matching (the case-sensitivity split) ──────────────────────
 
 @pytest.mark.parametrize("a,b", [
-    ("Zorg", "ZORG"), ("Zorg", "aon"), ("Zorg", " Zorg "), ("TYR", "ups"),
+    ("Zorg", "ZORG"), ("Zorg", "zorg"), ("Zorg", " Zorg "), ("TYR", "tyr"),
 ])
 def test_client_matching_is_case_and_space_insensitive(a, b):
     assert normalize_client(a) == normalize_client(b)
@@ -165,7 +165,7 @@ def test_sessions_for_client_matches_regardless_of_casing():
     rows = [
         _summary(session_id="1", client="Zorg"),
         _summary(session_id="2", client="ZORG"),
-        _summary(session_id="3", client="aon "),
+        _summary(session_id="3", client="zorg "),
         _summary(session_id="4", client="Acme"),
         _summary(session_id="5", client=""),
     ]

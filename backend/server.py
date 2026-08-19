@@ -697,7 +697,7 @@ class Services:
         self.session_svc: Optional[SessionService] = None
         self.export_svc: Optional[ExportService] = None
         self.client_cfg_svc: Optional[ClientConfigService] = None
-        # Confirmed owner-name merges (e.g. "Joshua" -> "Josh"). Same
+        # Confirmed owner-name merges (e.g. "Samantha" -> "Sam"). Same
         # directory, same lifecycle as client_cfg_svc — see
         # services/owner_service.py's OwnerAliasStore docstring.
         self.owner_alias_store: Optional[OwnerAliasStore] = None
@@ -6366,8 +6366,8 @@ async def list_commitments(
         [s.strip() for s in status.split(",") if s.strip()]
         if status else None
     )
-    # owner filtering resolves multi-owner strings ("Mark/Josh") and
-    # confirmed aliases ("Joshua" -> "Josh") — see owner_service.py.
+    # owner filtering resolves multi-owner strings ("Mark/Sam") and
+    # confirmed aliases ("Samantha" -> "Sam") — see owner_service.py.
     alias_index = load_alias_index(svc.owner_alias_store)
     items = await asyncio.to_thread(
         svc.commitments_svc.list_all,

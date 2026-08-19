@@ -28,7 +28,7 @@ def test_near_duplicate_catches_rewordings():
 def test_near_duplicate_containment():
     # The model loves re-emitting a slightly-expanded version of a prior.
     assert is_near_duplicate(
-        "vendor lock-in", "vendor lock-in risk due to APG being the sole gateway")
+        "vendor lock-in", "vendor lock-in risk due to ZTX being the sole gateway")
 
 
 def test_is_filler():
@@ -64,7 +64,7 @@ def test_dedup_within_new_batch():
 def test_dedup_preserves_distinct_items():
     new = [
         "Confirm Connect region for Philippines agents",
-        "Clarify APG rate limits and failover",
+        "Clarify ZTX rate limits and failover",
         "Pin Bedrock agent-core to a phase in the SOW",
     ]
     assert dedup_against(new, []) == new

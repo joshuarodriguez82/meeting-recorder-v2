@@ -27,6 +27,7 @@ Measured on the tree at **v2.32.0** (`db2d830`):
 | `python-bandit` | bandit 1.9.4 | `backend/ scripts/ tools/ setup.py zip-bundle.py make_shortcut.py` (~39,200 LOC) | **159** — 3 HIGH, 10 MEDIUM, 146 LOW |
 | `javascript-semgrep` | semgrep 1.173.0 (`p/security-audit`, `p/secrets`, `p/owasp-top-ten`, 365 rules) | `backend src chrome-extension mobile scripts tools src-tauri` (196 files) | **6** — all WARNING |
 | `rust-clippy` | `cargo clippy` (stable) | `src-tauri` (2,591 LOC, first-party only) | **5** warnings |
+| `personal-data` | `scripts/ci/personal_data_scan.py` (stdlib only) | every tracked text file | **0** — and it must stay 0, see below |
 
 Of bandit's 159, **156 are pre-existing application code** and 3 are in
 `scripts/ci/ai_code_review.py` itself — `B404`/`B603`/`B607` for its `git`
@@ -90,6 +91,113 @@ Already covered: `dependency-audit.yml`'s `rust-audit` job runs
 `cargo audit --file src-tauri/Cargo.lock`. This workflow adds `cargo clippy`
 over our own crate instead, which `cargo audit` never looks at.
 
+### The `personal-data` job — a disclosure gate, not a CVE scanner
+
+This repository is **public** and meant to be cloneable. In August 2026 a scrub
+found and removed, from the working tree:
+
+- real colleague / organiser / customer-contact names, in 10 files — including
+  the owner-grouping tests on both the TypeScript and Python sides;
+- real customer and employer names, ~90 occurrences across 25 files;
+- the author's personal email address and personal Windows/macOS home
+  directory paths;
+- real meeting subjects and agenda text in fixtures, design mockups and
+  historical release notes.
+
+The release notes matter most: `release.yml` reads
+`docs/release-notes/release-notes-v$VERSION.md` as its `body_path`, so every
+one of those names was **published verbatim into a GitHub Release body**.
+
+Nothing structural stopped any of it being committed, so nothing structural
+stopped it recurring. This job is that structure.
+
+**It is a curated deny-list, not a PII detector.** A regex that tries to
+recognise "a person's name" either misses most of them or fires on every
+capitalised word; both endings are the same — someone turns the check off. So
+the list holds only the identities that actually leaked here, plus three
+pattern classes precise enough to stay silent:
+
+| Rule | Fires on | Accepted placeholders |
+| --- | --- | --- |
+| `denied-term` | a deny-listed real person / customer / employer | — |
+| `windows-home-path` | `C:\Users\<someone>` | `<you>`, `sampleuser`, `%USERNAME%`, `Public`, `Default` |
+| `posix-home-path` | `/Users/<someone>`, `/home/<someone>` | `<you>`, `sampleuser`, `user`, `runner`, `Shared` |
+| `non-example-email` | an address outside the reserved example/test domains | `*.example`, `example.com/org/net`, `contoso.com`, `acme.com`, `your-company.com` |
+
+Only **tracked** files are scanned (`git ls-files`), so build output,
+`node_modules/` and lockfiles can never produce a finding.
+
+#### Why the deny-list is hashed
+
+`scripts/ci/personal-data-terms.json` stores
+`sha256(salt | normalized term)[:16]`, never the words. A plain-text roster of
+colleagues' surnames sitting in `scripts/ci/` would put back exactly what the
+scrub removed — grep-able, scrape-able, and the first thing anyone browsing the
+repo would find.
+
+**Stated plainly: this is obfuscation, not secrecy.** The salt is in the same
+file, and anyone with a surname dictionary can confirm a guess. What it buys is
+that the repo no longer *states* who these people are, while CI keeps exact
+matching. Do not describe it as encryption.
+
+One consequence: a `denied-term` finding **cannot name the term it matched** —
+job summaries on a public repo are public. It gives you the file and line. The
+developer who just wrote the line knows which string it was, and can confirm:
+
+```sh
+python scripts/ci/personal_data_scan.py test-term "The String I Typed"
+```
+
+The three pattern rules *do* quote what they matched. That text is already in
+the author's own diff, and the finding is not actionable without it.
+
+#### Adding a term
+
+```sh
+python scripts/ci/personal_data_scan.py add-term "Some Person"   # appends the hash
+python scripts/ci/personal_data_scan.py --report /tmp/pd.json    # must report 0
+```
+
+Then commit `scripts/ci/personal-data-terms.json` — **without naming the term
+in the commit message or the PR description**, which are exactly as public as
+the tree.
+
+What does *not* belong in the list: common English words, and bare common first
+names (`Mark`, `Ken`, `Dan`). Matching is case- and punctuation-insensitive
+over 1–3 word windows, so an over-broad term fires on ordinary prose, and a
+noisy check is a check people learn to ignore. Three of the scrubbed customer
+names are ordinary English words or common three-letter acronyms; they were
+deliberately **not** added. They were still renamed everywhere in the tree —
+the deny-list just cannot police those particular words without false
+positives, and a rule that cries wolf protects nothing.
+
+Terms longer than three normalised words need `denied.max_ngram` raised (it
+costs one extra pass per line); usually it is better to deny a shorter,
+still-identifying part of the name.
+
+#### Its baseline is empty, and should stay empty
+
+The other three jobs baseline a backlog of accepted static-analysis debt. A
+real name in a public repo is never accepted debt, so
+`scripts/ci/baselines/personal-data.json` holds zero findings. It exists so the
+mechanism matches its neighbours, and so a genuinely deliberate exception can
+be made as a reviewed commit rather than by disabling the job.
+
+Note that baselining a `denied-term` finding would write the offending line's
+normalised text into the baseline file — re-disclosing exactly what the scan
+exists to catch. Prefer `allow.paths` / `allow.line_substrings` in the term
+list, which are documented and don't carry the text.
+
+#### The deliberate exceptions
+
+`allow.line_substrings` and `allow.paths` exempt the app's **published
+identity**, which is not a leak and cannot change without breaking installs:
+the repo's own clone URL, the macOS bundle identifier / Android application id
+(changing either invalidates existing installs, their TCC grants and their
+update path), and the `src-tauri` publisher / copyright / authors fields —
+replacing a real author with a fictional one would be a false statement of
+authorship, not a privacy improvement.
+
 ### Known gaps, stated plainly
 
 - **clippy runs on Linux only.** The `#[cfg]`-gated macOS and Windows branches
@@ -102,6 +210,15 @@ over our own crate instead, which `cargo audit` never looks at.
   pinned semgrep version. A registry rule addition can surface a new finding on
   a PR that changed nothing. When that happens, the finding is real — triage it,
   then either fix it or refresh the baseline.
+- **`personal-data` only knows what it has been told.** It catches the
+  identities already on the list and the three path/email patterns. A *new*
+  customer name, or a colleague nobody has added yet, walks straight through.
+  It is a ratchet against repeating a known mistake, not a guarantee. Judgement
+  at write time — see the rule in `AGENTS.md` — is still the primary control.
+- **`personal-data` does not read git history, release bodies, commit messages
+  or PR descriptions.** It scans the working tree of tracked files, which is
+  the only thing a pre-merge check can act on. History and already-published
+  Release bodies have to be dealt with separately.
 
 ---
 
@@ -182,6 +299,13 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --message-format=json \
   > clippy-report.json
 python scripts/ci/security_baseline.py update --tool clippy \
   --report clippy-report.json --baseline scripts/ci/baselines/clippy.json
+
+# Personal data (no install needed — stdlib only). This one should always
+# write 0 findings; if it doesn't, fix the tree instead of committing.
+python scripts/ci/personal_data_scan.py --report personal-data-report.json
+python scripts/ci/security_baseline.py update --tool personal-data \
+  --report personal-data-report.json \
+  --baseline scripts/ci/baselines/personal-data.json
 ```
 
 Then **read the diff** before committing. An added entry means "we are

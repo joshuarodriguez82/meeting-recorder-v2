@@ -3,8 +3,8 @@ Owner normalisation and grouping — the shared logic behind the
 Follow Ups / Commitments "owner" filter.
 
 LLM extraction produces owner names as free text, so one real person
-ends up scattered across many spellings ("Josh", "Josh (AWS)", "Josh
-Rodriguez", "Joshua") and multi-owner strings ("Mark/Josh") are opaque
+ends up scattered across many spellings ("Sam", "Sam (AWS)", "Sam
+Doe", "Samantha") and multi-owner strings ("Mark/Sam") are opaque
 blobs that belong to nobody individually. This module is the ONE place
 that:
 
@@ -52,8 +52,9 @@ logger = get_logger(__name__)
 #
 # Split on '/', '&', and the standalone word "and". Deliberately do
 # NOT split on comma: real names in this data contain commas (calendar
-# organisers show up as "Roe, Bob Jr. [US-US]"), and a comma
-# split would shred a single name into two fake people. If you're
+# organisers show up as "Last, First Suffix [REGION]" — e.g. the
+# fictional "Roe, Pat Jr. [US-US]"), and a comma split would shred a
+# single name into two fake people. If you're
 # tempted to "improve" this by adding comma — don't; that's the one
 # regression this module exists to prevent. See
 # backend/tests/test_owner_service.py::test_comma_is_not_split.
@@ -64,13 +65,13 @@ _SPLIT_RE = re.compile(r"\s*(?:/|&|\band\b)\s*", re.IGNORECASE)
 def split_owners(raw: str) -> List[str]:
     """Split a raw owner string into individual owner pieces.
 
-    "Mark/Josh" -> ["Mark", "Josh"]
+    "Mark/Sam" -> ["Mark", "Sam"]
     "Melissa & Kendra" -> ["Melissa", "Kendra"]
-    "Osmo/Craig/Josh" -> ["Osmo", "Craig", "Josh"]
-    "Roe, Bob Jr." -> ["Roe, Bob Jr."]   (comma preserved)
+    "Osmo/Craig/Sam" -> ["Osmo", "Craig", "Sam"]
+    "Roe, Pat Jr." -> ["Roe, Pat Jr."]   (comma preserved)
 
-    Case-insensitive de-dupe within the same raw string (so "Josh /
-    Josh" from a sloppy extraction doesn't produce a duplicate), order
+    Case-insensitive de-dupe within the same raw string (so "Sam /
+    Sam" from a sloppy extraction doesn't produce a duplicate), order
     preserved otherwise.
     """
     s = (raw or "").strip()
@@ -108,15 +109,15 @@ def normalize_owner(raw: str) -> Tuple[str, str]:
       - display: same transforms, original casing preserved — used
         for showing the person's name in the UI.
 
-    "Josh (AWS)"  -> ("josh", "Josh")
-    "  Josh  "    -> ("josh", "Josh")
-    "JOSH."       -> ("josh", "JOSH")
-    "Jake (AWS)"  -> ("jake", "Jake")   # different base name: NOT the
-                                        # same key as "Josh (AWS)"
+    "Sam (AWS)"  -> ("sam", "Sam")
+    "  Sam  "    -> ("sam", "Sam")
+    "SAM."       -> ("sam", "SAM")
+    "Jake (AWS)" -> ("jake", "Jake")  # different base name: NOT the
+                                      # same key as "Sam (AWS)"
     """
     s = (raw or "").strip()
     # Strip trailing punctuation / org-suffix / punctuation again, in
-    # that order, to catch "Josh (AWS)." as well as "Josh (AWS)".
+    # that order, to catch "Sam (AWS)." as well as "Sam (AWS)".
     s = _TRAILING_PUNCT_RE.sub("", s).strip()
     stripped = _ORG_SUFFIX_RE.sub("", s).strip()
     if stripped:  # don't collapse a name that IS just "(AWS)" to ""
@@ -135,8 +136,8 @@ def _first_token(key: str) -> str:
 
 def _looks_related(a: str, b: str) -> bool:
     """True if two normalised keys are plausibly the same person:
-    same first token ("josh" / "josh rodriguez"), or one is a strict
-    prefix of the other ("josh" / "joshua"). Both are heuristics for
+    same first token ("sam" / "sam doe"), or one is a strict prefix
+    of the other ("sam" / "samantha"). Both are heuristics for
     a human to confirm, not to auto-apply — see module docstring."""
     if a == b:
         return False
@@ -506,9 +507,9 @@ def resolve_owners(
     Commitments owner filter and the Follow Ups filter dropdown are
     built on.
 
-    "Mark/Josh" with no aliases         -> ["Mark", "Josh"]
-    "Josh (AWS)"                        -> ["Josh"]
-    "Joshua" with a Josh/Joshua alias   -> ["Josh"]
+    "Mark/Sam" with no aliases           -> ["Mark", "Sam"]
+    "Sam (AWS)"                          -> ["Sam"]
+    "Samantha" with a Sam/Samantha alias -> ["Sam"]
     """
     out: List[str] = []
     seen = set()
