@@ -810,6 +810,30 @@ export interface ClientExportStatus {
   pending: { session_id: string; display_name: string; missing: string[] }[];
 }
 
+// What a follow-up run produced. See `followUpDrafts` below — "draft"
+// is a message in a mailbox, "compose_link" is a URL and nothing more.
+export type FollowUpArtifact = "draft" | "compose_link";
+
+// One recipient's prefilled Outlook Web compose window, not yet opened.
+// The app deliberately does NOT open these itself: ten compose tabs
+// firing at once is worse than the bug this replaced.
+export interface ComposeLink {
+  owner: string;
+  display_name: string;
+  // "" when the owner label could not be resolved to a mailbox. The
+  // compose window still opens; the To: field is just empty.
+  address: string;
+  subject: string;
+  // ALWAYS the full drafted text, even when `truncated` is true. This
+  // is what the copy button hands over.
+  body: string;
+  url: string;
+  // true when the body did not fit the URL length budget and the link
+  // opens with a shortened version. The full text is still in `body`.
+  truncated: boolean;
+  addressed: boolean;
+}
+
 export interface DocumentSkip {
   file: string;
   reason: string;
@@ -1168,6 +1192,21 @@ export const api = {
   //     failed, and `message` then says so rather than naming a folder
   //     nobody checked.
   // `message` is the assembled sentence and is the string to show.
+  //
+  // `artifact` says WHAT drafts_created counts, and the two values are
+  // not interchangeable:
+  //   "draft"        — a message the mail client wrote into a mailbox.
+  //                    It has a folder and an account; it is still there
+  //                    tomorrow.
+  //   "compose_link" — an Outlook Web compose URL. NOTHING was written
+  //                    anywhere: close the tab without saving and it is
+  //                    gone, and no Drafts folder ever held it. Produced
+  //                    when calendar_source is "extension" (the user
+  //                    cannot use a desktop mail client, which is why
+  //                    they set it), on every platform. `location` and
+  //                    `account` are always "" in this mode, and
+  //                    `compose_links` carries one entry per recipient.
+  // Never render the second as the first.
   followUpDrafts: (id: string, tone = "friendly-professional") =>
     request<{
       ok: boolean;
@@ -1181,6 +1220,8 @@ export const api = {
       unverified: number;
       location: string;
       account: string;
+      artifact: FollowUpArtifact;
+      compose_links: ComposeLink[];
     }>(
       `/sessions/${id}/follow_up_drafts`,
       { method: "POST", body: JSON.stringify({ tone }) },

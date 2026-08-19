@@ -1,7 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, type SessionFull, type Speaker, formatDuration } from "@/lib/api";
+import {
+  api, openExternal, type ComposeLink, type SessionFull, type Speaker,
+  formatDuration,
+} from "@/lib/api";
 import { toast } from "sonner";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
@@ -139,6 +142,17 @@ export function SessionDetailDialog({
   const [notes, setNotes] = useState("");
   const [dirty, setDirty] = useState(false);
 
+  // Outlook Web compose links from the most recent follow-up run.
+  // Populated only when the backend returns artifact "compose_link"
+  // (calendar_source "extension" — the user has no usable desktop mail
+  // client, which is why they set it). These are URLs and nothing more:
+  // nothing has been written to a mailbox, so they have to stay on
+  // screen until the user has opened them. The app deliberately does
+  // not open them itself — ten compose tabs at once is worse than the
+  // behaviour this replaced.
+  const [composeLinks, setComposeLinks] = useState<ComposeLink[]>([]);
+  const [composeMessage, setComposeMessage] = useState("");
+
   useEffect(() => {
     if (!open || !sessionId) return;
     setLoading(true);
@@ -155,6 +169,11 @@ export function SessionDetailDialog({
         setTemplate(s.template || "General");
         setNotes(s.notes || "");
         setDirty(false);
+        // Links belong to one run of one session. Carrying them across
+        // a session switch would put someone else's follow-ups in front
+        // of the user under this session's heading.
+        setComposeLinks([]);
+        setComposeMessage("");
       })
       .catch((e) => toast.error(`Could not load session: ${e}`))
       .finally(() => setLoading(false));
@@ -340,10 +359,36 @@ export function SessionDetailDialog({
         onChanged?.();
       }
 
-      toast.loading("Drafting emails with Claude + creating Outlook drafts…",
-                    { id: toastId });
+      toast.loading("Drafting emails with Claude…", { id: toastId });
       const r = await api.followUpDrafts(sessionId);
-      if (r.drafts_created > 0) {
+      // Two artifact kinds, and they are NOT the same thing. Under
+      // calendar_source "extension" the backend contacts no mail client
+      // at all (that setting says "never contacts Outlook", and the
+      // drafting path used to break the promise the calendar path
+      // keeps) and returns Outlook Web compose URLs instead. A compose
+      // link is not a saved draft: nothing is in any mailbox, and
+      // saying "drafts created" about one would be the same overclaim
+      // the unaddressed/unverified counts above exist to stop.
+      if (r.artifact === "compose_link") {
+        setComposeLinks(r.compose_links ?? []);
+        setComposeMessage(r.message || "");
+        if ((r.compose_links ?? []).length > 0) {
+          const n = r.compose_links.length;
+          const stuck = r.unaddressed ?? 0;
+          const title =
+            `${n} follow-up email${n === 1 ? "" : "s"} ready to open` +
+            (stuck > 0 ? ` — ${stuck} need${stuck === 1 ? "s" : ""} a recipient` : "");
+          (stuck > 0 ? toast.warning : toast.success)(title, {
+            id: toastId,
+            description: r.message,
+          });
+        } else {
+          toast.info(FOLLOW_UP_EMPTY_TITLES[r.state] ?? "No follow-up emails prepared", {
+            id: toastId,
+            description: r.message || undefined,
+          });
+        }
+      } else if (r.drafts_created > 0) {
         // Field repro 2026-08-19 (same session as the parser bug above):
         // "created 10 of 10 drafts", HTTP 200 — and nine of the ten had
         // no email address, because the GAL was handed bare first names.
@@ -669,9 +714,13 @@ export function SessionDetailDialog({
                         title={isFinalizing
                           ? FINALIZING_BUTTON_TOOLTIP
                           : hasTranscript
+                            // Deliberately does not promise an Outlook
+                            // draft: under calendar_source "extension"
+                            // no mail client is contacted at all and the
+                            // result is a set of compose links instead.
                             ? (session.action_items
-                                ? "Create an Outlook draft email per attendee with their action items"
-                                : "Extract action items + create Outlook drafts (one click)")
+                                ? "Draft a follow-up email per attendee with their action items"
+                                : "Extract action items + draft follow-up emails (one click)")
                             : "Run Process first — need a transcript before drafting emails"}
                       >
                         {processing === "follow_up_drafts"
@@ -680,6 +729,69 @@ export function SessionDetailDialog({
                         Draft follow-up emails
                       </Button>
                     </div>
+                    {composeLinks.length > 0 && (
+                      <div className="space-y-2 rounded-md border p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+                            Follow-up emails — compose links
+                          </Label>
+                          <Button
+                            variant="ghost" size="sm" className="h-7 text-xs"
+                            onClick={() => { setComposeLinks([]); setComposeMessage(""); }}
+                            title="Dismiss this list"
+                          >
+                            <X className="h-3.5 w-3.5 mr-1" />
+                            Dismiss
+                          </Button>
+                        </div>
+                        {/* The one string that has to be read. It is
+                            assembled backend-side (one source of truth,
+                            tested there) and its whole job is to stop
+                            these being mistaken for saved drafts. */}
+                        <p className="text-xs text-muted-foreground">
+                          {composeMessage}
+                        </p>
+                        <div className="space-y-1.5">
+                          {composeLinks.map((link, i) => (
+                            <div
+                              key={`${link.owner}-${i}`}
+                              className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
+                            >
+                              <div className="min-w-0 space-y-0.5">
+                                <div className="flex items-center gap-2 text-sm">
+                                  <span className="truncate">
+                                    {link.display_name || link.owner}
+                                  </span>
+                                  {link.truncated && (
+                                    <Badge variant="outline" className="text-[10px]">
+                                      shortened in link
+                                    </Badge>
+                                  )}
+                                </div>
+                                {/* An empty To: is a fact about this
+                                    row, not a footnote — the compose
+                                    window opens either way and the user
+                                    types the address in. */}
+                                <div className="truncate text-xs text-muted-foreground">
+                                  {link.address || "no address — opens with an empty To:"}
+                                </div>
+                              </div>
+                              <div className="flex shrink-0 items-center gap-1">
+                                <CopyButton text={link.body} label="Copy full body" />
+                                <Button
+                                  variant="outline" size="sm" className="h-7 text-xs"
+                                  onClick={() => openExternal(link.url)}
+                                  title="Open a prefilled compose window in Outlook Web"
+                                >
+                                  <Mail className="h-3.5 w-3.5 mr-1" />
+                                  Open
+                                </Button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                     {processing && (
                       <div className="flex items-center gap-2 text-xs text-muted-foreground">
                         <Loader2 className="h-3 w-3 animate-spin" />
