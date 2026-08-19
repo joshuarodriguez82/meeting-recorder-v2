@@ -111,7 +111,7 @@ def _doc_index_dir(recordings_dir) -> Path:
 
 
 def _doc_digest(doc_path: Path) -> str:
-    return hashlib.sha1(str(doc_path.resolve()).encode("utf-8")).hexdigest()
+    return hashlib.sha1(str(doc_path.resolve()).encode("utf-8"), usedforsecurity=False).hexdigest()
 
 
 def _doc_npz_path(recordings_dir, doc_path: Path) -> Path:
