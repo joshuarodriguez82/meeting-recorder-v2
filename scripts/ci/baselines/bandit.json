@@ -1,0 +1,1440 @@
+{
+  "schema": 2,
+  "tool": "bandit",
+  "generated_utc": "2026-08-19T01:23:12Z",
+  "note": "Accepted pre-existing findings. CI fails only on findings absent from this list. Refresh deliberately with `scripts/ci/security_baseline.py update` and review the diff.",
+  "count": 159,
+  "findings": [
+    {
+      "fingerprint": "bd2dfda71e883f14",
+      "rule": "B110",
+      "file": "backend/core/audio_capture.py",
+      "line": 78,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "861279512bac90a6",
+      "rule": "B110",
+      "file": "backend/core/audio_capture.py",
+      "line": 206,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "5dccf3357d26c274",
+      "rule": "B110",
+      "file": "backend/core/audio_capture.py",
+      "line": 489,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "90428dc3feb8e0d5",
+      "rule": "B110",
+      "file": "backend/core/audio_capture.py",
+      "line": 570,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "4fcd47584ae0647f",
+      "rule": "B110",
+      "file": "backend/core/audio_capture.py",
+      "line": 614,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "7668e2324a32b840",
+      "rule": "B110",
+      "file": "backend/core/audio_capture.py",
+      "line": 657,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "c64f3aa85c0fa850",
+      "rule": "B110",
+      "file": "backend/core/audio_capture.py",
+      "line": 846,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "474be7ef1028c30d",
+      "rule": "B110",
+      "file": "backend/core/audio_capture.py",
+      "line": 887,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "51e92bf53bf7c6fc",
+      "rule": "B112",
+      "file": "backend/core/audio_capture.py",
+      "line": 867,
+      "severity": "LOW",
+      "message": "Try, Except, Continue detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "3a73003d5df28736",
+      "rule": "B112",
+      "file": "backend/core/audio_format_inspector.py",
+      "line": 335,
+      "severity": "LOW",
+      "message": "Try, Except, Continue detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "b47e9a6e78c929f2",
+      "rule": "B404",
+      "file": "backend/core/audio_format_inspector.py",
+      "line": 76,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with the subprocess module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "e60a08024195a91c",
+      "rule": "B603",
+      "file": "backend/core/audio_format_inspector.py",
+      "line": 234,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "b2c063f6ca3d1926",
+      "rule": "B110",
+      "file": "backend/core/transcription.py",
+      "line": 25,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "d407238dd041b192",
+      "rule": "B110",
+      "file": "backend/server.py",
+      "line": 69,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "09e17dfcd6e65593",
+      "rule": "B110",
+      "file": "backend/server.py",
+      "line": 100,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "25224729eaa04edc",
+      "rule": "B110",
+      "file": "backend/server.py",
+      "line": 129,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "7ae05befd0892259",
+      "rule": "B110",
+      "file": "backend/server.py",
+      "line": 138,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "258a0922f37ad34f",
+      "rule": "B110",
+      "file": "backend/server.py",
+      "line": 319,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "a5f5900729db2486",
+      "rule": "B110",
+      "file": "backend/server.py",
+      "line": 342,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "6722475abbffcb23",
+      "rule": "B110",
+      "file": "backend/server.py",
+      "line": 349,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "c02e5b83f8274a47",
+      "rule": "B110",
+      "file": "backend/server.py",
+      "line": 355,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "62c1c8ef7dbc5b84",
+      "rule": "B110",
+      "file": "backend/server.py",
+      "line": 2029,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "e8d36d21aa3d2751",
+      "rule": "B110",
+      "file": "backend/server.py",
+      "line": 2172,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "016b7598137181a1",
+      "rule": "B110",
+      "file": "backend/server.py",
+      "line": 5740,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "4ace3904e8738941",
+      "rule": "B110",
+      "file": "backend/server.py",
+      "line": 8412,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "feb1effdd664f542",
+      "rule": "B110",
+      "file": "backend/server.py",
+      "line": 8966,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "7c88086c9a929115",
+      "rule": "B112",
+      "file": "backend/server.py",
+      "line": 7132,
+      "severity": "LOW",
+      "message": "Try, Except, Continue detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "1ac42fcda9cc4100",
+      "rule": "B310",
+      "file": "backend/server.py",
+      "line": 1359,
+      "severity": "MEDIUM",
+      "message": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "116e9f5bbe46d981",
+      "rule": "B310",
+      "file": "backend/server.py",
+      "line": 1445,
+      "severity": "MEDIUM",
+      "message": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "deb33f3b0bdc5c63",
+      "rule": "B310",
+      "file": "backend/server.py",
+      "line": 8292,
+      "severity": "MEDIUM",
+      "message": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "130ed7d031ddf0ed",
+      "rule": "B404",
+      "file": "backend/server.py",
+      "line": 11,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with the subprocess module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "7e347d37f76213ab",
+      "rule": "B404",
+      "file": "backend/server.py",
+      "line": 2061,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with the subprocess module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "6bd7eef68bf5b8af",
+      "rule": "B603",
+      "file": "backend/server.py",
+      "line": 258,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "07d497a2a1fc8eed",
+      "rule": "B603",
+      "file": "backend/server.py",
+      "line": 2069,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "1eb687cdd1464834",
+      "rule": "B603",
+      "file": "backend/server.py",
+      "line": 2167,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "dbd09d3816ec180b",
+      "rule": "B603",
+      "file": "backend/server.py",
+      "line": 5334,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "feb18a79c2a456d6",
+      "rule": "B603",
+      "file": "backend/server.py",
+      "line": 5341,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "38c1fa8e0659a7e0",
+      "rule": "B606",
+      "file": "backend/server.py",
+      "line": 5328,
+      "severity": "LOW",
+      "message": "Starting a process without a shell.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "78132fc23c07edfe",
+      "rule": "B607",
+      "file": "backend/server.py",
+      "line": 5341,
+      "severity": "LOW",
+      "message": "Starting a process with a partial executable path",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "ae5a23cd9f990175",
+      "rule": "B110",
+      "file": "backend/services/_calendar_eventkit.py",
+      "line": 182,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "d1b880a62a7e859f",
+      "rule": "B110",
+      "file": "backend/services/_calendar_eventkit.py",
+      "line": 198,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "c7bd86383be9a0ba",
+      "rule": "B110",
+      "file": "backend/services/_calendar_eventkit.py",
+      "line": 207,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "21ed80fc04b05c34",
+      "rule": "B110",
+      "file": "backend/services/_calendar_eventkit.py",
+      "line": 570,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "d7dda52b9b2d7c09",
+      "rule": "B110",
+      "file": "backend/services/_calendar_eventkit.py",
+      "line": 577,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "c12914325d125f11",
+      "rule": "B112",
+      "file": "backend/services/_calendar_eventkit.py",
+      "line": 180,
+      "severity": "LOW",
+      "message": "Try, Except, Continue detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "c2d702cea5d8aa5f",
+      "rule": "B112",
+      "file": "backend/services/_calendar_eventkit.py",
+      "line": 375,
+      "severity": "LOW",
+      "message": "Try, Except, Continue detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "3f0ad84f09433270",
+      "rule": "B112",
+      "file": "backend/services/_calendar_eventkit.py",
+      "line": 551,
+      "severity": "LOW",
+      "message": "Try, Except, Continue detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "ca4742248fe831cd",
+      "rule": "B110",
+      "file": "backend/services/_calendar_outlook.py",
+      "line": 176,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "8f4dbe0a5a986793",
+      "rule": "B110",
+      "file": "backend/services/_calendar_outlook.py",
+      "line": 187,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "2b99c3a9db21efc0",
+      "rule": "B110",
+      "file": "backend/services/_calendar_outlook.py",
+      "line": 189,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "9dfd3bd3b60fef30",
+      "rule": "B110",
+      "file": "backend/services/_calendar_outlook.py",
+      "line": 222,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "8a3f26a7670d5793",
+      "rule": "B110",
+      "file": "backend/services/_calendar_outlook.py",
+      "line": 319,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "cb9fa5718bb7372b",
+      "rule": "B110",
+      "file": "backend/services/_calendar_outlook.py",
+      "line": 512,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "aaf4ca25731557ce",
+      "rule": "B110",
+      "file": "backend/services/_calendar_outlook.py",
+      "line": 700,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "8a3a5b2bd67de5ad",
+      "rule": "B110",
+      "file": "backend/services/_calendar_outlook.py",
+      "line": 792,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "4024ac2321a13522",
+      "rule": "B110",
+      "file": "backend/services/_calendar_outlook.py",
+      "line": 551,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 2
+    },
+    {
+      "fingerprint": "661e6086db0f94b7",
+      "rule": "B112",
+      "file": "backend/services/_calendar_outlook.py",
+      "line": 220,
+      "severity": "LOW",
+      "message": "Try, Except, Continue detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "1044bf01b292df51",
+      "rule": "B112",
+      "file": "backend/services/_calendar_outlook.py",
+      "line": 522,
+      "severity": "LOW",
+      "message": "Try, Except, Continue detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "6beded03378ac09a",
+      "rule": "B112",
+      "file": "backend/services/_calendar_outlook.py",
+      "line": 317,
+      "severity": "LOW",
+      "message": "Try, Except, Continue detected.",
+      "occurrence": 2
+    },
+    {
+      "fingerprint": "5f4577a02f7c28dd",
+      "rule": "B112",
+      "file": "backend/services/_calendar_outlook.py",
+      "line": 549,
+      "severity": "LOW",
+      "message": "Try, Except, Continue detected.",
+      "occurrence": 3
+    },
+    {
+      "fingerprint": "9935d49a994a71b9",
+      "rule": "B404",
+      "file": "backend/services/_follow_up_email_macos.py",
+      "line": 19,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with the subprocess module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "3444fe1bcce8af7d",
+      "rule": "B603",
+      "file": "backend/services/_follow_up_email_macos.py",
+      "line": 47,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "68c3eeb5955c9058",
+      "rule": "B110",
+      "file": "backend/services/_follow_up_email_outlook.py",
+      "line": 74,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "40a3d7f03e97bfa1",
+      "rule": "B324",
+      "file": "backend/services/document_service.py",
+      "line": 114,
+      "severity": "HIGH",
+      "message": "Use of weak SHA1 hash for security. Consider usedforsecurity=False",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "2aaf8d82a23caf87",
+      "rule": "B110",
+      "file": "backend/services/engagement_service.py",
+      "line": 262,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "ff1eb83bb9d4f4cd",
+      "rule": "B110",
+      "file": "backend/services/item_status_service.py",
+      "line": 149,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "68ffffe516a41fed",
+      "rule": "B112",
+      "file": "backend/services/item_status_service.py",
+      "line": 178,
+      "severity": "LOW",
+      "message": "Try, Except, Continue detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "7e5fa2260641c033",
+      "rule": "B324",
+      "file": "backend/services/item_status_service.py",
+      "line": 69,
+      "severity": "HIGH",
+      "message": "Use of weak SHA1 hash for security. Consider usedforsecurity=False",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "f13c3be3b58b89f1",
+      "rule": "B110",
+      "file": "backend/services/outlook_web_scraper.py",
+      "line": 410,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "ed321f299cbd731a",
+      "rule": "B110",
+      "file": "backend/services/outlook_web_scraper.py",
+      "line": 544,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "50ff698335449d07",
+      "rule": "B110",
+      "file": "backend/services/outlook_web_scraper.py",
+      "line": 677,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 2
+    },
+    {
+      "fingerprint": "e20e46d00b4f86a0",
+      "rule": "B324",
+      "file": "backend/services/prep_brief_cache_service.py",
+      "line": 48,
+      "severity": "HIGH",
+      "message": "Use of weak SHA1 hash for security. Consider usedforsecurity=False",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "8c5dc6d1e9b6a69b",
+      "rule": "B110",
+      "file": "backend/services/recording_service.py",
+      "line": 1695,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "9ad3b95b261a5bc4",
+      "rule": "B110",
+      "file": "backend/services/recording_service.py",
+      "line": 1764,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "1ee048bed8981965",
+      "rule": "B404",
+      "file": "backend/services/recording_service.py",
+      "line": 9,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with the subprocess module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "82f60ae175f7336e",
+      "rule": "B603",
+      "file": "backend/services/recording_service.py",
+      "line": 2020,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "b3ceee534c6fcd24",
+      "rule": "B603",
+      "file": "backend/services/recording_service.py",
+      "line": 2038,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "fd3ec307fc8c8f1b",
+      "rule": "B110",
+      "file": "backend/services/retention_service.py",
+      "line": 192,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "db6017618dbddd06",
+      "rule": "B112",
+      "file": "backend/services/retention_service.py",
+      "line": 197,
+      "severity": "LOW",
+      "message": "Try, Except, Continue detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "3bbbee62e0095468",
+      "rule": "B112",
+      "file": "backend/services/retention_service.py",
+      "line": 294,
+      "severity": "LOW",
+      "message": "Try, Except, Continue detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "d6c6a21eadfce843",
+      "rule": "B608",
+      "file": "backend/services/session_index.py",
+      "line": 279,
+      "severity": "MEDIUM",
+      "message": "Possible SQL injection vector through string-based query construction.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "a79ae99d87b35b6b",
+      "rule": "B110",
+      "file": "backend/services/session_service.py",
+      "line": 326,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "a13c8fea61e69c55",
+      "rule": "B404",
+      "file": "backend/tests/test_audio_format_inspector.py",
+      "line": 18,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with the subprocess module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "12166a80afcac2e0",
+      "rule": "B106",
+      "file": "backend/tests/test_auth_fail_closed.py",
+      "line": 66,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "05bb93edb50b4713",
+      "rule": "B106",
+      "file": "backend/tests/test_auth_fail_closed.py",
+      "line": 75,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "a8fd13a851cb5698",
+      "rule": "B106",
+      "file": "backend/tests/test_auth_fail_closed.py",
+      "line": 83,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "7341903fd01ccf41",
+      "rule": "B106",
+      "file": "backend/tests/test_auth_fail_closed.py",
+      "line": 90,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "48986531c9e42e76",
+      "rule": "B106",
+      "file": "backend/tests/test_auth_fail_closed.py",
+      "line": 99,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "8cac892c89ce403a",
+      "rule": "B106",
+      "file": "backend/tests/test_auth_fail_closed.py",
+      "line": 108,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: 'secret-token-123'",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "f191d5fc8b157b8b",
+      "rule": "B106",
+      "file": "backend/tests/test_auth_fail_closed.py",
+      "line": 116,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: 'secret-token-123'",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "28605b1cb5bb9000",
+      "rule": "B106",
+      "file": "backend/tests/test_auth_fail_closed.py",
+      "line": 124,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: 'secret-token-123'",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "110b34769597b8ce",
+      "rule": "B106",
+      "file": "backend/tests/test_calendar_source_settings.py",
+      "line": 124,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "77442d23c99a797f",
+      "rule": "B106",
+      "file": "backend/tests/test_calendar_source_settings.py",
+      "line": 136,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "f74f7ea7d8a7841b",
+      "rule": "B106",
+      "file": "backend/tests/test_calendar_source_settings.py",
+      "line": 163,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: 'hf-test'",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "9cfe69c8cb84daa7",
+      "rule": "B108",
+      "file": "backend/tests/test_capture_confidence.py",
+      "line": 130,
+      "severity": "MEDIUM",
+      "message": "Probable insecure usage of temp file/directory.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "dc9191b10eecb56f",
+      "rule": "B106",
+      "file": "backend/tests/test_channel_attribution_pipeline.py",
+      "line": 112,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "39f3f9756dee168c",
+      "rule": "B106",
+      "file": "backend/tests/test_channel_attribution_pipeline.py",
+      "line": 128,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: 'hf-test'",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "28995878fcbfb75a",
+      "rule": "B404",
+      "file": "backend/tests/test_channel_attribution_pipeline.py",
+      "line": 21,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with the subprocess module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "19270237fdd649e4",
+      "rule": "B603",
+      "file": "backend/tests/test_channel_attribution_pipeline.py",
+      "line": 212,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "1a31901ce3c0a0cf",
+      "rule": "B106",
+      "file": "backend/tests/test_diarization_device.py",
+      "line": 215,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "3f58a4c15c5663e5",
+      "rule": "B106",
+      "file": "backend/tests/test_diarization_device.py",
+      "line": 228,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "5d1e6556543d1df9",
+      "rule": "B106",
+      "file": "backend/tests/test_diarization_device.py",
+      "line": 262,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "b7d6b6f2cd8448d6",
+      "rule": "B403",
+      "file": "backend/tests/test_document_service.py",
+      "line": 21,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with pickle module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "af245f6d233db5b4",
+      "rule": "B108",
+      "file": "backend/tests/test_finalize_gate.py",
+      "line": 199,
+      "severity": "MEDIUM",
+      "message": "Probable insecure usage of temp file/directory.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "42c25c635529a156",
+      "rule": "B404",
+      "file": "backend/tests/test_finalize_gate.py",
+      "line": 20,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with the subprocess module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "5c19d96a241ba727",
+      "rule": "B106",
+      "file": "backend/tests/test_finalize_in_progress_endpoints.py",
+      "line": 58,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: 'hf_x'",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "5307da2cd6bea83f",
+      "rule": "B404",
+      "file": "backend/tests/test_finalize_subprocess.py",
+      "line": 18,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with the subprocess module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "e1aaeda401297685",
+      "rule": "B603",
+      "file": "backend/tests/test_finalize_subprocess.py",
+      "line": 36,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "1f30efce2f3aa332",
+      "rule": "B108",
+      "file": "backend/tests/test_finalize_timing.py",
+      "line": 94,
+      "severity": "MEDIUM",
+      "message": "Probable insecure usage of temp file/directory.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "9096cc3186ec9a21",
+      "rule": "B102",
+      "file": "backend/tests/test_ghost_sessions.py",
+      "line": 50,
+      "severity": "MEDIUM",
+      "message": "Use of exec detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "53e1f71cabf12dab",
+      "rule": "B106",
+      "file": "backend/tests/test_live_speaker_split_settings.py",
+      "line": 89,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "d0bb18b9d8298323",
+      "rule": "B106",
+      "file": "backend/tests/test_live_speaker_split_settings.py",
+      "line": 102,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "419107f4cce1ad39",
+      "rule": "B106",
+      "file": "backend/tests/test_live_speaker_split_settings.py",
+      "line": 121,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: 'hf-test'",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "c2fbb8e799d4a426",
+      "rule": "B106",
+      "file": "backend/tests/test_live_speaker_split_settings.py",
+      "line": 156,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "453c0529a6a926f4",
+      "rule": "B106",
+      "file": "backend/tests/test_live_speaker_split_settings.py",
+      "line": 163,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "2810630d10ceab05",
+      "rule": "B106",
+      "file": "backend/tests/test_live_vad_settings.py",
+      "line": 83,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "d7abd56e24e0cb06",
+      "rule": "B106",
+      "file": "backend/tests/test_live_vad_settings.py",
+      "line": 96,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "7c0ee4c10e99d46c",
+      "rule": "B106",
+      "file": "backend/tests/test_live_vad_settings.py",
+      "line": 115,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: 'hf-test'",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "08ba38634a34064f",
+      "rule": "B106",
+      "file": "backend/tests/test_model_load_singleflight.py",
+      "line": 26,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: 'hf_x'",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "cf8222117f8fdb0f",
+      "rule": "B404",
+      "file": "backend/tests/test_owner_grouping_ts_lockstep.py",
+      "line": 41,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with the subprocess module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "741d23509bbd229a",
+      "rule": "B603",
+      "file": "backend/tests/test_owner_grouping_ts_lockstep.py",
+      "line": 191,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "3852bf6cab48176c",
+      "rule": "B106",
+      "file": "backend/tests/test_processing_busy_signal.py",
+      "line": 67,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: 'hf_x'",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "47e878f3d9b7a1f8",
+      "rule": "B106",
+      "file": "backend/tests/test_processing_busy_signal.py",
+      "line": 191,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "5abf5078c3c21aaf",
+      "rule": "B102",
+      "file": "backend/tests/test_provider_model_fetch.py",
+      "line": 40,
+      "severity": "MEDIUM",
+      "message": "Use of exec detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "dc7e49d0fabf9604",
+      "rule": "B108",
+      "file": "backend/tests/test_search_service.py",
+      "line": 127,
+      "severity": "MEDIUM",
+      "message": "Probable insecure usage of temp file/directory.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "99e1b87a48b40f93",
+      "rule": "B403",
+      "file": "backend/tests/test_search_service.py",
+      "line": 12,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with pickle module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "a9d234751882c034",
+      "rule": "B105",
+      "file": "backend/tests/test_secrets_keychain.py",
+      "line": 145,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: 'sk-ant-supersecret-12345'",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "efbe752f72c7d93e",
+      "rule": "B105",
+      "file": "backend/tests/test_secrets_keychain.py",
+      "line": 188,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: 'hf-secret'",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "6b73ccc6de15b72f",
+      "rule": "B105",
+      "file": "backend/tests/test_secrets_keychain.py",
+      "line": 252,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: 'sk-ant-plaintext-fallback'",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "9c400a12003c1400",
+      "rule": "B105",
+      "file": "backend/tests/test_secrets_keychain.py",
+      "line": 276,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: 'sk-ant-write-failed'",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "0b0219a947182406",
+      "rule": "B106",
+      "file": "backend/tests/test_secrets_keychain.py",
+      "line": 129,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "214c2574b2d20548",
+      "rule": "B106",
+      "file": "backend/tests/test_secrets_keychain.py",
+      "line": 173,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: 'hf-secret'",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "3e605b5b327d572d",
+      "rule": "B106",
+      "file": "backend/tests/test_session_archive_settings.py",
+      "line": 94,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "7572b5eaf6ddbdf5",
+      "rule": "B106",
+      "file": "backend/tests/test_session_archive_settings.py",
+      "line": 107,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "db2ffd781a094f53",
+      "rule": "B110",
+      "file": "backend/utils/audio_utils.py",
+      "line": 823,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "b6da036690acd2e3",
+      "rule": "B110",
+      "file": "backend/utils/crash_log.py",
+      "line": 166,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "6b87c188e4c76eea",
+      "rule": "B110",
+      "file": "backend/utils/crash_log.py",
+      "line": 197,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "09b5086154317610",
+      "rule": "B110",
+      "file": "backend/utils/crash_log.py",
+      "line": 211,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "5e2819279eda9a72",
+      "rule": "B110",
+      "file": "backend/utils/crash_log.py",
+      "line": 218,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "218fc0109af3dc04",
+      "rule": "B110",
+      "file": "backend/utils/finalize_gate.py",
+      "line": 77,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "f76ba002b1fe3c8e",
+      "rule": "B110",
+      "file": "backend/utils/finalize_gate.py",
+      "line": 98,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "09744abb1ee24b25",
+      "rule": "B404",
+      "file": "backend/utils/finalize_gate.py",
+      "line": 43,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with the subprocess module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "ea1a835415a7a878",
+      "rule": "B110",
+      "file": "backend/utils/logger.py",
+      "line": 14,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "ccee683c269d786c",
+      "rule": "B110",
+      "file": "backend/utils/ml_memory.py",
+      "line": 65,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "8e45a82288fa41e4",
+      "rule": "B404",
+      "file": "backend/utils/startup_shortcut.py",
+      "line": 176,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with the subprocess module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "6cd3091aa0baabcc",
+      "rule": "B603",
+      "file": "backend/utils/startup_shortcut.py",
+      "line": 177,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "8d057106f6a72c39",
+      "rule": "B110",
+      "file": "make_shortcut.py",
+      "line": 27,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "ea4615f26a5a0df9",
+      "rule": "B404",
+      "file": "make_shortcut.py",
+      "line": 11,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with the subprocess module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "35419399971e2226",
+      "rule": "B603",
+      "file": "make_shortcut.py",
+      "line": 67,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "fcc69f6043b36701",
+      "rule": "B607",
+      "file": "make_shortcut.py",
+      "line": 67,
+      "severity": "LOW",
+      "message": "Starting a process with a partial executable path",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "e5e83ab74566b1a5",
+      "rule": "B404",
+      "file": "scripts/ci/ai_code_review.py",
+      "line": 52,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with the subprocess module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "2c6fe8f646f8dc29",
+      "rule": "B603",
+      "file": "scripts/ci/ai_code_review.py",
+      "line": 95,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "efd5d0dc40e285ac",
+      "rule": "B607",
+      "file": "scripts/ci/ai_code_review.py",
+      "line": 95,
+      "severity": "LOW",
+      "message": "Starting a process with a partial executable path",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "f3bf5cfcc723309e",
+      "rule": "B110",
+      "file": "setup.py",
+      "line": 89,
+      "severity": "LOW",
+      "message": "Try, Except, Pass detected.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "d143bcbbdc57cd5c",
+      "rule": "B404",
+      "file": "setup.py",
+      "line": 27,
+      "severity": "LOW",
+      "message": "Consider possible security implications associated with the subprocess module.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "20cbc3413386570a",
+      "rule": "B603",
+      "file": "setup.py",
+      "line": 73,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "1ce94344d932ca66",
+      "rule": "B603",
+      "file": "setup.py",
+      "line": 79,
+      "severity": "LOW",
+      "message": "subprocess call - check for execution of untrusted input.",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "7824bddbb6e91699",
+      "rule": "B607",
+      "file": "setup.py",
+      "line": 79,
+      "severity": "LOW",
+      "message": "Starting a process with a partial executable path",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "778efcd923c430d5",
+      "rule": "B105",
+      "file": "tools/ui-harness/stub.py",
+      "line": 154,
+      "severity": "LOW",
+      "message": "Possible hardcoded password: ''",
+      "occurrence": 1
+    }
+  ]
+}

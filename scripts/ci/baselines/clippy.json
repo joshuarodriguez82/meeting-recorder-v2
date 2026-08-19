@@ -1,0 +1,54 @@
+{
+  "schema": 2,
+  "tool": "clippy",
+  "generated_utc": "2026-08-19T01:12:40Z",
+  "note": "Accepted pre-existing findings. CI fails only on findings absent from this list. Refresh deliberately with `scripts/ci/security_baseline.py update` and review the diff.",
+  "count": 5,
+  "findings": [
+    {
+      "fingerprint": "9f68ee0ad5c0f7ec",
+      "rule": "clippy::manual_find",
+      "file": "src-tauri/src/lib.rs",
+      "line": 354,
+      "severity": "MEDIUM",
+      "message": "manual implementation of `Iterator::find`",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "666af707ac5ea835",
+      "rule": "clippy::manual_find",
+      "file": "src-tauri/src/lib.rs",
+      "line": 552,
+      "severity": "MEDIUM",
+      "message": "manual implementation of `Iterator::find`",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "6ea20c5820fa7006",
+      "rule": "clippy::useless_format",
+      "file": "src-tauri/src/lib.rs",
+      "line": 1394,
+      "severity": "MEDIUM",
+      "message": "useless use of `format!`",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "d4f057531943ebbb",
+      "rule": "unused_mut",
+      "file": "src-tauri/src/lib.rs",
+      "line": 329,
+      "severity": "MEDIUM",
+      "message": "variable does not need to be mutable",
+      "occurrence": 1
+    },
+    {
+      "fingerprint": "55eb3b630fe11bc5",
+      "rule": "unused_variables",
+      "file": "src-tauri/src/lib.rs",
+      "line": 1724,
+      "severity": "MEDIUM",
+      "message": "unused variable: `scale`",
+      "occurrence": 1
+    }
+  ]
+}
