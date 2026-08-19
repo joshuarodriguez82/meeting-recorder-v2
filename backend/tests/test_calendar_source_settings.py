@@ -51,6 +51,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -273,8 +274,22 @@ def _wire(monkeypatch, *, calendar_source: str, extension_svc=None):
     monkeypatch.setattr(server.svc, "extension_calendar_svc", extension_svc)
 
 
-def _failing_spy(name: str):
+def _failing_spy(name: str, calls: Optional[list] = None):
+    """A local-calendar fetch that must never run.
+
+    Records into `calls` AND raises. The recording is the load-bearing
+    half: services/calendar_feed.py deliberately degrades a failing
+    local fetch to "extension events only" (a broken Outlook must not be
+    able to withhold extension events from the panel OR from
+    auto-record), so a raise alone could be swallowed and the assertion
+    on the empty result would still pass with the gate broken. Assert on
+    `calls` to prove the call was never MADE — attaching to Outlook is
+    itself what trips a locked-down tenant's sign-in prompt, which is
+    the entire point of the gate.
+    """
     def _fn(*a, **kw):
+        if calls is not None:
+            calls.append(name)
         raise AssertionError(
             f"{name} must not be called when calendar_source disallows "
             f"the local calendar backend")
@@ -283,19 +298,27 @@ def _failing_spy(name: str):
 
 @pytest.mark.parametrize("source", ["extension", "off"])
 def test_upcoming_never_calls_outlook_fetch_when_gated(source, monkeypatch):
+    calls: list[str] = []
     _wire(monkeypatch, calendar_source=source, extension_svc=SimpleNamespace(
         get_events=lambda hours: []))
-    monkeypatch.setattr(server, "get_upcoming_meetings", _failing_spy("get_upcoming_meetings"))
+    monkeypatch.setattr(
+        server, "get_upcoming_meetings",
+        _failing_spy("get_upcoming_meetings", calls))
     result = asyncio.run(server.get_calendar_upcoming(hours=168, refresh=False))
     assert result == []
+    assert calls == []
 
 
 @pytest.mark.parametrize("source", ["extension", "off"])
 def test_today_never_calls_outlook_fetch_when_gated(source, monkeypatch):
+    calls: list[str] = []
     _wire(monkeypatch, calendar_source=source)
-    monkeypatch.setattr(server, "get_todays_meetings", _failing_spy("get_todays_meetings"))
+    monkeypatch.setattr(
+        server, "get_todays_meetings",
+        _failing_spy("get_todays_meetings", calls))
     result = asyncio.run(server.get_calendar_today())
     assert result == []
+    assert calls == []
 
 
 @pytest.mark.parametrize("source", ["extension", "off"])
