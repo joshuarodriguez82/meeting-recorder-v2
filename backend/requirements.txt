@@ -13,6 +13,14 @@ openpyxl>=3.1
 pypdf>=5.0
 python-docx>=1.1
 python-pptx>=1.0
+# Legacy Word 97-2003 (.doc) — an OLE2 compound file, which python-docx
+# (a zip reader) cannot open. olefile is the container reader; the
+# [MS-DOC] piece-table walk on top of it lives in
+# services/document_service.py. Chosen because it is pure Python with
+# ZERO transitive dependencies and ~115 KB on disk — the alternatives
+# (LibreOffice headless, textract) cannot exist inside a packaged app.
+# Imported lazily, so a missing wheel is a counted skip, not a crash.
+olefile>=0.47
 python-dotenv
 # OS keychain for secrets (Anthropic/HF/OpenAI keys). Picks the right
 # backend automatically: Windows Credential Manager, macOS Keychain,

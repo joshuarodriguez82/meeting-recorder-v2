@@ -90,11 +90,31 @@ logger = get_logger(__name__)
 # tests/test_document_service.py that fails if they ever drift apart
 # again.
 #
-# .txt/.md are handled inline (no library at all); every other
-# extension here must have a matching entry in _EXTRACTORS with a lazy
+# Plain text: read straight off disk, no library at all. Every other
+# extension must have a matching entry in _EXTRACTORS with a lazy
 # import and a skip-reason path — never a hard dependency for the rest
 # of the app to import this module.
-_PLAIN_TEXT_EXTENSIONS = {".txt", ".md"}
+#
+# Field data (2026-08-19): a real client Knowledge Folder skipped 19
+# files. Ten of those skips were correct (6 images, 3 archives, 1
+# .drawio). The rest were coverage gaps, and the plain-text ones were
+# gaps by oversight rather than by decision — the module was indexing
+# .xlsx spreadsheets while reporting "unsupported file type: .csv",
+# and CloudFormation .yaml templates are as plain-text as the .txt
+# files right next to them.
+#
+# Everything here is read through _read_text_bounded(), which stops at
+# the character cap instead of slurping the file — a stray 2 GB .log
+# in a knowledge folder must not become a 2 GB allocation.
+_PLAIN_TEXT_EXTENSIONS = {
+    # prose / notes
+    ".txt", ".md", ".rst", ".log",
+    # config, IaC and data formats an SA's knowledge folder actually
+    # holds: CloudFormation and Kubernetes YAML, Terraform, API
+    # payloads, exported settings.
+    ".yaml", ".yml", ".json", ".xml", ".ini", ".cfg", ".toml", ".tf",
+    ".sql",
+}
 
 # 350 words is a slightly tighter window than the 400-word transcript
 # chunking in core.embeddings — document prose tends to be denser
@@ -221,7 +241,7 @@ def extract_text(path: Path) -> Tuple[str, Optional[str]]:
     suffix = path.suffix.lower()
     try:
         if suffix in _PLAIN_TEXT_EXTENSIONS:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            text = _read_text_bounded(path)
             reason = None
         elif suffix in _EXTRACTORS:
             text, reason = _EXTRACTORS[suffix](path)
@@ -242,6 +262,409 @@ def extract_text(path: Path) -> Tuple[str, Optional[str]]:
     if len(text) > MAX_EXTRACTED_CHARS:
         text = text[:MAX_EXTRACTED_CHARS]
     return text, None
+
+
+def _read_text_bounded(path: Path, limit: int = MAX_EXTRACTED_CHARS) -> str:
+    """Read at most ``limit`` characters of a text file.
+
+    extract_text() re-applies the cap on whatever comes back, so this
+    exists purely to bound the ALLOCATION: ``read_text()`` on a 2 GB log
+    file that someone dropped in a knowledge folder would materialise
+    the whole thing in memory only to throw 99.9% of it away.
+    """
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        return f.read(limit + 1)
+
+
+def _extract_csv(path: Path) -> Tuple[str, Optional[str]]:
+    """One line of ``cell | cell | cell`` per row.
+
+    Read through the ``csv`` module rather than splitting on commas so
+    a quoted field containing a comma — or an embedded newline, which
+    is common in exported estimates and RFP response matrices — stays
+    in one piece instead of shattering the row.
+
+    The output shape deliberately matches ``_extract_xlsx``'s
+    (pipe-joined cells, blank cells and blank rows dropped): a CSV is
+    the same data as a one-sheet workbook, so it should chunk the same
+    way and retrieve the same way. Without this, the whole file would
+    collapse toward one unreadable line and chunk boundaries would fall
+    mid-record.
+
+    Sniffs the delimiter so tab-separated files (.tsv, and the many
+    .csv files that are actually tab- or semicolon-delimited) do not
+    come back as one column.
+    """
+    import csv  # noqa: PLC0415  (stdlib, but keep the import local)
+
+    try:
+        sample = _read_text_bounded(path, 8192)
+    except OSError as e:
+        return "", f"could not read file: {e}"
+    if not sample.strip():
+        return "", None  # extract_text() turns this into "no extractable text"
+
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+    except csv.Error:
+        # A single-column file gives the sniffer nothing to go on. That
+        # is not an error — comma is the right default.
+        dialect = csv.excel
+
+    lines: List[str] = []
+    total = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace",
+                  newline="") as f:
+            for row in csv.reader(f, dialect):
+                # Collapse whitespace INSIDE each cell. A quoted field
+                # may legally contain newlines (common in RFP response
+                # matrices and estimate notes), and leaving them in
+                # would split one record across several output lines —
+                # defeating the point of doing this row-wise at all.
+                cells = [" ".join(str(c).split()) for c in row]
+                cells = [c for c in cells if c]
+                if not cells:
+                    continue
+                line = " | ".join(cells)
+                lines.append(line)
+                total += len(line) + 1
+                # Same bail-out as _extract_xlsx: stop once past the cap
+                # rather than reading a huge file only to truncate it.
+                if total > MAX_EXTRACTED_CHARS:
+                    break
+    except (OSError, csv.Error) as e:
+        return "", f"corrupt or unreadable csv: {e}"
+
+    return "\n".join(lines), None
+
+
+# ── legacy .doc ──────────────────────────────────────────────────────
+#
+# Field data (2026-08-19): 5 of the 19 skipped files in a real client
+# Knowledge Folder were `.doc` — and they were the valuable ones (TCO/ROI
+# models, a competitive battle card, an architecture document).
+#
+# `.doc` is not one format. The extension is attached to at least four
+# different things in the wild, and which one you have decides whether
+# it is trivial or impossible to read:
+#
+#   1. RTF with a .doc extension. Extremely common — "Save as .doc"
+#      from non-Word tools, and most mail/CRM exports, produce this.
+#   2. HTML with a .doc extension. Word's own "Save as Web Page", and
+#      almost every server-side "export to Word" feature, produce this.
+#   3. Plain text with a .doc extension.
+#   4. A genuine Word 97-2003 OLE2 compound file.
+#
+# So the extractor sniffs the magic bytes first and routes; only case 4
+# needs any real work. python-docx cannot read ANY of these — it is a
+# zip reader, and none of the four is a zip.
+_OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+
+def _sniff_document_kind(path: Path) -> str:
+    """What a `.doc` file actually is: ole2 / rtf / html / text / binary."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4096)
+    except OSError:
+        return "binary"
+
+    if head.startswith(_OLE2_MAGIC):
+        return "ole2"
+    stripped = head.lstrip(b"\xef\xbb\xbf \t\r\n")
+    if stripped.startswith(b"{\\rt"):
+        return "rtf"
+    lowered = stripped[:1024].lower()
+    if (lowered.startswith(b"<!doctype html") or lowered.startswith(b"<html")
+            or b"<html" in lowered or b"<body" in lowered):
+        return "html"
+    # Everything left: call it text if it decodes cleanly and is not
+    # peppered with the NULs and control bytes that mark a binary blob.
+    if not head:
+        return "text"
+    controls = sum(
+        1 for b in head
+        if b < 0x09 or (0x0E <= b < 0x20 and b not in (0x1B,))
+    )
+    if controls / len(head) < 0.02:
+        return "text"
+    return "binary"
+
+
+def _rtf_to_text(raw: str) -> str:
+    """Strip RTF markup down to readable prose.
+
+    Deliberately small and approximate rather than a real RTF parser:
+    this feeds semantic search, where approximate text beats no text.
+    It drops the header groups that hold no prose (font/colour/style
+    tables and any ``{\\*\\...}`` destination), resolves ``\\'hh`` byte
+    escapes and the handful of control words that mean whitespace, and
+    throws the remaining control words away.
+    """
+    out: List[str] = []
+    i = 0
+    n = len(raw)
+    depth = 0
+    skip_to_depth: Optional[int] = None
+
+    while i < n:
+        ch = raw[i]
+        if ch == "{":
+            depth += 1
+            # Groups that never contain document prose.
+            ahead = raw[i + 1:i + 12].lower()
+            if skip_to_depth is None and (
+                ahead.startswith("\\*")
+                or ahead.startswith("\\fonttbl")
+                or ahead.startswith("\\colortbl")
+                or ahead.startswith("\\stylesheet")
+                or ahead.startswith("\\info")
+                or ahead.startswith("\\pict")
+            ):
+                skip_to_depth = depth
+            i += 1
+            continue
+        if ch == "}":
+            if skip_to_depth is not None and depth == skip_to_depth:
+                skip_to_depth = None
+            depth -= 1
+            i += 1
+            continue
+        if ch == "\\":
+            # \'hh — a single byte in the document's codepage.
+            if raw[i + 1:i + 2] == "'":
+                hexpair = raw[i + 2:i + 4]
+                i += 4
+                if skip_to_depth is None:
+                    try:
+                        out.append(bytes([int(hexpair, 16)]).decode(
+                            "cp1252", errors="replace"))
+                    except ValueError:
+                        pass
+                continue
+            # An escaped literal character.
+            if not raw[i + 1:i + 2].isalpha():
+                if skip_to_depth is None and raw[i + 1:i + 2]:
+                    out.append(raw[i + 1])
+                i += 2
+                continue
+            # A control word, optionally with a numeric parameter and
+            # one optional trailing space that belongs to the word.
+            j = i + 1
+            while j < n and raw[j].isalpha():
+                j += 1
+            word = raw[i + 1:j]
+            if j < n and (raw[j] == "-" or raw[j].isdigit()):
+                j += 1
+                while j < n and raw[j].isdigit():
+                    j += 1
+            if j < n and raw[j] == " ":
+                j += 1
+            if skip_to_depth is None and word in (
+                    "par", "line", "tab", "cell", "row", "sect", "page"):
+                out.append("\n" if word != "tab" else "\t")
+            i = j
+            continue
+        if skip_to_depth is None and ch not in "\r\n":
+            out.append(ch)
+        i += 1
+
+    text = "".join(out)
+    # RTF line breaks are the control words above; raw newlines in the
+    # source are formatting noise. Collapse the runs we produced.
+    lines = [ln.strip() for ln in text.splitlines()]
+    return "\n".join(ln for ln in lines if ln)
+
+
+# Offsets into the WordDocument stream's FIB, from [MS-DOC]. The FIB is
+# FibBase (0x00-0x1F), csw (0x20), fibRgW (0x22-0x3D), cslw (0x3E),
+# fibRgLw97 (0x40-0x97), cbRgFcLcb (0x98), then the FibRgFcLcb97 blob
+# from 0x9A. fcClx is pair 33 of that blob: 0x9A + 33*8 = 0x1A2.
+_FIB_FLAGS_OFFSET = 0x0A
+_FIB_WHICH_TABLE_STREAM_BIT = 0x0200
+_FIB_FCCLX_OFFSET = 0x01A2
+
+
+def _extract_doc_ole2(path: Path) -> Tuple[str, Optional[str]]:
+    """Text out of a genuine Word 97-2003 binary document.
+
+    Walks the piece table exactly as [MS-DOC] specifies rather than
+    scraping printable runs out of the stream: the WordDocument stream
+    interleaves document text with field codes, style names and binary
+    structures, so a "pull out the readable-looking bytes" approach
+    yields prose salted with garbage — which is worse than nothing for
+    a semantic index, because the garbage gets embedded and retrieved
+    alongside real content.
+
+    The walk is: read the FIB to find which table stream is live and
+    where the Clx sits, skip the RgPrc grpprl entries, then read the
+    PlcPcd. Each piece's fc has bit 30 set when the text is 8-bit
+    cp1252 ("compressed") at fc/2, and clear when it is UTF-16LE at fc.
+
+    Validated against a real Word 97-2003 document, not a synthetic
+    one — see tests/fixtures/README.md.
+
+    olefile is the only dependency, and it is deliberately the ONLY one
+    considered acceptable here: pure Python, no transitive
+    dependencies, ~115 KB. LibreOffice-headless and textract were both
+    ruled out — neither can exist inside a packaged app.
+    """
+    try:
+        import olefile  # noqa: PLC0415  (deliberately lazy, as above)
+    except ImportError:
+        return "", _missing_dependency_reason("olefile")
+
+    import struct  # noqa: PLC0415
+
+    try:
+        ole = olefile.OleFileIO(str(path))
+    except Exception as e:
+        return "", f"corrupt or unreadable doc: {e}"
+
+    try:
+        if not ole.exists("WordDocument"):
+            # An OLE2 file that is not a Word document at all — an old
+            # .xls or .ppt renamed, most often. Say so precisely.
+            return "", ("not a Word document — this is an OLE2 file with "
+                        "no WordDocument stream")
+        wd = ole.openstream("WordDocument").read()
+        if len(wd) < _FIB_FCCLX_OFFSET + 8:
+            return "", "corrupt or unreadable doc: truncated FIB"
+
+        flags = struct.unpack_from("<H", wd, _FIB_FLAGS_OFFSET)[0]
+        table_name = ("1Table" if flags & _FIB_WHICH_TABLE_STREAM_BIT
+                      else "0Table")
+        if not ole.exists(table_name):
+            return "", (f"corrupt or unreadable doc: missing {table_name} "
+                        f"stream")
+        table = ole.openstream(table_name).read()
+
+        fc_clx, lcb_clx = struct.unpack_from("<II", wd, _FIB_FCCLX_OFFSET)
+        clx = table[fc_clx:fc_clx + lcb_clx]
+        if not clx:
+            return "", "corrupt or unreadable doc: empty piece table"
+
+        # Skip any RgPrc (clxtGrpprl == 0x01) entries preceding the Pcdt.
+        i = 0
+        while i < len(clx) and clx[i] == 0x01:
+            cb = struct.unpack_from("<H", clx, i + 1)[0]
+            i += 3 + cb
+        if i >= len(clx) or clx[i] != 0x02:
+            return "", "corrupt or unreadable doc: no piece table found"
+
+        lcb = struct.unpack_from("<I", clx, i + 1)[0]
+        plc = clx[i + 5:i + 5 + lcb]
+        piece_count = (len(plc) - 4) // 12
+        if piece_count <= 0:
+            return "", "corrupt or unreadable doc: empty piece table"
+
+        cps = struct.unpack_from(f"<{piece_count + 1}I", plc, 0)
+        parts: List[str] = []
+        total = 0
+        for k in range(piece_count):
+            off = 4 * (piece_count + 1) + k * 8
+            fc = struct.unpack_from("<I", plc, off + 2)[0]
+            compressed = bool(fc & 0x40000000)
+            base = fc & 0x3FFFFFFF
+            nchars = cps[k + 1] - cps[k]
+            if nchars <= 0:
+                continue
+            if compressed:
+                chunk = wd[base // 2: base // 2 + nchars].decode(
+                    "cp1252", errors="replace")
+            else:
+                chunk = wd[base: base + nchars * 2].decode(
+                    "utf-16-le", errors="replace")
+            parts.append(chunk)
+            total += len(chunk)
+            if total > MAX_EXTRACTED_CHARS:
+                break
+    except Exception as e:
+        return "", f"corrupt or unreadable doc: {e}"
+    finally:
+        try:
+            ole.close()
+        except Exception:
+            pass
+
+    return _clean_doc_text("".join(parts)), None
+
+
+# Word's binary text stream carries in-band markers alongside the prose:
+# 0x07 ends a table cell/row, 0x0B is a hard line break, 0x0C a page
+# break, 0x13/0x14/0x15 bracket field codes, and 0x1E/0x1F are
+# non-breaking/optional hyphens.
+_DOC_FIELD_START = "\x13"
+_DOC_FIELD_SEPARATOR = "\x14"
+_DOC_FIELD_END = "\x15"
+
+
+def _clean_doc_text(raw: str) -> str:
+    """Turn the raw piece-table text into readable prose.
+
+    Drops field CODES while keeping field RESULTS — a HYPERLINK or REF
+    field stores its instruction between 0x13 and 0x14 and the text the
+    reader actually sees between 0x14 and 0x15, so keeping the former
+    would index "HYPERLINK \\l _Toc12345" instead of the heading it
+    points at.
+    """
+    out: List[str] = []
+    in_field_code = False
+    for ch in raw:
+        if ch == _DOC_FIELD_START:
+            in_field_code = True
+            continue
+        if ch == _DOC_FIELD_SEPARATOR:
+            in_field_code = False
+            continue
+        if ch == _DOC_FIELD_END:
+            in_field_code = False
+            continue
+        if in_field_code:
+            continue
+        if ch in ("\r", "\x0b", "\x0c", "\x07"):
+            out.append("\n")
+        elif ch in ("\x1e", "\x1f"):
+            out.append("-")
+        elif ch == "\t":
+            out.append("\t")
+        elif ch < " " and ch != "\n":
+            continue
+        else:
+            out.append(ch)
+    lines = [ln.strip() for ln in "".join(out).splitlines()]
+    return "\n".join(ln for ln in lines if ln)
+
+
+def _extract_rtf(path: Path) -> Tuple[str, Optional[str]]:
+    try:
+        raw = _read_text_bounded(path, MAX_EXTRACTED_CHARS * 4)
+    except OSError as e:
+        return "", f"could not read file: {e}"
+    return _rtf_to_text(raw), None
+
+
+def _extract_doc(path: Path) -> Tuple[str, Optional[str]]:
+    """`.doc` — sniff what the file really is, then route.
+
+    See the block comment above ``_OLE2_MAGIC`` for why sniffing comes
+    first: the extension says almost nothing about the format.
+    """
+    kind = _sniff_document_kind(path)
+    if kind == "ole2":
+        return _extract_doc_ole2(path)
+    if kind == "rtf":
+        return _extract_rtf(path)
+    if kind == "html":
+        return _extract_html(path)
+    if kind == "text":
+        try:
+            return _read_text_bounded(path), None
+        except OSError as e:
+            return "", f"could not read file: {e}"
+    return "", ("unrecognised .doc format — not an OLE2 Word document, "
+                "RTF, HTML or text")
 
 
 def _missing_dependency_reason(package: str) -> str:
@@ -440,6 +863,17 @@ _EXTRACTORS: Dict[str, Callable[[Path], Tuple[str, Optional[str]]]] = {
     ".pptx": _extract_pptx,
     ".html": _extract_html,
     ".htm": _extract_html,
+    # Row-aware, so records stay coherent across chunk boundaries and
+    # the output matches _extract_xlsx's shape.
+    ".csv": _extract_csv,
+    ".tsv": _extract_csv,
+    # Legacy Word. Sniffs the magic bytes and routes — see the block
+    # comment above _OLE2_MAGIC; the extension covers four unrelated
+    # formats.
+    ".doc": _extract_doc,
+    # Falls out of the .doc work for free: an actual .rtf gets the same
+    # de-markup path a mislabelled one does.
+    ".rtf": _extract_rtf,
 }
 
 SUPPORTED_EXTENSIONS = _PLAIN_TEXT_EXTENSIONS | set(_EXTRACTORS)
