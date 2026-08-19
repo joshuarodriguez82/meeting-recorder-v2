@@ -116,6 +116,28 @@ STATE_MESSAGES = {
 }
 
 
+# ── What kind of thing a run produced ────────────────────────────────
+#
+# There are two, and they are NOT interchangeable:
+#
+#   ARTIFACT_DRAFT        a message the mail client wrote into a
+#                         mailbox. It survives closing the app; it has
+#                         a folder and an owning account; it can be
+#                         found again tomorrow.
+#   ARTIFACT_COMPOSE_LINK a URL that opens a prefilled compose window
+#                         in Outlook Web. NOTHING was written anywhere.
+#                         Close the tab without saving and it is gone,
+#                         and no Drafts folder ever held it.
+#
+# Calling the second one a draft would be the same defect this module's
+# `state` field exists to stop — a state we never established rendered
+# as a finished one — so the kind travels with the count and every
+# message and UI string branches on it.
+
+ARTIFACT_DRAFT = "draft"
+ARTIFACT_COMPOSE_LINK = "compose_link"
+
+
 # ── Generic owners ───────────────────────────────────────────────────
 #
 # Owners we can never resolve to one mailbox. "team" / "all" / "everyone"
@@ -695,6 +717,12 @@ class DraftResult:
     screen). `unverified` counts items the mail client accepted but did
     not confirm persisting; those are excluded from `created`, because
     counting them is exactly the overclaim this shape exists to stop.
+
+    `artifact` says WHICH of the two things above `created` counts — see
+    ARTIFACT_DRAFT / ARTIFACT_COMPOSE_LINK. `location` and `account`
+    are only ever meaningful for ARTIFACT_DRAFT; the compose-link path
+    leaves them empty on purpose, because there is no folder and no
+    mailbox to name.
     """
 
     created: int = 0
@@ -707,6 +735,10 @@ class DraftResult:
     unverified: int = 0
     location: str = ""
     account: str = ""
+    artifact: str = ARTIFACT_DRAFT
+    # Populated only for ARTIFACT_COMPOSE_LINK: one entry per owner,
+    # each already a plain dict — see _follow_up_email_web.ComposeLink.
+    compose_links: List[dict] = field(default_factory=list)
 
     @classmethod
     def from_plan(cls, plan: DraftPlan, created: int = 0) -> "DraftResult":
@@ -725,4 +757,6 @@ class DraftResult:
             "unverified": self.unverified,
             "location": self.location,
             "account": self.account,
+            "artifact": self.artifact,
+            "compose_links": list(self.compose_links),
         }

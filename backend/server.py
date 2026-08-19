@@ -6112,6 +6112,7 @@ async def process_full(session_id: str, req: ProcessFullRequest):
         if req.follow_up_drafts:
             try:
                 from services.follow_up_email import draft_follow_up_emails
+                from services.follow_up_owners import ARTIFACT_COMPOSE_LINK
                 result = await asyncio.to_thread(
                     draft_follow_up_emails, svc, session_id)
                 # `state` distinguishes "no action items" from "action
@@ -6120,8 +6121,17 @@ async def process_full(session_id: str, req: ProcessFullRequest):
                 # `unaddressed` is the same idea one level on: a non-zero
                 # count is not automatically a good outcome, because a
                 # draft with no recipient cannot be sent.
+                #
+                # The noun comes from `artifact`, not from this line: a
+                # compose link (calendar_source "extension" — no mail
+                # client contacted, nothing written to any mailbox) is
+                # not a draft, and this stage string is read back by a
+                # human deciding whether to go looking in Outlook.
+                noun = ("compose links"
+                        if result.artifact == ARTIFACT_COMPOSE_LINK
+                        else "drafts")
                 stages["follow_up_drafts"] = (
-                    f"ok ({result.created} drafts, state={result.state}"
+                    f"ok ({result.created} {noun}, state={result.state}"
                     + (f", source={result.source}" if result.source else "")
                     + (f", unaddressed={result.unaddressed}"
                        if result.unaddressed else "")
