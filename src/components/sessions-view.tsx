@@ -630,12 +630,32 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
                   {s.finalize_status === "finalizing" && (
                     <div
                       className="inline-flex items-start gap-1.5 max-w-full rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300 text-[11px] px-2.5 py-1 mt-2"
-                      title="The post-stop finalize step (WAV merge, optional echo cancellation) is still running. This is normal — no data has been lost. AI actions become available once it finishes."
+                      title={
+                        s.finalize_aec_requested
+                          ? "The post-stop finalize step (WAV merge + echo cancellation) is still running. This is normal — no data has been lost. AI actions become available once it finishes."
+                          : "The post-stop finalize step (WAV merge) is still running. This is normal — no data has been lost. AI actions become available once it finishes."
+                      }
                     >
                       <Loader2 className="h-3 w-3 animate-spin shrink-0 mt-0.5" aria-hidden />
                       <span className="flex-1">
                         Finalizing{_finalizeElapsedSuffix(s.finalize_started_at)}
-                        {" "}— echo cancellation can take several minutes.
+                        {/* Named echo cancellation UNCONDITIONALLY until
+                            2026-08-20, so a user with the setting OFF was
+                            told it was running — while the event log for
+                            that very session recorded aec_requested:
+                            false. AEC was off and correctly not running;
+                            only the sentence was wrong.
+
+                            Describing work that is not happening is the
+                            same defect as describing a result that was
+                            never established, pointing the other way. It
+                            also cost the user real time: "several
+                            minutes" is true of AEC and not of a merge
+                            that takes seconds, so a normal 12-second
+                            finalize read as something being stuck. */}
+                        {s.finalize_aec_requested
+                          ? " — echo cancellation can take several minutes."
+                          : " — merging the audio tracks; usually a few seconds."}
                       </span>
                     </div>
                   )}

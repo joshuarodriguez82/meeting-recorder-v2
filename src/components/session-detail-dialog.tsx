@@ -77,10 +77,16 @@ const FOLLOW_UP_EMPTY_TITLES: Record<string, string> = {
 // Kept deliberately state-agnostic (rather than branching on isQueued)
 // since it's a terse hover tooltip, not the overview-tab banner, which
 // does spell out the queued/running distinction.
+// Also named echo cancellation unconditionally until 2026-08-20 (see
+// sessions-view.tsx's finalize banner for the field report). This one
+// is a terse tooltip on a disabled button rather than the progress
+// banner, so it drops the claim entirely instead of branching: the
+// user needs to know the button will work shortly, not which step is
+// running. Saying nothing is honest; naming a step that may not be
+// running is not.
 const FINALIZING_BUTTON_TOOLTIP =
   "This recording's audio is still finalizing (or queued behind another " +
-  "finalize job) — echo cancellation can take several minutes — try " +
-  "again once it's done.";
+  "finalize job) — try again once it's done.";
 
 export function SessionDetailDialog({
   sessionId, open, onOpenChange, onChanged,
