@@ -1921,6 +1921,55 @@ test("the recorder registers for the NEW Outlook host, not just classic OWA", ()
 const JOIN_PATTERNS_FROM_SOURCE =
   vm.runInContext("JOIN_PROVIDER_PATTERNS", sandbox);
 
+// Like fakeDetailPage but the click also reveals ANCHORS and
+// attendee-name elements — the two things a Teams pane has and a
+// text-only reader cannot see.
+function fakeDetailPageRich({ tiles, reveal }) {
+  let extra = "";
+  let anchors = [];
+  let people = [];
+  const base = "Calendar grid baseline text that is already on screen.";
+  const mkAttr = (attrs) => ({
+    getAttribute: (n) => (n in attrs ? attrs[n] : null),
+  });
+  const els = tiles.map((t) => ({
+    getAttribute: (n) => (n === "aria-label" ? t.label : null),
+    click() {
+      const r = reveal[t.subject] || {};
+      extra = "\n" + (r.text || "");
+      anchors = (r.hrefs || []).map((h) => mkAttr({ href: h }));
+      people = (r.names || []).map((n) => mkAttr({ "aria-label": n }));
+    },
+  }));
+  const doc = {
+    body: { get innerText() { return base + extra; } },
+    querySelectorAll: (sel) => {
+      if (String(sel).includes("a[href]")) return anchors;
+      if (String(sel).includes("[title]")) return [...people, ...els];
+      return els;
+    },
+    dispatchEvent: () => { extra = ""; anchors = []; people = []; return true; },
+  };
+  return doc;
+}
+
+async function runRichDetailReader({ tiles, reveal, wanted }) {
+  const prevDoc = sandbox.document;
+  const prevKE = sandbox.KeyboardEvent;
+  const prevST = sandbox.setTimeout;
+  sandbox.document = fakeDetailPageRich({ tiles, reveal });
+  sandbox.KeyboardEvent = function () {};
+  sandbox.setTimeout = setTimeout;
+  try {
+    return await sandbox._readEventDetailsFunc(
+      wanted, JOIN_PATTERNS_FROM_SOURCE, 25, 90000);
+  } finally {
+    sandbox.document = prevDoc;
+    sandbox.KeyboardEvent = prevKE;
+    sandbox.setTimeout = prevST;
+  }
+}
+
 function fakeDetailPage({ tiles, revealText }) {
   // Minimal page: aria-labelled tiles that, when clicked, grow
   // body.innerText by revealText[subject]. No classes, no roles — if
@@ -2195,4 +2244,163 @@ test("the screen pass is invoked BEFORE the week navigation", () => {
     firstDetail < nav,
     "the week-1 screen pass runs AFTER navigating to week 2 — its tiles " +
     "are no longer rendered, which is the v2.45.0 no-op");
+});
+
+// ── Teams: the URL is in a Join BUTTON, not in the text (v1.11) ──────
+//
+// FIELD RESULT 2026-08-20, v1.10: Webex and Zoom meetings gained a
+// Join link, Teams meetings gained nothing. Not a Teams parsing
+// problem — a question-shape problem, and the same one as v1.4's
+// anchor-only probe, exactly inverted:
+//
+//   v1.4   looked at ELEMENTS, missed a URL that was text  → wrong
+//   v1.10  looked at TEXT, missed a URL that is an href    → wrong
+//
+// Webex/Zoom add-ins paste the raw URL into the invite body, so it IS
+// text. Teams renders a button and puts the URL only in the href.
+
+test("a Teams join link is found in an anchor href, not the text", async () => {
+  const out = await runRichDetailReader({
+    tiles: [{ subject: "Team sync", label: "Team sync, 10:00 AM to 10:30 AM" }],
+    reveal: {
+      "Team sync": {
+        // Exactly what a Teams pane shows: the words, never the URL.
+        text: "Microsoft Teams Meeting\nJoin the meeting now",
+        hrefs: ["https://teams.microsoft.com/l/meetup-join/19%3ameeting_EXAMPLE%40thread.v2/0"],
+      },
+    },
+    wanted: [{ subject: "Team sync", startIso: "2026-08-21T10:00:00" }],
+  });
+  const d = out.details[0];
+  assert.ok(d, "nothing extracted");
+  assert.match(d.joinUrl, /teams\.microsoft\.com\/l\/meetup-join/);
+  assert.equal(out.joinFromAnchor, 1);
+});
+
+test("a text URL still wins over an anchor when both are present", async () => {
+  // A pasted URL is unambiguously part of THIS invite; an anchor is
+  // located only by having newly appeared.
+  const out = await runRichDetailReader({
+    tiles: [{ subject: "Webex call", label: "Webex call, 9:30 AM to 9:45 AM" }],
+    reveal: {
+      "Webex call": {
+        text: "Join here https://globex.webex.com/globex/j.php?MTID=EXAMPLE",
+        hrefs: ["https://teams.microsoft.com/l/meetup-join/OTHER"],
+      },
+    },
+    wanted: [{ subject: "Webex call", startIso: "2026-08-21T09:30:00" }],
+  });
+  assert.match(out.details[0].joinUrl, /webex\.com/);
+  assert.equal(out.joinFromAnchor, 0);
+});
+
+test("a non-conferencing anchor never becomes a join link", async () => {
+  // Every pane is full of navigation links. Only the shared provider
+  // list may produce a Join button.
+  const out = await runRichDetailReader({
+    tiles: [{ subject: "Training", label: "Training, 2:00 PM to 3:30 PM" }],
+    reveal: {
+      "Training": {
+        text: "Course block",
+        hrefs: ["https://learning.example.com/library/", "https://outlook.office.com/mail/"],
+      },
+    },
+    wanted: [{ subject: "Training", startIso: "2026-08-20T14:00:00" }],
+  });
+  const d = out.details[0];
+  if (d) assert.equal(d.joinUrl, "");
+  assert.equal(out.joinFromAnchor, 0);
+});
+
+test("an anchor already on screen before the click is not attributed", async () => {
+  // The previous meeting's Join button is still in the DOM. Attaching
+  // it to this meeting would send the user into the wrong call —
+  // worse than an empty field.
+  const page = fakeDetailPageRich({
+    tiles: [{ subject: "Second", label: "Second, 11:00 AM to 11:30 AM" }],
+    reveal: { "Second": { text: "Some agenda text", hrefs: [] } },
+  });
+  const stale = { getAttribute: (n) => (n === "href"
+    ? "https://teams.microsoft.com/l/meetup-join/STALE" : null) };
+  const origQSA = page.querySelectorAll;
+  page.querySelectorAll = (sel) => (String(sel).includes("a[href]")
+    ? [stale] : origQSA(sel));
+
+  const prevDoc = sandbox.document;
+  const prevKE = sandbox.KeyboardEvent;
+  const prevST = sandbox.setTimeout;
+  sandbox.document = page;
+  sandbox.KeyboardEvent = function () {};
+  sandbox.setTimeout = setTimeout;
+  try {
+    const out = await sandbox._readEventDetailsFunc(
+      [{ subject: "Second", startIso: "2026-08-21T11:00:00" }],
+      JOIN_PATTERNS_FROM_SOURCE, 25, 90000);
+    const d = out.details[0];
+    if (d) assert.equal(d.joinUrl, "", "a pre-existing anchor was attributed");
+  } finally {
+    sandbox.document = prevDoc;
+    sandbox.KeyboardEvent = prevKE;
+    sandbox.setTimeout = prevST;
+  }
+});
+
+// ── Attendees are NAMES, not addresses (v1.11) ───────────────────────
+//
+// v1.10 matched email addresses only. Outlook's pane renders people as
+// NAMES, so a meeting with a dozen invitees reported "Attendees (1)" —
+// the single row that happened to show an address — or (0).
+
+test("attendee names are read from the pane's accessible labels", async () => {
+  const out = await runRichDetailReader({
+    tiles: [{ subject: "Standup", label: "Standup, 9:30 AM to 9:45 AM" }],
+    reveal: {
+      "Standup": {
+        text: "Recurring daily",
+        names: ["Ana Doe", "Pat Roe", "Kim Noh"],
+      },
+    },
+    wanted: [{ subject: "Standup", startIso: "2026-08-21T09:30:00" }],
+  });
+  const d = out.details[0];
+  assert.ok(d, "nothing extracted");
+  assert.deepEqual([...d.attendees].sort(), ["Ana Doe", "Kim Noh", "Pat Roe"]);
+  assert.equal(out.attendeesFromNames, 1);
+});
+
+test("interface chrome is never mistaken for a person", async () => {
+  // The pane is full of labelled controls. A wrong attendee propagates
+  // into speaker identification and follow-up recipients, so this
+  // stays strict rather than generous.
+  const out = await runRichDetailReader({
+    tiles: [{ subject: "Review", label: "Review, 3:00 PM to 3:30 PM" }],
+    reveal: {
+      "Review": {
+        text: "Agenda",
+        names: [
+          "Join meeting", "Accept", "Decline", "Tentative", "Show as Busy",
+          "Microsoft Teams Meeting", "Every weekday", "Optional attendees",
+          "a.doe@globex.example", "https://example.com/x",
+          "Ana Doe",                      // the only real person
+        ],
+      },
+    },
+    wanted: [{ subject: "Review", startIso: "2026-08-20T15:00:00" }],
+  });
+  assert.deepEqual([...out.details[0].attendees], ["Ana Doe"]);
+});
+
+test("addresses in the text are still collected alongside names", async () => {
+  const out = await runRichDetailReader({
+    tiles: [{ subject: "Mixed", label: "Mixed, 1:00 PM to 2:00 PM" }],
+    reveal: {
+      "Mixed": {
+        text: "Also invited: k.noh@zorg.example",
+        names: ["Ana Doe"],
+      },
+    },
+    wanted: [{ subject: "Mixed", startIso: "2026-08-20T13:00:00" }],
+  });
+  assert.deepEqual([...out.details[0].attendees].sort(),
+                   ["Ana Doe", "k.noh@zorg.example"]);
 });
