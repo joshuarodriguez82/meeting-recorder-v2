@@ -28,7 +28,7 @@ WHAT THIS FILE PINS DOWN
      glued to punctuation the way calendar subjects actually are.
   2. THE BOUNDARY RULE. `_` / `-` / `/` and digits are separators (a
      `\\b`-based pattern is not — `_` is a word character, which is
-     exactly how `\\bRicoh\\b` failed to match `transcript_Ricoh` in this
+     exactly how `\\bHooli\\b` failed to match `transcript_Hooli` in this
      repo), and a short client name is never matched inside a longer
      word.
   3. Longest name wins for NESTED matches; two genuinely different

@@ -46,8 +46,8 @@ SIGNAL ORDER (strongest first)
 BOUNDARY RULE
 -------------
 Client names are matched on TOKENS, not substrings, and not with
-`\\b` — a bug of exactly that shape shipped in this repo (a `\\bRicoh\\b`
-pattern failed to match `transcript_Ricoh`, because `_` is a word
+`\\b` — a bug of exactly that shape shipped in this repo (a `\\bHooli\\b`
+pattern failed to match `transcript_Hooli`, because `_` is a word
 character to the regex engine, so it is NOT a word boundary). Both the
 subject and each candidate name are canonicalised by `_canon`: casefold,
 every non-alphanumeric character becomes a separator, and every
@@ -56,7 +56,7 @@ whole-token containment of one space-padded string in the other.
 
 Consequences, all of them deliberate:
   * `_`, `-`, `/`, `.`, `|` and whitespace are separators, so
-    `transcript_Ricoh`, `Acme-Globex` and `Acme/Globex` all match.
+    `transcript_Hooli`, `Acme-Globex` and `Acme/Globex` all match.
   * digits are separators, so `Acme2026` matches `Acme`…
   * …but digits are kept as their own tokens, so `Initech 360` stays a
     distinct, longer name than `Initech` rather than collapsing onto it.
@@ -102,7 +102,7 @@ def _canon(text: str) -> str:
     """Canonical token string: casefolded, alphanumeric runs separated
     by single spaces, with letter↔digit transitions split apart.
 
-        "transcript_Ricoh"  -> "transcript ricoh"
+        "transcript_Hooli"  -> "transcript hooli"
         "Acme-Globex | MVP" -> "acme globex mvp"
         "Acme2026"          -> "acme 2026"
         "Initech 360"       -> "initech 360"
