@@ -795,3 +795,61 @@ def test_a_runaway_invite_body_is_capped_at_the_store(tmp_path: Path):
         [ext("Long one", now + timedelta(hours=1), body="x" * 50_000)], now=now)
     back = ExtensionCalendarService(tmp_path).get_events()
     assert len(back[0]["body"]) == 8000
+
+
+# ── Cancelled meetings (v2.45.0) ─────────────────────────────────────
+#
+# Field report 2026-08-20: a cancelled call rendered struck-through and
+# CANCELLED on the Today screen — which reads the briefing agenda,
+# whose `status` events_from_briefing has always honoured — while the
+# SAME meeting sat in Upcoming Meetings on the Record tab as a live,
+# recordable row.
+#
+# The structured path never checked. Worse, `_SUBJECT_PREFIX_RE`
+# strips "Canceled:" alongside "RE:" and "FW:" for dedupe purposes, so
+# by the time anything downstream saw the subject the evidence was
+# gone.
+
+
+def test_a_cancelled_meeting_is_dropped_from_the_structured_path():
+    from services.extension_calendar_service import events_from_structured
+
+    stats = {}
+    out = events_from_structured([
+        {"subject": "Canceled: Partner Introduction",
+         "start": "2026-08-20T12:30:00", "end": "2026-08-20T13:00:00"},
+        {"subject": "Quarterly review",
+         "start": "2026-08-20T14:00:00", "end": "2026-08-20T15:00:00"},
+    ], stats=stats)
+
+    assert [e["subject"] for e in out] == ["Quarterly review"]
+    assert stats["dropped_cancelled"] == 1
+
+
+def test_both_spellings_and_the_bang_form_are_caught():
+    from services.extension_calendar_service import is_cancelled_subject
+
+    assert is_cancelled_subject("Canceled: Partner Introduction")
+    assert is_cancelled_subject("Cancelled: Partner Introduction")
+    assert is_cancelled_subject("CANCELED: Partner Introduction")
+    assert is_cancelled_subject("  cancelled!  Partner Introduction")
+
+
+def test_a_response_state_is_not_a_cancellation():
+    # "Accepted"/"Declined"/"Tentative" are RESPONSE states — the
+    # meeting is still happening and the user may still want it
+    # recorded. Only cancellation removes the meeting itself.
+    from services.extension_calendar_service import is_cancelled_subject
+
+    for prefix in ("Accepted", "Declined", "Tentative", "RE", "FW", "Updated"):
+        assert not is_cancelled_subject(f"{prefix}: Quarterly review"), prefix
+
+
+def test_a_meeting_merely_ABOUT_a_cancellation_survives():
+    # The word has to be a PREFIX marking status, not a word in the
+    # subject. Dropping a real meeting because of its title would be a
+    # worse failure than showing a cancelled one.
+    from services.extension_calendar_service import is_cancelled_subject
+
+    assert not is_cancelled_subject("Discuss cancelled orders process")
+    assert not is_cancelled_subject("Cancellation policy review")
