@@ -1264,6 +1264,12 @@ class StartRecordingRequest(BaseModel):
     template: str = "General"
     client: str = ""
     project: str = ""
+    # Provenance for `client`, set only by the calendar auto-record path
+    # (see _resolve_client_for_meeting). Left None by the manual Start
+    # button, where the user picked the client themselves and there is
+    # nothing to explain. See Session.client_source.
+    client_source: Optional[str] = None
+    client_source_detail: Optional[str] = None
     attendees: list[str] = []
     # ISO datetime when the meeting is scheduled to end, when this
     # recording was started from a calendar entry. Optional. Used by
@@ -2600,6 +2606,8 @@ def _start_recording_sync(req: StartRecordingRequest):
     session.template = req.template or "General"
     session.client = req.client or ""
     session.project = req.project or ""
+    session.client_source = req.client_source or None
+    session.client_source_detail = req.client_source_detail or None
     session.attendees = req.attendees or []
     svc.current_session = session
     svc.record_started_at = datetime.now()
@@ -2691,6 +2699,56 @@ def _output_index_for_name(name: str) -> Optional[int]:
     return None
 
 
+def _resolve_client_for_meeting(subject: str, attendees: list) -> dict:
+    """Resolve a calendar meeting to a client, server-side.
+
+    Returns the `ClientResolution.to_dict()` shape
+    (`client` / `project` / `method` / `detail`). See
+    services/client_resolution_service.py for the signal order and the
+    token-boundary matching rule.
+
+    STRICTLY ADDITIVE AND NON-FATAL. Every caller is on a path whose
+    real job is starting a recording or generating a brief; a tagging
+    failure must never cost someone either of those. Anything that goes
+    wrong in here — an un-downloaded client_configs.json, an unreadable
+    recordings dir, a bug in the resolver — is logged and degrades to
+    "no client", which is exactly the behaviour that shipped before this
+    existed.
+    """
+    # Import inside the try as well: a broken import here must degrade
+    # to "no client", never propagate into the record-start path.
+    _empty = {"client": "", "project": "", "method": "none", "detail": ""}
+    try:
+        from services.client_resolution_service import resolve_client
+        try:
+            configs = svc.client_cfg_svc.get_all() if svc.client_cfg_svc else {}
+        except Exception as e:
+            # CloudFileNotReadyError lives here: the synced
+            # client_configs.json hasn't downloaded yet. Session-derived
+            # client names still work, so carry on with an empty config.
+            logger.warning(f"client resolution: client configs unavailable ({e})")
+            configs = {}
+        sessions = svc.session_svc.list_sessions() if svc.session_svc else []
+        res = resolve_client(
+            subject=subject or "",
+            attendees=list(attendees or []),
+            client_configs=configs,
+            sessions=sessions,
+        )
+    except Exception as e:
+        logger.warning(f"client resolution failed for {subject!r}: {e}")
+        return dict(_empty)
+    if res.resolved:
+        logger.info(
+            f"client resolution: '{subject}' → client={res.client!r} "
+            f"project={res.project!r} via {res.method}")
+    else:
+        logger.info(
+            f"client resolution: '{subject}' → no client ({res.method}: "
+            f"{res.detail})")
+    return res.to_dict()
+
+
 def _auto_record_start(meeting: dict) -> None:
     """Adapter the AutoRecordService calls when a meeting window opens.
     Synthesizes a StartRecordingRequest from the calendar event and hands
@@ -2718,9 +2776,30 @@ def _auto_record_start(meeting: dict) -> None:
         svc.auto_record_skip_reason = reason
         return
 
+    # Tag the session at creation instead of making the user come back
+    # after the call and file it by hand. Placed AFTER the device/skip
+    # checks above so it can't waste work on a meeting we've already
+    # decided not to record, and it only ever ADDS fields to the request
+    # — nothing here can decide whether we record.
+    # `_resolve_client_for_meeting` swallows its own failures, and the
+    # belt-and-braces try here means even a programming error in it
+    # leaves the recording starting exactly as it does today.
+    resolution = {"client": "", "project": "", "method": "none", "detail": ""}
+    try:
+        resolution = _resolve_client_for_meeting(
+            str(meeting.get("subject") or "") or name,
+            list(meeting.get("attendees") or []),
+        )
+    except Exception as e:
+        logger.warning(f"auto-record: client resolution skipped ({e})")
+
     req = StartRecordingRequest(
         meeting_name=name,
         attendees=list(meeting.get("attendees") or []),
+        client=resolution.get("client") or "",
+        project=resolution.get("project") or "",
+        client_source=resolution.get("method") or None,
+        client_source_detail=resolution.get("detail") or None,
         scheduled_end_iso=end_iso,
         mic_device_index=mic_idx,
         output_device_index=out_idx,
@@ -3948,6 +4027,11 @@ async def patch_session(session_id: str, req: SessionPatchRequest):
         session.display_name = req.display_name
     if req.client is not None:
         session.client = req.client
+        # The user just decided. Drop any auto-tagging provenance —
+        # leaving "Auto-tagged from the meeting title" attached to a
+        # value the user corrected by hand is worse than no label.
+        session.client_source = None
+        session.client_source_detail = None
     if req.project is not None:
         session.project = req.project
     if req.template is not None:
@@ -4007,6 +4091,14 @@ async def _auto_identify_and_save_speakers(session) -> int:
     the speaker AND persist their voice fingerprint to the known-speaker
     store so future meetings auto-match without the user typing anything.
 
+    The session's CALENDAR INVITE goes in alongside the transcript. The
+    invite is ground truth for who was in the room, so it supplies the
+    candidate set: a transcript that only ever says "Jane" resolves to
+    the roster's "Jane Doe" instead of stopping at a first name, which
+    is what follow_up_recipients.py needs to resolve an address at all.
+    Additive — a session with no attendees sends the same prompt it
+    always did. See core/speaker_roster.py.
+
     Mirrors the create/link/refine logic of the manual rename endpoint.
     Best-effort: returns the number of speakers named; logs and continues
     on any failure."""
@@ -4016,7 +4108,17 @@ async def _auto_identify_and_save_speakers(session) -> int:
         return 0
     try:
         mapping = await svc.summarizer.identify_speakers(
-            session.full_transcript())
+            session.full_transcript(),
+            attendees=list(getattr(session, "attendees", None) or []),
+            # SEAM, not a stub. `Session` carries no `organizer` field
+            # today — organiser extraction is being added to the Chrome
+            # extension on a separate branch, and StartRecordingRequest
+            # would need the field too. Reading it defensively means the
+            # organiser joins the roster the moment that field lands,
+            # with no change here; until then this is the empty string
+            # and roster_names() ignores it.
+            organizer=str(getattr(session, "organizer", "") or ""),
+        )
     except Exception as e:
         logger.warning(f"auto speaker-id call failed: {e}")
         return 0
@@ -4433,6 +4535,9 @@ async def bulk_tag_sessions(req: BulkTagRequest):
             continue
         if req.client is not None:
             session.client = req.client
+            # Explicit user decision — see patch_session.
+            session.client_source = None
+            session.client_source_detail = None
         if req.project is not None:
             session.project = req.project
         svc.session_svc.save(session)
@@ -8985,25 +9090,29 @@ async def _auto_prep_brief_loop():
                     logger.info(
                         f"[auto-brief] generating brief for '{subject}' "
                         f"(~{int(mins_until)} min out)")
-                    # NOTE: client/project are empty here — attendee-
-                    # domain → client resolution lives in the frontend
-                    # (meeting-brief-modal.tsx), so this loop has no
-                    # account scope. Consequence, pre-dating and
-                    # unchanged by Knowledge-Folder retrieval: auto
-                    # briefs use the corpus-wide recent-sessions
-                    # fallback rather than client-scoped history, and
-                    # they retrieve no documents (document retrieval is
-                    # gated on a resolved client, since documents can
-                    # only be filtered by client). Auto-brief token cost
-                    # is therefore unchanged. Porting the resolver
-                    # server-side would fix both at once.
+                    # client/project used to be hard-coded empty here,
+                    # because attendee-domain → client resolution lived
+                    # only in the frontend (meeting-brief-modal.tsx) and
+                    # this loop had no account scope. The consequence
+                    # was that auto briefs fell back to corpus-wide
+                    # recent sessions instead of client-scoped history,
+                    # and retrieved NO Knowledge Folder documents at all
+                    # (document retrieval is gated on a resolved client,
+                    # since documents can only be filtered by client).
+                    # The resolver now lives server-side, so wire it in.
+                    # Non-fatal by construction — an unresolved meeting
+                    # produces "" / "" and the brief degrades to exactly
+                    # the old behaviour rather than failing.
+                    resolution = await asyncio.to_thread(
+                        _resolve_client_for_meeting,
+                        subject, list(m.get("attendees") or []))
                     req = PrepBriefFromMeetingRequest(
                         subject=subject,
                         attendees=list(m.get("attendees") or []),
                         scheduled_start_iso=start_iso,
                         scheduled_end_iso=m.get("end") or "",
-                        client="",
-                        project="",
+                        client=resolution.get("client") or "",
+                        project=resolution.get("project") or "",
                         body="",
                         user_context="",
                     )

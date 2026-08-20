@@ -354,6 +354,17 @@ export interface SessionSummary {
   has_decisions: boolean;
   client: string;
   project: string;
+  // How `client` got set. null/undefined = the user typed it (or the
+  // session predates auto-tagging). "subject_match" = the client's name
+  // was in the meeting title; "domain_history" = attendee email domains
+  // matched a client tagged before; "ambiguous" = two different clients
+  // matched the title so NOTHING was tagged; "none" = resolution ran and
+  // found nothing. The last two carry an empty `client` on purpose —
+  // they exist so an untagged auto-recording can explain itself rather
+  // than looking broken. `client_source_detail` is the human-readable
+  // why, shown beside the client field.
+  client_source?: string | null;
+  client_source_detail?: string | null;
   action_items: string;
   summary: string;
   decisions: string;
@@ -546,6 +557,11 @@ export interface SessionFull {
   template: string;
   client: string;
   project: string;
+  // Provenance for `client` — see SessionSummary.client_source. Present
+  // only when the backend resolved the client itself at record-start;
+  // cleared the moment the user edits the field by hand.
+  client_source?: string | null;
+  client_source_detail?: string | null;
   attendees: string[];
   notes: string;
   segments: Array<{ speaker_id: string; start: number; end: number; text: string }>;

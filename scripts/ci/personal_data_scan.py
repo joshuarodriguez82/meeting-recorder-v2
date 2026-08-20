@@ -196,7 +196,18 @@ def scan(root: Path, terms: dict[str, Any]) -> list[dict[str, Any]]:
             for rule_id, rx, message, allowed in compiled:
                 for match in rx.finditer(line):
                     captured = match.group(1) if match.groups() else ""
-                    if captured in allowed:
+                    # Exact allow-list first, then the reserved-TLD rule.
+                    # `.example` is reserved by RFC 2606 precisely so it can
+                    # never resolve, so an address under ANY `.example`
+                    # domain is documentation by construction and cannot be
+                    # a real person's. Enumerating each placeholder domain
+                    # instead (acme.example, globex.example, …) meant every
+                    # new placeholder introduced a CI failure that looked
+                    # like a leak and wasn't — the scrub's own approved
+                    # names (Umbrella, Hooli, Zorg per AGENTS.md) were
+                    # reported as real addresses. A rule that cries wolf on
+                    # its own placeholders gets switched off.
+                    if captured in allowed or captured.endswith(".example"):
                         continue
                     results.append({
                         "rule": rule_id,

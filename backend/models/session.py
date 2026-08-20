@@ -27,6 +27,24 @@ class Session:
         self.template: str = "General"
         self.client: str = ""
         self.project: str = ""
+        # PROVENANCE for `client`. Set when the backend resolved the
+        # client itself at record-start (services/client_resolution_
+        # service.py) rather than the user typing it. Values:
+        #   None            — the user set (or cleared) it by hand, or
+        #                     the session predates auto-tagging.
+        #   "subject_match" — the client's name was in the meeting title.
+        #   "domain_history"— attendee email domains matched a client the
+        #                     user has tagged before.
+        #   "ambiguous"     — two different clients matched the title, so
+        #                     NOTHING was tagged. `client` stays "".
+        #   "none"          — resolution ran and found nothing.
+        # The last two exist so the UI can explain why an auto-recorded
+        # session came back untagged instead of looking broken.
+        # `client_source_detail` is the human-readable why, shown next to
+        # the client field — an auto-applied value with no explanation is
+        # one the user has to re-verify by hand.
+        self.client_source: Optional[str] = None
+        self.client_source_detail: Optional[str] = None
         self.attendees: List[str] = []
         self.decisions: Optional[str] = None
         # Structured counterparts to the markdown fields above. The
@@ -215,6 +233,8 @@ class Session:
             "template": self.template,
             "client": self.client,
             "project": self.project,
+            "client_source": self.client_source,
+            "client_source_detail": self.client_source_detail,
             "attendees": self.attendees,
             "decisions": self.decisions,
             "requirements_struct": [r.to_dict() for r in self.requirements_struct],
@@ -265,6 +285,11 @@ class Session:
         session.template = data.get("template", "General") or "General"
         session.client = data.get("client", "") or ""
         session.project = data.get("project", "") or ""
+        # Absent on every session written before auto-tagging existed —
+        # a missing key reads as "the user set this by hand", which is
+        # exactly right for those.
+        session.client_source = data.get("client_source") or None
+        session.client_source_detail = data.get("client_source_detail") or None
         session.attendees = list(data.get("attendees") or [])
         session.decisions = data.get("decisions")
         session.requirements_struct = [

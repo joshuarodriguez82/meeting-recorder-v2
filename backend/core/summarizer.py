@@ -23,7 +23,7 @@ import base64
 import json
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 from anthropic import AsyncAnthropic
 from core._coach_text import dedup_against as _dedup_against
 # One shared no-invented-precision rule, referenced by every prompt
@@ -34,6 +34,10 @@ from core._precision import (
     json_timing_note as _json_timing_note,
     no_invented_precision as _no_invented_precision,
 )
+# The calendar invite as the candidate set for speaker identification.
+# Same "state it once" reasoning as _precision above: the roster rules
+# are text, they live in one module, and no builder paraphrases them.
+from core.speaker_roster import roster_block, roster_names
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -1396,8 +1400,27 @@ class Summarizer:
         except Exception as e:
             raise RuntimeError(f"Requirements extraction failed: {e}") from e
 
-    async def identify_speakers(self, transcript: str) -> Dict[str, str]:
+    async def identify_speakers(
+        self, transcript: str,
+        attendees: Optional[Sequence[str]] = None,
+        organizer: str = "",
+    ) -> Dict[str, str]:
+        """Map diarized speaker IDs to real names.
+
+        `attendees` / `organizer` are the CALENDAR INVITE — ground truth
+        for who was in the room, and the candidate set a heard first
+        name is allowed to resolve to. Both are optional and additive:
+        an invite-less session (or one whose attendee entries yield no
+        usable name) produces a byte-identical prompt to the pre-roster
+        one, so nothing changes for sessions never started from a
+        calendar entry. See core/speaker_roster.py for how an address
+        becomes a display name and which forms deliberately yield
+        nothing.
+        """
+        roster = roster_names(attendees, organizer)
         logger.info(f"Requesting speaker identification via {self._provider}/{self._model}")
+        if roster:
+            logger.info(f"Speaker ID roster: {len(roster)} invited name(s)")
         try:
             raw = (await self._chat(
                 (
@@ -1422,6 +1445,12 @@ class Summarizer:
                     "or role. If nothing qualifies, return {}.\n\n"
                     "Example response: "
                     "{\"SPEAKER_00\": \"John Smith\", \"SPEAKER_02\": \"Sarah Jones\"}\n\n"
+                    # The invite roster, when there is one. Empty
+                    # string otherwise — and that emptiness is checked
+                    # byte-for-byte by test_speaker_roster.py, because
+                    # a session with no attendees must get exactly the
+                    # prompt it got before this feature existed.
+                    + roster_block(roster)
                     # DELIBERATELY PARTIAL. The output is a JSON map of
                     # speaker labels to names: there is no list to
                     # enumerate and no count to state, and no date,

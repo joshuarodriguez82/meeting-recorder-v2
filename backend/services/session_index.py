@@ -50,7 +50,15 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-SCHEMA_VERSION = 1
+# Bump whenever SUMMARY_FIELDS changes: a row cached by an older build
+# holds a data_json without the new keys, and the cache is only
+# invalidated by (mtime, size) — an untouched session file would keep
+# serving the old, short summary forever. Rebuilding is free (every row
+# is recomputable from the JSON on disk); serving a summary missing a
+# field the UI now reads is not.
+#   1 → 2: added client_source / client_source_detail (auto client
+#          tagging provenance).
+SCHEMA_VERSION = 2
 
 # The exact summary shape SessionService.list_sessions() has always
 # returned (see its docstring / the summary dict built in
@@ -63,7 +71,8 @@ SUMMARY_FIELDS: Tuple[str, ...] = (
     "audio_path", "audio_exists",
     "has_transcript", "has_summary", "has_action_items",
     "has_requirements", "has_decisions",
-    "client", "project", "action_items", "summary", "decisions",
+    "client", "project", "client_source", "client_source_detail",
+    "action_items", "summary", "decisions",
     "requirements", "attendees", "speakers",
     "audio_integrity_warning", "audio_actual_duration_s",
     "audio_expected_duration_s", "processing_error", "sync_warning",
