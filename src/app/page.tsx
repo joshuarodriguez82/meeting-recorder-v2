@@ -524,7 +524,7 @@ export default function Home() {
             `Backend failed to start after ${MAX_ATTEMPTS} seconds. ` +
             "Click Retry — if the backend finished starting while this " +
             "screen was up, it will come online immediately. Otherwise " +
-            "check %APPDATA%\\MeetingRecorder\\backend.log and rust.log."
+            "check %LOCALAPPDATA%\\MeetingRecorder\\backend.log and rust.log."
           );
         } else {
           setTimeout(check, 1000);
@@ -755,9 +755,9 @@ export default function Home() {
               <div>
                 <strong>Log files:</strong>
                 <br />
-                %APPDATA%\MeetingRecorder\backend.log
+                %LOCALAPPDATA%\MeetingRecorder\backend.log
                 <br />
-                %APPDATA%\MeetingRecorder\rust.log
+                %LOCALAPPDATA%\MeetingRecorder\rust.log
               </div>
               <div>
                 <strong>Common causes:</strong>

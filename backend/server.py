@@ -2901,6 +2901,23 @@ def _auto_record_start(meeting: dict) -> None:
     _start_recording_sync(req)
 
 
+def want_safe_mode() -> bool:
+    """True when the desktop shell asked for a reduced startup.
+
+    Set by the Rust supervisor (`MEETING_RECORDER_SAFE_MODE=1`) after
+    several backends died before finishing startup — see SAFE_MODE in
+    src-tauri/src/lib.rs for the incident that produced it.
+
+    Read at CALL time rather than cached at import, so a `restart_backend`
+    that clears the flag takes effect without the module being reloaded.
+
+    Defaults to off, and any unexpected value reads as off: safe mode
+    disables real features, so the failure direction has to be "ran
+    normally" rather than "silently degraded".
+    """
+    return os.environ.get("MEETING_RECORDER_SAFE_MODE", "").strip() == "1"
+
+
 def _ensure_auto_record_service() -> None:
     """Lazily build the AutoRecordService once settings exist, and
     start/stop its loop to match the current `auto_record_enabled` flag.
@@ -2931,6 +2948,28 @@ def _ensure_auto_record_service() -> None:
                 svc.auto_record_blocklist_svc
                 and svc.auto_record_blocklist_svc.is_blocked(m)),
         )
+    # SAFE MODE. The Rust supervisor sets this after several backends
+    # died before finishing startup (see SAFE_MODE in src-tauri/src/
+    # lib.rs). Auto-record is the startup path that has actually caused
+    # that: a meeting already in progress makes it fire a recording
+    # within milliseconds of boot, which on 2026-08-20 collided with the
+    # audio pre-warm inside PortAudio and took the process down —
+    # repeatedly, with the app unusable and Settings unreachable because
+    # Settings is served BY the backend.
+    #
+    # Refusing to start the loop here is what makes the app reachable
+    # again. The user's SETTING is untouched: this does not write
+    # auto_record_enabled, so nothing is silently turned off behind
+    # their back — a normal restart leaves safe mode and restores it.
+    if want_safe_mode():
+        if svc.auto_record_svc.running:
+            asyncio.create_task(svc.auto_record_svc.stop())
+        logger.warning(
+            "SAFE MODE: auto-record loop not started. The app repeatedly "
+            "crashed during startup; restart normally once the cause is "
+            "addressed.")
+        return
+
     want_on = bool(svc.settings and svc.settings.auto_record_enabled)
     if want_on and not svc.auto_record_svc.running:
         svc.auto_record_svc.start()
@@ -9641,6 +9680,13 @@ async def startup():
     _t.Thread(target=_audit_ghost_sessions, daemon=True).start()
 
     def _prewarm_audio():
+        # Skipped in safe mode: this is the other half of the PortAudio
+        # collision that crash-looped the backend, and it is pure
+        # optimisation — the device lists are rebuilt on demand, just
+        # more slowly the first time.
+        if want_safe_mode():
+            logger.warning("SAFE MODE: skipping audio device pre-warm.")
+            return
         try:
             from core.audio_capture import list_input_devices, list_output_devices
             t0 = time.time()

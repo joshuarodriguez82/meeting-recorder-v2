@@ -1479,6 +1479,10 @@ pub fn run() {
                 // Backoff applies ONLY to genuinely failed spawn attempts.
                 let mut respawn_backoff_secs: u64 = 5;
                 let mut last_spawn = std::time::Instant::now();
+                // Consecutive backends that died before finishing
+                // startup. Reset by any process that survives the
+                // window. See SAFE_MODE.
+                let mut crash_streak: u32 = 0;
 
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(5));
@@ -1587,6 +1591,30 @@ pub fn run() {
                         WatchdogAction::Respawn => {}
                     }
                     unhealthy_streak = 0;
+
+                    // Did the process that just died ever finish
+                    // starting? A death inside the startup window is a
+                    // reproducible crash on a startup path, not a
+                    // flake — and respawning it identically cannot
+                    // produce a different outcome. See SAFE_MODE.
+                    if last_spawn.elapsed().as_secs() < SAFE_MODE_MIN_UPTIME_SECS {
+                        crash_streak += 1;
+                        rlog(&format!(
+                            "Backend died {}s after spawn (streak {}/{})",
+                            last_spawn.elapsed().as_secs(), crash_streak,
+                            SAFE_MODE_CRASH_STREAK));
+                        if crash_streak >= SAFE_MODE_CRASH_STREAK
+                            && !SAFE_MODE.load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            SAFE_MODE.store(true, std::sync::atomic::Ordering::Relaxed);
+                            rlog("SAFE MODE ENGAGED — respawning with                                   auto-record and audio pre-warm disabled so                                   the app becomes reachable. Turn the                                   offending feature off in Settings, then                                   restart the app to leave safe mode.");
+                        }
+                    } else {
+                        // Ran long enough to be healthy: whatever killed
+                        // it was not a startup crash, so don't count it
+                        // toward the streak.
+                        crash_streak = 0;
+                    }
 
                     rlog("Respawning backend");
                     match spawn_python_backend(&app_handle) {
@@ -1978,6 +2006,42 @@ fn open_sound_panel() -> Result<(), String> {
     Err("No supported sound-settings launcher found on this system".to_string())
 }
 
+/// CRASH-LOOP BREAKER.
+///
+/// Set once the supervisor has seen several backends die almost
+/// immediately after spawn. Read by `spawn_python_backend`, which then
+/// starts Python with `MEETING_RECORDER_SAFE_MODE=1`.
+///
+/// FIELD INCIDENT 2026-08-20. A PortAudio race (see
+/// core/audio_capture.py's `_PORTAUDIO_LOCK`) killed the backend with
+/// an access violation every time it started, because auto-record
+/// fired a recording for an already-in-progress meeting within
+/// milliseconds of boot and collided with the audio pre-warm. The
+/// supervisor did exactly what it was built to do — respawn — and so
+/// the app crash-looped for minutes on end.
+///
+/// The user could not fix it from inside the app either: settings are
+/// served BY the backend, so the switch that would have turned
+/// auto-record off was unreachable precisely because the backend
+/// wouldn't stay up. Unbounded retry plus an unreachable off-switch is
+/// a trap, not resilience.
+///
+/// Respawning forever is still right for a TRANSIENT failure. What was
+/// missing is noticing that the failure is not transient. Three deaths
+/// inside the startup window is not a flake; it is a reproducible crash
+/// on a startup code path, and continuing to spawn it identically
+/// cannot produce a different result.
+static SAFE_MODE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// A backend that dies sooner than this after spawn never finished
+/// starting up — generous enough to cover model loading on a cold
+/// cache, so a slow-but-healthy boot is never mistaken for a crash.
+const SAFE_MODE_MIN_UPTIME_SECS: u64 = 60;
+
+/// Consecutive too-short lifetimes before safe mode engages.
+const SAFE_MODE_CRASH_STREAK: u32 = 3;
+
 fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let port = backend_port();
     if port_in_use(port) {
@@ -2096,6 +2160,11 @@ fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
             app.package_info().version.to_string())
        // Intel Fortran runtime workarounds — Windows-only but harmless on
        // POSIX (FOR_DISABLE_* are simply ignored when MKL isn't present).
+       // Safe mode: the backend skips the startup work that can crash
+       // it (auto-record firing instantly, audio pre-warm) so the app
+       // comes up usable and the user can reach Settings. See SAFE_MODE.
+       .env("MEETING_RECORDER_SAFE_MODE",
+            if SAFE_MODE.load(std::sync::atomic::Ordering::Relaxed) { "1" } else { "0" })
        .env("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "1")
        .env("FOR_DISABLE_STACK_TRACE", "1")
        .stdout(Stdio::from(log_file))
