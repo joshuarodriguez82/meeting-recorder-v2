@@ -31,14 +31,15 @@
 //   surface that the fake objects below satisfy it without needing a
 //   real DOM implementation.
 //
-// NOT covered here: _calendarDiagnosticProbeFunc and the live
-// Outlook Web DOM itself. The probe relies on real querySelectorAll
-// (including querySelectorAll inside iframe documents/shadow roots,
-// which real browsers support natively) — reimplementing a CSS
-// selector engine in the fake DOM below just to test the probe isn't
-// worth it for a read-only, user-triggered diagnostic tool. And there
-// is no way to sign in to a real Outlook Web tenant from this
-// environment — see the v1.3 header comment in background.js.
+// _calendarDiagnosticProbeFunc IS covered now (it wasn't before): the
+// fake DOM's `querySelectorAll` grew compound-selector and
+// descendant-combinator support, which was the only thing standing in
+// the way. What it needs beyond `document` — `location.href` and `URL`,
+// for href redaction — is handed to the vm context in `loadSandbox`.
+//
+// NOT covered here: the live Outlook Web DOM itself. There is no way to
+// sign in to a real tenant from this environment — see the v1.3 header
+// comment in background.js. That is exactly why the probe exists.
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -65,11 +66,16 @@ function loadSandbox() {
     tabs: {},
     scripting: {},
   };
-  const sandbox = { chrome: chromeStub, console };
+  // `URL` and `location` are page globals the diagnostic probe uses
+  // (href redaction). They're browser/Node globals, not part of a bare
+  // vm context's intrinsics, so they're handed in explicitly.
+  const sandbox = { chrome: chromeStub, console, URL, location: { href: PAGE_HREF } };
   vm.createContext(sandbox);
   vm.runInContext(SRC, sandbox, { filename: BG_PATH });
   return sandbox;
 }
+
+const PAGE_HREF = "https://outlook.office.com/calendar/view/week";
 
 const sandbox = loadSandbox();
 
@@ -78,27 +84,61 @@ const sandbox = loadSandbox();
 // Deliberately minimal — see the file header for the exact surface
 // _calendarDomScanFunc needs.
 
-// Minimal CSS-selector matcher: enough for the simple,
-// non-compound selectors _calendarDomScanFunc actually issues
-// (`*`, bare tag names like `iframe`, `[attr]`, `[attr="value"]`,
-// and comma-separated lists of those) — not a general selector
-// engine. Added specifically so the fake DOM can grow a real
-// `querySelectorAll`, per the v1.3.2 depth-cap fix: the production
-// scan now uses `querySelectorAll` instead of a depth-limited
-// `.children` recursion, so the test double has to support it rather
-// than the production code staying depth-limited just to remain
-// testable against a double that couldn't do it.
-function matchesSimpleSelector(node, rawSel) {
-  const sel = rawSel.trim();
-  if (sel === "*") return true;
-  const attrMatch = /^\[([a-zA-Z0-9_-]+)(?:=("|')(.*?)\2)?\]$/.exec(sel);
-  if (attrMatch) {
-    const [, name, , value] = attrMatch;
-    if (!node.hasAttribute || !node.hasAttribute(name)) return false;
-    if (value === undefined) return true;
-    return node.getAttribute(name) === value;
+// Minimal CSS-selector matcher: enough for the selectors
+// _calendarDomScanFunc and _calendarDiagnosticProbeFunc actually issue
+// — `*`, bare tag names (`iframe`), attribute selectors (`[attr]`,
+// `[attr="value"]`), COMPOUND selectors that stack those on one
+// element (`a[href]`, `[role="button"][aria-label]`), a single
+// DESCENDANT combinator (`[role="gridcell"] [role="button"]`), and
+// comma-separated lists of any of those — not a general selector
+// engine. Added so the fake DOM can grow a real `querySelectorAll`,
+// per the v1.3.2 depth-cap fix: the production scan uses
+// `querySelectorAll` instead of a depth-limited `.children` recursion,
+// so the test double has to support it rather than the production code
+// staying depth-limited just to remain testable against a double that
+// couldn't do it. The compound/descendant support is what lets the
+// diagnostic probe be tested here too (it was previously untestable
+// for exactly this reason — see the file header).
+function matchesCompound(node, compound) {
+  if (compound === "*") return true;
+  let rest = compound;
+  const tagMatch = /^[A-Za-z][A-Za-z0-9]*/.exec(compound);
+  if (tagMatch) {
+    if ((node.tagName || "").toLowerCase() !== tagMatch[0].toLowerCase()) return false;
+    rest = compound.slice(tagMatch[0].length);
   }
-  return (node.tagName || "").toLowerCase() === sel.toLowerCase();
+  const attrRe = /\[([a-zA-Z0-9_-]+)(?:=("|')(.*?)\2)?\]/g;
+  let consumed = 0;
+  let m;
+  while ((m = attrRe.exec(rest)) !== null) {
+    consumed = attrRe.lastIndex;
+    const name = m[1];
+    const value = m[3];
+    if (!node.hasAttribute || !node.hasAttribute(name)) return false;
+    if (value !== undefined && node.getAttribute(name) !== value) return false;
+  }
+  // Anything the loop didn't consume is syntax this double doesn't
+  // implement — fail loudly-ish (no match) rather than silently
+  // matching everything.
+  if (consumed !== rest.length) return false;
+  return !!tagMatch || consumed > 0;
+}
+
+function matchesSimpleSelector(node, rawSel) {
+  const parts = rawSel.trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return false;
+  if (!matchesCompound(node, parts[parts.length - 1])) return false;
+  let ancestor = node.parentElement;
+  for (let i = parts.length - 2; i >= 0; i--) {
+    let matched = false;
+    while (ancestor) {
+      const cur = ancestor;
+      ancestor = ancestor.parentElement;
+      if (matchesCompound(cur, parts[i])) { matched = true; break; }
+    }
+    if (!matched) return false;
+  }
+  return true;
 }
 
 function matchesSelector(node, selector) {
@@ -731,4 +771,357 @@ test("FIELD: no date anywhere and no column date is still unresolved", () => {
   const parsed = sandbox.parseMeetingLabel(
     "Mystery Meeting, 9:00 AM to 10:00 AM", null, FALLBACK_YEAR);
   assert.equal(parsed.kind, "date-unresolved");
+});
+
+// ── extractOrganizerFromLabel: the "By <name>" tail segment ──────────
+//
+// `organizer` was declared on every captured event and never assigned —
+// always "". It is, however, already in the string being parsed: Outlook
+// Web writes "By <name>" into the tail after the time range, the same
+// tail the date resolver reads. These fixtures cover the variations the
+// field labels above actually exhibit (names containing commas, a
+// bracketed region suffix, diacritics, several different trailing
+// status words) plus the shapes that must yield NOTHING rather than a
+// wrong name.
+
+test("organizer: the plain 'By <First Last>' form", () => {
+  assert.equal(
+    sandbox.extractOrganizerFromLabel(
+      "Globex sync, 8:30 AM to 9:00 AM, Friday, August 14, 2026, " +
+      "Microsoft Teams Meeting, By Jane Doe, Busy"),
+    "Jane Doe");
+});
+
+test("organizer: no 'By' segment at all yields empty, not a guess", () => {
+  assert.equal(
+    sandbox.extractOrganizerFromLabel(
+      "Acme/CYB - IVA PoC Sync-up, 1:00 PM to 1:30 PM, Friday, August 14, 2026, " +
+      "Microsoft Teams Meeting"),
+    "");
+});
+
+test("organizer: 'Last, First Suffix [REGION]' keeps its comma, suffix and bracket", () => {
+  // The comma inside the name is the whole trap — splitting the tail on
+  // comma and taking the first piece would report "Roe". Same reason
+  // owner_service.split_owners refuses to split on comma (see
+  // test_owner_service.py::test_comma_is_not_split).
+  assert.equal(
+    sandbox.extractOrganizerFromLabel(
+      "Discuss the Northwind collection script, 10:30 AM to 11:00 AM, " +
+      "Friday, August 14, 2026, Microsoft Teams Meeting, By Roe, Pat Jr. [US-US], Busy"),
+    "Roe, Pat Jr. [US-US]");
+});
+
+test("organizer: bare 'Last, First' keeps both halves", () => {
+  assert.equal(
+    sandbox.extractOrganizerFromLabel(
+      "Umbrella/Acme/Northwind Sync, 9:30 AM to 10:30 AM, " +
+      "Thursday, August 13, 2026, By Noh, Kim, Busy"),
+    "Noh, Kim");
+});
+
+test("organizer: non-ASCII diacritics survive intact", () => {
+  assert.equal(
+    sandbox.extractOrganizerFromLabel(
+      "Acme Daily Pulse Call , 9:30 AM to 9:45 AM, Friday, August 14, 2026, " +
+      "Microsoft Teams Meeting, By Zoë Døe, Busy, Recurring event"),
+    "Zoë Døe");
+});
+
+test("organizer: every trailing status word is stripped, never absorbed into the name", () => {
+  const cases = [
+    ["…, 9:00 AM to 9:30 AM, Monday, August 10, 2026, By Casey Roe, Busy", "Casey Roe"],
+    ["…, 9:00 AM to 9:30 AM, Monday, August 10, 2026, By Casey Roe, Free", "Casey Roe"],
+    ["…, 9:00 AM to 9:30 AM, Monday, August 10, 2026, By Casey Roe, Tentative", "Casey Roe"],
+    ["…, 9:00 AM to 9:30 AM, Monday, August 10, 2026, By Casey Roe, Out of office", "Casey Roe"],
+    ["…, 9:00 AM to 9:30 AM, Monday, August 10, 2026, By Casey Roe, Busy, Recurring event", "Casey Roe"],
+    ["…, 9:00 AM to 9:30 AM, Monday, August 10, 2026, By Casey Roe, Busy, Exception to recurring event", "Casey Roe"],
+    ["…, 9:00 AM to 9:30 AM, Monday, August 10, 2026, By Casey Roe, Free, Canceled", "Casey Roe"],
+    // …and with a comma-carrying name in front of the same statuses.
+    ["…, 9:00 AM to 9:30 AM, Monday, August 10, 2026, By Roe, Pat Jr. [US-US], Busy, Recurring event", "Roe, Pat Jr. [US-US]"],
+  ];
+  for (const [label, expected] of cases) {
+    assert.equal(sandbox.extractOrganizerFromLabel(label), expected, label);
+  }
+});
+
+test("organizer: a 'Canceled:' SUBJECT prefix never reaches the name", () => {
+  // The prefix sits before the time range, i.e. in the subject, which
+  // this function never looks at.
+  assert.equal(
+    sandbox.extractOrganizerFromLabel(
+      "Canceled: Globex sync, 8:30 AM to 9:00 AM, Friday, August 14, 2026, " +
+      "By Jane Doe, Free, Canceled"),
+    "Jane Doe");
+});
+
+test("organizer: a status word immediately after 'By' yields empty, not a status as a name", () => {
+  assert.equal(
+    sandbox.extractOrganizerFromLabel(
+      "Blocked, 9:00 AM to 9:30 AM, Monday, August 10, 2026, By, Busy"),
+    "");
+  assert.equal(
+    sandbox.extractOrganizerFromLabel(
+      "Blocked, 9:00 AM to 9:30 AM, Monday, August 10, 2026, By Busy"),
+    "");
+});
+
+test("organizer: the word 'by' inside a SUBJECT is not read as an organizer", () => {
+  assert.equal(
+    sandbox.extractOrganizerFromLabel(
+      "Design Review by the numbers, 9:00 AM to 10:00 AM, Monday, August 10, 2026, Busy"),
+    "");
+});
+
+test("organizer: junk input is empty, never a throw", () => {
+  assert.equal(sandbox.extractOrganizerFromLabel(null), "");
+  assert.equal(sandbox.extractOrganizerFromLabel(""), "");
+  assert.equal(sandbox.extractOrganizerFromLabel(12345), "");
+  assert.equal(sandbox.extractOrganizerFromLabel({}), "");
+  // A runaway "name" (no recognizable status terminator, absurd length)
+  // reports nothing rather than a sentence.
+  const runaway = "X, 9:00 AM to 9:30 AM, Monday, August 10, 2026, By " + "z".repeat(200);
+  assert.equal(sandbox.extractOrganizerFromLabel(runaway), "");
+});
+
+test("organizer: a structured-time candidate (no text range in the label) still resolves", () => {
+  // parseStructuredCandidate's labels carry no time range at all, so the
+  // tail lookup falls back to the whole label — with the stricter
+  // comma-anchored marker, which is why the subject-only case above
+  // still yields nothing.
+  assert.equal(
+    sandbox.extractOrganizerFromLabel("Budget Review, By Devon Poe, Busy"),
+    "Devon Poe");
+});
+
+test("organizer: flows end-to-end through extractEventsFromCandidates for every field label", () => {
+  const candidates = FIELD_LABELS.map((label) => ({
+    label, columnDateIso: null, layer: "aria-label",
+  }));
+  const result = sandbox.extractEventsFromCandidates(
+    candidates, { fallbackYear: FALLBACK_YEAR });
+  assert.equal(result.events.length, FIELD_LABELS.length);
+
+  const bySubject = Object.fromEntries(result.events.map((e) => [e.subject, e]));
+  assert.equal(bySubject["Globex"].organizer, "Riley Poe");
+  assert.equal(
+    bySubject["Discuss the Northwind collection script concerns and develop a path forward"].organizer,
+    "Roe, Pat Jr. [US-US]");
+  assert.equal(bySubject["Acme Daily Pulse Call"].organizer, "Zoë Døe");
+  assert.equal(bySubject["Umbrella/Acme/Northwind Sync"].organizer, "Noh, Kim");
+  assert.equal(bySubject["Q3 Quarterly Management Meeting"].organizer, "Northwind Evite");
+
+  // And the fields that were already correct are untouched.
+  assert.equal(bySubject["Globex"].start, "2026-08-14T08:30:00");
+  assert.equal(bySubject["Globex"].join_url, "");
+});
+
+test("organizer: a label with no 'By' segment leaves the event exactly as it was (empty organizer)", () => {
+  const result = sandbox.extractEventsFromCandidates(
+    [{ label: "Acme/CYB - IVA PoC Sync-up, 1:00 PM to 1:30 PM, Friday, August 14, 2026",
+       columnDateIso: null, layer: "aria-label" }],
+    { fallbackYear: FALLBACK_YEAR });
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0].organizer, "");
+  assert.equal(result.events[0].start, "2026-08-14T13:00:00");
+});
+
+test("organizer: stats count how many kept events actually carry each field", () => {
+  const result = sandbox.extractEventsFromCandidates([
+    { label: "Globex sync, 8:30 AM to 9:00 AM, Friday, August 14, 2026, By Jane Doe, Busy",
+      columnDateIso: null, layer: "aria-label" },
+    { label: "Ad-hoc sync, 1:00 PM to 1:30 PM, Friday, August 14, 2026",
+      columnDateIso: null, layer: "aria-label" },
+  ], { fallbackYear: FALLBACK_YEAR });
+  assert.equal(result.stats.parsed, 2);
+  assert.equal(result.stats.withOrganizer, 1);
+  // Zero, and REPORTED as zero — the popup says "no join links (not
+  // exposed)" off this number rather than leaving an empty field
+  // indistinguishable from a meeting that has no link.
+  assert.equal(result.stats.withJoinUrl, 0);
+});
+
+test("organizer: a DOM-supplied organizer still wins over the label-derived one", () => {
+  const result = sandbox.extractEventsFromCandidates(
+    [{ label: "Globex sync, 8:30 AM to 9:00 AM, Friday, August 14, 2026, By Jane Doe, Busy",
+       organizer: "Preset Person", columnDateIso: null, layer: "aria-label" }],
+    { fallbackYear: FALLBACK_YEAR });
+  assert.equal(result.events[0].organizer, "Preset Person");
+});
+
+test("organizer: survives the whole DOM-scan -> extract path", () => {
+  const tile = el("div", {
+    role: "button",
+    "aria-label": "Globex sync, 8:30 AM to 9:00 AM, Friday, August 14, 2026, " +
+      "Microsoft Teams Meeting, By Jane Doe, Busy",
+  });
+  setDocument(doc([tile]));
+  const { candidates } = sandbox._calendarDomScanFunc();
+  const result = sandbox.extractEventsFromCandidates(candidates, { fallbackYear: FALLBACK_YEAR });
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0].organizer, "Jane Doe");
+});
+
+// ── Join-link probe (_calendarDiagnosticProbeFunc) ───────────────────
+//
+// Read-only, diagnostic only. It exists to ANSWER the question "is a
+// join link reachable from the DOM the capture already walks?" rather
+// than to assume either answer — see JOIN_URL_PROBE_CONFIG in
+// background.js. Nothing here populates `join_url`; these tests pin
+// the two things that make the answer trustworthy: association is by
+// DOM containment/adjacency (never position), and an example may only
+// ever show a redacted host+path SHAPE, because a join URL is a
+// single-use meeting credential and the report gets pasted into chat.
+
+const TIME_HINT_SOURCE = "\\d{1,2}(:\\d{2})?\\s*[AaPp]?\\.?[Mm]?\\b|\\d{1,2}:\\d{2}\\b";
+const MEETING_LABEL =
+  "Globex sync, 8:30 AM to 9:00 AM, Friday, August 14, 2026, By Jane Doe, Busy";
+// Shaped like a real Teams invite link; the opaque segment stands in
+// for the credential that must never be echoed back.
+const TEAMS_HREF =
+  "https://teams.microsoft.com/l/meetup-join/19%3ameeting_SECRETTOKEN123%40thread.v2/0" +
+  "?context=%7b%22Tid%22%3a%22tenant%22%7d";
+
+// background.js's top-level `const`s live in the context's global
+// LEXICAL scope, not on its global object, so they aren't reachable as
+// `sandbox.X` the way its `function` declarations are — read them by
+// evaluating an expression inside the same context instead. The real
+// extension passes these exact two values as executeScript args.
+const PROBE_ARGS = vm.runInContext(
+  "({ timeRangeSource: TIME_RANGE_RE.source, joinConfig: JOIN_URL_PROBE_CONFIG })",
+  sandbox);
+
+function runProbe() {
+  return sandbox._calendarDiagnosticProbeFunc(
+    PROBE_ARGS.timeRangeSource, TIME_HINT_SOURCE, PROBE_ARGS.joinConfig);
+}
+
+test("join probe: a join link INSIDE a meeting-labelled element is associated by containment", () => {
+  const link = el("a", { href: TEAMS_HREF });
+  const tile = el("div", { role: "button", "aria-label": MEETING_LABEL });
+  append(tile, link);
+  setDocument(doc([tile]));
+
+  const { joinLinks } = runProbe();
+  assert.equal(joinLinks.matchCount, 1);
+  assert.equal(joinLinks.byProvider.teams, 1);
+  assert.equal(joinLinks.insideMeetingLabelledElement, 1);
+  assert.equal(joinLinks.adjacentToMeetingLabelledElement, 0);
+  assert.equal(joinLinks.unassociated, 0);
+  assert.match(joinLinks.verdict, /join_url IS fillable/);
+});
+
+test("join probe: a join link NEXT TO a meeting-labelled element is associated by adjacency, not containment", () => {
+  const link = el("a", { href: TEAMS_HREF });
+  const tile = el("div", { role: "button", "aria-label": MEETING_LABEL });
+  const wrapper = el("div");
+  append(wrapper, tile, link);
+  setDocument(doc([wrapper]));
+
+  const { joinLinks } = runProbe();
+  assert.equal(joinLinks.matchCount, 1);
+  assert.equal(joinLinks.insideMeetingLabelledElement, 0);
+  assert.equal(joinLinks.adjacentToMeetingLabelledElement, 1);
+  assert.equal(joinLinks.unassociated, 0);
+});
+
+test("join probe: a join link with no meeting-shaped label anywhere near it is UNASSOCIATED, never matched by position", () => {
+  const link = el("a", { href: TEAMS_HREF });
+  const footer = el("div");
+  append(footer, link);
+  // A real meeting tile exists, but nowhere near the link in the tree.
+  const farTile = el("div", { role: "button", "aria-label": MEETING_LABEL });
+  const farBranch = el("div");
+  append(farBranch, farTile);
+  const page = el("div");
+  append(page, farBranch, el("div"), el("div"));
+  setDocument(doc([page, footer]));
+
+  const { joinLinks } = runProbe();
+  assert.equal(joinLinks.matchCount, 1);
+  assert.equal(joinLinks.insideMeetingLabelledElement, 0);
+  assert.equal(joinLinks.adjacentToMeetingLabelledElement, 0);
+  assert.equal(joinLinks.unassociated, 1);
+  assert.match(joinLinks.verdict, /would have to be positional/);
+});
+
+test("join probe: ordinary calendar chrome links are not counted as join links", () => {
+  const nav = el("a", { href: "https://outlook.office.com/calendar/view/day" });
+  const help = el("a", { href: "https://support.microsoft.com/outlook" });
+  const tile = el("div", { role: "button", "aria-label": MEETING_LABEL });
+  append(tile, nav, help);
+  setDocument(doc([tile]));
+
+  const { joinLinks } = runProbe();
+  assert.equal(joinLinks.anchorCount, 2);
+  assert.equal(joinLinks.matchCount, 0);
+  assert.equal(joinLinks.redactedExamples.length, 0);
+  assert.match(joinLinks.verdict, /no join-shaped links anywhere/);
+});
+
+test("join probe: Zoom / Webex / Google Meet links are recognized alongside Teams", () => {
+  const tile = el("div", { role: "button", "aria-label": MEETING_LABEL });
+  append(tile,
+    el("a", { href: "https://zoom.us/j/9876543210?pwd=SECRET" }),
+    el("a", { href: "https://acme.webex.com/meet/j.doe" }),
+    el("a", { href: "https://meet.google.com/abc-defg-hij" }));
+  setDocument(doc([tile]));
+
+  const { joinLinks } = runProbe();
+  assert.equal(joinLinks.matchCount, 3);
+  assert.equal(joinLinks.byProvider.zoom, 1);
+  assert.equal(joinLinks.byProvider.webex, 1);
+  assert.equal(joinLinks.byProvider.meet, 1);
+  assert.equal(joinLinks.insideMeetingLabelledElement, 3);
+});
+
+test("join probe: examples show the URL SHAPE only — never the credential, the query string, or the customer's host", () => {
+  const tile = el("div", { role: "button", "aria-label": MEETING_LABEL });
+  append(tile,
+    el("a", { href: TEAMS_HREF }),
+    el("a", { href: "https://acme.webex.com/meet/j.doe" }),
+    el("a", { href: "https://zoom.us/my/janedoe" }));
+  setDocument(doc([tile]));
+
+  const { joinLinks } = runProbe();
+  // Array.from: the probe's return value is built inside the vm
+  // context, so its arrays carry that realm's Array prototype and
+  // deepStrictEqual would fail on the prototype alone.
+  const shapes = Array.from(joinLinks.redactedExamples, (e) => e.shape);
+  assert.deepEqual(shapes, [
+    "teams.microsoft.com/l/meetup-join/…/0?…",
+    // The Webex SITE subdomain is usually the customer's name — elided.
+    "*.webex.com/meet/…",
+    "zoom.us/my/…",
+  ]);
+  const blob = JSON.stringify(joinLinks);
+  for (const secret of ["SECRETTOKEN123", "context=", "janedoe", "j.doe", "acme.webex.com"]) {
+    assert.ok(!blob.includes(secret), `redacted output leaked ${secret}: ${blob}`);
+  }
+});
+
+test("join probe: join links inside iframes and shadow roots are counted too", () => {
+  const innerLink = el("a", { href: TEAMS_HREF });
+  const innerTile = el("div", { role: "button", "aria-label": MEETING_LABEL });
+  append(innerTile, innerLink);
+  const iframeEl = el("iframe", {}, { contentDocument: doc([innerTile]) });
+
+  const shadowLink = el("a", { href: "https://zoom.us/j/1234567890" });
+  const shadowTile = el("div", { role: "button", "aria-label": MEETING_LABEL });
+  append(shadowTile, shadowLink);
+  const hostEl = el("div", {}, { shadowRoot: doc([shadowTile]) });
+
+  setDocument(doc([iframeEl, hostEl]));
+
+  const { joinLinks } = runProbe();
+  assert.equal(joinLinks.matchCount, 2);
+  assert.equal(joinLinks.insideMeetingLabelledElement, 2);
+});
+
+test("join probe: a page with no anchors at all reports zero, not an error", () => {
+  setDocument(doc([el("div", { role: "button", "aria-label": MEETING_LABEL })]));
+  const { joinLinks } = runProbe();
+  assert.equal(joinLinks.anchorCount, 0);
+  assert.equal(joinLinks.matchCount, 0);
+  assert.ok(!joinLinks.error);
 });
