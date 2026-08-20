@@ -181,6 +181,16 @@
     <pre id="diagnosticOutput" style="display:none; margin-top:12px; padding:12px; background:#111827; color:#e5e7eb; border-radius:6px; font-size:11px; line-height:1.5; max-height:420px; overflow:auto; white-space:pre-wrap; word-break:break-word;"></pre>
   </div>
 
+  <div class="card">
+    <h2>Diagnose calendar API access</h2>
+    <p>Teams meetings show no Join link, every meeting shows <em>Attendees (0)</em>, and no invite descriptions come through. All three are the same thing: that detail is not in the calendar grid, so no amount of reading the page will find it. The alternative is to ask the same API Outlook Web itself asks, from inside your already-signed-in session.</p>
+    <p>This checks whether that is possible on <em>your</em> tenant. It tries each candidate endpoint and reports what each one actually did &mdash; answered with the fields we need, answered without them, refused our credentials, or could not be reached. Those are kept separate on purpose: an endpoint that returns a tidy empty answer must never be recorded as working.</p>
+    <p class="help">It reads your real calendar and reports none of it &mdash; status codes, response sizes, and which <em>field names</em> came back. No subject, attendee, body text, URL or token is included, so the result is safe to share.</p>
+    <button id="diagnoseApiBtn" class="secondary">Diagnose calendar API access</button>
+    <button id="copyApiDiagnosticBtn" class="secondary" style="display:none;">Copy</button>
+    <pre id="apiDiagnosticOutput" style="display:none; margin-top:12px; padding:12px; background:#111827; color:#e5e7eb; border-radius:6px; font-size:11px; line-height:1.5; max-height:420px; overflow:auto; white-space:pre-wrap; word-break:break-word;"></pre>
+  </div>
+
   <script src="options.js"></script>
 </body>
 </html>

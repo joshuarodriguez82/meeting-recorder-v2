@@ -230,6 +230,42 @@ $("diagnoseBtn").addEventListener("click", async () => {
   }
 });
 
+$("diagnoseApiBtn").addEventListener("click", async () => {
+  const out = $("apiDiagnosticOutput");
+  const copyBtn = $("copyApiDiagnosticBtn");
+  $("diagnoseApiBtn").disabled = true;
+  out.style.display = "block";
+  copyBtn.style.display = "none";
+  out.textContent = "Running… opens the calendar page in the background and asks " +
+    "each candidate endpoint once. Takes about 10 seconds.";
+  try {
+    const report = await chrome.runtime.sendMessage({ type: "diagnose-calendar-api" });
+    // `ok === false` with no results is a wrapper failure; a report
+    // WITH results is a successful measurement even when every
+    // candidate failed — that distinction is the point of the probe,
+    // so it must survive into how the result is displayed.
+    if (report?.ok === false && !(report.results || []).length) {
+      out.textContent = `Diagnostic failed: ${report.error || "unknown error"}`;
+      return;
+    }
+    out.textContent = formatDiagnosticReport(report);
+    copyBtn.style.display = "inline-block";
+  } catch (e) {
+    out.textContent = `Diagnostic failed: ${e.message || String(e)}`;
+  } finally {
+    $("diagnoseApiBtn").disabled = false;
+  }
+});
+
+$("copyApiDiagnosticBtn").addEventListener("click", async () => {
+  const out = $("apiDiagnosticOutput");
+  try {
+    await navigator.clipboard.writeText(out.textContent || "");
+    $("copyApiDiagnosticBtn").textContent = "Copied";
+    setTimeout(() => { $("copyApiDiagnosticBtn").textContent = "Copy"; }, 1500);
+  } catch (_) { /* clipboard denied — the text is selectable anyway */ }
+});
+
 $("copyDiagnosticBtn").addEventListener("click", async () => {
   const out = $("diagnosticOutput");
   try {
