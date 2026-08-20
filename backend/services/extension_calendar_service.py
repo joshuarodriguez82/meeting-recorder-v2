@@ -612,6 +612,61 @@ class ExtensionCalendarService:
             "source": SOURCE_EXTENSION,
         }
 
+    def record_capture_diag(self, diag: Optional[dict]) -> None:
+        """Store the extension's last capture-recorder counters.
+
+        Counts and booleans only — the extension sends no URL, subject,
+        attendee or body text in this payload, and nothing here adds
+        any. Written on every POST that carries one, overwriting the
+        previous capture: the useful question is always "what did the
+        most recent capture do", and keeping a history would put a
+        growing diagnostic log in the calendar store.
+
+        Exists because v1.7 computed these counters and kept them
+        inside the extension, where the app's diagnostics bundle could
+        not see them. An empty attendee list then looked identical
+        whether the recorder never installed, saw no responses at all,
+        or saw responses it could not read — three causes needing three
+        different fixes, and no way to tell them apart from a bug
+        report. That ambiguity is what turned this into four
+        release/reinstall/re-run cycles.
+
+        Best-effort by construction: bookkeeping must never fail the
+        calendar import it rides along with.
+        """
+        if not isinstance(diag, dict):
+            return
+        # Scalars only. A nested structure here would be the extension
+        # deciding what this file stores, and this payload is opaque
+        # by design — cheap to bound, and it keeps a future extension
+        # from writing something large or unexpected into the store.
+        clean = {
+            str(k)[:64]: v
+            for k, v in diag.items()
+            if isinstance(v, (bool, int, float)) or v is None
+        }
+        with self._lock:
+            data = self._read_locked()
+            data["last_capture_diag"] = clean
+            data["last_capture_diag_at"] = datetime.now().isoformat()
+            self._write_locked(data)
+
+    def last_capture_diag(self) -> dict:
+        """The most recent capture-recorder counters, or {} if none.
+
+        {} means no capture has reported any since this field existed —
+        NOT that a capture ran and found nothing. The diagnostics
+        bundle renders those differently for exactly the reason this
+        method exists.
+        """
+        with self._lock:
+            data = self._read_locked()
+        out = data.get("last_capture_diag")
+        if not isinstance(out, dict):
+            return {}
+        at = data.get("last_capture_diag_at")
+        return {**out, "at": at} if at else dict(out)
+
     def record_extension_version(self, version: Optional[str],
                                  now: Optional[datetime] = None) -> None:
         """Record the extension version that just POSTed, plus when.

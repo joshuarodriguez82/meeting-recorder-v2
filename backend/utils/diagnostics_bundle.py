@@ -335,6 +335,63 @@ def app_version() -> Optional[str]:
 EXTENSION_VERSION_UNREPORTED = "unknown (extension predates version reporting)"
 
 
+def extension_capture_diag(settings: Any = None) -> Dict[str, Any]:
+    """What the extension's calendar RESPONSE RECORDER did last capture.
+
+    Returns ``{"extension_capture_diag": {...}}`` — counts and booleans
+    only; the extension sends no URL, subject, attendee or body text in
+    this payload.
+
+    WHY THIS IS IN THE BUNDLE
+    -------------------------
+    Extension 1.7 added a recorder that reads Outlook's own calendar
+    responses, and computed exactly the counters needed to tell its
+    failure modes apart — then kept them inside the extension. The app's
+    diagnostics bundle could not see them. So a report of "attendees
+    still empty" looked identical whether:
+
+      * the recorder never installed (``recorderInstalled`` false),
+      * it installed but the page fetches through a worker rather than
+        the main world (``responsesSeen`` 0),
+      * it saw traffic that held no meeting (``responsesMatched`` 0),
+      * or it read meetings that did not match any captured event
+        (``detailMatched`` 0).
+
+    Those need four different fixes. Telling a user "send the
+    diagnostics and it will say which" while shipping a bundle that
+    could not say is the same defect as the rest of this saga, one
+    layer out.
+
+    An EMPTY dict means no capture has reported since this field
+    existed — deliberately not the same as a capture that ran and found
+    nothing, which reports zeros.
+    """
+    out: Dict[str, Any] = {"extension_capture_diag": {}}
+    data_dir = ""
+    try:
+        data_dir = str(getattr(settings, "recordings_dir", "") or "").strip()
+    except Exception:  # noqa: BLE001
+        data_dir = ""
+    if not data_dir:
+        try:
+            from config.settings import USER_DATA_DIR
+            data_dir = str(Path(USER_DATA_DIR) / "recordings")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"Diagnostics export could not locate the extension calendar "
+                f"store ({e}); extension_capture_diag will be empty.")
+            return out
+    try:
+        from services.extension_calendar_service import ExtensionCalendarService
+        out["extension_capture_diag"] = (
+            ExtensionCalendarService(Path(data_dir)).last_capture_diag())
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"Diagnostics export could not read the capture diagnostics "
+            f"({e}); extension_capture_diag will be empty.")
+    return out
+
+
 def extension_last_seen(settings: Any = None) -> Dict[str, Any]:
     """What the extension store actually recorded about the last POST.
 
@@ -479,6 +536,7 @@ def gather_versions(settings: Any = None) -> Dict[str, Any]:
     # the placeholders seeded above, so their position in the exported
     # JSON is unchanged.
     out.update(extension_last_seen(settings))
+    out.update(extension_capture_diag(settings))
     return out
 
 
