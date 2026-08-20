@@ -505,6 +505,57 @@ def describe_structured_source(raw_calendar_events: Optional[Any]) -> str:
     return "empty" if n == 0 else "present"
 
 
+def _drop_rescheduled(prior: List[dict], fresh: Iterable[dict]) -> List[dict]:
+    """Remove prior events this capture has RESCHEDULED.
+
+    A prior event is dropped when the fresh capture contains the same
+    normalised subject on the same calendar day at a different time.
+    That is a moved meeting — an Outlook "Exception to recurring event"
+    is the common source — and the fresh capture is the newer truth.
+
+    Everything else is left alone. In particular a prior event on a day
+    the fresh capture returned NOTHING for survives untouched: that is
+    the partial-capture case the count guard in `replace_all` exists to
+    protect, and this must not become a back door around it.
+
+    Same-subject-same-day-same-time is not a reschedule, it is the same
+    meeting, and dedupe downstream handles it.
+
+    Pure: no I/O, inputs not mutated.
+    """
+    by_day: Dict[tuple, set] = {}
+    for m in fresh:
+        start = _coerce_dt(m.get("start"))
+        if start is None:
+            continue
+        by_day.setdefault(
+            (normalize_subject(m.get("subject")), start.date()), set()
+        ).add(start)
+
+    out: List[dict] = []
+    for m in prior:
+        start = _coerce_dt(m.get("start"))
+        if start is None:
+            out.append(m)
+            continue
+        times = by_day.get((normalize_subject(m.get("subject")), start.date()))
+        if times is None:
+            # This capture said nothing about this subject on this day —
+            # not evidence of anything. Keep it.
+            out.append(m)
+            continue
+        if any(abs(start - t) <= DEDUP_TOLERANCE for t in times):
+            # Same meeting, same slot. Keep; dedupe handles it.
+            out.append(m)
+            continue
+        # Same subject, same day, a time this capture does not have:
+        # the meeting moved. Drop the stale copy.
+        logger.info(
+            "Extension calendar: dropping a prior event whose time changed "
+            "in this capture (same subject, same day, different start)")
+    return out
+
+
 def merge_meetings(local: Iterable[dict],
                    extension: Iterable[dict]) -> List[dict]:
     """Merge extension-sourced events into the LOCAL list.
@@ -818,8 +869,49 @@ class ExtensionCalendarService:
             except CloudFileNotReadyError:
                 raw_before = {}
             prior_kept = self._prior_kept_from_raw(raw_before, lo, hi)
+            # A fresh capture is AUTHORITATIVE about a day it can see.
+            #
+            # The count guard below exists so a bad/partial capture can't
+            # wipe good data, and that is worth keeping. But on its own
+            # it has no way out: meetings get moved, cancelled, or
+            # declined, so an honest capture legitimately returns fewer
+            # events than an accumulated store. Once the store holds
+            # more than any correct capture returns, EVERY capture is
+            # "fewer", every capture merges, and nothing ever leaves.
+            #
+            # Field evidence 2026-08-20 — the same warning three times in
+            # one afternoon ("returned fewer events (36) than the store
+            # already holds (43)"), and two copies of one recurring
+            # training block rendering as simultaneously LIVE on the
+            # Record tab: a series instance had been MOVED (an
+            # "Exception to recurring event" shifting it 1:30→2:00), so
+            # the capture carried the new time while the merge kept
+            # resurrecting the old one.
+            #
+            # So a prior event is dropped when this capture covers the
+            # same day and holds the same subject at a different time —
+            # that is a reschedule, and the capture is the newer truth.
+            # Deliberately narrow: same subject AND same day. A prior
+            # event on a day this capture returned nothing for is still
+            # protected, which is the partial-capture case the guard was
+            # built for.
+            # Filtered for the MERGE, but the merge-vs-replace decision
+            # below still weighs the ORIGINAL count.
+            #
+            # Judging the decision on the filtered list changes which
+            # branch runs: dropping two ghosts can make a partial
+            # capture look complete, flip it to the replace branch, and
+            # delete real events on days the capture never covered. A
+            # test caught exactly that — one day's moved instance
+            # deleting the same series on another day.
+            #
+            # Keeping the decision on `prior_kept` means this change can
+            # only ever remove a stale duplicate from the merge; it can
+            # never make the store shrink in a case where it previously
+            # would not have.
+            prior_for_merge = _drop_rescheduled(prior_kept, kept)
             if len(kept) < len(prior_kept):
-                merged = merge_meetings(kept, prior_kept)
+                merged = merge_meetings(kept, prior_for_merge)
                 logger.warning(
                     f"Extension calendar capture returned fewer events "
                     f"({len(kept)}) than the store already holds in "
@@ -830,7 +922,33 @@ class ExtensionCalendarService:
             else:
                 kept.sort(key=lambda m: m["start"])
 
-            payload = {
+            # START FROM WHAT IS ALREADY THERE, then overwrite only the
+            # keys this method owns.
+            #
+            # This used to be built from `{}` with a hand-listed set of
+            # keys copied forward, which made the file a whole-file
+            # REPLACEMENT and every unlisted key a silent deletion.
+            # `record_capture_diag` writes on the SAME request,
+            # milliseconds before this call (see server.py's
+            # extension-import handler), so its key was not merely going
+            # stale — it was recorded and then destroyed on every POST.
+            #
+            # Field evidence 2026-08-20: a bundle exported minutes after
+            # three v1.9.0 captures reported `extension_capture_diag:
+            # {}` while `extension_last_seen_version` in the same file
+            # said "1.9.0". The version survived because it happened to
+            # be on the list; the capture counters did not because they
+            # were not. Two releases went out unable to say which of
+            # four detail-capture failures was occurring, and the answer
+            # had been computed and deleted on every capture.
+            #
+            # Inheriting first inverts the failure direction: a key this
+            # method does not know about is now KEPT by default rather
+            # than dropped by default. Preserving something stale is a
+            # visible wrong value; deleting it is invisible, and this
+            # module has now paid for that difference twice.
+            payload = dict(raw_before or {})
+            payload.update({
                 "updated_at": ref.isoformat(),
                 "events": [self._serialize(e) for e in kept],
                 # Preserve extension-version bookkeeping (see
@@ -840,7 +958,30 @@ class ExtensionCalendarService:
                 # POST last recorded it.
                 "last_seen_version": (raw_before or {}).get("last_seen_version"),
                 "last_seen_version_at": (raw_before or {}).get("last_seen_version_at"),
-            }
+                # Same reasoning, and the reason it is spelled out here
+                # rather than left to a future reader to notice:
+                #
+                # THIS PAYLOAD IS A WHOLE-FILE REPLACEMENT. Every key
+                # not named here is deleted. `record_capture_diag` runs
+                # on the SAME request, milliseconds before this write
+                # (see server.py's extension-import handler), so a key
+                # missing from this dict is not merely stale — it is
+                # destroyed on every single POST, immediately after
+                # being recorded.
+                #
+                # Field evidence 2026-08-20: a diagnostics bundle
+                # exported minutes after three v1.9.0 captures reported
+                # `extension_capture_diag: {}`, while
+                # `extension_last_seen_version` in the same file said
+                # "1.9.0" — the version survived because it is listed
+                # above, and the capture counters did not because they
+                # were not. Two releases were spent unable to tell
+                # which of four detail-capture failures was happening,
+                # and the answer had been computed, sent, stored and
+                # deleted on each of those captures.
+                "last_capture_diag": (raw_before or {}).get("last_capture_diag"),
+                "last_capture_diag_at": (raw_before or {}).get("last_capture_diag_at"),
+            })
             if import_meta is not None:
                 payload["last_import_path"] = import_meta.get("path")
                 payload["last_import_raw"] = import_meta.get("raw")

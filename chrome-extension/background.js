@@ -2704,47 +2704,69 @@ async function settleAndCollectCalendar(tabId, label) {
 // comment on why one week view alone can miss the tail of the panel's
 // 168h window), structured extraction with a text-scrape fallback.
 // Returns { events, layer, stats, zeroReason, fallbackText, elapsedMs, diag }.
-// Both detail mechanisms, in order, against a LIVE tab.
+// Both detail mechanisms, run against the week that is ON SCREEN.
 //
-// Mechanism 1 (the response recorder) needs no tab — it reads what was
-// already captured. Mechanism 2 (the screen) does, which is why this
-// runs inside captureCalendarTab's try rather than after it.
+// WHY THIS IS PER-WEEK AND NOT ONCE AT THE END.
 //
-// They are deliberately independent. Five releases each bet on ONE
-// mechanism and each was wrong in a way the previous one could not
-// have predicted. Mechanism 2 only touches events mechanism 1 left
-// empty, so a working recorder costs nothing here, and the pair fails
-// only if BOTH fail.
-async function applyDetailPasses(tabId, extraction, capturedBodies, diag) {
-  // ── 1. Outlook's own responses ────────────────────────────────────
-  const merged = mergeDetailIntoEvents(
-    extraction.events, detailsFromResponses(capturedBodies));
-  diag.detailMatched = merged.stats.matched;
-  diag.detailGainedAttendees = merged.stats.gainedAttendees;
-  diag.detailGainedBody = merged.stats.gainedBody;
-  diag.detailGainedJoinUrl = merged.stats.gainedJoinUrl;
-  extraction.stats.withAttendees = merged.stats.gainedAttendees;
-  extraction.stats.withBody = merged.stats.gainedBody;
-  extraction.stats.withJoinUrl =
-    (extraction.stats.withJoinUrl || 0) + merged.stats.gainedJoinUrl;
+// v1.9 ran a single detail pass after BOTH weeks had been scanned —
+// which means after `goToNextCalendarWeek` had already navigated away
+// from the current week, with no navigation back. Mechanism 2 works by
+// finding an event's tile by its aria-label and clicking it, and it
+// only considers events starting inside DETAIL_WINDOW_HOURS (72h) —
+// every one of which is a tile in the CURRENT week's view. So it went
+// looking for tiles that were no longer rendered, matched nothing,
+// counted everything as skipped, and returned in under a second having
+// never opened a single event.
+//
+// Field evidence 2026-08-20: a whole calendar-only capture completed in
+// ~21s. A pass that actually opened ~20 events cannot finish in less
+// than a minute. The "second mechanism" shipped in v2.45.0 had never
+// once clicked anything, and the counters that would have said so were
+// being deleted by the store bug fixed alongside this.
+//
+// So detail is now collected while the relevant week is still
+// rendered, and accumulated into a map that the final extraction folds
+// in. Both mechanisms run per-week for the same reason: mechanism 1's
+// captured bodies are harvested per-week too, and running it first
+// means mechanism 2 only pays for what mechanism 1 could not fill.
+async function collectWeekDetail(tabId, candidates, capturedBodies, diag, into) {
+  // What this week's tiles parse to. A separate extraction from the
+  // final one, on this week's candidates only, so the subjects and
+  // start times handed to the clicker correspond to tiles that are
+  // actually on screen right now.
+  const weekEvents = extractEventsFromCandidates(candidates, {
+    fallbackYear: new Date().getFullYear(),
+  }).events;
+  if (!weekEvents.length) return;
 
-  // ── 2. The screen ─────────────────────────────────────────────────
-  diag.domDetailAttempted = 0;
-  diag.domDetailOpened = 0;
-  diag.domDetailGrew = 0;
-  diag.domDetailSkipped = 0;
-  diag.domGainedAttendees = 0;
-  diag.domGainedBody = 0;
-  diag.domGainedJoinUrl = 0;
+  // ── Mechanism 1: Outlook's own responses ──────────────────────────
+  // Cheap, needs no clicking. Applied first so mechanism 2 skips
+  // anything already answered.
+  const fromResponses = detailsFromResponses(capturedBodies);
+  for (const [k, v] of fromResponses) {
+    const prev = into.get(k) || { attendees: [], body: "", joinUrl: "" };
+    into.set(k, {
+      attendees: v.attendees.length ? v.attendees : prev.attendees,
+      body: v.body || prev.body,
+      joinUrl: v.joinUrl || prev.joinUrl,
+    });
+  }
+
+  // ── Mechanism 2: the rendered event ───────────────────────────────
   try {
     const cutoff = Date.now() + DETAIL_WINDOW_HOURS * 3600 * 1000;
-    const needing = extraction.events.filter((e) => {
-      const hasDetail = (e.attendees && e.attendees.length) || e.body || e.join_url;
-      if (hasDetail) return false;
+    const needing = weekEvents.filter((e) => {
+      const already = into.get(detailKey(e.subject, e.start));
+      if (already && (already.attendees.length || already.body || already.joinUrl)) {
+        return false;
+      }
+      // Label-derived detail (v1.5's Zoom links) also counts as
+      // answered — no reason to open an event we can already join.
+      if ((e.attendees && e.attendees.length) || e.body || e.join_url) return false;
       const t = Date.parse(e.start);
       return Number.isFinite(t) && t <= cutoff;
     });
-    diag.domDetailAttempted = needing.length;
+    diag.domDetailAttempted += needing.length;
     if (!needing.length) return;
 
     const r = await chrome.scripting.executeScript({
@@ -2760,35 +2782,26 @@ async function applyDetailPasses(tabId, extraction, capturedBodies, diag) {
     const got = (r && r[0] && r[0].result) || null;
     if (!got) return;
 
-    diag.domDetailOpened = got.opened || 0;
-    diag.domDetailGrew = got.grew || 0;
-    diag.domDetailSkipped = got.skipped || 0;
+    diag.domDetailOpened += got.opened || 0;
+    diag.domDetailGrew += got.grew || 0;
+    diag.domDetailSkipped += got.skipped || 0;
+    diag.domDetailNoTile += got.matchedElement != null
+      ? Math.max(0, (needing.length) - (got.matchedElement || 0)) : 0;
 
-    const byKey = new Map();
     for (const d of got.details || []) {
       const k = detailKey(d.subject, d.startIso);
-      if (k) {
-        byKey.set(k, {
-          attendees: d.attendees || [],
-          body: d.body || "",
-          joinUrl: d.joinUrl || "",
-        });
-      }
+      if (!k) continue;
+      const prev = into.get(k) || { attendees: [], body: "", joinUrl: "" };
+      into.set(k, {
+        attendees: (d.attendees && d.attendees.length) ? d.attendees : prev.attendees,
+        body: d.body || prev.body,
+        joinUrl: d.joinUrl || prev.joinUrl,
+      });
     }
-    const domMerged = mergeDetailIntoEvents(extraction.events, byKey);
-    diag.domGainedAttendees = domMerged.stats.gainedAttendees;
-    diag.domGainedBody = domMerged.stats.gainedBody;
-    diag.domGainedJoinUrl = domMerged.stats.gainedJoinUrl;
-    extraction.stats.withAttendees =
-      (extraction.stats.withAttendees || 0) + domMerged.stats.gainedAttendees;
-    extraction.stats.withBody =
-      (extraction.stats.withBody || 0) + domMerged.stats.gainedBody;
-    extraction.stats.withJoinUrl =
-      (extraction.stats.withJoinUrl || 0) + domMerged.stats.gainedJoinUrl;
   } catch (e) {
     // Never fatal: the events are already extracted, and a capture
     // with no detail beats no capture at all.
-    console.warn("[ext] DOM detail pass failed:", e);
+    console.warn("[ext] screen detail pass failed:", e);
     diag.domDetailError = String((e && e.message) || e).slice(0, 200);
   }
 }
@@ -2821,7 +2834,17 @@ async function captureCalendarTab() {
     // ensureRecorderInstalled.
     recorderInjectedLate: false,
     recorderReloaded: false,
+    // Mechanism 2 counters, accumulated across weeks.
+    domDetailAttempted: 0,
+    domDetailOpened: 0,
+    domDetailGrew: 0,
+    domDetailSkipped: 0,
+    domDetailNoTile: 0,
   };
+  // Detail gathered from BOTH mechanisms, keyed by subject|start, while
+  // the relevant week was still rendered. Folded into the final
+  // extraction below.
+  const detailByKey = new Map();
   let fallbackText = "";
   // Assigned inside the try (the DOM detail pass needs the live tab).
   // Left null if the try threw before extraction, which the guard
@@ -2893,6 +2916,10 @@ async function captureCalendarTab() {
     diag.weeksScanned += 1;
     if (!week1.stabilized) diag.anyWeekUnstable = true;
     await harvest("week1");
+    // BEFORE navigating away. Mechanism 2 clicks tiles, and week 1's
+    // tiles are only on screen now — this is the bug that made the
+    // whole screen-reading mechanism a no-op in v2.45.0.
+    await collectWeekDetail(tabId, week1.candidates, capturedBodies, diag, detailByKey);
 
     const navOk = await goToNextCalendarWeek(tabId);
     diag.nextWeekNavOk = navOk;
@@ -2903,16 +2930,25 @@ async function captureCalendarTab() {
       diag.weeksScanned += 1;
       if (!week2.stabilized) diag.anyWeekUnstable = true;
       await harvest("week2");
+      await collectWeekDetail(tabId, week2.candidates, capturedBodies, diag,
+                              detailByKey);
     }
 
-    // Extraction and BOTH detail passes happen here, inside the try —
-    // the DOM pass needs the tab, and the finally below closes it.
-    // An earlier draft ran the DOM pass after the finally, against a
-    // tab that no longer existed.
+    // Final extraction over BOTH weeks, then fold in the detail that
+    // was gathered while each week was rendered. Inside the try
+    // because the finally below closes the tab.
     extraction = extractEventsFromCandidates(allCandidates, {
       fallbackYear: new Date().getFullYear(),
     });
-    await applyDetailPasses(tabId, extraction, capturedBodies, diag);
+    const merged = mergeDetailIntoEvents(extraction.events, detailByKey);
+    diag.detailMatched = merged.stats.matched;
+    diag.detailGainedAttendees = merged.stats.gainedAttendees;
+    diag.detailGainedBody = merged.stats.gainedBody;
+    diag.detailGainedJoinUrl = merged.stats.gainedJoinUrl;
+    extraction.stats.withAttendees = merged.stats.gainedAttendees;
+    extraction.stats.withBody = merged.stats.gainedBody;
+    extraction.stats.withJoinUrl =
+      (extraction.stats.withJoinUrl || 0) + merged.stats.gainedJoinUrl;
   } finally {
     try { await chrome.tabs.remove(tabId); } catch (_) { /* ignore */ }
     // Unregistered whatever happened: this must not stay installed on
@@ -3010,9 +3046,11 @@ async function captureCalendarOnly(backendUrl, token) {
     domDetailOpened: capture.diag?.domDetailOpened || 0,
     domDetailGrew: capture.diag?.domDetailGrew || 0,
     domDetailSkipped: capture.diag?.domDetailSkipped || 0,
-    domGainedAttendees: capture.diag?.domGainedAttendees || 0,
-    domGainedBody: capture.diag?.domGainedBody || 0,
-    domGainedJoinUrl: capture.diag?.domGainedJoinUrl || 0,
+    // How many events wanted detail but had no tile on screen to
+    // click. Non-zero here means the clicker is looking at the wrong
+    // view — the exact v2.45.0 failure, which was invisible because
+    // every mechanism-2 failure reported the same way.
+    domDetailNoTile: capture.diag?.domDetailNoTile || 0,
     eventsExtracted: capture.events.length,
   };
   if (capture.events.length > 0) {
