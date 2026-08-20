@@ -99,7 +99,7 @@ _WEAK_TOKENS = {
 }
 
 _TOKEN_SPLIT_RE = re.compile(r"[\s,]+")
-_TOKEN_TRIM = ".,;:()[]'\""
+_PUNCT_TRIM = ".,;:()[]'\""
 
 
 def _name_tokens(name: str) -> FrozenSet[str]:
@@ -112,7 +112,7 @@ def _name_tokens(name: str) -> FrozenSet[str]:
     """
     key, _display = normalize_owner(name or "")
     toks = {
-        t.strip(_TOKEN_TRIM) for t in _TOKEN_SPLIT_RE.split(key)
+        t.strip(_PUNCT_TRIM) for t in _TOKEN_SPLIT_RE.split(key)
     }
     return frozenset(t for t in toks if t)
 
