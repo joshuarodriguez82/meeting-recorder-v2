@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   api, openExternal, type ComposeLink, type SessionFull, type Speaker,
   formatDuration,
@@ -141,6 +141,33 @@ export function SessionDetailDialog({
   const [template, setTemplate] = useState("General");
   const [notes, setNotes] = useState("");
   const [dirty, setDirty] = useState(false);
+
+  // One line explaining how the Client field got its value — or why an
+  // auto-recorded meeting came back with none. The backend resolves the
+  // client at record-start (services/client_resolution_service.py) and
+  // stamps the method + a human-readable reason onto the session; this
+  // just renders it. "ambiguous" is the important one: it means two
+  // different clients matched the meeting title and the backend refused
+  // to guess, which the user needs told, because a wrongly-tagged
+  // session silently files a client conversation under another client
+  // (and the export worker copies it into that client's folder).
+  const clientSourceHint = useMemo(() => {
+    const source = session?.client_source;
+    if (!source) return "";  // user-typed, or predates auto-tagging
+    const detail = session?.client_source_detail || "";
+    switch (source) {
+      case "subject_match":
+        return `Auto-tagged from the meeting title. ${detail}`.trim();
+      case "domain_history":
+        return `Auto-tagged from attendee email domains. ${detail}`.trim();
+      case "ambiguous":
+        return `Left untagged on purpose. ${detail}`.trim();
+      case "none":
+        return "Auto-record could not identify a client for this meeting.";
+      default:
+        return detail;
+    }
+  }, [session?.client_source, session?.client_source_detail]);
 
   // Outlook Web compose links from the most recent follow-up run.
   // Populated only when the backend returns artifact "compose_link"
@@ -635,6 +662,20 @@ export function SessionDetailDialog({
                       <datalist id="detail-clients-list">
                         {existingClients.map((c) => <option key={c} value={c} />)}
                       </datalist>
+                      {/* Where an auto-recorded session's client came
+                          from — or why it deliberately has none. An
+                          auto-applied value with no explanation is one
+                          the user has to re-verify by hand, which is the
+                          manual step this feature exists to remove. Only
+                          shown until they edit the field: saving clears
+                          the provenance backend-side, because the label
+                          would then be describing a value the user
+                          overrode. */}
+                      {!dirty && clientSourceHint && (
+                        <p className="text-xs text-muted-foreground">
+                          {clientSourceHint}
+                        </p>
+                      )}
                     </div>
                     <div className="space-y-2">
                       <Label>Project</Label>

@@ -341,6 +341,13 @@ class SessionService:
             "has_decisions": bool(data.get("decisions")),
             "client": data.get("client", "") or "",
             "project": data.get("project", "") or "",
+            # How `client` got there — see Session.client_source. Carried
+            # on the summary (not just the full JSON) so the Sessions
+            # list and the session header can label an auto-tagged
+            # client without a second fetch, and so a deliberately
+            # untagged ("ambiguous") auto-recording can explain itself.
+            "client_source": data.get("client_source") or None,
+            "client_source_detail": data.get("client_source_detail") or None,
             "action_items": data.get("action_items", "") or "",
             "summary": data.get("summary", "") or "",
             "decisions": data.get("decisions", "") or "",

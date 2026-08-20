@@ -77,7 +77,25 @@ async function renderCalendarStatus() {
       const layerLabel = r.layer === "aria-label" ? "structured"
         : r.layer === "generic-node" ? "structured (fallback nodes)"
         : "⚠ text fallback";
-      el.innerHTML = `Calendar: ${ago} · ${n} event${n === 1 ? "" : "s"} · ${layerLabel}`;
+      // Per-field coverage, not just a count. `organizer` and
+      // `join_url` were both declared on every captured event and
+      // never assigned — always "" — which looked identical to "this
+      // meeting genuinely has none". Organizer now comes out of the
+      // label's own "By <name>" tail; join_url still has no source on
+      // this path (Outlook Web's grid labels a meeting "Microsoft
+      // Teams Meeting" but never exposes the URL), and saying so here
+      // is the difference between a known gap and an invisible one.
+      // Settings → Diagnose calendar capture reports whether a join
+      // link is reachable at all in this tenant.
+      const s = r.stats || {};
+      const extras = [];
+      if (typeof s.withOrganizer === "number") {
+        extras.push(`organizer on ${s.withOrganizer}/${n}`);
+      }
+      const joins = s.withJoinUrl || 0;
+      extras.push(joins > 0 ? `join link on ${joins}/${n}` : "no join links (not exposed)");
+      el.innerHTML = `Calendar: ${ago} · ${n} event${n === 1 ? "" : "s"} · ` +
+        `${layerLabel} · ${extras.join(" · ")}`;
     }
   } else if (r) {
     el.innerHTML = `Calendar: ${ago} · ✗ ${r.error || "failed"}`;

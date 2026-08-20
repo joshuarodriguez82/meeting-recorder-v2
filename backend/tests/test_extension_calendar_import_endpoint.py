@@ -139,6 +139,50 @@ def test_calendar_only_structured_path_skips_llm_and_briefing_save(monkeypatch):
     assert "FW: Acme Connect - Italy / ACR next steps: weekly team connect" in subjects
 
 
+def test_structured_import_carries_the_organizer_into_the_calendar_store(monkeypatch):
+    """The extension now fills `organizer` from the aria-label's own
+    "By <name>" tail (chrome-extension/background.js's
+    `extractOrganizerFromLabel`); before that, the field was declared on
+    every captured event and never assigned, so it always arrived here
+    as "".
+
+    The endpoint has always ACCEPTED the key — what was never proven is
+    that a non-empty one survives the request model and reaches the
+    calendar store. The comma-carrying name is the shape that would
+    break first if anything on the way re-split the field.
+    """
+    replace_all = _ReplaceAllSpy()
+    _wire(monkeypatch, summarizer=_FakeSummarizer(),
+          save_parsed=_SaveParsedSpy(), replace_all=replace_all)
+
+    req = server.ExtensionImportRequest(calendar_events=[
+        {"subject": "Globex sync",
+         "start": "2026-08-14T08:30:00", "end": "2026-08-14T09:00:00",
+         "organizer": "Jane Doe"},
+        {"subject": "Northwind collection script review",
+         "start": "2026-08-14T10:30:00", "end": "2026-08-14T11:00:00",
+         "organizer": "Roe, Pat Jr. [US-US]"},
+        {"subject": "Ad-hoc sync",
+         "start": "2026-08-14T13:00:00", "end": "2026-08-14T13:30:00"},
+    ])
+    result = asyncio.run(server.import_briefing_from_extension(req))
+
+    assert result["ok"] is True
+    assert result["path"] == "structured"
+    stored = {e["subject"]: e for e in replace_all.calls[0]}
+    assert stored["Globex sync"]["organizer"] == "Jane Doe"
+    assert stored["Northwind collection script review"]["organizer"] == "Roe, Pat Jr. [US-US]"
+    # No "By" segment in the source label -> empty, and empty means the
+    # empty STRING (record-view.tsx renders a join/organizer block only
+    # on a truthy value; None would still be falsy but breaks the
+    # str-typed contract every other calendar backend honours).
+    assert stored["Ad-hoc sync"]["organizer"] == ""
+    # join_url stays empty on this path — Outlook Web's calendar grid
+    # exposes "Microsoft Teams Meeting" as a LABEL, never the URL. See
+    # JOIN_URL_PROBE_CONFIG in chrome-extension/background.js.
+    assert all(e["join_url"] == "" for e in replace_all.calls[0])
+
+
 def test_calendar_only_text_fallback_uses_llm_but_still_skips_briefing_save(monkeypatch):
     """Structured extraction found nothing client-side; calendar_text is
     the last resort. This DOES call the LLM (only path that must), but
