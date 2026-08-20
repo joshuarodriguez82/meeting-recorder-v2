@@ -1491,3 +1491,199 @@ test("join probe: a join URL in a NON-meeting-shaped label is counted but not cr
   assert.equal(joinLinks.labelJoinInMeetingShapedLabel, 0);
   assert.match(joinLinks.verdict, /no join-shaped links anywhere/);
 });
+
+// ── Calendar API probe (v1.6) ────────────────────────────────────────
+//
+// The probe answers "can we read a meeting's detail without opening
+// it?" and its ONLY job is to answer honestly. Every test here is
+// about a wrong answer being worse than no answer:
+//
+//   * a candidate we never asked must not read as one that failed
+//   * a 401 must not read as "the API isn't there"
+//   * a 200 of the wrong shape must not read as success
+//   * a 200 of HTML (a sign-in page) must not read as JSON data
+//   * no calendar CONTENT may reach the report, ever
+//
+// v1.4 shipped a verdict that said "cannot be filled from this DOM"
+// when it meant "I looked in one place", and the field data disproved
+// it. These pin the replacement.
+
+const API_WANTED = {
+  attendees: ["attendees", "requiredattendees"],
+  body: ["body", "bodypreview"],
+  joinUrl: ["joinurl", "onlinemeeting", "location"],
+  timing: ["start", "end"],
+};
+
+// Drives _calendarApiProbeFunc with a scripted fetch. The function is
+// written to run in the page, so everything it touches — fetch,
+// document.cookie, location — is injected here.
+async function runApiProbe({ candidates, cookie = "", responses = {} }) {
+  const prevFetch = sandbox.fetch;
+  const prevDoc = sandbox.document;
+  const prevLoc = sandbox.location;
+
+  sandbox.document = { cookie };
+  sandbox.location = { origin: "https://outlook.office.com" };
+  sandbox.fetch = async (url) => {
+    const hit = Object.keys(responses).find((k) => url.includes(k));
+    if (!hit) throw new Error("network error");
+    const r = responses[hit];
+    if (r.throws) throw new Error(r.throws);
+    return {
+      status: r.status,
+      ok: r.status >= 200 && r.status < 300,
+      headers: { get: () => r.contentType || "application/json" },
+      text: async () => r.text,
+    };
+  };
+  try {
+    return await sandbox._calendarApiProbeFunc(candidates, API_WANTED, 7);
+  } finally {
+    sandbox.fetch = prevFetch;
+    sandbox.document = prevDoc;
+    sandbox.location = prevLoc;
+  }
+}
+
+const CANARY_COOKIE = "X-OWA-CANARY=EXAMPLECANARYVALUE; other=1";
+const ONE_POST = [{
+  name: "owa-service-findItem", note: "n", path: "/owa/service.svc?action=FindItem",
+  method: "POST", needsCanary: true, action: "FindItem",
+}];
+const ONE_GET = [{
+  name: "rest-v2-calendarview", note: "n", path: "/api/v2.0/me/calendarview",
+  method: "GET", needsCanary: false, action: "",
+}];
+
+test("a candidate that was never attempted is not recorded as a failure", async () => {
+  // No canary cookie → the request is never sent. Reporting that as
+  // "unreachable" would be the exact defect this probe exists over:
+  // never having asked rendered as having asked and got nothing.
+  const out = await runApiProbe({ candidates: ONE_POST, cookie: "" });
+  assert.equal(out.results[0].verdict, "not-attempted");
+  assert.match(out.results[0].skipped, /canary/i);
+  assert.equal(out.results[0].status, null);
+  assert.equal(out.canaryPresent, false);
+});
+
+test("a 401 is auth-rejected, never unreachable", async () => {
+  const out = await runApiProbe({
+    candidates: ONE_POST, cookie: CANARY_COOKIE,
+    responses: { "service.svc": { status: 401, text: "{}" } },
+  });
+  assert.equal(out.results[0].verdict, "auth-rejected");
+});
+
+test("a 200 carrying the wanted fields is usable, and says which", async () => {
+  const out = await runApiProbe({
+    candidates: ONE_POST, cookie: CANARY_COOKIE,
+    responses: {
+      "service.svc": {
+        status: 200,
+        text: JSON.stringify({
+          Body: { Items: [
+            { Subject: "s", Attendees: [{ Name: "n" }], Body: { Text: "t" },
+              OnlineMeeting: { JoinUrl: "u" }, Start: "2026-08-20T12:30:00Z" },
+            { Subject: "s2", Attendees: [], Body: { Text: "" },
+              OnlineMeeting: {}, Start: "2026-08-20T13:30:00Z" },
+          ] },
+        }),
+      },
+    },
+  });
+  const r = out.results[0];
+  assert.equal(r.verdict, "usable");
+  assert.equal(r.fieldsPresent.attendees, true);
+  assert.equal(r.fieldsPresent.body, true);
+  assert.equal(r.fieldsPresent.joinUrl, true);
+  assert.equal(r.itemCount, 2);
+});
+
+test("a 200 with none of the wanted fields is answered-thin, not usable", async () => {
+  // The failure that matters most: a tidy 200 that carries nothing we
+  // need. Recording it as success would send the implementation at an
+  // endpoint that can't do the job.
+  const out = await runApiProbe({
+    candidates: ONE_POST, cookie: CANARY_COOKIE,
+    responses: {
+      "service.svc": {
+        status: 200,
+        text: JSON.stringify({ Body: { Items: [{ ItemId: { Id: "AAA" } }] } }),
+      },
+    },
+  });
+  assert.equal(out.results[0].verdict, "answered-thin");
+  assert.equal(out.results[0].fieldsPresent.attendees, false);
+});
+
+test("a 200 of HTML is unreachable, not a successful JSON answer", async () => {
+  // A sign-in redirect returns 200 text/html. Parsing that as success
+  // is how "it works" gets reported for a session that isn't signed in.
+  const out = await runApiProbe({
+    candidates: ONE_GET,
+    responses: {
+      "calendarview": { status: 200, contentType: "text/html",
+                        text: "<!doctype html><html>sign in</html>" },
+    },
+  });
+  assert.equal(out.results[0].verdict, "unreachable");
+  assert.equal(out.results[0].json, false);
+  assert.match(out.results[0].error, /not JSON/i);
+});
+
+test("a thrown fetch is unreachable and carries the reason", async () => {
+  const out = await runApiProbe({
+    candidates: ONE_GET,
+    responses: { "calendarview": { status: 0, throws: "Failed to fetch" } },
+  });
+  assert.equal(out.results[0].verdict, "unreachable");
+  assert.match(out.results[0].error, /Failed to fetch/);
+});
+
+test("no calendar content and no token reaches the report", async () => {
+  // The report is a file users paste into chat. It must carry field
+  // NAMES and counts and nothing else — not a subject, not an
+  // attendee, not a join URL, and never the CSRF token.
+  const SECRETS = ["Acme Bank Partner Introduction", "a.doe@globex.example",
+                   "https://globex.zoom.us/j/00000000000", "EXAMPLECANARYVALUE"];
+  const out = await runApiProbe({
+    candidates: ONE_POST, cookie: CANARY_COOKIE,
+    responses: {
+      "service.svc": {
+        status: 200,
+        text: JSON.stringify({ Body: { Items: [{
+          Subject: SECRETS[0],
+          Attendees: [{ EmailAddress: SECRETS[1] }],
+          Body: { Text: `Join here ${SECRETS[2]}` },
+          OnlineMeeting: { JoinUrl: SECRETS[2] },
+          Start: "2026-08-20T12:30:00Z",
+        }] } }),
+      },
+    },
+  });
+  const blob = JSON.stringify(out);
+  for (const s of SECRETS) assert.ok(!blob.includes(s), `leaked: ${s}`);
+  // ...while still having actually measured something.
+  assert.equal(out.results[0].verdict, "usable");
+  assert.equal(out.canaryPresent, true);   // presence, never the value
+});
+
+test("field detection matches key NAMES only, never values", async () => {
+  // A meeting whose subject contains the word "attendees" must not
+  // make a thin endpoint look usable.
+  const out = await runApiProbe({
+    candidates: ONE_POST, cookie: CANARY_COOKIE,
+    responses: {
+      "service.svc": {
+        status: 200,
+        text: JSON.stringify({ Body: { Items: [
+          { ItemId: { Id: "A" }, Subject: "Confirm attendees and body for the call" },
+        ] } }),
+      },
+    },
+  });
+  assert.equal(out.results[0].verdict, "answered-thin");
+  assert.equal(out.results[0].fieldsPresent.attendees, false);
+  assert.equal(out.results[0].fieldsPresent.body, false);
+});

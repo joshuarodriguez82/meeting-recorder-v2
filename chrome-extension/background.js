@@ -580,6 +580,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch((e) => sendResponse({ ok: false, error: e.message || String(e) }));
     return true;
   }
+  if (msg?.type === "diagnose-calendar-api") {
+    diagnoseCalendarApi()
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: e.message || String(e) }));
+    return true;
+  }
 });
 
 // ──────────────────────────────────────────────────────────────────
@@ -2694,6 +2700,415 @@ function _calendarDiagnosticProbeFunc(timeRangeSource, timeHintSource, joinConfi
 // DIAGNOSTIC_SNAPSHOT_DELAYS_MS after load, and return a report the
 // options page renders directly (JSON, via a Copy button — see the
 // v1.3 header comment). Read-only: never clicks, never navigates.
+// ──────────────────────────────────────────────────────────────────
+// Calendar API probe (v1.6) — CAN we read a meeting's detail without
+// opening it?
+// ──────────────────────────────────────────────────────────────────
+//
+// WHY THIS IS A PROBE AND NOT AN IMPLEMENTATION.
+//
+// Three fields are empty on every extension-sourced meeting, and all
+// three are empty for ONE reason: they are not in the calendar grid.
+//
+//   * `join_url` for a Teams meeting. Teams writes the literal words
+//     "Microsoft Teams Meeting" into Location; the URL lives in the
+//     invite body. (A Zoom/Webex add-in DOES write its URL into
+//     Location, which is why v1.5 fills those and only those — field
+//     data: 1 of 25 labels carried a URL, and extraction got it.)
+//   * `attendees`. The grid label names only the organiser, so the
+//     Record tab reads "ATTENDEES (0) / None listed." forever.
+//   * the invite body / agenda, which renders as "(No description on
+//     this invite.)" on every row.
+//
+// The DOM has been asked and has answered: `anchorCount: 0`,
+// `labelJoinCount: 1` across a whole week. There is nothing further to
+// scrape. The remaining routes are (a) open all ~25 events one by one
+// — slow, visibly drives the user's calendar, and re-introduces
+// exactly the DOM dependency that broke capture for weeks — or (b)
+// ask the same API that OWA itself asks, from inside the user's
+// already-authenticated session.
+//
+// (b) is the better architecture and it is what this probe measures.
+// It does NOT measure it by reasoning about it. Twice now this project
+// has shipped a confident verdict about a page it could not see:
+// v1.4's join-link probe searched for anchors, found none, and
+// reported that join links "cannot be filled from this DOM" while its
+// own output carried one as text. The rule that came out of that:
+//
+//     A result you could not read must never render as a result that
+//     is not there.
+//
+// Which endpoint answers, whether it needs a canary token, whether the
+// response actually carries attendees/body/join URL — those are facts
+// about a live authenticated tenant, and nothing in this repository
+// can observe them. So this ships as a MEASUREMENT first. It tries
+// each candidate, reports exactly what each one did, and the
+// implementation is written against whatever the field run says
+// rather than against what seemed likely here.
+//
+// FOUR verdict states, deliberately, because the failure that matters
+// is the one that reads like success:
+//
+//   usable            — answered 2xx AND carries the fields we need
+//   answered-thin     — answered 2xx but the payload lacks them
+//   auth-rejected     — 401/403: reachable, we are not entitled
+//   unreachable       — network error / non-JSON / no response
+//
+// "answered-thin" exists so an endpoint that returns a tidy 200 of the
+// wrong shape can never be recorded as working, and "auth-rejected" so
+// a permissions problem is never filed as "the API does not exist".
+//
+// PRIVACY. This probe reads real calendar data and reports NONE of it.
+// Per candidate it emits a status code, a content type, a byte count,
+// which FIELD NAMES were present, and how many items came back. No
+// subject, no attendee, no body text, no URL, and no token — the
+// canary is reported as present/absent, never as a value.
+
+// Candidate requests, most-likely first. Each is a pure description;
+// the injected function builds the actual fetch. Kept out here rather
+// than inlined so the list is reviewable in one place and so a future
+// candidate is a data change, not a code change.
+//
+// `needsCanary` marks the OWA `service.svc` family: those reject a
+// request whose X-OWA-CANARY header does not match the cookie of the
+// same name (CSRF defence). The REST/Graph candidates use bearer auth
+// instead and are expected to 401 from a cookie-only call — that is a
+// RESULT, not a bug, and is why "auth-rejected" is its own state.
+const CALENDAR_API_CANDIDATES = [
+  {
+    name: "owa-service-findItem",
+    note: "OWA's own EWS-over-JSON endpoint, the one the calendar grid uses",
+    path: "/owa/service.svc?action=FindItem",
+    method: "POST",
+    needsCanary: true,
+    action: "FindItem",
+  },
+  {
+    name: "owa-service-getCalendarView",
+    note: "same service, calendar-view shaped request",
+    path: "/owa/service.svc?action=GetCalendarView",
+    method: "POST",
+    needsCanary: true,
+    action: "GetCalendarView",
+  },
+  {
+    name: "owa-0-service-findItem",
+    note: "newer /owa/0/ path prefix seen on some tenants",
+    path: "/owa/0/service.svc?action=FindItem",
+    method: "POST",
+    needsCanary: true,
+    action: "FindItem",
+  },
+  {
+    name: "rest-v2-calendarview",
+    note: "Outlook REST v2 on the same origin (may accept session auth)",
+    path: "/api/v2.0/me/calendarview",
+    method: "GET",
+    needsCanary: false,
+    action: "",
+  },
+];
+
+// Field names worth finding in a response. Presence of these is what
+// separates "usable" from "answered-thin". Matched case-insensitively
+// against the response's KEY NAMES only — never against values, so a
+// meeting whose subject happens to contain the word "attendees"
+// cannot make a thin endpoint look usable.
+const CALENDAR_API_WANTED_KEYS = {
+  attendees: ["attendees", "requiredattendees", "optionalattendees"],
+  body: ["body", "bodypreview", "description", "textbody"],
+  joinUrl: ["joinurl", "onlinemeeting", "onlinemeetingurl", "skypeteamsmeetingurl",
+            "onlinemeetinginformation", "location", "locations"],
+  timing: ["start", "end", "starttime", "endtime", "originalstart"],
+};
+
+// Runs IN THE PAGE (chrome.scripting.executeScript), which is the
+// whole point: fetch() from there is same-origin against
+// outlook.office.com, so the session cookies, the canary and the
+// tenant routing all come along without this extension ever handling
+// a credential. A service-worker fetch would be cross-origin and
+// would have to be granted and manage auth itself.
+//
+// Returns data ABOUT the responses, never the responses.
+async function _calendarApiProbeFunc(candidates, wantedKeys, windowDays) {
+  const out = {
+    origin: "",
+    canaryPresent: false,
+    mailboxHintPresent: false,
+    results: [],
+    error: null,
+  };
+
+  // Deliberately reports presence, never the value: the canary is a
+  // CSRF token and a diagnostics bundle is a file users email around.
+  const readCookie = (name) => {
+    try {
+      const hit = (document.cookie || "").split(";")
+        .map((c) => c.trim())
+        .find((c) => c.toLowerCase().startsWith(name.toLowerCase() + "="));
+      return hit ? hit.slice(hit.indexOf("=") + 1) : "";
+    } catch (_) { return ""; }
+  };
+
+  try {
+    out.origin = location.origin;
+    const canary = readCookie("X-OWA-CANARY");
+    out.canaryPresent = !!canary;
+    // Any of these tells us which mailbox to anchor a request to.
+    // Presence only — it is an address.
+    out.mailboxHintPresent = !!(readCookie("X-AnchorMailbox")
+      || readCookie("DefaultAnchorMailbox"));
+
+    const now = new Date();
+    const startIso = new Date(now.getTime() - 86400000).toISOString();
+    const endIso = new Date(now.getTime() + windowDays * 86400000).toISOString();
+
+    // The largest array of objects in the response — the meeting
+    // items, whatever this shape happens to call them (`Items`,
+    // `value`, `Events`). Returned rather than just counted, because
+    // the field scan below has to run INSIDE it and nowhere else.
+    const findItemArray = (value) => {
+      let best = [];
+      const walk = (v, depth) => {
+        if (v === null || typeof v !== "object" || depth > 12) return;
+        if (Array.isArray(v)) {
+          if (v.length > best.length && v.some((x) => x && typeof x === "object")) best = v;
+          for (const x of v.slice(0, 50)) walk(x, depth + 1);
+          return;
+        }
+        for (const k of Object.keys(v)) walk(v[k], depth + 1);
+      };
+      walk(value, 0);
+      return best;
+    };
+
+    // Collect KEY NAMES only, and ONLY from within the meeting items.
+    //
+    // Scanning the whole response instead is a false-positive machine,
+    // and the tests caught it doing exactly that: an EWS reply is
+    // wrapped in a top-level `Body` envelope (the SOAP body), which
+    // collides with a meeting's own `Body` — so EVERY EWS response
+    // scored `body: true` and read as "usable" no matter how empty it
+    // was. That is the same defect as v1.4's join-link probe in a new
+    // costume: a question whose shape guarantees the answer.
+    //
+    // Values are never read, so no calendar content can reach the
+    // report even by accident. Depth- and node-capped: a calendar
+    // response is large and an unbounded walk would hang the tab.
+    const keyNamesIn = (items) => {
+      const found = new Set();
+      let nodes = 0;
+      const walk = (v, depth) => {
+        if (v === null || typeof v !== "object" || depth > 10 || nodes > 20000) return;
+        nodes++;
+        if (Array.isArray(v)) { for (const x of v.slice(0, 50)) walk(x, depth + 1); return; }
+        for (const k of Object.keys(v)) {
+          found.add(k.toLowerCase());
+          walk(v[k], depth + 1);
+        }
+      };
+      for (const item of (items || []).slice(0, 50)) walk(item, 0);
+      return found;
+    };
+
+    for (const cand of candidates) {
+      const entry = {
+        name: cand.name,
+        note: cand.note,
+        method: cand.method,
+        // The PATH only. The origin is reported once above and the
+        // path carries no mailbox or meeting identifier.
+        path: cand.path,
+        status: null,
+        ok: false,
+        contentType: "",
+        bytes: 0,
+        json: false,
+        itemCount: 0,
+        // Which of the fields we actually need showed up, by name.
+        fieldsPresent: {},
+        skipped: "",
+        verdict: "",
+        error: null,
+      };
+
+      if (cand.needsCanary && !canary) {
+        // NOT recorded as "unreachable" — we never asked. Collapsing
+        // "did not ask" into "does not work" is the exact defect this
+        // whole probe exists because of.
+        entry.skipped = "no X-OWA-CANARY cookie in this session";
+        entry.verdict = "not-attempted";
+        out.results.push(entry);
+        continue;
+      }
+
+      try {
+        const headers = { Accept: "application/json" };
+        let body;
+        if (cand.method === "POST") {
+          headers["Content-Type"] = "application/json; charset=utf-8";
+          headers["X-OWA-CANARY"] = canary;
+          headers["Action"] = cand.action;
+          headers["X-Requested-With"] = "XMLHttpRequest";
+          body = JSON.stringify({
+            __type: `${cand.action}JsonRequest:#Exchange`,
+            Header: {
+              __type: "JsonRequestHeaders:#Exchange",
+              RequestServerVersion: "Exchange2013",
+            },
+            Body: {
+              __type: `${cand.action}Request:#Exchange`,
+              // AllProperties, NOT IdOnly. The probe's whole job is to
+              // decide whether attendees/body/join URL come back, and
+              // asking for IdOnly guarantees they do not — which this
+              // probe would then have to record as "answered-thin".
+              // That would be a false negative manufactured by the
+              // question, which is precisely the mistake v1.4's
+              // anchor-only join-link search made. Ask for everything;
+              // let the response be the evidence.
+              ItemShape: {
+                __type: "ItemResponseShape:#Exchange",
+                BaseShape: "AllProperties",
+              },
+              ParentFolderIds: [{ __type: "DistinguishedFolderId:#Exchange", Id: "calendar" }],
+              Traversal: "Shallow",
+              CalendarView: {
+                __type: "CalendarView:#Exchange",
+                StartDate: startIso,
+                EndDate: endIso,
+                MaxEntriesReturned: 50,
+              },
+            },
+          });
+        }
+
+        const url = cand.method === "GET"
+          ? `${location.origin}${cand.path}?startDateTime=${encodeURIComponent(startIso)}&endDateTime=${encodeURIComponent(endIso)}&$top=50`
+          : `${location.origin}${cand.path}`;
+
+        const res = await fetch(url, {
+          method: cand.method,
+          credentials: "include",
+          headers,
+          body,
+        });
+
+        entry.status = res.status;
+        entry.ok = res.ok;
+        entry.contentType = (res.headers.get("content-type") || "").split(";")[0];
+
+        const text = await res.text();
+        entry.bytes = text.length;
+
+        let parsed = null;
+        try { parsed = JSON.parse(text); entry.json = true; } catch (_) { entry.json = false; }
+
+        if (parsed) {
+          const items = findItemArray(parsed);
+          const keys = keyNamesIn(items);
+          entry.itemCount = items.length;
+          for (const [want, aliases] of Object.entries(wantedKeys)) {
+            entry.fieldsPresent[want] = aliases.some((a) => keys.has(a));
+          }
+        }
+
+        // The four states. Order matters: auth is checked before
+        // shape, so a 401 is never described as "thin".
+        if (res.status === 401 || res.status === 403) {
+          entry.verdict = "auth-rejected";
+        } else if (!res.ok) {
+          entry.verdict = "unreachable";
+        } else if (!entry.json) {
+          // A 200 of HTML is a sign-in page, not calendar data.
+          entry.verdict = "unreachable";
+          entry.error = "2xx but the body was not JSON (likely a sign-in redirect)";
+        } else if (entry.fieldsPresent.attendees || entry.fieldsPresent.body
+                   || entry.fieldsPresent.joinUrl) {
+          entry.verdict = "usable";
+        } else {
+          entry.verdict = "answered-thin";
+        }
+      } catch (e) {
+        entry.verdict = "unreachable";
+        entry.error = (e && e.message) ? e.message : String(e);
+      }
+
+      out.results.push(entry);
+    }
+  } catch (e) {
+    out.error = (e && e.message) ? e.message : String(e);
+  }
+
+  return out;
+}
+
+// Wrapper — opens the calendar tab, runs the probe in it, closes it.
+// Mirrors diagnoseCalendarCapture's lifecycle exactly, including the
+// finally-block tab cleanup, so a thrown probe can never leave a
+// stray tab behind in the user's browser.
+async function diagnoseCalendarApi() {
+  const tab = await chrome.tabs.create({ url: CALENDAR_WEEK_URL, active: false });
+  const tabId = tab.id;
+  let probe = null;
+  try {
+    await waitForTabComplete(tabId);
+    // The grid's own first data call has to land before the session is
+    // reliably warm; the existing capture path waits for the same
+    // reason.
+    await sleep(3000);
+    const result = await chrome.scripting.executeScript({
+      target: { tabId },
+      args: [CALENDAR_API_CANDIDATES, CALENDAR_API_WANTED_KEYS, 7],
+      func: _calendarApiProbeFunc,
+    });
+    probe = (result && result[0] && result[0].result) || null;
+  } catch (e) {
+    probe = { error: e.message || String(e), results: [] };
+  } finally {
+    try { await chrome.tabs.remove(tabId); } catch (_) { /* ignore */ }
+  }
+
+  const results = (probe && probe.results) || [];
+  const usable = results.filter((r) => r.verdict === "usable");
+  const thin = results.filter((r) => r.verdict === "answered-thin");
+  const rejected = results.filter((r) => r.verdict === "auth-rejected");
+  const notAttempted = results.filter((r) => r.verdict === "not-attempted");
+
+  // Says what was actually established, and names what was NOT tried
+  // rather than letting a skipped candidate read as a failed one.
+  let verdict;
+  if (usable.length) {
+    const fields = usable[0].fieldsPresent || {};
+    verdict = `${usable.length} endpoint(s) answered with calendar data carrying `
+      + Object.entries(fields).filter(([, v]) => v).map(([k]) => k).join(", ")
+      + ` — the detail fields ARE reachable from the signed-in session without opening each event;`
+      + ` implement against "${usable[0].name}"`;
+  } else if (thin.length) {
+    verdict = `${thin.length} endpoint(s) answered but carried none of attendees/body/joinUrl`
+      + ` — reachable, wrong shape. The request body needs a fuller property set, not a different endpoint.`;
+  } else if (rejected.length) {
+    verdict = `${rejected.length} endpoint(s) were reachable but rejected this session's credentials`
+      + ` (401/403) — an entitlement problem, NOT evidence the API is absent.`;
+  } else if (notAttempted.length === results.length && results.length) {
+    verdict = `nothing was attempted: every candidate needs the X-OWA-CANARY cookie and none was present.`
+      + ` This says nothing about whether the endpoints work — only that this run could not ask.`;
+  } else {
+    verdict = `no candidate answered. ${results.length} tried;`
+      + ` see each result's status and error for which failed how.`;
+  }
+
+  return {
+    ok: true,
+    origin: (probe && probe.origin) || "",
+    canaryPresent: !!(probe && probe.canaryPresent),
+    mailboxHintPresent: !!(probe && probe.mailboxHintPresent),
+    candidatesTried: results.length,
+    results,
+    verdict,
+    error: (probe && probe.error) || null,
+  };
+}
+
 async function diagnoseCalendarCapture() {
   const tab = await chrome.tabs.create({ url: CALENDAR_WEEK_URL, active: false });
   const tabId = tab.id;
