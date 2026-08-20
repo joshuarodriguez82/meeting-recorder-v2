@@ -18,6 +18,7 @@ Linux is untested but should follow the macOS path through PulseAudio /
 PipeWire (loopback exposed as a normal capture source).
 """
 
+import contextlib
 import os
 import sys
 import threading
@@ -43,6 +44,108 @@ if IS_WINDOWS:
     except ImportError as e:
         logger.warning(f"pyaudiowpatch not available on Windows: {e}. "
                        "System audio loopback will be unavailable.")
+
+# PORTAUDIO IS PROCESS-GLOBAL AND NOT THREAD-SAFE.
+#
+# `PyAudio()` calls `Pa_Initialize()` and `.terminate()` calls
+# `Pa_Terminate()`. Those maintain a single process-wide refcount and
+# device list in C, and PortAudio's own documentation is explicit that
+# they must not be called concurrently. Two threads inside them at the
+# same moment corrupt the heap — and because it is a C-level corruption
+# there is no Python exception to catch: the interpreter is killed
+# outright.
+#
+# FIELD CRASH 2026-08-20, and it was an unrecoverable boot loop.
+# faulthandler caught two threads inside pyaudiowpatch simultaneously:
+#
+#   Thread A  _prewarm_audio → list_output_devices → PyAudio.terminate()
+#   Thread B  auto-record starting a recording → PyAudio.__init__()
+#
+#   Windows fatal exception: access violation   (0xC0000005)
+#   ...and on other spawns 0xC0000374, heap corruption — the same fault
+#   surfacing at a different allocation.
+#
+# What made it fatal rather than occasional: the user had a meeting
+# already IN PROGRESS, so `AutoRecordService` fired a recording start
+# within milliseconds of startup — exactly when `_prewarm_audio` runs.
+# The backend died, the supervisor respawned it, the meeting was still
+# in progress, and it died again. Sixteen crash-respawn cycles in four
+# minutes, with the app unusable throughout and no way to reach Settings
+# to turn auto-record off.
+#
+# One lock, held across the whole init → use → terminate span, is the
+# only correct fix: a lock around init alone still permits one thread to
+# terminate while another is enumerating.
+#
+# It is deliberately module-global rather than per-instance — the
+# resource being guarded is the PortAudio library itself, not any one
+# PyAudio object, so per-instance locking would guard nothing.
+_PORTAUDIO_LOCK = threading.RLock()
+
+
+def portaudio_new():
+    """Construct a PyAudio handle with `Pa_Initialize()` serialised.
+
+    For the LONG-LIVED handle a recording owns: it must outlive the
+    call, so it cannot use `portaudio_session` below. Pair it with
+    `portaudio_terminate`.
+
+    The lock is held only across construction, never for the length of
+    a recording — holding it that long would block every device
+    enumeration in the app for the whole call, which is a hang rather
+    than a fix.
+    """
+    if pyaudio is None:
+        raise RuntimeError("pyaudiowpatch is not available on this platform")
+    with _PORTAUDIO_LOCK:
+        return pyaudio.PyAudio()
+
+
+def portaudio_terminate(p) -> None:
+    """Terminate a handle from `portaudio_new` with `Pa_Terminate()`
+    serialised against every other PortAudio entry point.
+
+    Never raises: teardown runs on stop and error paths where a throw
+    would mask the original failure.
+    """
+    if p is None:
+        return
+    try:
+        with _PORTAUDIO_LOCK:
+            p.terminate()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"PortAudio terminate failed: {e}")
+
+
+@contextlib.contextmanager
+def portaudio_session():
+    """Yield a PyAudio handle, exclusively, and always terminate it.
+
+    Every `PyAudio()` / `.terminate()` pair in this module goes through
+    here. Callers must not hold the handle beyond the `with` block —
+    the guarantee is that no other thread is inside PortAudio for its
+    duration, and that ends when the block does.
+
+    Reentrant (`RLock`) because the capture path can legitimately
+    re-enter while already holding it (a device enumeration during
+    stream setup); a plain `Lock` would deadlock that instead of
+    crashing, which is not an improvement.
+    """
+    if pyaudio is None:
+        raise RuntimeError("pyaudiowpatch is not available on this platform")
+    # The lock is held across the WHOLE span, not just construction:
+    # guarding init alone still permits another thread to terminate
+    # while this one is enumerating, which is the same crash.
+    with _PORTAUDIO_LOCK:
+        p = pyaudio.PyAudio()
+        try:
+            yield p
+        finally:
+            try:
+                p.terminate()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"PortAudio terminate failed: {e}")
+
 
 SAMPLE_RATE = 16000
 BLOCK_SIZE = 1024
@@ -274,26 +377,33 @@ def list_output_devices() -> List[dict]:
 
     if IS_WINDOWS and pyaudio is not None:
         try:
-            p = pyaudio.PyAudio()
-            wasapi_info = None
-            for i in range(p.get_host_api_count()):
-                api = p.get_host_api_info_by_index(i)
-                if api["name"] == "Windows WASAPI":
-                    wasapi_info = api
-                    break
+            # Under portaudio_session, so a recording starting on
+            # another thread cannot be inside Pa_Initialize() while this
+            # enumeration is inside Pa_Terminate(). That exact pair
+            # crash-looped the backend on 2026-08-20 — see the comment
+            # on _PORTAUDIO_LOCK. The terminate that used to sit at the
+            # end of this block is now the context manager's, so an
+            # exception mid-enumeration also releases PortAudio instead
+            # of leaking an initialised library.
+            with portaudio_session() as p:
+                wasapi_info = None
+                for i in range(p.get_host_api_count()):
+                    api = p.get_host_api_info_by_index(i)
+                    if api["name"] == "Windows WASAPI":
+                        wasapi_info = api
+                        break
 
-            if wasapi_info:
-                for i in range(wasapi_info["deviceCount"]):
-                    dev = p.get_device_info_by_host_api_device_index(
-                        wasapi_info["index"], i)
-                    if dev.get("isLoopbackDevice", False):
-                        devices.append({
-                            "index": dev["index"],
-                            "name": dev["name"],
-                            "channels": int(dev["maxInputChannels"]),
-                            "default_samplerate": dev["defaultSampleRate"],
-                        })
-            p.terminate()
+                if wasapi_info:
+                    for i in range(wasapi_info["deviceCount"]):
+                        dev = p.get_device_info_by_host_api_device_index(
+                            wasapi_info["index"], i)
+                        if dev.get("isLoopbackDevice", False):
+                            devices.append({
+                                "index": dev["index"],
+                                "name": dev["name"],
+                                "channels": int(dev["maxInputChannels"]),
+                                "default_samplerate": dev["defaultSampleRate"],
+                            })
         except Exception as e:
             logger.warning(f"Could not enumerate loopback devices: {e}")
     else:
@@ -525,7 +635,13 @@ class AudioCapture:
     def _start_loopback_windows(self) -> None:
         """WASAPI loopback path (pyaudiowpatch)."""
         try:
-            self._pa = pyaudio.PyAudio()
+            # portaudio_new, not PyAudio() — Pa_Initialize() here used to
+            # race the audio pre-warm's Pa_Terminate() and take the whole
+            # process down with an access violation. This handle is
+            # long-lived (it owns the loopback stream for the recording),
+            # so it cannot use portaudio_session; it pairs with
+            # portaudio_terminate on every teardown path below.
+            self._pa = portaudio_new()
             dev_info = self._pa.get_device_info_by_index(self._out_idx)
             self._loopback_channels = int(dev_info["maxInputChannels"])
             self._loopback_sr = int(dev_info["defaultSampleRate"])
@@ -565,10 +681,7 @@ class AudioCapture:
             logger.warning(f"System audio capture unavailable: {e}. Mic only.")
             self._out_idx = None
             if self._pa:
-                try:
-                    self._pa.terminate()
-                except Exception:
-                    pass
+                portaudio_terminate(self._pa)
                 self._pa = None
 
     def _start_loopback_macos(self) -> None:
@@ -723,8 +836,13 @@ class AudioCapture:
             pa = self._pa
             self._pa = None
             logger.info("[capture.stop] pa.terminate() …")
+            # portaudio_terminate, so Pa_Terminate() cannot run while a
+            # device enumeration on another thread is inside
+            # Pa_Initialize(). Still wrapped in _run_with_timeout: the
+            # 2s guard is for a terminate that HANGS, which is a
+            # different failure from the race and both are real.
             _run_with_timeout(
-                lambda: pa.terminate(), 2.0, "pa.terminate"
+                lambda: portaudio_terminate(pa), 2.0, "pa.terminate"
             )
             logger.info("[capture.stop] pa terminated")
         logger.info(f"Audio capture stopped. Total chunks captured: {self._chunk_count}")
