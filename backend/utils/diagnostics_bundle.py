@@ -326,7 +326,118 @@ def app_version() -> Optional[str]:
     return None
 
 
-def gather_versions() -> Dict[str, Any]:
+#: What ``extension_last_seen_version`` says when the extension HAS
+#: posted but the build that posted predates version reporting
+#: (background.js only started sending
+#: ``chrome.runtime.getManifest().version`` in 1.2.0). Deliberately not
+#: None: null is reserved for "nothing has ever posted", and collapsing
+#: the two is the exact ambiguity this field exists to remove.
+EXTENSION_VERSION_UNREPORTED = "unknown (extension predates version reporting)"
+
+
+def extension_last_seen(settings: Any = None) -> Dict[str, Any]:
+    """What the extension store actually recorded about the last POST.
+
+    Returns ``{"extension_last_seen_version", "extension_last_seen_at",
+    "extension_version_status"}``.
+
+    WHY THIS ISN'T A CONSTANT ANY MORE
+    ----------------------------------
+    ``gather_versions`` used to emit ``"extension_last_seen_version":
+    None`` as a literal, so every exported ``versions.json`` said null
+    no matter what. A real bundle exported at 21:04 had an
+    ``events.jsonl`` line for an import at 21:03:27 carrying
+    ``extension_version: "1.4.0"`` — 37 seconds earlier, in the SAME
+    zip — while ``versions.json`` in that zip reported null. The store
+    knew; the export never asked. That is the same defect as the
+    pre-v2.38.0 ``app_version: null``, and it costs a round trip on
+    every bug report just to establish which extension build produced
+    the behaviour.
+
+    ``ExtensionCalendarService.capture_status`` is the same source the
+    Settings → Chrome Extension card reads through ``/extension/info``,
+    and ``extension_bundle_service.extension_version_status`` is the
+    same classifier, so the zip cannot disagree with what the user is
+    looking at in the app.
+
+    THREE STATES, KEPT DISTINCT
+    ---------------------------
+      * posted AND reported a version → that version string.
+      * posted but the build predates version reporting →
+        :data:`EXTENSION_VERSION_UNREPORTED`, never null.
+      * nothing has ever posted → ``None``. The only null case.
+
+    ``extension_last_seen_at`` is what separates the second state from
+    the third at the data level (see ``capture_status``'s docstring),
+    and ``extension_version_status`` carries the classifier's own
+    verdict — "never_posted" / "unknown_version" / "up_to_date" /
+    "update_available" / "unknown".
+
+    Never raises. The store lives in ``recordings_dir``, which a
+    diagnostics export must be able to run without: an absent, corrupt
+    or un-downloaded store degrades to the "nothing has ever posted"
+    shape, exactly like the rest of this module degrades to null rather
+    than guessing.
+    """
+    out: Dict[str, Any] = {
+        "extension_last_seen_version": None,
+        "extension_last_seen_at": None,
+        "extension_version_status": "unknown",
+    }
+    data_dir = ""
+    try:
+        data_dir = str(getattr(settings, "recordings_dir", "") or "").strip()
+    except Exception:  # noqa: BLE001
+        data_dir = ""
+    if not data_dir:
+        # No settings handed in (a bare gather_versions() call). Fall
+        # back to the same default recordings location the app uses so
+        # the field still reports rather than reporting null-by-omission
+        # — which is the bug.
+        try:
+            from config.settings import USER_DATA_DIR
+            data_dir = str(Path(USER_DATA_DIR) / "recordings")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"Diagnostics export could not locate the extension calendar "
+                f"store ({e}); extension_last_seen_version will say null.")
+            return out
+    try:
+        from services.extension_calendar_service import ExtensionCalendarService
+        status = ExtensionCalendarService(Path(data_dir)).capture_status()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"Diagnostics export could not read the extension calendar store "
+            f"({e}); extension_last_seen_version will say null.")
+        return out
+
+    seen_version = status.get("last_seen_version") or None
+    seen_at = status.get("last_seen_version_at") or None
+    out["extension_last_seen_at"] = seen_at
+    if seen_version:
+        out["extension_last_seen_version"] = seen_version
+    elif seen_at:
+        out["extension_last_seen_version"] = EXTENSION_VERSION_UNREPORTED
+    try:
+        from services.extension_bundle_service import (
+            bundled_extension_version, extension_version_status,
+        )
+        out["extension_version_status"] = extension_version_status(
+            bundled_extension_version(), seen_version, seen_at)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Extension version status unavailable ({e})")
+    return out
+
+
+def gather_versions(settings: Any = None) -> Dict[str, Any]:
+    """Versions of everything that could plausibly explain a bug.
+
+    ``settings`` is optional and is used only to locate the extension
+    calendar store (``recordings_dir``) — see ``extension_last_seen``.
+    Passing it is how the real export reaches the recorded extension
+    version; omitting it falls back to the default location rather than
+    to null.
+    """
     import sys
     out: Dict[str, Any] = {
         "app_version": app_version(),
@@ -334,7 +445,6 @@ def gather_versions() -> Dict[str, Any]:
         "python_implementation": platform.python_implementation(),
         "event_log_schema": None,
         "extension_bundled_version": None,
-        "extension_last_seen_version": None,
     }
     try:
         from utils import events
@@ -346,6 +456,11 @@ def gather_versions() -> Dict[str, Any]:
         out["extension_bundled_version"] = bundled_extension_version()
     except Exception:
         pass
+    # What the extension last told us, READ from the store rather than
+    # hardcoded. `extension_bundled_version` above is the model: both
+    # halves of "which extension build is involved" now come from real
+    # data, so the two can actually be compared in a bug report.
+    out.update(extension_last_seen(settings))
     for mod in ("numpy", "torch", "soundfile", "sounddevice", "fastapi"):
         try:
             m = __import__(mod)
@@ -523,7 +638,10 @@ def build_diagnostics_zip(
         payload["crash.log.tail.txt"] = "(crash log unavailable)"
 
     # 3. versions / system / devices
-    payload["versions.json"] = json.dumps(gather_versions(), indent=2)
+    # `settings` is threaded in so `extension_last_seen` can find the
+    # extension calendar store under the user's real recordings_dir.
+    payload["versions.json"] = json.dumps(
+        gather_versions(settings), indent=2)
     payload["system.json"] = json.dumps(gather_system(), indent=2)
     if include_audio_devices:
         payload["audio-devices.json"] = json.dumps(

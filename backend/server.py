@@ -1271,6 +1271,18 @@ class StartRecordingRequest(BaseModel):
     client_source: Optional[str] = None
     client_source_detail: Optional[str] = None
     attendees: list[str] = []
+    # Who called the meeting, from the calendar invite's organiser
+    # field. Sent by both calendar-driven start paths — the Record
+    # tab's Use button and `_auto_record_start` — and left "" for an
+    # ad-hoc recording. See Session.organizer for why this matters
+    # more than it looks: for an extension-sourced calendar it is the
+    # ONLY invite-derived name available, because `attendees` above is
+    # always empty there.
+    #
+    # Optional with an empty default on purpose. A client that doesn't
+    # send it (an older frontend, a script, the Start button on an
+    # ad-hoc recording) starts a recording exactly as before.
+    organizer: str = ""
     # ISO datetime when the meeting is scheduled to end, when this
     # recording was started from a calendar entry. Optional. Used by
     # the auto-stop watchdog to warn / stop after the meeting overruns
@@ -2609,6 +2621,11 @@ def _start_recording_sync(req: StartRecordingRequest):
     session.client_source = req.client_source or None
     session.client_source_detail = req.client_source_detail or None
     session.attendees = req.attendees or []
+    # The invite's organiser. Coerced to a plain string here so the
+    # session field is never None regardless of what the client sent —
+    # core/speaker_roster.roster_names() reads it positionally and ""
+    # is its documented "no organiser" input.
+    session.organizer = str(req.organizer or "")
     svc.current_session = session
     svc.record_started_at = datetime.now()
     return session
@@ -2749,6 +2766,53 @@ def _resolve_client_for_meeting(subject: str, attendees: list) -> dict:
     return res.to_dict()
 
 
+def _organizer_for_meeting(meeting: Any) -> str:
+    """The invite's organiser for one merged calendar meeting, or "".
+
+    All three calendar backends already emit an ``organizer`` key on
+    every meeting dict — ``_calendar_outlook._parse_appointment`` /
+    ``_parse_appointment_any_date`` (Outlook COM's ``Organizer``),
+    ``_calendar_eventkit._serialize_event`` (EventKit's
+    ``organizer().name()``, and the Rust calendar cache's own
+    ``organizer`` field), and
+    ``extension_calendar_service.events_from_structured`` (the Outlook
+    Web aria-label tail, added in v2.40.0). ``calendar_feed`` merges
+    whole dicts and ``_serialize_meetings`` spreads them, so the key
+    survives to both record-start paths untouched. This function is
+    just the total, never-raising read of it.
+
+    TOTAL BY CONSTRUCTION, for the same reason
+    ``_resolve_client_for_meeting`` is: the caller's real job is
+    STARTING A RECORDING. A meeting that arrives without the key, with
+    None, or as something that isn't a dict at all must cost the user
+    a name in the roster — never the recording. Everything degrades to
+    "" , which is precisely the state every pre-organiser session is
+    already in.
+    """
+    try:
+        raw = meeting.get("organizer") if hasattr(meeting, "get") else None
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"organiser lookup failed ({e}); continuing without one")
+        return ""
+    # Only a STRING is an organiser. A number or an object from a
+    # third-party backend is coerced to "" rather than str()'d — the
+    # roster prints its entries as people, so "42" would render as a
+    # participant who does not exist. Same refusal
+    # core/speaker_roster.roster_names() makes for a non-string
+    # attendee entry.
+    if not isinstance(raw, str):
+        if raw is not None:
+            logger.warning(
+                f"calendar organiser was {type(raw).__name__}, not a string; "
+                f"continuing without one")
+        return ""
+    try:
+        return raw.strip()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"organiser value unusable ({e}); continuing without one")
+        return ""
+
+
 def _auto_record_start(meeting: dict) -> None:
     """Adapter the AutoRecordService calls when a meeting window opens.
     Synthesizes a StartRecordingRequest from the calendar event and hands
@@ -2793,9 +2857,22 @@ def _auto_record_start(meeting: dict) -> None:
     except Exception as e:
         logger.warning(f"auto-record: client resolution skipped ({e})")
 
+    # The invite's organiser, obtained the same way client/project are
+    # above: from the meeting already in hand, additively, and behind a
+    # belt-and-braces try even though `_organizer_for_meeting` swallows
+    # its own failures. A missing organiser is a missing NAME, not a
+    # missing recording — this block must never be able to return
+    # early or raise.
+    organizer = ""
+    try:
+        organizer = _organizer_for_meeting(meeting)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"auto-record: organiser resolution skipped ({e})")
+
     req = StartRecordingRequest(
         meeting_name=name,
         attendees=list(meeting.get("attendees") or []),
+        organizer=organizer,
         client=resolution.get("client") or "",
         project=resolution.get("project") or "",
         client_source=resolution.get("method") or None,
@@ -4110,13 +4187,21 @@ async def _auto_identify_and_save_speakers(session) -> int:
         mapping = await svc.summarizer.identify_speakers(
             session.full_transcript(),
             attendees=list(getattr(session, "attendees", None) or []),
-            # SEAM, not a stub. `Session` carries no `organizer` field
-            # today — organiser extraction is being added to the Chrome
-            # extension on a separate branch, and StartRecordingRequest
-            # would need the field too. Reading it defensively means the
-            # organiser joins the roster the moment that field lands,
-            # with no change here; until then this is the empty string
-            # and roster_names() ignores it.
+            # The seam is now CONNECTED. `Session.organizer` is set at
+            # record start from the calendar event on both paths (the
+            # Record tab's Use button and `_auto_record_start`), so the
+            # organiser leads the roster — see core/speaker_roster.py's
+            # `roster_names`. Still read with `getattr`/`or ""` because
+            # this function is handed sessions rehydrated from JSON
+            # written before the field existed, and the empty string is
+            # the documented "no organiser" input.
+            #
+            # This is the one invite-derived name an extension-sourced
+            # calendar can supply at all: that scrape reads Outlook
+            # Web's grid aria-label, which carries the organiser and
+            # NOT the attendee list, so `attendees` above is [] for a
+            # user whose whole calendar comes from the extension. For
+            # them the organiser is the entire roster.
             organizer=str(getattr(session, "organizer", "") or ""),
         )
     except Exception as e:

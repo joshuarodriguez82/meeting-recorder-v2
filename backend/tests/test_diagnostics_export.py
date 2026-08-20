@@ -400,3 +400,138 @@ def test_zip_bundle_stamps_the_version_into_the_runtime_bundle():
     source = zip_bundle.read_text(encoding="utf-8")
     assert 'VERSION_FILE = "app_version.txt"' in source
     assert "zf.writestr(VERSION_FILE" in source
+
+
+# ── the extension version the store actually recorded ────────────────
+#
+# `extension_last_seen_version` used to be the literal `None` in
+# `gather_versions`, so every exported versions.json said null no matter
+# what. A real field bundle exported at 21:04 carried an events.jsonl
+# line for an import at 21:03:27 with `extension_version: "1.4.0"` — 37
+# seconds earlier, in the SAME zip — while versions.json in that zip
+# said null. Same defect as the pre-v2.38.0 `app_version: null`: the
+# store knew, the export never asked. `extension_bundled_version`, one
+# line above it in the same dict, was read from real data all along.
+
+
+def _ext_settings(recordings_dir: Path) -> "_Settings":
+    s = _Settings()
+    s.recordings_dir = str(recordings_dir)
+    return s
+
+
+def _store_with(recordings_dir: Path, version, at="2026-08-19T21:03:27"):
+    """Write the extension calendar store the way a real POST does —
+    through the service itself rather than by hand-writing JSON, so this
+    breaks if the recorded shape ever changes."""
+    from datetime import datetime
+
+    from services.extension_calendar_service import ExtensionCalendarService
+    recordings_dir.mkdir(parents=True, exist_ok=True)
+    svc = ExtensionCalendarService(recordings_dir)
+    svc.record_extension_version(version, now=datetime.fromisoformat(at))
+    return svc
+
+
+def test_the_recorded_extension_version_reaches_versions_json(tmp_path):
+    """The state that matters most: the extension posted and said which
+    build it was. That string has to come out the other end."""
+    rec = tmp_path / "recordings"
+    _store_with(rec, "1.4.0")
+
+    versions = db.gather_versions(_ext_settings(rec))
+
+    assert versions["extension_last_seen_version"] == "1.4.0"
+    assert versions["extension_last_seen_at"].startswith("2026-08-19T21:03:27")
+
+
+def test_the_extension_version_is_read_not_hardcoded(tmp_path):
+    """THE REGRESSION GUARD. A hardcoded field satisfies any
+    single-value assertion, so this asserts against TWO different
+    stores: no constant — null or otherwise — can satisfy both."""
+    first = tmp_path / "a"
+    second = tmp_path / "b"
+    _store_with(first, "1.4.0")
+    _store_with(second, "1.2.0")
+
+    got_first = db.gather_versions(_ext_settings(first))
+    got_second = db.gather_versions(_ext_settings(second))
+
+    assert got_first["extension_last_seen_version"] == "1.4.0"
+    assert got_second["extension_last_seen_version"] == "1.2.0"
+
+
+def test_never_posted_is_the_only_state_that_reads_as_null(tmp_path):
+    """Nothing has ever POSTed — no store on disk at all. This is the
+    ONE case null is the honest answer for, which is exactly why the
+    other two must not use it."""
+    versions = db.gather_versions(_ext_settings(tmp_path / "empty"))
+
+    assert versions["extension_last_seen_version"] is None
+    assert versions["extension_last_seen_at"] is None
+    assert versions["extension_version_status"] in ("never_posted", "unknown")
+
+
+def test_an_extension_too_old_to_report_its_version_says_so(tmp_path):
+    """background.js only started sending
+    `chrome.runtime.getManifest().version` in 1.2.0. An older build
+    posts and reports nothing. Collapsing that into null makes it
+    indistinguishable from "nothing has ever posted" — the difference
+    between "your extension is ancient" and "your extension never ran",
+    which are two completely different bug reports."""
+    rec = tmp_path / "recordings"
+    _store_with(rec, None)
+
+    versions = db.gather_versions(_ext_settings(rec))
+
+    assert versions["extension_last_seen_version"] is not None
+    assert versions["extension_last_seen_version"] == (
+        db.EXTENSION_VERSION_UNREPORTED)
+    # The timestamp is what carries "it DID post" at the data level.
+    assert versions["extension_last_seen_at"].startswith("2026-08-19T21:03:27")
+
+
+def test_the_exported_zip_carries_the_recorded_extension_version(
+        tmp_path, monkeypatch):
+    """The end the user actually sends: the file inside the zip, built
+    through the real `build_diagnostics_zip` rather than by calling
+    `gather_versions` directly — the wiring between the two is the half
+    that was missing."""
+    root = _make_log_dir(tmp_path)
+    monkeypatch.setenv("MEETING_RECORDER_LOG_DIR", str(root))
+    rec = tmp_path / "recordings"
+    _store_with(rec, "1.4.0")
+
+    result = db.build_diagnostics_zip(
+        settings=_ext_settings(rec), log_dir=root, out_dir=tmp_path / "out")
+
+    with zipfile.ZipFile(result["path"]) as zf:
+        versions = json.loads(zf.read("versions.json"))
+    assert versions["extension_last_seen_version"] == "1.4.0"
+
+
+def test_an_unreadable_store_degrades_to_null_rather_than_raising(
+        tmp_path, monkeypatch):
+    """A diagnostics export must survive anything — it is the thing the
+    user runs when the app is already broken. A store that cannot be
+    read reports the same shape as "never posted"."""
+    from services.extension_calendar_service import ExtensionCalendarService
+
+    def _explode(self, *a, **kw):
+        raise RuntimeError("store is an un-downloaded cloud placeholder")
+
+    monkeypatch.setattr(ExtensionCalendarService, "capture_status", _explode)
+
+    versions = db.gather_versions(_ext_settings(tmp_path / "recordings"))
+    assert versions["extension_last_seen_version"] is None
+
+
+def test_the_export_never_leaks_the_recordings_path_it_read(tmp_path):
+    """`recordings_dir` is presence-only in the redacted settings
+    because it carries the user's account name. Using it to LOCATE the
+    extension store must not put it into the output."""
+    rec = tmp_path / "recordings"
+    _store_with(rec, "1.4.0")
+
+    versions = db.gather_versions(_ext_settings(rec))
+    assert str(rec) not in json.dumps(versions)
