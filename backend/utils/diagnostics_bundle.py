@@ -445,6 +445,16 @@ def gather_versions(settings: Any = None) -> Dict[str, Any]:
         "python_implementation": platform.python_implementation(),
         "event_log_schema": None,
         "extension_bundled_version": None,
+        # Placeholders only, so the three extension fields stay next to
+        # `extension_bundled_version` in the exported JSON. They are
+        # REPLACED below from the extension calendar store — see
+        # `extension_last_seen`, and see
+        # test_diagnostics_export.py::test_the_extension_version_is_
+        # read_not_hardcoded, which asserts against two different stores
+        # so no constant left here can survive.
+        "extension_last_seen_version": None,
+        "extension_last_seen_at": None,
+        "extension_version_status": "unknown",
     }
     try:
         from utils import events
@@ -456,17 +466,19 @@ def gather_versions(settings: Any = None) -> Dict[str, Any]:
         out["extension_bundled_version"] = bundled_extension_version()
     except Exception:
         pass
-    # What the extension last told us, READ from the store rather than
-    # hardcoded. `extension_bundled_version` above is the model: both
-    # halves of "which extension build is involved" now come from real
-    # data, so the two can actually be compared in a bug report.
-    out.update(extension_last_seen(settings))
     for mod in ("numpy", "torch", "soundfile", "sounddevice", "fastapi"):
         try:
             m = __import__(mod)
             out[f"{mod}_version"] = str(getattr(m, "__version__", "unknown"))
         except Exception:
             out[f"{mod}_version"] = "not installed"
+    # What the extension last told us, READ from the store rather than
+    # hardcoded. `extension_bundled_version` above is the model: both
+    # halves of "which extension build is involved" now come from real
+    # data, so the two can finally be compared in a bug report. Updates
+    # the placeholders seeded above, so their position in the exported
+    # JSON is unchanged.
+    out.update(extension_last_seen(settings))
     return out
 
 
