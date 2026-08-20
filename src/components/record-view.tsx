@@ -269,7 +269,14 @@ export function RecordView({
           loading: false,
           data: {
             attendees: m.attendees || [],
-            body: "",
+            // Was hardcoded "" — the browser capture had no invite
+            // body to give, so every extension-sourced row read "(No
+            // description on this invite.)" whether or not the invite
+            // actually had one. Extension 1.7 records Outlook's own
+            // calendar responses, which DO carry it, so the real value
+            // is passed through and the empty case now means what it
+            // says.
+            body: m.body || "",
             join_url: m.join_url || null,
           },
         },

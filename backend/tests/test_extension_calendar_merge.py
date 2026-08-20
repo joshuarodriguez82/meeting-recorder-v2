@@ -750,3 +750,48 @@ def test_capture_status_tolerates_corrupt_store(tmp_path: Path):
     (tmp_path / "extension_calendar.json").write_text("{not json", encoding="utf-8")
     status = svc.capture_status()
     assert status["event_count"] == 0
+
+
+# ── The invite body (v2.43.0) ────────────────────────────────────────
+#
+# The calendar grid has never rendered a description, so every
+# extension-sourced meeting read "(No description on this invite.)"
+# whether or not the invite had one. Extension 1.7 records Outlook's
+# own calendar responses, which do carry it. These pin the store's end
+# of that: it round-trips, it is bounded, and an event written before
+# the field existed still loads.
+
+
+def test_invite_body_round_trips_through_the_store(tmp_path: Path):
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 11, 12, 0)
+    svc.replace_all(
+        [ext("Quarterly review", now + timedelta(hours=2),
+             body="Agenda: numbers, then the roadmap.")],
+        now=now)
+    back = ExtensionCalendarService(tmp_path).get_events()
+    assert back[0]["body"] == "Agenda: numbers, then the roadmap."
+
+
+def test_an_event_stored_before_the_body_field_existed_still_loads(tmp_path: Path):
+    # The state of every event in every existing install. A missing
+    # field must read as "" — the same value a description-less invite
+    # has — rather than raising.
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 11, 12, 0)
+    legacy = ext("Legacy meeting", now + timedelta(hours=1))
+    legacy.pop("body", None)
+    svc.replace_all([legacy], now=now)
+    back = ExtensionCalendarService(tmp_path).get_events()
+    assert back[0]["body"] == ""
+
+
+def test_a_runaway_invite_body_is_capped_at_the_store(tmp_path: Path):
+    # The extension trims too, but that stops being true the moment
+    # anything else POSTs — this boundary is the one that holds.
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 11, 12, 0)
+    svc.replace_all(
+        [ext("Long one", now + timedelta(hours=1), body="x" * 50_000)], now=now)
+    back = ExtensionCalendarService(tmp_path).get_events()
+    assert len(back[0]["body"]) == 8000

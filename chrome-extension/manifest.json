@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Meeting Recorder \u2014 Capture OWA + Teams",
   "description": "Captures today's Outlook calendar + Teams Activity from your already-signed-in Chrome session and sends it to the local Meeting Recorder app. Avoids Microsoft's automation-blocking of Playwright/Puppeteer by running in YOUR real browser.",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "permissions": [
     "tabs",
     "scripting",

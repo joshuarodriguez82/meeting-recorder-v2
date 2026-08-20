@@ -1690,11 +1690,17 @@ function extractEventsFromCandidates(candidates, opts = {}) {
       // "Microsoft Teams Meeting"), and left "" — exactly the value it
       // always had — otherwise. A non-conferencing URL never reaches
       // this field; it is a location and goes in `location`.
-      // Still deliberately NOT backfilled by opening each event to
-      // scrape its detail pane: that is slow, fragile, and exactly the
-      // DOM dependency that broke calendar capture before — an owner
-      // decision, not a default.
+      // v1.7: also filled from Outlook's OWN calendar response when
+      // one carried a join URL for this meeting (the Teams case, whose
+      // URL is in the invite body and never in the label). See
+      // mergeDetailIntoEvents.
       join_url: joinUrl,
+      // The invite body / agenda. Empty here and filled by
+      // mergeDetailIntoEvents when Outlook's response carried it —
+      // the grid has never rendered a description, which is why the
+      // Record tab said "(No description on this invite.)" on every
+      // row. HTML is reduced to text before it gets this far.
+      body: "",
     });
     stats.layerCounts[layer] = (stats.layerCounts[layer] || 0) + 1;
     stats.parsed++;
@@ -2146,6 +2152,319 @@ async function goToNextCalendarWeek(tabId) {
 // nothing at all; `stabilized` is false if the max-wait budget ran out
 // without the count ever settling (see classifyZeroReason's
 // "page still rendering" case).
+// ──────────────────────────────────────────────────────────────────
+// Response capture (v1.7) — read Outlook's OWN calls instead of
+// making our own.
+// ──────────────────────────────────────────────────────────────────
+//
+// THE HISTORY THAT PRODUCED THIS, because it is the whole argument.
+//
+// Three fields are empty on every extension-sourced meeting — the
+// Teams join URL, the attendee list, and the invite body. All three
+// live in the event detail, which the calendar grid does not render.
+// Field data settled that: `anchorCount: 0`, `labelJoinCount: 1`
+// across a full week, and v1.5's label extraction correctly found the
+// one and only link that existed.
+//
+// v1.6 then tried to fetch the detail from the API directly, and
+// failed for a reason worth writing down. It shipped four candidate
+// endpoints, all modelled on classic OWA on `outlook.office.com`. The
+// field run came back:
+//
+//     origin: "https://outlook.cloud.microsoft"
+//     canaryPresent: false
+//     rest-v2-calendarview: 401 auth-rejected
+//
+// That tenant is the NEW Outlook web stack. It has no X-OWA-CANARY —
+// not missing, not applicable — and authenticates with bearer tokens,
+// so three candidates were never attempted and the fourth was
+// rejected. Every guess was wrong, and each guess cost a full
+// release/reinstall/re-run cycle on the user's side.
+//
+// THE LESSON IS NOT "guess better endpoints." It is that replicating
+// somebody else's authenticated request means tracking their auth
+// scheme forever, and this project cannot observe that scheme from
+// here. Any fix shaped like "call endpoint X with credential Y" is one
+// Microsoft change away from another cycle.
+//
+// So this does not make a request at all.
+//
+// Outlook is ALREADY fetching every one of these fields — it has to,
+// to render the calendar. This installs a passive recorder in the
+// page before Outlook's own scripts run, lets Outlook authenticate
+// however it likes to whatever endpoint it likes, and reads the
+// responses on the way back. No endpoint to guess. No token ever
+// handled by this extension. Works on classic OWA and the new stack
+// identically, because it does not care which one is running.
+//
+// WHY MAIN WORLD. A content script's `fetch` is the isolated world's
+// own, which is NOT the object page scripts call — patching it there
+// records nothing. `world: "MAIN"` puts the patch on the page's real
+// globals. And it must be registered at `document_start`: Outlook's
+// calendar request is in flight within a second of navigation, and a
+// recorder installed after it is a recorder that missed it.
+//
+// WHAT IT DOES NOT DO. It never modifies a request, never blocks one,
+// never reads a credential, and never sends anything anywhere — the
+// patch is read-only pass-through and stores parsed bodies on a page
+// global that the extension reads back once and then drops. Request
+// headers, including Authorization, are never touched.
+
+// Reads back what the recorder collected and CLEARS it, so a second
+// week's navigation starts from empty rather than re-harvesting the
+// first week's bodies.
+function _harvestCalendarResponses() {
+  try {
+    const s = window.__mrCal;
+    if (!s) return { bodies: [], seen: 0, matched: 0, dropped: 0, installed: false };
+    const out = {
+      bodies: s.bodies, seen: s.seen, matched: s.matched,
+      dropped: s.dropped, installed: true,
+    };
+    s.bodies = [];
+    s.bytes = 0;
+    return out;
+  } catch (e) {
+    return { bodies: [], seen: 0, matched: 0, dropped: 0, installed: false,
+             error: (e && e.message) || String(e) };
+  }
+}
+
+// Pull the three detail fields out of whatever shape the tenant's API
+// returned, and key them by subject + start so they can be matched to
+// the events the DOM scan already produced.
+//
+// SHAPE-AGNOSTIC ON PURPOSE. Classic OWA (EWS-over-JSON) and the new
+// stack (Graph-ish) name these fields differently and nest them
+// differently, and v1.6 proved this project cannot know in advance
+// which one a tenant runs. So rather than parse a schema, this walks
+// the response for any object that looks like a meeting — has a
+// subject-ish key AND a start-ish key — and reads the aliases it
+// knows. An unrecognised shape yields nothing, which is exactly the
+// behaviour the fields had before this existed.
+const DETAIL_KEYS = {
+  subject: ["subject", "title", "normalizedsubject"],
+  start: ["start", "starttime", "startdate", "originalstart", "startdatetime"],
+  attendees: ["attendees", "requiredattendees", "optionalattendees", "participants"],
+  body: ["body", "bodypreview", "description", "textbody"],
+  joinUrl: ["joinurl", "onlinemeetingurl", "skypeteamsmeetingurl", "joinweburl"],
+  onlineMeeting: ["onlinemeeting", "onlinemeetinginformation"],
+};
+
+function _pick(obj, aliases) {
+  for (const k of Object.keys(obj || {})) {
+    if (aliases.includes(k.toLowerCase())) return obj[k];
+  }
+  return undefined;
+}
+
+// A datetime out of any of the shapes these APIs use: a bare ISO
+// string, {DateTime: "..."}, or {dateTime: "...", timeZone: "..."}.
+function _detailDateTime(v) {
+  if (!v) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "object") {
+    const inner = _pick(v, ["datetime", "date"]);
+    if (typeof inner === "string") return inner;
+  }
+  return "";
+}
+
+// Attendee display names. Names only — an address is a person's
+// contact detail and nothing downstream needs it here; the roster
+// wants names. Falls back to the address's local part ONLY when there
+// is no name at all, since "no attendees" and "attendees we could not
+// name" are different states and the roster can use either.
+function _detailAttendees(v) {
+  const out = [];
+  const push = (entry) => {
+    if (!entry) return;
+    if (typeof entry === "string") { out.push(entry); return; }
+    if (typeof entry !== "object") return;
+    const name = _pick(entry, ["name", "displayname"]);
+    if (typeof name === "string" && name.trim()) { out.push(name.trim()); return; }
+    const email = _pick(entry, ["emailaddress", "address", "mailbox"]);
+    if (typeof email === "string" && email.includes("@")) { out.push(email.trim()); return; }
+    if (email && typeof email === "object") {
+      const n = _pick(email, ["name", "displayname"]);
+      const a = _pick(email, ["address", "emailaddress"]);
+      if (typeof n === "string" && n.trim()) out.push(n.trim());
+      else if (typeof a === "string" && a.trim()) out.push(a.trim());
+    }
+  };
+  if (Array.isArray(v)) v.forEach(push);
+  else push(v);
+  // De-duped case-insensitively; a meeting can list the same person as
+  // both required and optional.
+  const seen = new Set();
+  return out.filter((n) => {
+    const k = n.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+function _detailBody(v) {
+  if (typeof v === "string") return v;
+  if (v && typeof v === "object") {
+    const c = _pick(v, ["content", "text", "value"]);
+    if (typeof c === "string") return c;
+  }
+  return "";
+}
+
+// HTML bodies are the norm. The invite body is shown to the user and
+// fed to the briefing, so it wants to be readable text, not markup.
+function _stripHtml(html) {
+  if (!html || !/<[a-z!/]/i.test(html)) return (html || "").trim();
+  return html
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|tr|li|h[1-6])>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// Same key the DOM extraction uses (subject|startIso) so the two sides
+// line up. Start is normalised to minute precision: the API returns
+// seconds and a timezone, the label parse does not, and an exact
+// string compare would match nothing.
+function detailKey(subject, startIso) {
+  const subj = String(subject || "").trim().toLowerCase();
+  const s = String(startIso || "");
+  const m = s.match(/(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  if (!subj || !m) return "";
+  return `${subj}|${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}`;
+}
+
+// Walk captured response bodies and return Map(key -> {attendees,
+// body, joinUrl}). Node- and depth-capped: these payloads are large
+// and an unbounded walk would stall the service worker.
+function detailsFromResponses(bodies) {
+  const found = new Map();
+  let nodes = 0;
+
+  const visit = (v, depth) => {
+    if (v === null || typeof v !== "object" || depth > 14 || nodes > 200000) return;
+    nodes++;
+    if (Array.isArray(v)) {
+      for (const x of v) visit(x, depth + 1);
+      return;
+    }
+
+    const subject = _pick(v, DETAIL_KEYS.subject);
+    const startRaw = _pick(v, DETAIL_KEYS.start);
+    if (typeof subject === "string" && startRaw !== undefined) {
+      const key = detailKey(subject, _detailDateTime(startRaw));
+      if (key) {
+        const attendees = _detailAttendees(_pick(v, DETAIL_KEYS.attendees));
+        const body = _stripHtml(_detailBody(_pick(v, DETAIL_KEYS.body)));
+        let joinUrl = _pick(v, DETAIL_KEYS.joinUrl);
+        if (typeof joinUrl !== "string") {
+          const om = _pick(v, DETAIL_KEYS.onlineMeeting);
+          joinUrl = (om && typeof om === "object") ? _pick(om, DETAIL_KEYS.joinUrl) : "";
+        }
+        if (typeof joinUrl !== "string") joinUrl = "";
+
+        // Merge rather than overwrite: the same meeting can appear in
+        // more than one response (a list call and a detail call), and
+        // whichever one actually carried a field should win over a
+        // later one that did not.
+        const prev = found.get(key) || { attendees: [], body: "", joinUrl: "" };
+        found.set(key, {
+          attendees: attendees.length ? attendees : prev.attendees,
+          body: body || prev.body,
+          joinUrl: joinUrl || prev.joinUrl,
+        });
+      }
+    }
+
+    for (const k of Object.keys(v)) visit(v[k], depth + 1);
+  };
+
+  for (const b of bodies || []) visit(b, 0);
+  return found;
+}
+
+// Fold captured detail into the events the DOM scan produced.
+// ADDITIVE ONLY: a field the DOM already filled is never overwritten,
+// and an event with no matching detail is returned byte-identical.
+function mergeDetailIntoEvents(events, details) {
+  const stats = { matched: 0, gainedAttendees: 0, gainedBody: 0, gainedJoinUrl: 0 };
+  if (!details || !details.size) return { events, stats };
+
+  for (const ev of events || []) {
+    const d = details.get(detailKey(ev.subject, ev.start));
+    if (!d) continue;
+    stats.matched++;
+    if (d.attendees.length && !(ev.attendees && ev.attendees.length)) {
+      ev.attendees = d.attendees;
+      stats.gainedAttendees++;
+    }
+    if (d.body && !ev.body) {
+      // Bounded — the backend caps this too, but a runaway invite body
+      // should not be carried across the wire to find that out.
+      ev.body = d.body.slice(0, 8000);
+      stats.gainedBody++;
+    }
+    if (d.joinUrl && !ev.join_url) {
+      ev.join_url = d.joinUrl;
+      stats.gainedJoinUrl++;
+    }
+  }
+  return { events, stats };
+}
+
+const CAL_RECORDER_SCRIPT_ID = "mr-calendar-response-recorder";
+
+// Registered just before the capture tab opens and removed straight
+// after. Registering rather than injecting is what buys
+// `document_start` — `executeScript` on an already-created tab cannot
+// beat the page's own first request, which is exactly the request
+// that carries the calendar.
+async function registerCalendarRecorder() {
+  try {
+    try {
+      await chrome.scripting.unregisterContentScripts({ ids: [CAL_RECORDER_SCRIPT_ID] });
+    } catch (_) { /* not registered — fine */ }
+    await chrome.scripting.registerContentScripts([{
+      id: CAL_RECORDER_SCRIPT_ID,
+      matches: [
+        "https://outlook.office.com/*",
+        "https://outlook.cloud.microsoft/*",
+        "https://*.office.com/*",
+        "https://*.cloud.microsoft/*",
+      ],
+      js: ["calendar-recorder.js"],
+      runAt: "document_start",
+      world: "MAIN",
+      allFrames: true,
+      persistAcrossSessions: false,
+    }]);
+    return true;
+  } catch (e) {
+    // Chrome < 111 has no MAIN-world content scripts. Capture still
+    // works, just without detail — reported, never silently degraded.
+    console.warn("[ext] calendar recorder registration failed:", e);
+    return false;
+  }
+}
+
+async function unregisterCalendarRecorder() {
+  try {
+    await chrome.scripting.unregisterContentScripts({ ids: [CAL_RECORDER_SCRIPT_ID] });
+  } catch (_) { /* ignore */ }
+}
+
 async function settleAndCollectCalendar(tabId, label) {
   const start = Date.now();
   let text = "";
@@ -2202,12 +2521,49 @@ async function settleAndCollectCalendar(tabId, label) {
 // 168h window), structured extraction with a text-scrape fallback.
 // Returns { events, layer, stats, zeroReason, fallbackText, elapsedMs, diag }.
 async function captureCalendarTab() {
+  // Registered BEFORE the tab exists. Outlook's calendar request is in
+  // flight within a second of navigation, and a recorder installed
+  // after that is a recorder that missed the response carrying the
+  // attendees. See calendar-recorder.js.
+  const recorderOn = await registerCalendarRecorder();
   const tab = await chrome.tabs.create({ url: CALENDAR_WEEK_URL, active: false });
   const tabId = tab.id;
   const start = Date.now();
   const allCandidates = [];
-  const diag = { weeksScanned: 0, nextWeekNavOk: null, anyWeekUnstable: false };
+  const capturedBodies = [];
+  const diag = {
+    weeksScanned: 0, nextWeekNavOk: null, anyWeekUnstable: false,
+    // Whether the detail path was even available this run. Reported
+    // rather than inferred: "the recorder could not install" and "the
+    // recorder ran and found nothing" are different facts, and
+    // collapsing them is the exact defect this project keeps hitting.
+    recorderRegistered: recorderOn,
+    recorderInstalled: false,
+    responsesSeen: 0,
+    responsesMatched: 0,
+    responsesDropped: 0,
+  };
   let fallbackText = "";
+
+  // Reads back and clears whatever the page recorded so far.
+  const harvest = async (label) => {
+    try {
+      const r = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        func: _harvestCalendarResponses,
+      });
+      const got = (r && r[0] && r[0].result) || null;
+      if (!got) return;
+      if (got.installed) diag.recorderInstalled = true;
+      diag.responsesSeen += got.seen || 0;
+      diag.responsesMatched += got.matched || 0;
+      diag.responsesDropped += got.dropped || 0;
+      capturedBodies.push(...(got.bodies || []));
+    } catch (e) {
+      console.warn(`[ext] calendar ${label}: harvest failed:`, e);
+    }
+  };
 
   try {
     await waitForTabComplete(tabId);
@@ -2217,6 +2573,7 @@ async function captureCalendarTab() {
     fallbackText = week1.text;
     diag.weeksScanned += 1;
     if (!week1.stabilized) diag.anyWeekUnstable = true;
+    await harvest("week1");
 
     const navOk = await goToNextCalendarWeek(tabId);
     diag.nextWeekNavOk = navOk;
@@ -2226,14 +2583,34 @@ async function captureCalendarTab() {
       if (week2.text) fallbackText += "\n\n" + week2.text;
       diag.weeksScanned += 1;
       if (!week2.stabilized) diag.anyWeekUnstable = true;
+      await harvest("week2");
     }
   } finally {
     try { await chrome.tabs.remove(tabId); } catch (_) { /* ignore */ }
+    // Unregistered whatever happened: this must not stay installed on
+    // the user's Outlook between captures.
+    await unregisterCalendarRecorder();
   }
 
   const extraction = extractEventsFromCandidates(allCandidates, {
     fallbackYear: new Date().getFullYear(),
   });
+
+  // Fold in anything Outlook's own responses carried that the grid
+  // could not: the attendee list, the invite body, and a Teams join
+  // URL. Purely additive — a field the label already filled wins, and
+  // an event with no match comes through untouched.
+  const merged = mergeDetailIntoEvents(
+    extraction.events, detailsFromResponses(capturedBodies));
+  diag.detailMatched = merged.stats.matched;
+  diag.detailGainedAttendees = merged.stats.gainedAttendees;
+  diag.detailGainedBody = merged.stats.gainedBody;
+  diag.detailGainedJoinUrl = merged.stats.gainedJoinUrl;
+  extraction.stats.withAttendees = merged.stats.gainedAttendees;
+  extraction.stats.withBody = merged.stats.gainedBody;
+  extraction.stats.withJoinUrl =
+    (extraction.stats.withJoinUrl || 0) + merged.stats.gainedJoinUrl;
+
   const zeroReason = extraction.events.length === 0
     ? classifyZeroReason(extraction.stats, { stillRendering: diag.anyWeekUnstable })
     : null;
