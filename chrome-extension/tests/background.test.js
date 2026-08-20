@@ -1125,3 +1125,369 @@ test("join probe: a page with no anchors at all reports zero, not an error", () 
   assert.equal(joinLinks.matchCount, 0);
   assert.ok(!joinLinks.error);
 });
+
+// ── extractUrlsFromLabel: join_url out of the same label tail (v1.5) ──
+//
+// The v1.4 probe searched for join-shaped ANCHOR elements, found none,
+// and reported that join_url "cannot be filled from this DOM". Real
+// capture output disproved it in the same report: the URL was sitting
+// in the aria-label TEXT, in the Location position between the date and
+// the "By <organiser>" segment. These fixtures pin both halves of the
+// fix — that a recognised conferencing URL there fills `join_url`, and
+// that any OTHER URL there is a LOCATION and never becomes one.
+//
+// Every URL below is synthetic. A join URL is a single-use meeting
+// credential; no real one goes in this repo, and none is ever logged.
+
+const ZOOM_LABEL_URL = "https://zoom.us/j/0000000000?pwd=EXAMPLEPWDVALUE&from=addon";
+const TEAMS_LABEL_URL =
+  "https://teams.microsoft.com/l/meetup-join/19%3ameeting_EXAMPLEID%40thread.v2/0";
+const WEBEX_LABEL_URL = "https://globex.webex.com/meet/pat.roe";
+const MEET_LABEL_URL = "https://meet.google.com/aaa-bbbb-ccc";
+// A link to a training library — the shape that turned up in the same
+// Location position as the Zoom link. It is where the meeting is about
+// something, not a meeting to join.
+const INCIDENTAL_LABEL_URL = "https://learning.example.com/library/course-42";
+
+function labelWithUrl(url, subject = "Onboarding call") {
+  return `${subject}, 9:00 AM to 9:30 AM, Friday, August 14, 2026, ` +
+    `${url}, By Jane Doe, Busy`;
+}
+
+test("join_url: a Zoom link in the Location position (query string and all) is extracted", () => {
+  const got = sandbox.extractUrlsFromLabel(labelWithUrl(ZOOM_LABEL_URL));
+  assert.equal(got.joinUrl, ZOOM_LABEL_URL);
+  assert.equal(got.joinProvider, "zoom");
+  assert.equal(got.locationUrl, "");
+});
+
+test("join_url: Teams meetup-join, Webex and Google Meet links are recognized too", () => {
+  const cases = [
+    [TEAMS_LABEL_URL, "teams"],
+    [WEBEX_LABEL_URL, "webex"],
+    [MEET_LABEL_URL, "meet"],
+  ];
+  for (const [url, provider] of cases) {
+    const got = sandbox.extractUrlsFromLabel(labelWithUrl(url));
+    assert.equal(got.joinUrl, url, url);
+    assert.equal(got.joinProvider, provider, url);
+  }
+});
+
+test("join_url: an INCIDENTAL Location URL is a location, never a join link", () => {
+  const got = sandbox.extractUrlsFromLabel(labelWithUrl(INCIDENTAL_LABEL_URL));
+  assert.equal(got.joinUrl, "");
+  assert.equal(got.joinProvider, "");
+  assert.equal(got.locationUrl, INCIDENTAL_LABEL_URL);
+});
+
+test("join_url: a conferencing host on a NON-join path is not a join link either", () => {
+  // Host alone is not enough — https://zoom.us/pricing joins nothing.
+  const got = sandbox.extractUrlsFromLabel(labelWithUrl("https://zoom.us/pricing"));
+  assert.equal(got.joinUrl, "");
+  assert.equal(got.locationUrl, "https://zoom.us/pricing");
+});
+
+test("join_url: a label carrying BOTH keeps them in separate fields", () => {
+  const label =
+    "Workshop, 9:00 AM to 10:00 AM, Friday, August 14, 2026, " +
+    `${INCIDENTAL_LABEL_URL}, ${ZOOM_LABEL_URL}, By Jane Doe, Busy`;
+  const got = sandbox.extractUrlsFromLabel(label);
+  assert.equal(got.joinUrl, ZOOM_LABEL_URL);
+  assert.equal(got.locationUrl, INCIDENTAL_LABEL_URL);
+});
+
+test("join_url: the trailing ', By <organiser>' is never swallowed into the URL", () => {
+  const label = labelWithUrl(ZOOM_LABEL_URL);
+  const got = sandbox.extractUrlsFromLabel(label);
+  assert.ok(!got.joinUrl.includes("By"), got.joinUrl);
+  assert.ok(!got.joinUrl.includes(","), got.joinUrl);
+  // ...and the organiser is still read out of the same tail.
+  assert.equal(sandbox.extractOrganizerFromLabel(label), "Jane Doe");
+});
+
+test("join_url: junk input yields empty fields, never a throw", () => {
+  for (const bad of [null, "", 12345, {}, "Standup, 9:00 AM to 9:30 AM"]) {
+    const got = sandbox.extractUrlsFromLabel(bad);
+    assert.equal(got.joinUrl, "");
+    assert.equal(got.locationUrl, "");
+  }
+});
+
+test("join_url: a label with NO url produces a byte-identical event", () => {
+  const label =
+    "Acme/CYB - IVA PoC Sync-up, 1:00 PM to 1:30 PM, Friday, August 14, 2026, " +
+    "Microsoft Teams Meeting, By Jane Doe, Busy";
+  const result = sandbox.extractEventsFromCandidates(
+    [{ label, columnDateIso: null, layer: "aria-label" }],
+    { fallbackYear: FALLBACK_YEAR });
+  assert.equal(result.events.length, 1);
+  // Every field, spelled out — this is the "a failed extraction leaves
+  // the event exactly as it was" guarantee, not a spot check.
+  assert.deepEqual({ ...result.events[0] }, {
+    subject: "Acme/CYB - IVA PoC Sync-up",
+    start: "2026-08-14T13:00:00",
+    end: "2026-08-14T13:30:00",
+    location: "",
+    organizer: "Jane Doe",
+    join_url: "",
+  });
+  assert.equal(result.stats.withJoinUrl, 0);
+  assert.equal(result.stats.withLocationUrl, 0);
+});
+
+test("join_url: flows end-to-end through extractEventsFromCandidates, per provider", () => {
+  const result = sandbox.extractEventsFromCandidates([
+    { label: labelWithUrl(ZOOM_LABEL_URL, "Zoom hosted review"), layer: "aria-label" },
+    { label: labelWithUrl(TEAMS_LABEL_URL, "Teams hosted review"), layer: "aria-label" },
+    { label: labelWithUrl(INCIDENTAL_LABEL_URL, "Training block"), layer: "aria-label" },
+    { label: labelWithUrl("", "Plain meeting").replace(", ,", ","), layer: "aria-label" },
+  ], { fallbackYear: FALLBACK_YEAR });
+
+  const bySubject = Object.fromEntries(result.events.map((e) => [e.subject, e]));
+  assert.equal(bySubject["Zoom hosted review"].join_url, ZOOM_LABEL_URL);
+  assert.equal(bySubject["Zoom hosted review"].location, "");
+  assert.equal(bySubject["Teams hosted review"].join_url, TEAMS_LABEL_URL);
+  // The training link is a LOCATION. Nothing offers it as a way to join.
+  assert.equal(bySubject["Training block"].join_url, "");
+  assert.equal(bySubject["Training block"].location, INCIDENTAL_LABEL_URL);
+  assert.equal(bySubject["Plain meeting"].join_url, "");
+  assert.equal(bySubject["Plain meeting"].location, "");
+
+  assert.equal(result.stats.withJoinUrl, 2);
+  assert.equal(result.stats.withLocationUrl, 1);
+  assert.equal(result.stats.joinUrlByProvider.zoom, 1);
+  assert.equal(result.stats.joinUrlByProvider.teams, 1);
+});
+
+test("join_url: the stats counters classify and count only — no URL is ever in them", () => {
+  const result = sandbox.extractEventsFromCandidates([
+    { label: labelWithUrl(ZOOM_LABEL_URL, "Zoom hosted review"), layer: "aria-label" },
+    { label: labelWithUrl(INCIDENTAL_LABEL_URL, "Training block"), layer: "aria-label" },
+  ], { fallbackYear: FALLBACK_YEAR });
+  const blob = JSON.stringify(result.stats);
+  for (const fragment of ["http", "zoom.us", "EXAMPLEPWDVALUE", "pwd=", "learning.example.com"]) {
+    assert.ok(!blob.includes(fragment), `stats leaked ${fragment}: ${blob}`);
+  }
+});
+
+test("join_url: a DOM-supplied joinUrl still wins over the label-derived one", () => {
+  const result = sandbox.extractEventsFromCandidates(
+    [{ label: labelWithUrl(ZOOM_LABEL_URL), joinUrl: MEET_LABEL_URL, layer: "aria-label" }],
+    { fallbackYear: FALLBACK_YEAR });
+  assert.equal(result.events[0].join_url, MEET_LABEL_URL);
+  assert.equal(result.stats.joinUrlByProvider.meet, 1);
+});
+
+test("join_url: survives the whole DOM-scan -> extract path", () => {
+  const tile = el("div", { role: "button", "aria-label": labelWithUrl(ZOOM_LABEL_URL) });
+  setDocument(doc([tile]));
+  const { candidates } = sandbox._calendarDomScanFunc();
+  const result = sandbox.extractEventsFromCandidates(candidates, { fallbackYear: FALLBACK_YEAR });
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0].join_url, ZOOM_LABEL_URL);
+  assert.equal(result.events[0].organizer, "Jane Doe");
+  assert.equal(result.events[0].start, "2026-08-14T09:00:00");
+});
+
+test("join_url: extracting a URL disturbs neither the date resolution nor the subject", () => {
+  // The URL sits between the date segment and the organiser — the same
+  // tail both of those parse. Every one of the field labels still lands
+  // on its own date with its own subject once a URL is inserted there.
+  const withUrls = FIELD_LABELS.map((label) =>
+    label.replace(", By ", `, ${ZOOM_LABEL_URL}, By `));
+  const plain = sandbox.extractEventsFromCandidates(
+    FIELD_LABELS.map((label) => ({ label, columnDateIso: null, layer: "aria-label" })),
+    { fallbackYear: FALLBACK_YEAR });
+  const urled = sandbox.extractEventsFromCandidates(
+    withUrls.map((label) => ({ label, columnDateIso: null, layer: "aria-label" })),
+    { fallbackYear: FALLBACK_YEAR });
+
+  assert.equal(urled.events.length, plain.events.length);
+  for (let i = 0; i < plain.events.length; i++) {
+    assert.equal(urled.events[i].subject, plain.events[i].subject);
+    assert.equal(urled.events[i].start, plain.events[i].start);
+    assert.equal(urled.events[i].end, plain.events[i].end);
+    assert.equal(urled.events[i].organizer, plain.events[i].organizer);
+    assert.equal(urled.events[i].join_url, ZOOM_LABEL_URL);
+  }
+});
+
+// ── organizer: the shapes real capture output actually contains ──────
+
+test("organizer: an SMTP address where a display name should be is kept as an address", () => {
+  assert.equal(
+    sandbox.extractOrganizerFromLabel(
+      "Globex sync, 8:30 AM to 9:00 AM, Friday, August 14, 2026, " +
+      "By a.doe@globex.example, Busy"),
+    "a.doe@globex.example");
+});
+
+test("organizer: an address is never glued to the segment after it", () => {
+  // The pre-v1.5 rule joined ANY bare single token to the next
+  // non-status segment (the "Last, First" form). An address is a bare
+  // single token, so it would have come out as
+  // "a.doe@globex.example, Umbrella HQ Room 3" — an address that is no
+  // longer an address, which resolves to nobody.
+  assert.equal(
+    sandbox.extractOrganizerFromLabel(
+      "Globex sync, 8:30 AM to 9:00 AM, Friday, August 14, 2026, " +
+      "By a.doe@globex.example, Umbrella HQ Room 3, Busy"),
+    "a.doe@globex.example");
+});
+
+test("organizer: an address is passed through with its own casing, unaltered", () => {
+  assert.equal(
+    sandbox.extractOrganizerFromLabel(
+      "Sync, 8:30 AM to 9:00 AM, Friday, August 14, 2026, By A.Doe@globex.example, Busy"),
+    "A.Doe@globex.example");
+  // A mailto: prefix, if the tenant ever writes one, leaves the address.
+  assert.equal(
+    sandbox.extractOrganizerFromLabel(
+      "Sync, 8:30 AM to 9:00 AM, Friday, August 14, 2026, By mailto:a.doe@globex.example, Busy"),
+    "a.doe@globex.example");
+});
+
+test("organizer: an email organiser flows through to the event and is counted as one", () => {
+  const result = sandbox.extractEventsFromCandidates(
+    [{ label: "Globex sync, 8:30 AM to 9:00 AM, Friday, August 14, 2026, " +
+        "By a.doe@globex.example, Busy", layer: "aria-label" }],
+    { fallbackYear: FALLBACK_YEAR });
+  assert.equal(result.events[0].organizer, "a.doe@globex.example");
+  assert.equal(result.stats.withOrganizer, 1);
+  assert.equal(result.stats.withOrganizerEmail, 1);
+});
+
+test("organizer: a double space inside a name is collapsed, not preserved", () => {
+  assert.equal(
+    sandbox.extractOrganizerFromLabel(
+      "Sync, 8:30 AM to 9:00 AM, Friday, August 14, 2026, By Jane  Doe, Busy"),
+    "Jane Doe");
+  // ...including in the surname-first form, on either side of the comma.
+  assert.equal(
+    sandbox.extractOrganizerFromLabel(
+      "Sync, 8:30 AM to 9:00 AM, Friday, August 14, 2026, By Noh,  Kim  Lee, Busy"),
+    "Noh, Kim Lee");
+});
+
+test("organizer: a distribution list or room name is read as written", () => {
+  const cases = [
+    ["…, 9:00 AM to 9:30 AM, Monday, August 10, 2026, By Northwind Evite, Tentative",
+      "Northwind Evite"],
+    ["…, 9:00 AM to 9:30 AM, Monday, August 10, 2026, By Umbrella HQ Room 3, Busy",
+      "Umbrella HQ Room 3"],
+    ["…, 9:00 AM to 9:30 AM, Monday, August 10, 2026, By Initech All Hands DL, Busy",
+      "Initech All Hands DL"],
+  ];
+  for (const [label, expected] of cases) {
+    assert.equal(sandbox.extractOrganizerFromLabel(label), expected, label);
+  }
+});
+
+test("organizer: a single-token list name is not glued to a room that follows it", () => {
+  // "all-hands-dl" is a bare token like a surname, but "Umbrella HQ
+  // Room 3" is a place, not a given name — the digit in it is the tell.
+  assert.equal(
+    sandbox.extractOrganizerFromLabel(
+      "…, 9:00 AM to 9:30 AM, Monday, August 10, 2026, By all-hands-dl, Umbrella HQ Room 3, Busy"),
+    "all-hands-dl");
+  // The genuine "Last, First" case is unaffected — that IS a given name.
+  assert.equal(
+    sandbox.extractOrganizerFromLabel(
+      "…, 9:00 AM to 9:30 AM, Monday, August 10, 2026, By Noh, Kim, Busy"),
+    "Noh, Kim");
+});
+
+test("organizer: non-ASCII survives the surname-first form too", () => {
+  assert.equal(
+    sandbox.extractOrganizerFromLabel(
+      "Sync, 8:30 AM to 9:00 AM, Friday, August 14, 2026, By Døe, Zoë, Busy"),
+    "Døe, Zoë");
+});
+
+// ── Join-link probe: label TEXT, and a verdict that says where it looked
+
+test("join probe: a join URL in aria-label TEXT is found even with zero anchors", () => {
+  const tile = el("div", {
+    role: "button",
+    "aria-label": labelWithUrl(ZOOM_LABEL_URL),
+  });
+  setDocument(doc([tile]));
+
+  const { joinLinks } = runProbe();
+  assert.equal(joinLinks.anchorCount, 0);
+  assert.equal(joinLinks.matchCount, 0);
+  assert.equal(joinLinks.labelJoinCount, 1);
+  assert.equal(joinLinks.labelJoinInMeetingShapedLabel, 1);
+  assert.equal(joinLinks.labelByProvider.zoom, 1);
+  // The v1.4 verdict for exactly this DOM was "no join-shaped links
+  // anywhere ... join_url cannot be filled from this DOM".
+  assert.match(joinLinks.verdict, /join_url IS fillable from the label/);
+  assert.ok(!/cannot be filled/.test(joinLinks.verdict), joinLinks.verdict);
+});
+
+test("join probe: a label-text example is redacted to a SHAPE, like an anchor one", () => {
+  const tile = el("div", { role: "button", "aria-label": labelWithUrl(ZOOM_LABEL_URL) });
+  setDocument(doc([tile]));
+
+  const { joinLinks } = runProbe();
+  const shapes = Array.from(joinLinks.labelRedactedExamples, (e) => e.shape);
+  assert.deepEqual(shapes, ["zoom.us/j/…?…"]);
+  const blob = JSON.stringify(joinLinks);
+  for (const secret of ["EXAMPLEPWDVALUE", "pwd=", "0000000000", "from=addon"]) {
+    assert.ok(!blob.includes(secret), `probe leaked ${secret}: ${blob}`);
+  }
+});
+
+test("join probe: a non-conferencing URL in a label is counted as a location, not a join link", () => {
+  const tile = el("div", {
+    role: "button",
+    "aria-label": labelWithUrl(INCIDENTAL_LABEL_URL),
+  });
+  setDocument(doc([tile]));
+
+  const { joinLinks } = runProbe();
+  assert.equal(joinLinks.labelUrlCount, 1);
+  assert.equal(joinLinks.labelJoinCount, 0);
+  assert.equal(joinLinks.labelNonJoinUrlCount, 1);
+  // Genuinely absent — and the verdict says BOTH places were checked
+  // and reports the non-conferencing URL it did see, rather than
+  // implying the page had nothing in it at all.
+  assert.match(joinLinks.verdict, /BOTH places checked/);
+  assert.match(joinLinks.verdict, /1 URL\(s\) in aria-label text were all non-conferencing/);
+});
+
+test("join probe: genuinely absent says so, and names what it looked at", () => {
+  setDocument(doc([el("div", { role: "button", "aria-label": MEETING_LABEL })]));
+  const { joinLinks } = runProbe();
+  assert.equal(joinLinks.labelUrlCount, 0);
+  assert.match(joinLinks.verdict, /no join-shaped links anywhere/);
+  assert.match(joinLinks.verdict, /BOTH places checked/);
+  assert.match(joinLinks.verdict, /genuinely absent/);
+});
+
+test("join probe: anchors and label text are reported separately when both are present", () => {
+  const tile = el("div", { role: "button", "aria-label": labelWithUrl(ZOOM_LABEL_URL) });
+  append(tile, el("a", { href: TEAMS_HREF }));
+  setDocument(doc([tile]));
+
+  const { joinLinks } = runProbe();
+  assert.equal(joinLinks.matchCount, 1);
+  assert.equal(joinLinks.insideMeetingLabelledElement, 1);
+  assert.equal(joinLinks.labelJoinInMeetingShapedLabel, 1);
+  assert.match(joinLinks.verdict, /1 join-shaped anchor link\(s\)/);
+  assert.match(joinLinks.verdict, /plus 1 in meeting-shaped aria-label TEXT/);
+});
+
+test("join probe: a join URL in a NON-meeting-shaped label is counted but not credited", () => {
+  // A URL in some unrelated widget's label is not this meeting's link —
+  // it is counted so the report is complete, but it must not be what
+  // makes the verdict say join_url is fillable.
+  const widget = el("div", { "aria-label": `Recent link ${ZOOM_LABEL_URL}` });
+  setDocument(doc([widget]));
+
+  const { joinLinks } = runProbe();
+  assert.equal(joinLinks.labelJoinCount, 1);
+  assert.equal(joinLinks.labelJoinInMeetingShapedLabel, 0);
+  assert.match(joinLinks.verdict, /no join-shaped links anywhere/);
+});
