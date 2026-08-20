@@ -578,6 +578,14 @@ class ExtensionCalendarService:
             "attendees": [str(a) for a in (event.get("attendees") or [])],
             "duration": int(event.get("duration") or DEFAULT_DURATION_MIN),
             "join_url": str(event.get("join_url") or ""),
+            # The invite body/agenda, new in v2.43.0. Empty for every
+            # meeting captured before extension 1.7 recorded Outlook's
+            # own calendar responses — the grid has never rendered a
+            # description. Capped here as well as in the extension:
+            # this is the only place a hostile or runaway body reaches
+            # the store, and "the extension already trims it" stops
+            # being true the moment anything else POSTs.
+            "body": str(event.get("body") or "")[:8000],
             "source": SOURCE_EXTENSION,
         }
 
@@ -597,6 +605,10 @@ class ExtensionCalendarService:
             "attendees": [str(a) for a in (raw.get("attendees") or [])],
             "duration": int(raw.get("duration") or DEFAULT_DURATION_MIN),
             "join_url": str(raw.get("join_url") or ""),
+            # Absent from every event stored before this field existed,
+            # which reads as "" — the same value an event with no
+            # description has — so an old store loads unchanged.
+            "body": str(raw.get("body") or "")[:8000],
             "source": SOURCE_EXTENSION,
         }
 

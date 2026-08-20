@@ -1231,6 +1231,11 @@ test("join_url: a label with NO url produces a byte-identical event", () => {
     location: "",
     organizer: "Jane Doe",
     join_url: "",
+    // Always present from v1.7, always "" out of the LABEL — the grid
+    // has never carried a description. It is filled, when it can be,
+    // by mergeDetailIntoEvents from Outlook's own responses, which is
+    // a separate step this assertion deliberately does not involve.
+    body: "",
   });
   assert.equal(result.stats.withJoinUrl, 0);
   assert.equal(result.stats.withLocationUrl, 0);
@@ -1686,4 +1691,214 @@ test("field detection matches key NAMES only, never values", async () => {
   assert.equal(out.results[0].verdict, "answered-thin");
   assert.equal(out.results[0].fieldsPresent.attendees, false);
   assert.equal(out.results[0].fieldsPresent.body, false);
+});
+
+// ── Detail from Outlook's own responses (v1.7) ───────────────────────
+//
+// v1.6 tried to CALL the calendar API and shipped four candidate
+// endpoints, all modelled on classic OWA. The field run said
+// `outlook.cloud.microsoft`, `canaryPresent: false`, 401 — the new
+// Outlook stack, no CSRF canary, bearer auth. Every guess was wrong.
+//
+// So v1.7 stops guessing: it records the responses Outlook itself
+// receives. These tests pin the property that makes that work — the
+// parser must not know or care which API shape produced the payload,
+// because not knowing is the entire point.
+
+const { detailsFromResponses, mergeDetailIntoEvents, detailKey } = sandbox;
+
+// Graph-ish, as the NEW Outlook stack returns.
+const GRAPH_BODY = {
+  value: [{
+    subject: "Quarterly review",
+    start: { dateTime: "2026-08-20T12:30:00.0000000", timeZone: "UTC" },
+    attendees: [
+      { emailAddress: { name: "Ana Doe", address: "a.doe@globex.example" }, type: "required" },
+      { emailAddress: { name: "Pat Roe", address: "p.roe@globex.example" }, type: "optional" },
+    ],
+    body: { contentType: "html", content: "<p>Agenda:</p><ul><li>Numbers</li></ul>" },
+    onlineMeeting: { joinUrl: "https://teams.microsoft.com/l/meetup-join/EXAMPLE" },
+  }],
+};
+
+// EWS-over-JSON, as CLASSIC OWA returns. Same three fields, different
+// names, different nesting, different datetime shape.
+const EWS_BODY = {
+  Body: { ResponseMessages: { Items: [{ RootFolder: { Items: [{
+    Subject: "Quarterly review",
+    Start: "2026-08-20T12:30:00Z",
+    RequiredAttendees: [{ Mailbox: { Name: "Ana Doe" } }],
+    Body: { BodyType: "Text", Value: "Agenda: numbers" },
+    JoinUrl: "https://globex.zoom.us/j/00000000000",
+  }] } }] } },
+};
+
+test("detail is read from the NEW Outlook stack's shape", () => {
+  const d = detailsFromResponses([GRAPH_BODY]);
+  const hit = d.get(detailKey("Quarterly review", "2026-08-20T12:30"));
+  assert.ok(hit, "no detail extracted");
+  assert.deepEqual([...hit.attendees], ["Ana Doe", "Pat Roe"]);
+  assert.match(hit.body, /Agenda/);
+  assert.match(hit.joinUrl, /meetup-join/);
+});
+
+test("detail is read from classic OWA's shape, with no code that knows which", () => {
+  // The SAME parser, no branch on tenant, API version or host. v1.6
+  // failed precisely because it had to know; this must not.
+  const d = detailsFromResponses([EWS_BODY]);
+  const hit = d.get(detailKey("Quarterly review", "2026-08-20T12:30"));
+  assert.ok(hit, "no detail extracted");
+  assert.deepEqual([...hit.attendees], ["Ana Doe"]);
+  assert.equal(hit.body, "Agenda: numbers");
+  assert.match(hit.joinUrl, /zoom\.us/);
+});
+
+test("HTML invite bodies are reduced to readable text", () => {
+  const d = detailsFromResponses([GRAPH_BODY]);
+  const hit = d.get(detailKey("Quarterly review", "2026-08-20T12:30"));
+  assert.ok(!hit.body.includes("<"), `markup survived: ${hit.body}`);
+  assert.match(hit.body, /Numbers/);
+});
+
+test("a script tag in an invite body is dropped, not flattened into text", () => {
+  const d = detailsFromResponses([{ value: [{
+    subject: "S", start: "2026-08-20T09:00:00",
+    body: { content: "<p>Hi</p><script>alert(1)</script>" },
+  }] }]);
+  const hit = d.get(detailKey("S", "2026-08-20T09:00"));
+  assert.ok(!hit.body.includes("alert"), `script body survived: ${hit.body}`);
+  assert.match(hit.body, /Hi/);
+});
+
+test("seconds and timezone suffixes still match the label-parsed start", () => {
+  // The API returns seconds and a zone; parseMeetingLabel produces
+  // neither. An exact string compare would match nothing at all — and
+  // would look exactly like "the API carried no detail".
+  assert.equal(
+    detailKey("A", "2026-08-20T12:30:00.0000000"),
+    detailKey("A", "2026-08-20T12:30"),
+  );
+  assert.equal(detailKey("A", "2026-08-20T12:30:59Z"), detailKey("A", "2026-08-20T12:30"));
+  // ...but a different minute is a different meeting.
+  assert.notEqual(detailKey("A", "2026-08-20T12:31"), detailKey("A", "2026-08-20T12:30"));
+});
+
+test("merging is additive: a field the label already filled is never overwritten", () => {
+  // v1.5's label extraction is the more specific signal for the Zoom
+  // case. A later generic response must not clobber it.
+  const events = [{
+    subject: "Quarterly review", start: "2026-08-20T12:30:00",
+    attendees: ["Already Known"], body: "", join_url: "https://kept.example/j/1",
+  }];
+  const { events: out, stats } = mergeDetailIntoEvents(
+    events, detailsFromResponses([GRAPH_BODY]));
+  assert.equal(stats.matched, 1);
+  assert.deepEqual([...out[0].attendees], ["Already Known"]);
+  assert.equal(out[0].join_url, "https://kept.example/j/1");
+  // ...but the field that WAS empty gets filled.
+  assert.match(out[0].body, /Agenda/);
+  assert.equal(stats.gainedBody, 1);
+  assert.equal(stats.gainedAttendees, 0);
+  assert.equal(stats.gainedJoinUrl, 0);
+});
+
+test("an event with no matching response comes through byte-identical", () => {
+  const before = {
+    subject: "Unrelated", start: "2026-08-21T09:00:00",
+    attendees: [], body: "", join_url: "",
+  };
+  const snapshot = JSON.stringify(before);
+  const { events, stats } = mergeDetailIntoEvents(
+    [before], detailsFromResponses([GRAPH_BODY]));
+  assert.equal(stats.matched, 0);
+  assert.equal(JSON.stringify(events[0]), snapshot);
+});
+
+test("no captured responses changes nothing at all", () => {
+  // The state when the recorder could not install (Chrome < 111) or
+  // Outlook served the grid from cache. Must degrade to exactly
+  // pre-v1.7 behaviour, never to an error or a wiped field.
+  const before = [{ subject: "A", start: "2026-08-20T09:00:00",
+                    attendees: ["X"], body: "keep", join_url: "u" }];
+  const snapshot = JSON.stringify(before);
+  const { events, stats } = mergeDetailIntoEvents(before, detailsFromResponses([]));
+  assert.equal(stats.matched, 0);
+  assert.equal(JSON.stringify(events), snapshot);
+});
+
+test("an unrecognised payload yields nothing rather than garbage", () => {
+  // A telemetry beacon that happened to match a URL hint. Inventing a
+  // meeting out of it would be worse than missing one.
+  const d = detailsFromResponses([
+    { telemetry: { events: [{ name: "click", ts: 12345 }] } },
+    "not an object",
+    null,
+  ]);
+  assert.equal(d.size, 0);
+});
+
+test("the same meeting across two responses merges rather than overwrites", () => {
+  // A list call carries attendees; a detail call carries the body.
+  // Whichever response HAD a field must win over a later one that
+  // didn't — otherwise arrival order silently decides what survives.
+  const list = { value: [{ subject: "M", start: "2026-08-20T09:00:00",
+                           attendees: [{ emailAddress: { name: "Ana Doe" } }] }] };
+  const detail = { value: [{ subject: "M", start: "2026-08-20T09:00:00",
+                             body: { content: "The agenda" } }] };
+  const d = detailsFromResponses([list, detail]);
+  const hit = d.get(detailKey("M", "2026-08-20T09:00"));
+  assert.deepEqual([...hit.attendees], ["Ana Doe"]);
+  assert.equal(hit.body, "The agenda");
+});
+
+test("attendees fall back to an address only when there is no name", () => {
+  const d = detailsFromResponses([{ value: [{
+    subject: "M", start: "2026-08-20T09:00:00",
+    attendees: [
+      { emailAddress: { name: "Ana Doe", address: "a.doe@globex.example" } },
+      { emailAddress: { address: "unnamed@globex.example" } },
+    ],
+  }] }]);
+  const hit = d.get(detailKey("M", "2026-08-20T09:00"));
+  // "no attendees" and "attendees we could not name" are different
+  // states; the second must not silently become the first.
+  assert.deepEqual([...hit.attendees], ["Ana Doe", "unnamed@globex.example"]);
+});
+
+test("a person listed as both required and optional appears once", () => {
+  const d = detailsFromResponses([{ value: [{
+    subject: "M", start: "2026-08-20T09:00:00",
+    requiredAttendees: [{ name: "Ana Doe" }],
+    optionalAttendees: [{ name: "ana doe" }],
+  }] }]);
+  const hit = d.get(detailKey("M", "2026-08-20T09:00"));
+  assert.deepEqual([...hit.attendees], ["Ana Doe"]);
+});
+
+test("the recorder file registerCalendarRecorder names actually exists", () => {
+  // registerContentScripts takes a FILENAME, not a function, so a
+  // rename or a missing file fails at runtime inside a background
+  // service worker — where nobody sees it, and the only symptom is
+  // attendees quietly staying empty. That is the silent-degradation
+  // shape this project keeps shipping, so it gets a build-time check.
+  const src = fs.readFileSync(BG_PATH, "utf8");
+  const m = src.match(/js:\s*\[\s*"([^"]+)"\s*\]/);
+  assert.ok(m, "registerCalendarRecorder no longer declares a js file");
+  assert.ok(
+    fs.existsSync(path.join(path.dirname(BG_PATH), m[1])),
+    `background.js registers "${m[1]}" but that file does not exist`,
+  );
+});
+
+test("the recorder registers for the NEW Outlook host, not just classic OWA", () => {
+  // The whole reason v1.6 failed: the field tenant is
+  // outlook.cloud.microsoft. A recorder that only matches
+  // outlook.office.com would never install there and would look
+  // exactly like "the response carried nothing".
+  const src = fs.readFileSync(BG_PATH, "utf8");
+  const block = src.slice(src.indexOf("async function registerCalendarRecorder"));
+  assert.match(block, /outlook\.cloud\.microsoft/);
+  assert.match(block, /outlook\.office\.com/);
+  assert.match(block, /world:\s*"MAIN"/);
+  assert.match(block, /runAt:\s*"document_start"/);
 });
