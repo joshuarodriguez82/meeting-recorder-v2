@@ -1035,3 +1035,85 @@ def test_a_recurring_series_on_other_days_is_untouched_by_one_days_move(tmp_path
     assert datetime(2026, 8, 20, 10, 30) in starts   # moved instance
     assert datetime(2026, 8, 20, 9, 30) not in starts  # ghost gone
     assert datetime(2026, 8, 21, 9, 30) in starts    # other day untouched
+
+
+# ── Enrichment ratchets up, never down (v2.50.0) ─────────────────────
+#
+# FIELD INCIDENT 2026-08-20, extension 1.11: a regression in the detail
+# pass made every capture come back with events but no detail. Those
+# bare events collided with the store's enriched ones, fresh won, and
+# the join links the user already HAD disappeared — "no links at all
+# now". One bad capture erased every previously-earned field.
+#
+# The grid labels a capture starts from NEVER carry attendees, a body,
+# or a Teams join link; detail is best-effort per capture. So an empty
+# detail field on a fresh event means "not fetched this time", not "the
+# invite has none" — and deleting stored data on it is indefensible.
+
+
+def _enriched(subject, start, **detail):
+    e = ext(subject, start)
+    e.update(detail)
+    return e
+
+
+def test_a_bare_capture_does_not_erase_stored_detail(tmp_path: Path):
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 20, 8, 0)
+    start = now + timedelta(hours=2)
+    svc.replace_all([_enriched(
+        "Team sync", start,
+        attendees=["Ana Doe", "Pat Roe"],
+        body="Agenda: numbers.",
+        join_url="https://teams.microsoft.com/l/meetup-join/EXAMPLE",
+        organizer="Kim Noh",
+    )], now=now)
+
+    # The next capture: same meeting, detail pass produced nothing —
+    # exactly what the 1.11 regression shipped on every capture.
+    svc.replace_all([ext("Team sync", start)], now=now)
+
+    back = ExtensionCalendarService(tmp_path).get_events()
+    assert len(back) == 1
+    assert back[0]["join_url"].endswith("EXAMPLE")
+    assert back[0]["attendees"] == ["Ana Doe", "Pat Roe"]
+    assert back[0]["body"] == "Agenda: numbers."
+    assert back[0]["organizer"] == "Kim Noh"
+
+
+def test_fresh_detail_still_wins_over_stored_detail(tmp_path: Path):
+    # The ratchet must not freeze the store: an invite genuinely CAN
+    # change its link, and the capture that saw the new one is newer
+    # truth.
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 20, 8, 0)
+    start = now + timedelta(hours=2)
+    svc.replace_all([_enriched(
+        "Team sync", start,
+        join_url="https://teams.microsoft.com/l/meetup-join/OLD")], now=now)
+    svc.replace_all([_enriched(
+        "Team sync", start,
+        join_url="https://teams.microsoft.com/l/meetup-join/NEW")], now=now)
+
+    back = ExtensionCalendarService(tmp_path).get_events()
+    assert back[0]["join_url"].endswith("NEW")
+
+
+def test_detail_does_not_jump_between_different_meetings(tmp_path: Path):
+    # The carry-forward is keyed on (subject, start). A different
+    # meeting must never inherit another meeting's join link — sending
+    # the user into the wrong call is worse than no link.
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 20, 8, 0)
+    svc.replace_all([_enriched(
+        "Team sync", now + timedelta(hours=2),
+        join_url="https://teams.microsoft.com/l/meetup-join/EXAMPLE")], now=now)
+
+    svc.replace_all([
+        ext("Team sync", now + timedelta(hours=2)),
+        ext("Different call", now + timedelta(hours=4)),
+    ], now=now)
+
+    back = {e["subject"]: e for e in ExtensionCalendarService(tmp_path).get_events()}
+    assert back["Team sync"]["join_url"].endswith("EXAMPLE")
+    assert back["Different call"]["join_url"] == ""

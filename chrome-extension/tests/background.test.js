@@ -2404,3 +2404,145 @@ test("addresses in the text are still collected alongside names", async () => {
   assert.deepEqual([...out.details[0].attendees].sort(),
                    ["Ana Doe", "k.noh@zorg.example"]);
 });
+
+// ── The 1.11 field regression: extraction fired before the pane loaded ─
+//
+// Outlook Web's DOM churns on its own — anchors and labelled elements
+// appear without anyone clicking anything. 1.11's "has the pane
+// rendered?" check treated ANY new anchor and ANY change in the
+// page-wide label count as the pane arriving, so on a real calendar it
+// fired on the first 150ms poll, extraction ran against a pane that
+// had not loaded, and every meeting came back empty. The Webex links
+// 1.10 had been finding disappeared — and the empty capture then
+// overwrote the store's previously-enriched events.
+//
+// None of the existing tests caught it because every fake page was
+// SILENT until clicked. These model the churn.
+
+function churningPage({ paneDelayMs, paneText }) {
+  // A page where an unrelated, NON-join anchor appears immediately
+  // after the click (the churn), and the pane's real content arrives
+  // only after `paneDelayMs`.
+  let clickAt = null;
+  const base = "Calendar grid baseline text that is already on screen.";
+  const tile = {
+    getAttribute: (n) => (n === "aria-label"
+      ? "Standup, 9:30 AM to 9:45 AM" : null),
+    click() { clickAt = Date.now(); },
+  };
+  const churnAnchor = {
+    getAttribute: (n) => (n === "href"
+      ? "https://outlook.office.com/mail/deeplink/1" : null),
+  };
+  const paneOpen = () => clickAt !== null && Date.now() - clickAt >= paneDelayMs;
+  return {
+    body: {
+      get innerText() {
+        return paneOpen() ? base + "\n" + paneText : base;
+      },
+    },
+    querySelectorAll: (sel) => {
+      if (String(sel).includes("a[href]")) {
+        // The churn anchor exists the instant the click happens —
+        // BEFORE the pane content — exactly the SPA behaviour that
+        // fooled 1.11.
+        return clickAt !== null ? [churnAnchor] : [];
+      }
+      return [tile];
+    },
+    dispatchEvent: () => true,
+  };
+}
+
+test("page churn does not trigger extraction before the pane loads", async () => {
+  // THE regression test. The churn anchor appears at t=0; the pane's
+  // Webex URL arrives at t=500ms. 1.11 extracted at the first poll and
+  // found nothing; the fix must wait for a signal that is actually
+  // pane-shaped and then let the page settle.
+  const page = churningPage({
+    paneDelayMs: 500,
+    paneText: "Join here https://globex.webex.com/globex/j.php?MTID=EXAMPLE",
+  });
+  const prevDoc = sandbox.document;
+  const prevKE = sandbox.KeyboardEvent;
+  const prevST = sandbox.setTimeout;
+  sandbox.document = page;
+  sandbox.KeyboardEvent = function () {};
+  sandbox.setTimeout = setTimeout;
+  try {
+    const out = await sandbox._readEventDetailsFunc(
+      [{ subject: "Standup", startIso: "2026-08-21T09:30:00" }],
+      JOIN_PATTERNS_FROM_SOURCE, 25, 90000);
+    assert.equal(out.opened, 1);
+    const d = out.details[0];
+    assert.ok(d, "extraction fired early and captured nothing");
+    assert.match(d.joinUrl, /webex\.com/,
+      "the join link the pane carried was missed — extraction ran "
+      + "before the pane rendered");
+    // And the body must be the pane's text, never the whole page.
+    assert.ok(!(d.body || "").includes("Calendar grid baseline"),
+      "whole-page text was stored as the meeting body");
+  } finally {
+    sandbox.document = prevDoc;
+    sandbox.KeyboardEvent = prevKE;
+    sandbox.setTimeout = prevST;
+  }
+});
+
+test("a previous pane's attendees do not bleed into the next meeting", async () => {
+  // Escape does not always close the pane; the next event's pre-click
+  // snapshot then contains the previous invitees. Set subtraction must
+  // keep them out of the next meeting.
+  let phase = 0; // 0 = nothing open, 1 = pane A open, 2 = pane B open
+  const mk = (label, n) => ({
+    getAttribute: (name) => (name === "aria-label" ? label : null),
+    click() { phase = n; },
+  });
+  const person = (name) => ({
+    getAttribute: (n) => (n === "aria-label" ? name : null),
+  });
+  const page = {
+    body: {
+      get innerText() {
+        return "Baseline calendar text on the screen already here."
+          + (phase >= 1 ? "\nAlpha meeting agenda body text." : "")
+          + (phase >= 2 ? "\nBeta meeting agenda body text." : "");
+      },
+    },
+    querySelectorAll: (sel) => {
+      const tiles = [mk("Alpha, 9:00 AM to 9:30 AM", 1),
+                     mk("Beta, 10:00 AM to 10:30 AM", 2)];
+      if (String(sel).includes("a[href]")) return [];
+      if (String(sel).includes("[title]")) {
+        const people = [];
+        if (phase >= 1) people.push(person("Ana Doe"));   // pane A, never closes
+        if (phase >= 2) people.push(person("Pat Roe"));   // pane B
+        return [...people, ...tiles];
+      }
+      return tiles;
+    },
+    dispatchEvent: () => true,  // Escape does nothing — pane A stays
+  };
+  const prevDoc = sandbox.document;
+  const prevKE = sandbox.KeyboardEvent;
+  const prevST = sandbox.setTimeout;
+  sandbox.document = page;
+  sandbox.KeyboardEvent = function () {};
+  sandbox.setTimeout = setTimeout;
+  try {
+    const out = await sandbox._readEventDetailsFunc(
+      [{ subject: "Alpha", startIso: "2026-08-21T09:00:00" },
+       { subject: "Beta", startIso: "2026-08-21T10:00:00" }],
+      JOIN_PATTERNS_FROM_SOURCE, 25, 90000);
+    const alpha = out.details.find((d) => d.subject === "Alpha");
+    const beta = out.details.find((d) => d.subject === "Beta");
+    assert.ok(alpha && beta, "both meetings should yield detail");
+    assert.deepEqual([...alpha.attendees], ["Ana Doe"]);
+    assert.deepEqual([...beta.attendees], ["Pat Roe"],
+      "pane A's invitee bled into meeting B");
+  } finally {
+    sandbox.document = prevDoc;
+    sandbox.KeyboardEvent = prevKE;
+    sandbox.setTimeout = prevST;
+  }
+});
