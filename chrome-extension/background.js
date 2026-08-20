@@ -2279,10 +2279,13 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
       // belonging to some other meeting already on screen. Attaching a
       // link to the wrong meeting is worse than having none.
       const anchorsBefore = new Set(anchorUrls());
-      // Person-shaped labels already present, for the same reason: the
-      // pane may reveal ONLY attendees — no link, barely any text —
-      // and that still counts as having rendered.
-      const namesBefore = attendeeNamesIn(document).length;
+      // Person-shaped labels already present — as a SET, not a count.
+      // The set serves two jobs: render detection compares membership
+      // (a churning page re-rendering the SAME labels is not a
+      // signal), and attendee extraction subtracts it (a label that
+      // existed before the click is page chrome, not an invitee of
+      // THIS meeting).
+      const namesBefore = new Set(attendeeNamesIn(document));
       try {
         el.click();
       } catch (_) { out.skipped++; continue; }
@@ -2306,36 +2309,89 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
       // Judging arrival by volume is a proxy; judging it by content is
       // the actual question.
       const GROWTH_MIN = 10;
-      const rendered = () => (visibleText().length > beforeLen + GROWTH_MIN)
-        || anchorUrls().some((u) => !anchorsBefore.has(u))
-        || attendeeNamesIn(document).length > namesBefore;
+      // FIELD REGRESSION 2026-08-20, extension 1.11. This check
+      // decides when the detail pane has arrived, and 1.11 broke it by
+      // widening the signals to "ANY new anchor anywhere on the page"
+      // and "ANY change in the page-wide count of name-shaped labels".
+      // Outlook Web is a live application — its DOM churns constantly,
+      // clicked or not — so on a real calendar those fired on the
+      // FIRST 150ms poll, extraction ran against a pane that had not
+      // loaded, and every meeting came back empty. The Webex links
+      // 1.10 had been finding disappeared, and the empty capture then
+      // overwrote the store's previously-enriched events (fixed on the
+      // backend in the same release: enrichment now ratchets).
+      //
+      // Two rules restore correctness without giving up the cases the
+      // wider signals were added for (a Teams pane that reveals mostly
+      // a button; an invite that reveals mostly attendee rows):
+      //
+      //   1. A signal must be SPECIFIC to what we came for: a new
+      //      JOIN-shaped anchor (not any anchor), or a name-shaped
+      //      label that was not present before the click (set
+      //      membership, not count — a page re-rendering the same
+      //      labels moves nothing).
+      //   2. A signal starts extraction only after the page SETTLES:
+      //      once signalled, keep polling until the text length holds
+      //      still for two consecutive polls, so extraction reads the
+      //      loaded pane rather than its first painted fragment.
+      const paneSignal = () =>
+        (visibleText().length > beforeLen + GROWTH_MIN)
+        || anchorUrls().some((u) => !anchorsBefore.has(u) && isJoin(u))
+        || attendeeNamesIn(document).some((n) => !namesBefore.has(n));
       let after = before;
-      for (let i = 0; i < 20; i++) {
+      let signalled = false;
+      let lastLen = -1;
+      let stable = 0;
+      for (let i = 0; i < 24; i++) {
         await sleep(150);
         after = visibleText();
-        if (rendered()) break;
+        if (!signalled) {
+          if (paneSignal()) signalled = true;
+          else continue;
+        }
+        if (after.length === lastLen) {
+          stable += 1;
+          if (stable >= 2) break;
+        } else {
+          stable = 0;
+          lastLen = after.length;
+        }
       }
 
-      if (rendered()) {
+      if (signalled) {
         out.grew++;
         // What is on screen now that was not before. Crude and exactly
         // right: the detail pane IS the new text.
         const fresh = after.slice(0, 200000);
+        // The text THIS pane added. Two diffs, in order of trust:
+        // innerText usually grows by appending, so a prefix match
+        // yields the exact addition; the old split heuristic stays as
+        // the fallback for a pane that inserted mid-page.
+        //
+        // What is deliberately GONE is the final fallback to the whole
+        // page. It existed so a pane with little text still yielded
+        // something, and what it yielded was the entire calendar's
+        // visible text stored as the meeting's "agenda" — garbage that
+        // then overwrote real fields via the store merge. URL and
+        // email scans below still search the whole page (that is what
+        // found the pasted Webex links); only the BODY is held to a
+        // genuine diff, because the body is the one field where "the
+        // whole page" is worse than nothing.
         const addedFrom = before.length > 40 ? fresh.split(before.slice(0, 40))[0] : "";
-        // Falls back to the whole page when the split finds no anchor
-        // point — which is normal for a pane that added almost no
-        // text, exactly the Teams case.
-        const added = addedFrom && addedFrom.length > 40 ? addedFrom : fresh;
+        let added = "";
+        if (after.startsWith(before)) added = after.slice(beforeLen);
+        else if (addedFrom && addedFrom.length > 40) added = addedFrom;
+        const scanText = fresh;
 
         const emails = Array.from(new Set(
-          (added.match(EMAIL_RE) || []).map((e) => e.trim())));
+          (scanText.match(EMAIL_RE) || []).map((e) => e.trim())));
 
         // Text URLs first (Webex/Zoom paste theirs into the body), then
         // anchors that appeared with this event (Teams renders a Join
         // BUTTON and puts the URL only in the href). Text is preferred
         // where both exist: a pasted URL is unambiguously part of THIS
         // invite, whereas an anchor is located by having newly appeared.
-        const urls = added.match(URL_RE) || [];
+        const urls = scanText.match(URL_RE) || [];
         const newAnchors = anchorUrls().filter((u) => !anchorsBefore.has(u));
         const joinUrl = urls.find(isJoin) || newAnchors.find(isJoin) || "";
         if (!urls.find(isJoin) && newAnchors.find(isJoin)) out.joinFromAnchor++;
@@ -2344,7 +2400,15 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
         // addresses in the text. Names are what Outlook actually
         // renders; v1.10 read addresses only and reported "Attendees
         // (1)" for a meeting with a dozen invitees.
-        const names = attendeeNamesIn(document);
+        // ONLY labels that appeared with this pane. Anything present
+        // before the click — buttons, view controls, other tiles — is
+        // interface chrome that happens to be name-shaped, and on a
+        // real calendar the page-wide scan finds plenty of it
+        // ("New event", "Next week"). Subtracting the pre-click set
+        // removes all of it in one move, and also stops one meeting's
+        // still-open pane from bleeding invitees into the next.
+        const names = attendeeNamesIn(document)
+          .filter((n) => !namesBefore.has(n));
         const attendees = Array.from(new Set([...names, ...emails]));
         if (names.length) out.attendeesFromNames++;
 

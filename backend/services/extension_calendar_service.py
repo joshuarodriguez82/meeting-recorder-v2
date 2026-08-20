@@ -869,6 +869,57 @@ class ExtensionCalendarService:
             except CloudFileNotReadyError:
                 raw_before = {}
             prior_kept = self._prior_kept_from_raw(raw_before, lo, hi)
+
+            # ENRICHMENT RATCHETS UP, NEVER DOWN.
+            #
+            # The grid labels a capture starts from never carry
+            # attendees, an invite body, or (for Teams) a join link —
+            # those come from the detail passes, which are best-effort:
+            # a click that times out, a pane that fails to render, a
+            # regression in the extension (field incident 2026-08-20,
+            # extension 1.11) all produce a capture whose EVENTS are
+            # fine but whose detail is empty.
+            #
+            # Before this, such a capture was worse than no capture:
+            # its bare events collided with the store's enriched ones,
+            # fresh won the collision, and the join links the user
+            # already HAD disappeared. "You broke it even more — no
+            # links at all now" was this exact mechanism: one capture
+            # with a broken detail pass erased every previously-earned
+            # field.
+            #
+            # So: a fresh event that carries a detail field wins (it is
+            # newer truth — an invite really can drop its link), but a
+            # fresh event whose detail field is EMPTY inherits the
+            # stored value. Empty here does not mean "the invite has
+            # none"; the grid path cannot tell "none" from "not
+            # fetched", and while that is true, deleting data on empty
+            # is indefensible.
+            prior_by_key: Dict[tuple, dict] = {}
+            for pm in prior_kept:
+                pk = (normalize_subject(pm.get("subject")), pm.get("start"))
+                prior_by_key[pk] = pm
+            backfilled = 0
+            for e in kept:
+                pm = prior_by_key.get(
+                    (normalize_subject(e.get("subject")), e.get("start")))
+                if pm is None:
+                    continue
+                gained = False
+                if not e.get("attendees") and pm.get("attendees"):
+                    e["attendees"] = list(pm["attendees"])
+                    gained = True
+                for f in ("body", "join_url", "organizer", "location"):
+                    if not e.get(f) and pm.get(f):
+                        e[f] = pm[f]
+                        gained = True
+                if gained:
+                    backfilled += 1
+            if backfilled:
+                logger.info(
+                    f"Extension calendar store: carried detail forward "
+                    f"onto {backfilled} event(s) the fresh capture "
+                    f"brought back bare")
             # A fresh capture is AUTHORITATIVE about a day it can see.
             #
             # The count guard below exists so a bad/partial capture can't
