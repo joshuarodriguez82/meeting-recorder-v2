@@ -16,6 +16,7 @@ import json
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -535,3 +536,76 @@ def test_the_export_never_leaks_the_recordings_path_it_read(tmp_path):
 
     versions = db.gather_versions(_ext_settings(rec))
     assert str(rec) not in json.dumps(versions)
+
+
+# ── The capture recorder's counters reach the bundle (v2.44.0) ───────
+#
+# Extension 1.7 computed exactly the counters needed to tell its
+# failure modes apart and kept them inside the extension, where the
+# bundle could not see them. "Attendees still empty" therefore looked
+# identical whether the recorder never installed, saw no responses at
+# all, saw responses holding no meeting, or read meetings that matched
+# no captured event — four causes, four different fixes, one symptom.
+
+
+def test_capture_diag_reaches_the_bundle(tmp_path):
+    from services.extension_calendar_service import ExtensionCalendarService
+    from utils.diagnostics_bundle import extension_capture_diag
+
+    ExtensionCalendarService(tmp_path).record_capture_diag({
+        "recorderInstalled": True,
+        "responsesSeen": 42,
+        "responsesMatched": 0,
+        "detailMatched": 0,
+    })
+    got = extension_capture_diag(
+        SimpleNamespace(recordings_dir=str(tmp_path)))["extension_capture_diag"]
+
+    # This exact shape — installed, saw traffic, matched nothing — is
+    # the "URL/shape problem, not an install problem" case, and it must
+    # be readable straight out of the zip.
+    assert got["recorderInstalled"] is True
+    assert got["responsesSeen"] == 42
+    assert got["responsesMatched"] == 0
+    assert got["at"]
+
+
+def test_no_capture_reported_is_distinct_from_a_capture_that_found_nothing(tmp_path):
+    from services.extension_calendar_service import ExtensionCalendarService
+    from utils.diagnostics_bundle import extension_capture_diag
+
+    settings = SimpleNamespace(recordings_dir=str(tmp_path))
+    # Nothing reported: empty. NOT zeros — "no capture has run since
+    # this existed" is a different fact from "a capture ran and saw
+    # nothing", and conflating them is the defect this whole field
+    # exists to end.
+    assert extension_capture_diag(settings)["extension_capture_diag"] == {}
+
+    ExtensionCalendarService(tmp_path).record_capture_diag({"responsesSeen": 0})
+    after = extension_capture_diag(settings)["extension_capture_diag"]
+    assert after["responsesSeen"] == 0
+    assert after != {}
+
+
+def test_capture_diag_stores_scalars_only(tmp_path):
+    # The payload is opaque diagnostic data from the extension. Bound
+    # what it can write into the store rather than trusting a future
+    # extension build not to send something large or nested.
+    from services.extension_calendar_service import ExtensionCalendarService
+
+    svc = ExtensionCalendarService(tmp_path)
+    svc.record_capture_diag({
+        "responsesSeen": 3,
+        "recorderInstalled": False,
+        "sneakyUrl": "https://tenant.example/j/secret",
+        "nested": {"subject": "Real Meeting Name"},
+        "list": ["a.doe@globex.example"],
+    })
+    got = svc.last_capture_diag()
+    assert got["responsesSeen"] == 3
+    assert got["recorderInstalled"] is False
+    # Strings and containers are dropped, so no URL, subject or address
+    # can reach a bundle users paste into chat.
+    assert "sneakyUrl" not in got
+    assert "nested" not in got
+    assert "list" not in got

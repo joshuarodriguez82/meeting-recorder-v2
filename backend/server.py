@@ -8091,6 +8091,21 @@ class ExtensionImportRequest(BaseModel):
     # record_extension_version / extension_bundle_service.
     # extension_version_status.
     extension_version: Optional[str] = None
+    # Counts and booleans describing what the extension's calendar
+    # RESPONSE RECORDER did on this capture — whether it registered,
+    # whether it installed, how many responses it saw, how many held a
+    # meeting, and how many events actually gained attendees / body /
+    # join URL from them. No URL, subject, attendee or body text.
+    #
+    # Stored so the diagnostics bundle can answer WHICH failure a
+    # field-empty report is. v1.7 computed these and kept them inside
+    # the extension, so an empty attendee list looked identical whether
+    # the recorder never installed, saw nothing, or saw traffic it
+    # could not read — three causes needing three different fixes.
+    # Free-form dict rather than a model: it is opaque diagnostic
+    # payload, and a schema here would reject a newer extension's extra
+    # counter rather than pass it through.
+    capture_diag: Optional[Dict[str, Any]] = None
 
 
 # Two calendar-parse paths (events_from_structured / events_from_briefing
@@ -8214,6 +8229,10 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
             await asyncio.to_thread(
                 svc.extension_calendar_svc.record_extension_version,
                 req.extension_version)
+            if req.capture_diag is not None:
+                await asyncio.to_thread(
+                    svc.extension_calendar_svc.record_capture_diag,
+                    req.capture_diag)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Extension version bookkeeping failed: {e}")
 

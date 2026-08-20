@@ -2216,10 +2216,14 @@ async function goToNextCalendarWeek(tabId) {
 function _harvestCalendarResponses() {
   try {
     const s = window.__mrCal;
-    if (!s) return { bodies: [], seen: 0, matched: 0, dropped: 0, installed: false };
+    if (!s) {
+      return { bodies: [], seen: 0, matched: 0, dropped: 0,
+               notMeetingShaped: 0, installed: false };
+    }
     const out = {
       bodies: s.bodies, seen: s.seen, matched: s.matched,
-      dropped: s.dropped, installed: true,
+      dropped: s.dropped, notMeetingShaped: s.notMeetingShaped || 0,
+      installed: true,
     };
     s.bodies = [];
     s.bytes = 0;
@@ -2542,6 +2546,12 @@ async function captureCalendarTab() {
     responsesSeen: 0,
     responsesMatched: 0,
     responsesDropped: 0,
+    responsesNotMeetingShaped: 0,
+    // Whether the recorder had to be injected after the fact because
+    // registration had not taken effect for this tab yet. See
+    // ensureRecorderInstalled.
+    recorderInjectedLate: false,
+    recorderReloaded: false,
   };
   let fallbackText = "";
 
@@ -2559,14 +2569,50 @@ async function captureCalendarTab() {
       diag.responsesSeen += got.seen || 0;
       diag.responsesMatched += got.matched || 0;
       diag.responsesDropped += got.dropped || 0;
+      diag.responsesNotMeetingShaped += got.notMeetingShaped || 0;
       capturedBodies.push(...(got.bodies || []));
     } catch (e) {
       console.warn(`[ext] calendar ${label}: harvest failed:`, e);
     }
   };
 
+  // registerContentScripts resolves before Chrome has necessarily
+  // applied the registration to a tab that is ALREADY navigating —
+  // and this tab was created microseconds after the call. If the
+  // recorder is not in the page, injecting it now is too late for the
+  // requests already made, so the page is reloaded with the recorder
+  // guaranteed present.
+  //
+  // This exists because the alternative is indistinguishable from
+  // every other failure: empty fields and no way to tell why.
+  const ensureRecorderInstalled = async () => {
+    try {
+      const probe = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        func: () => !!window.__mrCalRecorderInstalled,
+      });
+      if (probe && probe[0] && probe[0].result) return;
+
+      diag.recorderInjectedLate = true;
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        files: ["calendar-recorder.js"],
+      });
+      // Injected AFTER Outlook's first calendar fetch, so that fetch
+      // was missed. Reload with the recorder already resident.
+      await chrome.tabs.reload(tabId);
+      await waitForTabComplete(tabId);
+      diag.recorderReloaded = true;
+    } catch (e) {
+      console.warn("[ext] recorder install check failed:", e);
+    }
+  };
+
   try {
     await waitForTabComplete(tabId);
+    if (recorderOn) await ensureRecorderInstalled();
 
     const week1 = await settleAndCollectCalendar(tabId, "week1 (current)");
     allCandidates.push(...week1.candidates);
@@ -2667,6 +2713,30 @@ async function captureCalendarOnly(backendUrl, token) {
   }
 
   const payload = { date: _todayIsoLocal(), extension_version: currentExtensionVersion() };
+  // Counts and booleans ONLY — no URL, subject, attendee or body text.
+  //
+  // This is sent because v1.7 shipped these counters into the capture
+  // result and nowhere else: the app's diagnostics bundle could not
+  // see them, so a field failure still looked like every other field
+  // failure. Telling the user "send me the diagnostics and it will say
+  // which case this is" and then shipping a bundle that could not say
+  // is the same defect as the rest of this saga, committed one layer
+  // out.
+  payload.capture_diag = {
+    recorderRegistered: !!capture.diag?.recorderRegistered,
+    recorderInstalled: !!capture.diag?.recorderInstalled,
+    recorderInjectedLate: !!capture.diag?.recorderInjectedLate,
+    recorderReloaded: !!capture.diag?.recorderReloaded,
+    responsesSeen: capture.diag?.responsesSeen || 0,
+    responsesMatched: capture.diag?.responsesMatched || 0,
+    responsesDropped: capture.diag?.responsesDropped || 0,
+    responsesNotMeetingShaped: capture.diag?.responsesNotMeetingShaped || 0,
+    detailMatched: capture.diag?.detailMatched || 0,
+    detailGainedAttendees: capture.diag?.detailGainedAttendees || 0,
+    detailGainedBody: capture.diag?.detailGainedBody || 0,
+    detailGainedJoinUrl: capture.diag?.detailGainedJoinUrl || 0,
+    eventsExtracted: capture.events.length,
+  };
   if (capture.events.length > 0) {
     payload.calendar_events = capture.events;
   } else if (capture.fallbackText) {
