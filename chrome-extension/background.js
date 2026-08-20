@@ -2103,6 +2103,186 @@ function _calendarDomScanFunc() {
 // Advance Outlook Web's calendar to the following week. Unverified —
 // see NEXT_WEEK_SELECTORS above for why a click cascade was chosen
 // over a dated URL.
+// ──────────────────────────────────────────────────────────────────
+// Detail from the SCREEN (v1.9) — the source that cannot be wrong
+// about auth, hosts, API versions or workers.
+// ──────────────────────────────────────────────────────────────────
+//
+// FIVE RELEASES OF HISTORY, because it explains the design.
+//
+//   v1.5  read join links out of the grid label. Worked — and found
+//         the only 1 of 25 labels that had one.
+//   v1.6  guessed four API endpoints. All four modelled on classic
+//         OWA; the tenant runs the new stack. Nothing worked.
+//   v1.7  recorded Outlook's own responses instead of calling the API.
+//         Right idea, still unproven: if Outlook fetches from a
+//         SERVICE WORKER, a main-world patch never sees it.
+//   v1.8  made the failure modes distinguishable in diagnostics.
+//
+// Every one of those depends on something this project cannot observe
+// from where it is built: an endpoint, an auth scheme, a JSON shape,
+// or which thread issues a fetch.
+//
+// This does not. When a user clicks an event, Outlook RENDERS the
+// attendees, the agenda and the join link into the page — that is what
+// the user is looking at. Reading what is on screen cannot be defeated
+// by a service worker, a bearer token, a tenant migration or an API
+// version, because by the time it is on screen all of that has already
+// happened.
+//
+// It IS slower, and it touches the DOM. Both were why this was passed
+// over in favour of the API route four releases ago. That judgement
+// was wrong: "cleaner" is worth nothing next to "works".
+//
+// STRUCTURE-AGNOSTIC ON PURPOSE. This does not target selectors in the
+// detail pane — that would be one more guess about markup nobody here
+// can see. It snapshots the page's visible text, clicks, waits for the
+// text to grow, and reads what is NEW. Then it pulls out:
+//
+//   * attendees — by EMAIL ADDRESS regex. An address is an address in
+//     any markup.
+//   * join URL  — via JOIN_PROVIDER_PATTERNS, the same host+path list
+//     the label extractor and the diagnostic already share.
+//   * agenda    — the remaining new text.
+//
+// None of that depends on a class name, a role, or a DOM shape.
+//
+// BOUNDED, because 47 events one at a time is not acceptable: only
+// events still MISSING detail, only those inside a near-term window,
+// capped in count, and under a wall-clock budget. Whatever it does not
+// reach is reported as skipped rather than silently left empty.
+
+const DETAIL_MAX_EVENTS = 25;
+const DETAIL_TIME_BUDGET_MS = 90000;
+const DETAIL_WINDOW_HOURS = 72;
+
+// Runs IN THE PAGE. `wanted` is [{subject, startIso}]; returns
+// [{subject, startIso, attendees, body, joinUrl}] for whatever it
+// managed to open inside the budget, plus counters.
+async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) {
+  const started = Date.now();
+  const out = { details: [], opened: 0, matchedElement: 0, skipped: 0,
+                grew: 0, error: null };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  try {
+    const providers = (joinPatterns || []).map((p) => ({
+      name: p.name, host: new RegExp(p.host, "i"), path: new RegExp(p.path, "i"),
+    }));
+
+    const isJoin = (u) => {
+      try {
+        const url = new URL(u);
+        return providers.some((p) => p.host.test(url.hostname) && p.path.test(url.pathname));
+      } catch (_) { return false; }
+    };
+
+    // Every aria-label-bearing element, flat — the same surface the
+    // capture scan already trusts, no depth walk.
+    const labelled = () => Array.from(document.querySelectorAll("[aria-label]"));
+
+    const norm = (t) => String(t || "").replace(/\s+/g, " ").trim().toLowerCase();
+
+    const visibleText = () => {
+      try { return document.body ? (document.body.innerText || "") : ""; }
+      catch (_) { return ""; }
+    };
+
+    const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+    const URL_RE = /https?:\/\/[^\s"'<>)\]]+/g;
+
+    for (const want of wanted || []) {
+      if (out.details.length >= maxEvents) { out.skipped++; continue; }
+      if (Date.now() - started > budgetMs) { out.skipped++; continue; }
+
+      const target = norm(want.subject);
+      if (!target) { out.skipped++; continue; }
+
+      // The event tile whose label carries this subject. Longest label
+      // wins: a tile's label is the full "subject, time, ..." string,
+      // while a stray container may repeat just the subject.
+      let el = null;
+      let best = -1;
+      for (const cand of labelled()) {
+        const lab = norm(cand.getAttribute("aria-label"));
+        if (!lab.startsWith(target)) continue;
+        if (lab.length > best) { best = lab.length; el = cand; }
+      }
+      if (!el) { out.skipped++; continue; }
+      out.matchedElement++;
+
+      const before = visibleText();
+      const beforeLen = before.length;
+      try {
+        el.click();
+      } catch (_) { out.skipped++; continue; }
+      out.opened++;
+
+      // Wait for the pane to render — poll rather than fix a delay, so
+      // a fast tenant is not punished and a slow one is not truncated.
+      // GROWTH_MIN is deliberately small. An earlier draft required 40
+      // new characters, which silently discarded a sparse invite — one
+      // attendee, no agenda — as "never rendered". Whether the pane is
+      // USEFUL is decided below by what was actually extracted, not by
+      // guessing a size for it here.
+      const GROWTH_MIN = 10;
+      let after = before;
+      for (let i = 0; i < 20; i++) {
+        await sleep(150);
+        after = visibleText();
+        if (after.length > beforeLen + GROWTH_MIN) break;
+      }
+
+      if (after.length > beforeLen + GROWTH_MIN) {
+        out.grew++;
+        // What is on screen now that was not before. Crude and exactly
+        // right: the detail pane IS the new text.
+        const fresh = after.slice(0, 200000);
+        const addedFrom = before.length > 40 ? fresh.split(before.slice(0, 40))[0] : "";
+        const added = addedFrom && addedFrom.length > 40 ? addedFrom : fresh;
+
+        const emails = Array.from(new Set(
+          (added.match(EMAIL_RE) || []).map((e) => e.trim())));
+        const urls = added.match(URL_RE) || [];
+        const joinUrl = urls.find(isJoin) || "";
+
+        // Body: the new text with addresses and links removed, so the
+        // agenda does not re-state the attendee list.
+        let body = added.replace(EMAIL_RE, " ").replace(URL_RE, " ")
+          .replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+        if (body.length > 8000) body = body.slice(0, 8000);
+
+        // Only record something we actually found. A pane that
+        // rendered but yielded no address, no link and no text
+        // contributes nothing — and an empty attendee list recorded
+        // here would be indistinguishable from a meeting that
+        // genuinely has none.
+        if (emails.length || joinUrl || body) {
+          out.details.push({
+            subject: want.subject,
+            startIso: want.startIso,
+            attendees: emails,
+            body,
+            joinUrl,
+          });
+        }
+      }
+
+      // Close the pane so the next click starts from a comparable
+      // baseline. Escape is the one gesture every Outlook build honours.
+      try {
+        document.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "Escape", code: "Escape", keyCode: 27, bubbles: true,
+        }));
+      } catch (_) { /* ignore */ }
+      await sleep(200);
+    }
+  } catch (e) {
+    out.error = (e && e.message) ? e.message : String(e);
+  }
+  return out;
+}
+
 async function goToNextCalendarWeek(tabId) {
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt > 0) await sleep(1000);
@@ -2524,6 +2704,95 @@ async function settleAndCollectCalendar(tabId, label) {
 // comment on why one week view alone can miss the tail of the panel's
 // 168h window), structured extraction with a text-scrape fallback.
 // Returns { events, layer, stats, zeroReason, fallbackText, elapsedMs, diag }.
+// Both detail mechanisms, in order, against a LIVE tab.
+//
+// Mechanism 1 (the response recorder) needs no tab — it reads what was
+// already captured. Mechanism 2 (the screen) does, which is why this
+// runs inside captureCalendarTab's try rather than after it.
+//
+// They are deliberately independent. Five releases each bet on ONE
+// mechanism and each was wrong in a way the previous one could not
+// have predicted. Mechanism 2 only touches events mechanism 1 left
+// empty, so a working recorder costs nothing here, and the pair fails
+// only if BOTH fail.
+async function applyDetailPasses(tabId, extraction, capturedBodies, diag) {
+  // ── 1. Outlook's own responses ────────────────────────────────────
+  const merged = mergeDetailIntoEvents(
+    extraction.events, detailsFromResponses(capturedBodies));
+  diag.detailMatched = merged.stats.matched;
+  diag.detailGainedAttendees = merged.stats.gainedAttendees;
+  diag.detailGainedBody = merged.stats.gainedBody;
+  diag.detailGainedJoinUrl = merged.stats.gainedJoinUrl;
+  extraction.stats.withAttendees = merged.stats.gainedAttendees;
+  extraction.stats.withBody = merged.stats.gainedBody;
+  extraction.stats.withJoinUrl =
+    (extraction.stats.withJoinUrl || 0) + merged.stats.gainedJoinUrl;
+
+  // ── 2. The screen ─────────────────────────────────────────────────
+  diag.domDetailAttempted = 0;
+  diag.domDetailOpened = 0;
+  diag.domDetailGrew = 0;
+  diag.domDetailSkipped = 0;
+  diag.domGainedAttendees = 0;
+  diag.domGainedBody = 0;
+  diag.domGainedJoinUrl = 0;
+  try {
+    const cutoff = Date.now() + DETAIL_WINDOW_HOURS * 3600 * 1000;
+    const needing = extraction.events.filter((e) => {
+      const hasDetail = (e.attendees && e.attendees.length) || e.body || e.join_url;
+      if (hasDetail) return false;
+      const t = Date.parse(e.start);
+      return Number.isFinite(t) && t <= cutoff;
+    });
+    diag.domDetailAttempted = needing.length;
+    if (!needing.length) return;
+
+    const r = await chrome.scripting.executeScript({
+      target: { tabId },
+      args: [
+        needing.map((e) => ({ subject: e.subject, startIso: e.start })),
+        JOIN_PROVIDER_PATTERNS,
+        DETAIL_MAX_EVENTS,
+        DETAIL_TIME_BUDGET_MS,
+      ],
+      func: _readEventDetailsFunc,
+    });
+    const got = (r && r[0] && r[0].result) || null;
+    if (!got) return;
+
+    diag.domDetailOpened = got.opened || 0;
+    diag.domDetailGrew = got.grew || 0;
+    diag.domDetailSkipped = got.skipped || 0;
+
+    const byKey = new Map();
+    for (const d of got.details || []) {
+      const k = detailKey(d.subject, d.startIso);
+      if (k) {
+        byKey.set(k, {
+          attendees: d.attendees || [],
+          body: d.body || "",
+          joinUrl: d.joinUrl || "",
+        });
+      }
+    }
+    const domMerged = mergeDetailIntoEvents(extraction.events, byKey);
+    diag.domGainedAttendees = domMerged.stats.gainedAttendees;
+    diag.domGainedBody = domMerged.stats.gainedBody;
+    diag.domGainedJoinUrl = domMerged.stats.gainedJoinUrl;
+    extraction.stats.withAttendees =
+      (extraction.stats.withAttendees || 0) + domMerged.stats.gainedAttendees;
+    extraction.stats.withBody =
+      (extraction.stats.withBody || 0) + domMerged.stats.gainedBody;
+    extraction.stats.withJoinUrl =
+      (extraction.stats.withJoinUrl || 0) + domMerged.stats.gainedJoinUrl;
+  } catch (e) {
+    // Never fatal: the events are already extracted, and a capture
+    // with no detail beats no capture at all.
+    console.warn("[ext] DOM detail pass failed:", e);
+    diag.domDetailError = String((e && e.message) || e).slice(0, 200);
+  }
+}
+
 async function captureCalendarTab() {
   // Registered BEFORE the tab exists. Outlook's calendar request is in
   // flight within a second of navigation, and a recorder installed
@@ -2554,6 +2823,10 @@ async function captureCalendarTab() {
     recorderReloaded: false,
   };
   let fallbackText = "";
+  // Assigned inside the try (the DOM detail pass needs the live tab).
+  // Left null if the try threw before extraction, which the guard
+  // below turns into an honest empty result rather than a crash.
+  let extraction = null;
 
   // Reads back and clears whatever the page recorded so far.
   const harvest = async (label) => {
@@ -2631,6 +2904,15 @@ async function captureCalendarTab() {
       if (!week2.stabilized) diag.anyWeekUnstable = true;
       await harvest("week2");
     }
+
+    // Extraction and BOTH detail passes happen here, inside the try —
+    // the DOM pass needs the tab, and the finally below closes it.
+    // An earlier draft ran the DOM pass after the finally, against a
+    // tab that no longer existed.
+    extraction = extractEventsFromCandidates(allCandidates, {
+      fallbackYear: new Date().getFullYear(),
+    });
+    await applyDetailPasses(tabId, extraction, capturedBodies, diag);
   } finally {
     try { await chrome.tabs.remove(tabId); } catch (_) { /* ignore */ }
     // Unregistered whatever happened: this must not stay installed on
@@ -2638,24 +2920,9 @@ async function captureCalendarTab() {
     await unregisterCalendarRecorder();
   }
 
-  const extraction = extractEventsFromCandidates(allCandidates, {
-    fallbackYear: new Date().getFullYear(),
-  });
-
-  // Fold in anything Outlook's own responses carried that the grid
-  // could not: the attendee list, the invite body, and a Teams join
-  // URL. Purely additive — a field the label already filled wins, and
-  // an event with no match comes through untouched.
-  const merged = mergeDetailIntoEvents(
-    extraction.events, detailsFromResponses(capturedBodies));
-  diag.detailMatched = merged.stats.matched;
-  diag.detailGainedAttendees = merged.stats.gainedAttendees;
-  diag.detailGainedBody = merged.stats.gainedBody;
-  diag.detailGainedJoinUrl = merged.stats.gainedJoinUrl;
-  extraction.stats.withAttendees = merged.stats.gainedAttendees;
-  extraction.stats.withBody = merged.stats.gainedBody;
-  extraction.stats.withJoinUrl =
-    (extraction.stats.withJoinUrl || 0) + merged.stats.gainedJoinUrl;
+  if (!extraction) {
+    extraction = { events: [], stats: { scanned: allCandidates.length, parsed: 0 } };
+  }
 
   const zeroReason = extraction.events.length === 0
     ? classifyZeroReason(extraction.stats, { stillRendering: diag.anyWeekUnstable })
@@ -2735,6 +3002,17 @@ async function captureCalendarOnly(backendUrl, token) {
     detailGainedAttendees: capture.diag?.detailGainedAttendees || 0,
     detailGainedBody: capture.diag?.detailGainedBody || 0,
     detailGainedJoinUrl: capture.diag?.detailGainedJoinUrl || 0,
+    // Mechanism 2 — reading the rendered event. Reported separately
+    // from mechanism 1 so a bug report says WHICH one worked, and so
+    // "both were tried and both failed" is distinguishable from "only
+    // one ran".
+    domDetailAttempted: capture.diag?.domDetailAttempted || 0,
+    domDetailOpened: capture.diag?.domDetailOpened || 0,
+    domDetailGrew: capture.diag?.domDetailGrew || 0,
+    domDetailSkipped: capture.diag?.domDetailSkipped || 0,
+    domGainedAttendees: capture.diag?.domGainedAttendees || 0,
+    domGainedBody: capture.diag?.domGainedBody || 0,
+    domGainedJoinUrl: capture.diag?.domGainedJoinUrl || 0,
     eventsExtracted: capture.events.length,
   };
   if (capture.events.length > 0) {

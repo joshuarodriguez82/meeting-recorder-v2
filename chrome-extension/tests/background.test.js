@@ -1902,3 +1902,154 @@ test("the recorder registers for the NEW Outlook host, not just classic OWA", ()
   assert.match(block, /world:\s*"MAIN"/);
   assert.match(block, /runAt:\s*"document_start"/);
 });
+
+// ── Mechanism 2: detail read off the screen (v1.9) ───────────────────
+//
+// Five releases bet on one mechanism at a time — an endpoint, an auth
+// scheme, a JSON shape, a fetch thread — each unobservable from here.
+// This one reads what Outlook has already RENDERED, which cannot be
+// defeated by any of those. These tests pin that it is structure-
+// agnostic (no selector in the detail pane) and that it never makes
+// things worse than leaving the fields empty.
+
+// JOIN_PROVIDER_PATTERNS is a top-level `const`, and a `const` in a vm
+// script does NOT become a property of the context object the way a
+// function declaration does — `sandbox.JOIN_PROVIDER_PATTERNS` is
+// undefined. Read it by evaluating the identifier inside the context
+// instead, so these tests exercise the REAL provider list rather than
+// a local copy that could drift from it.
+const JOIN_PATTERNS_FROM_SOURCE =
+  vm.runInContext("JOIN_PROVIDER_PATTERNS", sandbox);
+
+function fakeDetailPage({ tiles, revealText }) {
+  // Minimal page: aria-labelled tiles that, when clicked, grow
+  // body.innerText by revealText[subject]. No classes, no roles — if
+  // the reader needed those, it would fail here.
+  let extra = "";
+  const base = "Calendar grid baseline text that is already on screen.";
+  const els = tiles.map((t) => ({
+    getAttribute: (n) => (n === "aria-label" ? t.label : null),
+    click() { extra = "\n" + (revealText[t.subject] || ""); },
+  }));
+  return {
+    body: { get innerText() { return base + extra; } },
+    querySelectorAll: () => els,
+    dispatchEvent: () => { extra = ""; return true; },
+  };
+}
+
+async function runDetailReader({ tiles, revealText, wanted, max = 25, budget = 90000 }) {
+  const prevDoc = sandbox.document;
+  const prevKE = sandbox.KeyboardEvent;
+  const prevST = sandbox.setTimeout;
+  sandbox.document = fakeDetailPage({ tiles, revealText });
+  sandbox.KeyboardEvent = function () {};
+  // setTimeout is NOT a vm-context intrinsic, and the reader polls
+  // with it. Without this the function throws, its outer catch
+  // swallows the throw, and every counter reads zero — which looks
+  // exactly like "nothing matched".
+  sandbox.setTimeout = setTimeout;
+  try {
+    return await sandbox._readEventDetailsFunc(
+      wanted, JOIN_PATTERNS_FROM_SOURCE, max, budget);
+  } finally {
+    sandbox.document = prevDoc;
+    sandbox.KeyboardEvent = prevKE;
+    sandbox.setTimeout = prevST;
+  }
+}
+
+test("attendees are read as ADDRESSES, with no dependence on markup", async () => {
+  const out = await runDetailReader({
+    tiles: [{ subject: "Quarterly review", label: "Quarterly review, 12:30 PM to 1:00 PM" }],
+    revealText: {
+      "Quarterly review":
+        "Required: Ana Doe a.doe@globex.example; Pat Roe p.roe@globex.example\n"
+        + "Agenda: numbers, then the roadmap.",
+    },
+    wanted: [{ subject: "Quarterly review", startIso: "2026-08-20T12:30:00" }],
+  });
+  assert.equal(out.opened, 1);
+  assert.equal(out.grew, 1);
+  const d = out.details[0];
+  assert.deepEqual([...d.attendees],
+    ["a.doe@globex.example", "p.roe@globex.example"]);
+  assert.match(d.body, /roadmap/);
+  // Addresses are stripped from the agenda so it doesn't restate the
+  // attendee list.
+  assert.ok(!d.body.includes("@"), `addresses leaked into body: ${d.body}`);
+});
+
+test("a Teams join link is recognised, an incidental link is not", async () => {
+  const out = await runDetailReader({
+    tiles: [{ subject: "Teams sync", label: "Teams sync, 9:00 AM to 9:30 AM" }],
+    revealText: {
+      "Teams sync":
+        "Join: https://teams.microsoft.com/l/meetup-join/EXAMPLE\n"
+        + "Notes: https://learning.example.com/library/course-42",
+    },
+    wanted: [{ subject: "Teams sync", startIso: "2026-08-20T09:00:00" }],
+  });
+  // THE case five releases failed on: a Teams meeting whose URL is not
+  // in the grid label at all.
+  assert.match(out.details[0].joinUrl, /meetup-join/);
+  assert.ok(!out.details[0].joinUrl.includes("learning.example.com"));
+});
+
+test("an event whose pane never renders yields nothing, not garbage", async () => {
+  // Clicked, nothing appeared. Inventing an empty attendee list would
+  // be indistinguishable from a meeting that genuinely has none.
+  const out = await runDetailReader({
+    tiles: [{ subject: "Silent one", label: "Silent one, 9:00 AM to 9:30 AM" }],
+    revealText: { "Silent one": "" },
+    wanted: [{ subject: "Silent one", startIso: "2026-08-20T09:00:00" }],
+  });
+  assert.equal(out.opened, 1);
+  assert.equal(out.grew, 0);
+  assert.equal(out.details.length, 0);
+});
+
+test("an event with no matching tile is skipped and counted", async () => {
+  const out = await runDetailReader({
+    tiles: [{ subject: "Something else", label: "Something else, 9:00 AM to 9:30 AM" }],
+    revealText: {},
+    wanted: [{ subject: "Not on screen", startIso: "2026-08-20T09:00:00" }],
+  });
+  assert.equal(out.matchedElement, 0);
+  assert.equal(out.skipped, 1);
+  assert.equal(out.details.length, 0);
+});
+
+test("the per-run cap is honoured and the remainder reported as skipped", async () => {
+  // 47 events one at a time is not acceptable. What is not reached
+  // must be COUNTED, never silently dropped — a truncated pass that
+  // reads as a complete one is this project's recurring defect.
+  const tiles = [], reveal = {}, wanted = [];
+  for (let i = 0; i < 5; i++) {
+    tiles.push({ subject: `M${i}`, label: `M${i}, 9:00 AM to 9:30 AM` });
+    reveal[`M${i}`] = `Attendee a${i}@globex.example agenda text here`;
+    wanted.push({ subject: `M${i}`, startIso: "2026-08-20T09:00:00" });
+  }
+  const out = await runDetailReader({ tiles, revealText: reveal, wanted, max: 2 });
+  assert.equal(out.details.length, 2);
+  assert.equal(out.skipped, 3);
+});
+
+test("detail read from the screen merges additively, like every other source", async () => {
+  const out = await runDetailReader({
+    tiles: [{ subject: "M", label: "M, 9:00 AM to 9:30 AM" }],
+    revealText: { M: "Attendee a.doe@globex.example agenda" },
+    wanted: [{ subject: "M", startIso: "2026-08-20T09:00:00" }],
+  });
+  const byKey = new Map([[
+    detailKey("M", "2026-08-20T09:00"),
+    { attendees: out.details[0].attendees, body: out.details[0].body, joinUrl: "" },
+  ]]);
+  const events = [{ subject: "M", start: "2026-08-20T09:00:00",
+                    attendees: [], body: "", join_url: "https://kept.example/j/1" }];
+  const { stats } = mergeDetailIntoEvents(events, byKey);
+  assert.equal(stats.gainedAttendees, 1);
+  // A join URL the label already supplied still wins.
+  assert.equal(events[0].join_url, "https://kept.example/j/1");
+  assert.equal(stats.gainedJoinUrl, 0);
+});

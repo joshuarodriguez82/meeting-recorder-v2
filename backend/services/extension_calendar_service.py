@@ -133,6 +133,45 @@ _SUBJECT_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+# CANCELLATION IS A STATUS, NOT NOISE.
+#
+# `_SUBJECT_PREFIX_RE` above strips "Canceled:" along with "RE:" and
+# "FW:", because for DEDUPE purposes they are all the same thing: the
+# same meeting wearing a different subject line. That is correct for
+# matching and catastrophic on its own — it scrubs a cancelled
+# meeting's subject clean, so it becomes indistinguishable from the
+# live one and keeps its place on the Record tab as something to
+# record.
+#
+# Field report 2026-08-20: a cancelled call rendered struck-through and
+# CANCELLED on the Today screen (which reads the briefing agenda, whose
+# `status` field `events_from_briefing` honours) while the SAME meeting
+# sat in Upcoming Meetings on Record as a live, recordable row. Two
+# paths, one of which knew.
+#
+# So the prefix is detected BEFORE it is stripped, and the event is
+# dropped — matching `events_from_briefing`'s existing rule and the
+# reason stated there: a cancelled meeting must not resurface as
+# something to record.
+#
+# Deliberately narrower than the strip list: "accepted", "declined" and
+# "tentative" are RESPONSE states — the meeting is still happening, and
+# the user may still want to record it. Only cancellation removes the
+# meeting itself.
+_CANCELLED_PREFIX_RE = re.compile(
+    r"^\s*(?:canceled|cancelled)\s*[:!]", re.IGNORECASE)
+
+
+def is_cancelled_subject(subject: str) -> bool:
+    """True when a subject line marks the meeting as cancelled.
+
+    Outlook and OWA both prefix the subject rather than exposing a
+    separate flag on the calendar grid, so the subject IS the signal on
+    this path — there is nothing else to read.
+    """
+    return bool(_CANCELLED_PREFIX_RE.match(str(subject or "")))
+
+
 _WS_RE = re.compile(r"\s+")
 
 # "9:30 AM", "9 AM", "09:30", "9.30 pm" — the shapes the briefing's
@@ -385,6 +424,7 @@ def events_from_structured(events: Iterable[Any],
     dropped_not_dict = 0
     dropped_no_subject = 0
     dropped_no_start = 0
+    dropped_cancelled = 0
     for item in events:
         if not isinstance(item, dict):
             dropped_not_dict += 1
@@ -392,6 +432,11 @@ def events_from_structured(events: Iterable[Any],
         subject = str(item.get("subject") or "").strip()
         if not subject:
             dropped_no_subject += 1
+            continue
+        # Before any normalisation — `_SUBJECT_PREFIX_RE` would remove
+        # the only evidence this meeting was cancelled.
+        if is_cancelled_subject(subject):
+            dropped_cancelled += 1
             continue
         start = _coerce_dt(item.get("start"))
         if start is None:
@@ -420,6 +465,7 @@ def events_from_structured(events: Iterable[Any],
             dropped_not_dict=dropped_not_dict,
             dropped_no_subject=dropped_no_subject,
             dropped_no_start=dropped_no_start,
+            dropped_cancelled=dropped_cancelled,
         )
     return out
 
