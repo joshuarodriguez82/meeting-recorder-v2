@@ -5710,7 +5710,20 @@ def _finalize_status_detail(session: "Session") -> Optional[tuple[int, str]]:
             )
             return (409, detail)
         aec_note = ""
-        if svc.settings and getattr(svc.settings, "echo_cancellation_enabled", False):
+        # Prefer what THIS finalize actually started with over the
+        # current setting. They differ whenever the user toggles echo
+        # cancellation while a finalize is in flight, and the setting
+        # then describes the next run rather than the one the user is
+        # waiting on. `finalize_aec_requested` is stamped before the
+        # finalize stub is written, so it is available for exactly the
+        # window this message is shown in; the live setting stays as
+        # the fallback for sessions written before the field existed.
+        aec_running = getattr(session, "finalize_aec_requested", None)
+        if aec_running is None:
+            aec_running = bool(
+                svc.settings
+                and getattr(svc.settings, "echo_cancellation_enabled", False))
+        if aec_running:
             aec_note = (
                 " Echo cancellation is enabled, which can make this step "
                 "take several minutes for longer meetings."

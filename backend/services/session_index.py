@@ -58,7 +58,15 @@ logger = get_logger(__name__)
 # field the UI now reads is not.
 #   1 → 2: added client_source / client_source_detail (auto client
 #          tagging provenance).
-SCHEMA_VERSION = 2
+#   2 → 3: added finalize_aec_requested, so the Sessions list's
+#          finalize banner can say whether echo cancellation is
+#          actually part of the running finalize. Without the bump,
+#          rows already cached under the v2 projection keep serving a
+#          summary with the field absent — the file's mtime has not
+#          changed, so nothing re-parses — and the banner falls back to
+#          "not running" on every pre-existing session regardless of
+#          the truth.
+SCHEMA_VERSION = 3
 
 # The exact summary shape SessionService.list_sessions() has always
 # returned (see its docstring / the summary dict built in
@@ -78,6 +86,7 @@ SUMMARY_FIELDS: Tuple[str, ...] = (
     "audio_expected_duration_s", "processing_error", "sync_warning",
     "finalize_duration_s", "aec_outcome",
     "finalize_status", "finalize_started_at", "finalize_error",
+    "finalize_aec_requested",
 )
 
 
