@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "tool": "bandit",
-  "generated_utc": "2026-08-19T15:42:39Z",
+  "generated_utc": "2026-08-20T01:54:45Z",
   "note": "Accepted pre-existing findings. CI fails only on findings absent from this list. Refresh deliberately with `scripts/ci/security_baseline.py update` and review the diff.",
   "count": 185,
   "findings": [
@@ -216,7 +216,7 @@
       "fingerprint": "62c1c8ef7dbc5b84",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 2041,
+      "line": 2048,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -225,7 +225,7 @@
       "fingerprint": "e8d36d21aa3d2751",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 2184,
+      "line": 2191,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -234,7 +234,7 @@
       "fingerprint": "016b7598137181a1",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 5803,
+      "line": 5916,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -243,7 +243,7 @@
       "fingerprint": "f39996b67a54697b",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 7937,
+      "line": 8078,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -252,7 +252,7 @@
       "fingerprint": "4ace3904e8738941",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 8623,
+      "line": 8764,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -261,7 +261,7 @@
       "fingerprint": "d3113a15fcdad96a",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 9138,
+      "line": 9283,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -270,7 +270,7 @@
       "fingerprint": "feb1effdd664f542",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 9288,
+      "line": 9433,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -279,7 +279,7 @@
       "fingerprint": "96c466860da40c77",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 9151,
+      "line": 9296,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 2
@@ -288,7 +288,7 @@
       "fingerprint": "8db86fc9c4bd91c6",
       "rule": "B110",
       "file": "backend/server.py",
-      "line": 9486,
+      "line": 9631,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 3
@@ -297,7 +297,7 @@
       "fingerprint": "7c88086c9a929115",
       "rule": "B112",
       "file": "backend/server.py",
-      "line": 7299,
+      "line": 7440,
       "severity": "LOW",
       "message": "Try, Except, Continue detected.",
       "occurrence": 1
@@ -306,7 +306,7 @@
       "fingerprint": "1ac42fcda9cc4100",
       "rule": "B310",
       "file": "backend/server.py",
-      "line": 1371,
+      "line": 1378,
       "severity": "MEDIUM",
       "message": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected.",
       "occurrence": 1
@@ -315,7 +315,7 @@
       "fingerprint": "116e9f5bbe46d981",
       "rule": "B310",
       "file": "backend/server.py",
-      "line": 1457,
+      "line": 1464,
       "severity": "MEDIUM",
       "message": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected.",
       "occurrence": 1
@@ -324,7 +324,7 @@
       "fingerprint": "deb33f3b0bdc5c63",
       "rule": "B310",
       "file": "backend/server.py",
-      "line": 8503,
+      "line": 8644,
       "severity": "MEDIUM",
       "message": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected.",
       "occurrence": 1
@@ -342,7 +342,7 @@
       "fingerprint": "7e347d37f76213ab",
       "rule": "B404",
       "file": "backend/server.py",
-      "line": 2073,
+      "line": 2080,
       "severity": "LOW",
       "message": "Consider possible security implications associated with the subprocess module.",
       "occurrence": 1
@@ -360,7 +360,7 @@
       "fingerprint": "07d497a2a1fc8eed",
       "rule": "B603",
       "file": "backend/server.py",
-      "line": 2081,
+      "line": 2088,
       "severity": "LOW",
       "message": "subprocess call - check for execution of untrusted input.",
       "occurrence": 1
@@ -369,7 +369,7 @@
       "fingerprint": "1eb687cdd1464834",
       "rule": "B603",
       "file": "backend/server.py",
-      "line": 2179,
+      "line": 2186,
       "severity": "LOW",
       "message": "subprocess call - check for execution of untrusted input.",
       "occurrence": 1
@@ -378,7 +378,7 @@
       "fingerprint": "dbd09d3816ec180b",
       "rule": "B603",
       "file": "backend/server.py",
-      "line": 5362,
+      "line": 5475,
       "severity": "LOW",
       "message": "subprocess call - check for execution of untrusted input.",
       "occurrence": 1
@@ -387,7 +387,7 @@
       "fingerprint": "feb18a79c2a456d6",
       "rule": "B603",
       "file": "backend/server.py",
-      "line": 5369,
+      "line": 5482,
       "severity": "LOW",
       "message": "subprocess call - check for execution of untrusted input.",
       "occurrence": 1
@@ -396,7 +396,7 @@
       "fingerprint": "38c1fa8e0659a7e0",
       "rule": "B606",
       "file": "backend/server.py",
-      "line": 5356,
+      "line": 5469,
       "severity": "LOW",
       "message": "Starting a process without a shell.",
       "occurrence": 1
@@ -405,7 +405,7 @@
       "fingerprint": "78132fc23c07edfe",
       "rule": "B607",
       "file": "backend/server.py",
-      "line": 5369,
+      "line": 5482,
       "severity": "LOW",
       "message": "Starting a process with a partial executable path",
       "occurrence": 1
@@ -603,7 +603,7 @@
       "fingerprint": "9935d49a994a71b9",
       "rule": "B404",
       "file": "backend/services/_follow_up_email_macos.py",
-      "line": 19,
+      "line": 20,
       "severity": "LOW",
       "message": "Consider possible security implications associated with the subprocess module.",
       "occurrence": 1
@@ -612,7 +612,7 @@
       "fingerprint": "3444fe1bcce8af7d",
       "rule": "B603",
       "file": "backend/services/_follow_up_email_macos.py",
-      "line": 47,
+      "line": 55,
       "severity": "LOW",
       "message": "subprocess call - check for execution of untrusted input.",
       "occurrence": 1
@@ -621,7 +621,7 @@
       "fingerprint": "68c3eeb5955c9058",
       "rule": "B110",
       "file": "backend/services/_follow_up_email_outlook.py",
-      "line": 74,
+      "line": 58,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -810,7 +810,7 @@
       "fingerprint": "d6c6a21eadfce843",
       "rule": "B608",
       "file": "backend/services/session_index.py",
-      "line": 279,
+      "line": 288,
       "severity": "MEDIUM",
       "message": "Possible SQL injection vector through string-based query construction.",
       "occurrence": 1
@@ -1368,7 +1368,7 @@
       "fingerprint": "c311be2d7c97dd1b",
       "rule": "B110",
       "file": "backend/utils/diagnostics_bundle.py",
-      "line": 166,
+      "line": 170,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -1377,7 +1377,7 @@
       "fingerprint": "deb51450573e1b2c",
       "rule": "B110",
       "file": "backend/utils/diagnostics_bundle.py",
-      "line": 305,
+      "line": 342,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -1386,7 +1386,7 @@
       "fingerprint": "8afa04c0085c077e",
       "rule": "B110",
       "file": "backend/utils/diagnostics_bundle.py",
-      "line": 310,
+      "line": 347,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -1395,7 +1395,7 @@
       "fingerprint": "00e9dfb6a27529bb",
       "rule": "B110",
       "file": "backend/utils/diagnostics_bundle.py",
-      "line": 339,
+      "line": 376,
       "severity": "LOW",
       "message": "Try, Except, Pass detected.",
       "occurrence": 1
@@ -1404,7 +1404,7 @@
       "fingerprint": "fee06d21216633b9",
       "rule": "B112",
       "file": "backend/utils/diagnostics_bundle.py",
-      "line": 176,
+      "line": 180,
       "severity": "LOW",
       "message": "Try, Except, Continue detected.",
       "occurrence": 1
@@ -1413,16 +1413,16 @@
       "fingerprint": "1a21918b49abe07d",
       "rule": "B112",
       "file": "backend/utils/diagnostics_bundle.py",
-      "line": 203,
+      "line": 207,
       "severity": "LOW",
       "message": "Try, Except, Continue detected.",
       "occurrence": 1
     },
     {
-      "fingerprint": "8f980cce6f5d66ff",
+      "fingerprint": "0e139d1336993cf5",
       "rule": "B112",
       "file": "backend/utils/diagnostics_bundle.py",
-      "line": 287,
+      "line": 319,
       "severity": "LOW",
       "message": "Try, Except, Continue detected.",
       "occurrence": 1
