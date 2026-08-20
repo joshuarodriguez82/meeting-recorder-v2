@@ -2162,8 +2162,7 @@ const DETAIL_WINDOW_HOURS = 72;
 async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) {
   const started = Date.now();
   const out = { details: [], opened: 0, matchedElement: 0, skipped: 0,
-                grew: 0, joinFromAnchor: 0, attendeesFromNames: 0,
-                error: null };
+                grew: 0, joinFromAnchor: 0, error: null };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   try {
@@ -2234,23 +2233,26 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
     // contain, no digits, no URL/email shapes, and nothing sentence-like.
     // A wrong attendee is worse than a missing one — it propagates into
     // speaker identification and follow-up recipients.
-    const NAME_RE = /^[\p{L}][\p{L}'’.-]*(?:\s+[\p{L}][\p{L}'’.-]*){1,3}$/u;
-    const NOT_A_NAME = /(meeting|invite|calendar|accept|decline|tentative|organizer|organiser|attendee|optional|required|response|join|teams|zoom|webex|show as|reminder|recurrence|every|occurs|categor)/i;
-    const attendeeNamesIn = (root) => {
-      const names = [];
-      try {
-        for (const el of root.querySelectorAll("[aria-label],[title]")) {
-          const raw = (el.getAttribute("aria-label")
-            || el.getAttribute("title") || "").replace(/\s+/g, " ").trim();
-          if (!raw || raw.length > 60) continue;
-          if (raw.includes("@") || raw.includes("http")) continue;
-          if (NOT_A_NAME.test(raw)) continue;
-          if (!NAME_RE.test(raw)) continue;
-          names.push(raw);
-        }
-      } catch (_) { /* ignore */ }
-      return names;
-    };
+    // THERE IS NO NAME-SHAPE SCANNER ANY MORE, ON PURPOSE.
+    //
+    // 1.11–1.12 tried to identify attendees by scanning the page for
+    // labels that LOOKED like a person's name — 2-to-4 title-case
+    // words, minus a vocabulary blacklist. The field result (2026-08-20)
+    // was a meeting with "Attendees (24)" of which 22 were Outlook's
+    // own controls — "Skip to main content", "App launcher", "Ribbon
+    // tabs", "Chat with Copilot" — plus the user's OWN account button
+    // rendered as an invitee. A blacklist can never enumerate a
+    // product's entire UI vocabulary, in every language Outlook ships
+    // in, across every redesign. Shape-of-text is simply not evidence
+    // that a string denotes a person.
+    //
+    // Attendees now come only from sources where they are DATA:
+    //   * Outlook's own event-detail responses (mechanisms 1 and 3 —
+    //     the captured JSON carries the real invitee list, which field
+    //     diagnostics showed filling 19 of 23 meetings), and
+    //   * email addresses in the text THIS pane added.
+    // A meeting whose sources yield nothing shows no attendees — an
+    // honest zero, which the 24-button lie was not.
 
     for (const want of wanted || []) {
       if (out.details.length >= maxEvents) { out.skipped++; continue; }
@@ -2285,7 +2287,7 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
       // signal), and attendee extraction subtracts it (a label that
       // existed before the click is page chrome, not an invitee of
       // THIS meeting).
-      const namesBefore = new Set(attendeeNamesIn(document));
+
       try {
         el.click();
       } catch (_) { out.skipped++; continue; }
@@ -2336,8 +2338,7 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
       //      loaded pane rather than its first painted fragment.
       const paneSignal = () =>
         (visibleText().length > beforeLen + GROWTH_MIN)
-        || anchorUrls().some((u) => !anchorsBefore.has(u) && isJoin(u))
-        || attendeeNamesIn(document).some((n) => !namesBefore.has(n));
+        || anchorUrls().some((u) => !anchorsBefore.has(u) && isJoin(u));
       let after = before;
       let signalled = false;
       let lastLen = -1;
@@ -2381,17 +2382,27 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
         let added = "";
         if (after.startsWith(before)) added = after.slice(beforeLen);
         else if (addedFrom && addedFrom.length > 40) added = addedFrom;
-        const scanText = fresh;
+        // NOTHING is scanned page-wide any more. The whole-page email
+        // scan attributed another meeting's organiser — whose address
+        // is literally rendered in that meeting's grid tile label —
+        // as an attendee of whichever meeting happened to be clicked
+        // (field screenshot 2026-08-20: a different call's
+        // organiser address listed among this meeting's "attendees").
+        // The same logic would hand one meeting's pasted join URL to
+        // another. Mis-attribution is worse than a miss, so both
+        // scans are held to the text THIS pane added; the join link
+        // additionally comes from anchors that appeared with the
+        // pane, which is already click-scoped.
 
         const emails = Array.from(new Set(
-          (scanText.match(EMAIL_RE) || []).map((e) => e.trim())));
+          (added.match(EMAIL_RE) || []).map((e) => e.trim())));
 
         // Text URLs first (Webex/Zoom paste theirs into the body), then
         // anchors that appeared with this event (Teams renders a Join
         // BUTTON and puts the URL only in the href). Text is preferred
         // where both exist: a pasted URL is unambiguously part of THIS
         // invite, whereas an anchor is located by having newly appeared.
-        const urls = scanText.match(URL_RE) || [];
+        const urls = added.match(URL_RE) || [];
         const newAnchors = anchorUrls().filter((u) => !anchorsBefore.has(u));
         const joinUrl = urls.find(isJoin) || newAnchors.find(isJoin) || "";
         if (!urls.find(isJoin) && newAnchors.find(isJoin)) out.joinFromAnchor++;
@@ -2407,10 +2418,7 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
         // ("New event", "Next week"). Subtracting the pre-click set
         // removes all of it in one move, and also stops one meeting's
         // still-open pane from bleeding invitees into the next.
-        const names = attendeeNamesIn(document)
-          .filter((n) => !namesBefore.has(n));
-        const attendees = Array.from(new Set([...names, ...emails]));
-        if (names.length) out.attendeesFromNames++;
+        const attendees = emails;
 
         // Body: the new text with addresses and links removed, so the
         // agenda does not re-state the attendee list.
@@ -2952,7 +2960,6 @@ async function collectWeekDetail(tabId, candidates, capturedBodies, diag, into,
     diag.domDetailOpened += got.opened || 0;
     diag.domDetailGrew += got.grew || 0;
     diag.joinFromAnchor += got.joinFromAnchor || 0;
-    diag.attendeesFromNames += got.attendeesFromNames || 0;
     diag.domDetailSkipped += got.skipped || 0;
     diag.domDetailNoTile += got.matchedElement != null
       ? Math.max(0, (needing.length) - (got.matchedElement || 0)) : 0;
@@ -3051,7 +3058,6 @@ async function captureCalendarTab() {
     postClickBodies: 0,
     postClickImproved: 0,
     joinFromAnchor: 0,
-    attendeesFromNames: 0,
   };
   // Detail gathered from BOTH mechanisms, keyed by subject|start, while
   // the relevant week was still rendered. Folded into the final
@@ -3270,7 +3276,6 @@ async function captureCalendarOnly(backendUrl, token) {
     postClickBodies: capture.diag?.postClickBodies || 0,
     postClickImproved: capture.diag?.postClickImproved || 0,
     joinFromAnchor: capture.diag?.joinFromAnchor || 0,
-    attendeesFromNames: capture.diag?.attendeesFromNames || 0,
     eventsExtracted: capture.events.length,
   };
   if (capture.events.length > 0) {

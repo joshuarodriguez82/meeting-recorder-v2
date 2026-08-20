@@ -1117,3 +1117,62 @@ def test_detail_does_not_jump_between_different_meetings(tmp_path: Path):
     back = {e["subject"]: e for e in ExtensionCalendarService(tmp_path).get_events()}
     assert back["Team sync"]["join_url"].endswith("EXAMPLE")
     assert back["Different call"]["join_url"] == ""
+
+
+# ── One-time scrub of name-shape-scanner junk (v2.51.0) ──────────────
+#
+# Extensions 1.11-1.12 harvested any 2-4-word title-case page label as
+# a person; the field result was stored attendee lists of Outlook UI
+# controls — and the v2.50.0 ratchet, doing its job, would preserve
+# them forever. Junk and genuine display names are the same shape in
+# the store, so the scrub keeps address-shaped entries only; real names
+# refill from Outlook's own detail responses on the next capture.
+
+
+def test_scanner_junk_is_scrubbed_from_carried_forward_attendees(tmp_path: Path):
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 20, 8, 0)
+    start = now + timedelta(hours=2)
+    # What 1.12 actually stored, per the field screenshot.
+    svc.replace_all([_enriched(
+        "Follow up session", start,
+        attendees=["Skip to main content", "App launcher",
+                   "Chat with Copilot", "k.noh@zorg.example"],
+    )], now=now)
+
+    # The junk store in the field was written by v2.50.0, which had no
+    # scrub flag. This test's first write ran NEW code, which stamps
+    # the flag — so remove it, exactly reproducing the store a user
+    # upgrading from 2.50.0 actually has.
+    store_path = tmp_path / "extension_calendar.json"
+    data = json.loads(store_path.read_text(encoding="utf-8"))
+    data.pop("attendee_scrub_v1", None)
+    store_path.write_text(json.dumps(data), encoding="utf-8")
+
+    # Next capture: bare event → ratchet carries attendees forward,
+    # but through the scrub.
+    svc.replace_all([ext("Follow up session", start)], now=now)
+
+    back = ExtensionCalendarService(tmp_path).get_events()
+    assert back[0]["attendees"] == ["k.noh@zorg.example"], (
+        "UI-control junk survived the scrub, or the real address "
+        "was lost with it")
+
+
+def test_the_scrub_runs_once_and_spares_later_names(tmp_path: Path):
+    # After the flag is set, a name without "@" is a display name from
+    # Outlook's detail responses — data, not a shape guess — and must
+    # never be wiped.
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 20, 8, 0)
+    start = now + timedelta(hours=2)
+    svc.replace_all([ext("Weekly", start)], now=now)  # sets the flag
+
+    svc.replace_all([_enriched(
+        "Weekly", start, attendees=["Ana Doe", "Pat Roe"])], now=now)
+    svc.replace_all([ext("Weekly", start)], now=now)  # bare → ratchet
+
+    back = ExtensionCalendarService(tmp_path).get_events()
+    assert back[0]["attendees"] == ["Ana Doe", "Pat Roe"], (
+        "post-scrub response-derived names were wiped — the scrub "
+        "must be one-time, not ongoing")
