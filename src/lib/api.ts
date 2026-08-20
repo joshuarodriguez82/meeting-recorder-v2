@@ -337,6 +337,12 @@ export interface Meeting {
   // Join link the extension saw in Outlook Web. Local meetings resolve
   // theirs lazily via /calendar/meeting-detail instead.
   join_url?: string;
+  // The invite body / agenda, for extension-sourced meetings only —
+  // local ones fetch theirs through /calendar/meeting-detail on
+  // expand. Optional: the calendar grid has never carried a
+  // description, so this is empty for everything captured before
+  // extension 1.7 began reading Outlook's own calendar responses.
+  body?: string;
 }
 
 export interface SessionSummary {
