@@ -2162,7 +2162,8 @@ const DETAIL_WINDOW_HOURS = 72;
 async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) {
   const started = Date.now();
   const out = { details: [], opened: 0, matchedElement: 0, skipped: 0,
-                grew: 0, error: null };
+                grew: 0, joinFromAnchor: 0, attendeesFromNames: 0,
+                error: null };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   try {
@@ -2191,6 +2192,66 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
     const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
     const URL_RE = /https?:\/\/[^\s"'<>)\]]+/g;
 
+    // ANCHOR HREFS, NOT JUST TEXT.
+    //
+    // v1.10 read URLs only out of `innerText`, and the field result was
+    // exact: Webex and Zoom meetings got a Join link, Teams meetings got
+    // nothing. That is not a Teams-specific parsing problem — it is
+    // WHERE the URL lives:
+    //
+    //   Webex / Zoom  the organiser's add-in pastes the raw URL into the
+    //                 invite body, so it IS visible text.
+    //   Teams         the pane renders a "Join" BUTTON. The URL is the
+    //                 anchor's href and appears nowhere in the text.
+    //
+    // Reading text and concluding "Teams has no join link" is the same
+    // mistake as v1.4's anchor-only probe, exactly inverted: that one
+    // looked at elements and missed text, this one looked at text and
+    // missed elements. Both places are read now.
+    //
+    // href attributes only — no other attribute is inspected, and no
+    // element structure is depended on.
+    const anchorUrls = () => {
+      const out = [];
+      try {
+        for (const a of document.querySelectorAll("a[href]")) {
+          const h = a.getAttribute("href") || "";
+          if (h.startsWith("http")) out.push(h);
+        }
+      } catch (_) { /* ignore */ }
+      return out;
+    };
+
+    // Attendees render as NAMES in the detail pane; addresses usually do
+    // not appear at all. v1.10 matched only addresses, which is why a
+    // meeting with a dozen invitees reported "Attendees (1)" — the one
+    // that happened to show an address — or (0).
+    //
+    // Outlook exposes each attendee row to assistive tech, so the
+    // accessible name is the person's name without this having to guess
+    // at markup. Deliberately conservative about what counts as a
+    // person: 2-4 words, letters and the punctuation names actually
+    // contain, no digits, no URL/email shapes, and nothing sentence-like.
+    // A wrong attendee is worse than a missing one — it propagates into
+    // speaker identification and follow-up recipients.
+    const NAME_RE = /^[\p{L}][\p{L}'’.-]*(?:\s+[\p{L}][\p{L}'’.-]*){1,3}$/u;
+    const NOT_A_NAME = /(meeting|invite|calendar|accept|decline|tentative|organizer|organiser|attendee|optional|required|response|join|teams|zoom|webex|show as|reminder|recurrence|every|occurs|categor)/i;
+    const attendeeNamesIn = (root) => {
+      const names = [];
+      try {
+        for (const el of root.querySelectorAll("[aria-label],[title]")) {
+          const raw = (el.getAttribute("aria-label")
+            || el.getAttribute("title") || "").replace(/\s+/g, " ").trim();
+          if (!raw || raw.length > 60) continue;
+          if (raw.includes("@") || raw.includes("http")) continue;
+          if (NOT_A_NAME.test(raw)) continue;
+          if (!NAME_RE.test(raw)) continue;
+          names.push(raw);
+        }
+      } catch (_) { /* ignore */ }
+      return names;
+    };
+
     for (const want of wanted || []) {
       if (out.details.length >= maxEvents) { out.skipped++; continue; }
       if (Date.now() - started > budgetMs) { out.skipped++; continue; }
@@ -2213,6 +2274,15 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
 
       const before = visibleText();
       const beforeLen = before.length;
+      // Anchors present BEFORE the click, so the join link is taken
+      // from what this event added rather than from a Join button
+      // belonging to some other meeting already on screen. Attaching a
+      // link to the wrong meeting is worse than having none.
+      const anchorsBefore = new Set(anchorUrls());
+      // Person-shaped labels already present, for the same reason: the
+      // pane may reveal ONLY attendees — no link, barely any text —
+      // and that still counts as having rendered.
+      const namesBefore = attendeeNamesIn(document).length;
       try {
         el.click();
       } catch (_) { out.skipped++; continue; }
@@ -2225,26 +2295,58 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
       // attendee, no agenda — as "never rendered". Whether the pane is
       // USEFUL is decided below by what was actually extracted, not by
       // guessing a size for it here.
+      // "Did the pane render?" is measured by whether ANY of the three
+      // things we came for appeared — not by how much text arrived.
+      //
+      // Text length alone was wrong twice. First at 40 characters,
+      // which discarded a sparse invite. Then at 10, which still
+      // discarded a Teams pane: Teams reveals a Join BUTTON and a
+      // couple of words, so its text can grow by less than that while
+      // carrying exactly the URL this whole mechanism exists to get.
+      // Judging arrival by volume is a proxy; judging it by content is
+      // the actual question.
       const GROWTH_MIN = 10;
+      const rendered = () => (visibleText().length > beforeLen + GROWTH_MIN)
+        || anchorUrls().some((u) => !anchorsBefore.has(u))
+        || attendeeNamesIn(document).length > namesBefore;
       let after = before;
       for (let i = 0; i < 20; i++) {
         await sleep(150);
         after = visibleText();
-        if (after.length > beforeLen + GROWTH_MIN) break;
+        if (rendered()) break;
       }
 
-      if (after.length > beforeLen + GROWTH_MIN) {
+      if (rendered()) {
         out.grew++;
         // What is on screen now that was not before. Crude and exactly
         // right: the detail pane IS the new text.
         const fresh = after.slice(0, 200000);
         const addedFrom = before.length > 40 ? fresh.split(before.slice(0, 40))[0] : "";
+        // Falls back to the whole page when the split finds no anchor
+        // point — which is normal for a pane that added almost no
+        // text, exactly the Teams case.
         const added = addedFrom && addedFrom.length > 40 ? addedFrom : fresh;
 
         const emails = Array.from(new Set(
           (added.match(EMAIL_RE) || []).map((e) => e.trim())));
+
+        // Text URLs first (Webex/Zoom paste theirs into the body), then
+        // anchors that appeared with this event (Teams renders a Join
+        // BUTTON and puts the URL only in the href). Text is preferred
+        // where both exist: a pasted URL is unambiguously part of THIS
+        // invite, whereas an anchor is located by having newly appeared.
         const urls = added.match(URL_RE) || [];
-        const joinUrl = urls.find(isJoin) || "";
+        const newAnchors = anchorUrls().filter((u) => !anchorsBefore.has(u));
+        const joinUrl = urls.find(isJoin) || newAnchors.find(isJoin) || "";
+        if (!urls.find(isJoin) && newAnchors.find(isJoin)) out.joinFromAnchor++;
+
+        // Attendee NAMES from the pane's accessible labels, plus any
+        // addresses in the text. Names are what Outlook actually
+        // renders; v1.10 read addresses only and reported "Attendees
+        // (1)" for a meeting with a dozen invitees.
+        const names = attendeeNamesIn(document);
+        const attendees = Array.from(new Set([...names, ...emails]));
+        if (names.length) out.attendeesFromNames++;
 
         // Body: the new text with addresses and links removed, so the
         // agenda does not re-state the attendee list.
@@ -2257,11 +2359,11 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
         // contributes nothing — and an empty attendee list recorded
         // here would be indistinguishable from a meeting that
         // genuinely has none.
-        if (emails.length || joinUrl || body) {
+        if (attendees.length || joinUrl || body) {
           out.details.push({
             subject: want.subject,
             startIso: want.startIso,
-            attendees: emails,
+            attendees,
             body,
             joinUrl,
           });
@@ -2729,7 +2831,8 @@ async function settleAndCollectCalendar(tabId, label) {
 // in. Both mechanisms run per-week for the same reason: mechanism 1's
 // captured bodies are harvested per-week too, and running it first
 // means mechanism 2 only pays for what mechanism 1 could not fill.
-async function collectWeekDetail(tabId, candidates, capturedBodies, diag, into) {
+async function collectWeekDetail(tabId, candidates, capturedBodies, diag, into,
+                                 harvest) {
   // What this week's tiles parse to. A separate extraction from the
   // final one, on this week's candidates only, so the subjects and
   // start times handed to the clicker correspond to tiles that are
@@ -2784,6 +2887,8 @@ async function collectWeekDetail(tabId, candidates, capturedBodies, diag, into) 
 
     diag.domDetailOpened += got.opened || 0;
     diag.domDetailGrew += got.grew || 0;
+    diag.joinFromAnchor += got.joinFromAnchor || 0;
+    diag.attendeesFromNames += got.attendeesFromNames || 0;
     diag.domDetailSkipped += got.skipped || 0;
     diag.domDetailNoTile += got.matchedElement != null
       ? Math.max(0, (needing.length) - (got.matchedElement || 0)) : 0;
@@ -2797,6 +2902,44 @@ async function collectWeekDetail(tabId, candidates, capturedBodies, diag, into) 
         body: d.body || prev.body,
         joinUrl: d.joinUrl || prev.joinUrl,
       });
+    }
+
+    // ── Mechanism 3: the responses the CLICKS just provoked ──────────
+    //
+    // The best source in the whole pipeline, and it was being thrown
+    // away. Opening an event makes Outlook fetch that event's FULL
+    // detail — the complete attendee list with real names, the invite
+    // body, and the join URL as data rather than as scraped text.
+    // The recorder is installed and captures every one of those
+    // responses; nothing ever harvested them, because the only
+    // harvests happened before the clicks.
+    //
+    // This is strictly better than reading the pane: it is the same
+    // information Outlook itself renders FROM, so it needs no
+    // assumption about markup, and it cannot mistake one meeting's
+    // Join button for another's. Scraping stays as the fallback for a
+    // tenant whose detail arrives some other way.
+    if (typeof harvest === "function" && got.opened) {
+      const before = capturedBodies.length;
+      await harvest("post-click");
+      if (capturedBodies.length > before) {
+        const fresh = detailsFromResponses(capturedBodies.slice(before));
+        diag.postClickBodies += capturedBodies.length - before;
+        for (const [k, v] of fresh) {
+          const prev = into.get(k) || { attendees: [], body: "", joinUrl: "" };
+          // Richest wins: a full attendee list from the detail
+          // response should replace a single scraped name, so this
+          // compares LENGTH rather than merely taking the first
+          // non-empty answer.
+          const better = v.attendees.length > prev.attendees.length;
+          if (better) diag.postClickImproved++;
+          into.set(k, {
+            attendees: better ? v.attendees : prev.attendees,
+            body: v.body || prev.body,
+            joinUrl: v.joinUrl || prev.joinUrl,
+          });
+        }
+      }
     }
   } catch (e) {
     // Never fatal: the events are already extracted, and a capture
@@ -2840,6 +2983,11 @@ async function captureCalendarTab() {
     domDetailGrew: 0,
     domDetailSkipped: 0,
     domDetailNoTile: 0,
+    // Mechanism 3 — responses the clicks provoked.
+    postClickBodies: 0,
+    postClickImproved: 0,
+    joinFromAnchor: 0,
+    attendeesFromNames: 0,
   };
   // Detail gathered from BOTH mechanisms, keyed by subject|start, while
   // the relevant week was still rendered. Folded into the final
@@ -2919,7 +3067,8 @@ async function captureCalendarTab() {
     // BEFORE navigating away. Mechanism 2 clicks tiles, and week 1's
     // tiles are only on screen now — this is the bug that made the
     // whole screen-reading mechanism a no-op in v2.45.0.
-    await collectWeekDetail(tabId, week1.candidates, capturedBodies, diag, detailByKey);
+    await collectWeekDetail(tabId, week1.candidates, capturedBodies, diag,
+                            detailByKey, harvest);
 
     const navOk = await goToNextCalendarWeek(tabId);
     diag.nextWeekNavOk = navOk;
@@ -2931,7 +3080,7 @@ async function captureCalendarTab() {
       if (!week2.stabilized) diag.anyWeekUnstable = true;
       await harvest("week2");
       await collectWeekDetail(tabId, week2.candidates, capturedBodies, diag,
-                              detailByKey);
+                              detailByKey, harvest);
     }
 
     // Final extraction over BOTH weeks, then fold in the detail that
@@ -3051,6 +3200,13 @@ async function captureCalendarOnly(backendUrl, token) {
     // view — the exact v2.45.0 failure, which was invisible because
     // every mechanism-2 failure reported the same way.
     domDetailNoTile: capture.diag?.domDetailNoTile || 0,
+    // Mechanism 3 and the two extraction widenings, reported
+    // separately so the next bug report says WHICH source produced the
+    // detail rather than only that some did.
+    postClickBodies: capture.diag?.postClickBodies || 0,
+    postClickImproved: capture.diag?.postClickImproved || 0,
+    joinFromAnchor: capture.diag?.joinFromAnchor || 0,
+    attendeesFromNames: capture.diag?.attendeesFromNames || 0,
     eventsExtracted: capture.events.length,
   };
   if (capture.events.length > 0) {
