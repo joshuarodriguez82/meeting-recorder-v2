@@ -113,6 +113,18 @@ export function RecordView({
     catch { return false; }
   });
   const [attendees, setAttendees] = useState<string[]>([]);
+  // Who called the meeting, off the calendar tile the user clicked Use
+  // on. "" for an ad-hoc recording. Threaded through to
+  // /recording/start, which stores it on the session so the speaker-
+  // identification roster can lead with it
+  // (backend/core/speaker_roster.py).
+  //
+  // Kept as its own piece of state rather than derived from
+  // `attendees`, because for an extension-sourced meeting `attendees`
+  // is EMPTY — Outlook Web's grid label carries the organiser and not
+  // the attendee list — and that is exactly the user this field is
+  // for.
+  const [organizer, setOrganizer] = useState<string>("");
   // ISO datetime of the calendar meeting's scheduled end, when the
   // user clicked Use on a calendar tile. Threaded through to
   // /recording/start so the backend's auto-stop watchdog knows when
@@ -795,6 +807,7 @@ export function RecordView({
         client,
         project,
         attendees,
+        organizer,
         scheduled_end_iso: scheduledEndIso ?? undefined,
         conference_room_mode: conferenceRoomMode,
       });
@@ -1165,6 +1178,14 @@ export function RecordView({
     const date = new Date(m.start).toISOString().slice(0, 10);
     setMeetingName(`${m.subject} - ${date}`);
     setAttendees(m.attendees || []);
+    // The invite's organiser, carried onto the session at start so the
+    // speaker roster has a full name to resolve a heard first name
+    // against. For an extension-sourced meeting this is the ONLY
+    // invite-derived name available (the grid label has no attendee
+    // list), so a manually started meeting has to pick it up here —
+    // `_auto_record_start` does the equivalent on the backend for the
+    // auto path.
+    setOrganizer(m.organizer || "");
     // Stash the calendar end time so the auto-stop watchdog can warn
     // / stop us if the meeting runs long. m.end is already an ISO
     // string per the calendar service.
@@ -1959,6 +1980,40 @@ export function RecordView({
                                 </a>
                               </div>
                             )}
+                            {/* ORGANISER — read straight off the
+                                calendar row (`m`), not off `det.data`:
+                                every source emits it on the meeting
+                                itself, and for an extension row
+                                `det.data` is synthesised locally from
+                                that same object anyway.
+
+                                Sits above Attendees because it is the
+                                one invite-derived name an
+                                extension-sourced meeting can actually
+                                have. Outlook Web's grid label carries
+                                the organiser but not the attendee
+                                list, so those rows render "Attendees
+                                (0) / None listed." forever — and
+                                before this block the panel therefore
+                                said the app knew NOTHING about who was
+                                in the meeting, while the backend was
+                                holding a full name for the person who
+                                called it. Rendered even when empty so
+                                "we looked and there is none" stays
+                                distinguishable from "we never
+                                looked". */}
+                            <div>
+                              <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
+                                Organizer
+                              </div>
+                              {m.organizer ? (
+                                <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-foreground/80 break-all">
+                                  {m.organizer}
+                                </span>
+                              ) : (
+                                <div className="text-xs text-muted-foreground">Not listed.</div>
+                              )}
+                            </div>
                             {(() => {
                               // The backend's type promises `attendees`
                               // is always an array, but a partial/error
@@ -2055,6 +2110,11 @@ export function RecordView({
           const date = new Date(m.start).toISOString().slice(0, 10);
           setMeetingName(`${m.subject} - ${date}`);
           setAttendees(m.attendees || []);
+          // Same organiser hand-off as useMeeting(). This modal's
+          // "Use for recording" is the other way a calendar meeting
+          // reaches the form, so leaving it out here would silently
+          // drop the roster's lead name for anyone who briefs first.
+          setOrganizer(m.organizer || "");
           setScheduledEndIso(m.end || null);
           if (c) setClient(c);
           if (p) setProject(p);

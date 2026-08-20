@@ -43,6 +43,7 @@ from services.follow_up_recipients import (
     candidate_names,
     delivery_message,
     draft_result,
+    is_address,
     resolve_recipient,
 )
 from services.owner_service import OwnerAliasStore, load_alias_index
@@ -510,3 +511,93 @@ def test_end_to_end_does_not_count_a_draft_that_did_not_persist(
     assert result.created == 1
     assert result.unverified == 1
     assert "not counted above" in result.message
+
+
+# ── An owner label that is already a mailbox ─────────────────────────
+#
+# New in v2.41.0. The extension calendar source reads the organiser out
+# of Outlook Web's grid label, and OWA renders the bare SMTP address
+# there when the organiser has no resolved display name. So an owner
+# label can now be `a.doe@globex.example` where a person's NAME has
+# always been. Everything in this module was written for names.
+
+
+@pytest.mark.parametrize("text", [
+    "a.doe@globex.example",
+    "pat.roe+meetings@acme.example",
+    "kim_noh@sub.initech.example",
+    "A.Doe@Globex.example",
+])
+def test_an_address_is_recognised_as_an_address(text):
+    assert is_address(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Jane Doe",              # a plain name
+    "Roe, Pat Jr.",          # surname-first, and it has a comma
+    "ask @sam about it",     # an "@" but whitespace around it
+    "sam@localhost",         # no dotted domain
+    "conf-room-3",           # a room, no "@" at all
+    "a@b.c",                 # single-letter TLD is not a real domain
+    "",
+])
+def test_a_name_is_not_mistaken_for_an_address(text):
+    # A false positive here skips the directory lookup and drops the
+    # label straight into To:, so this stays strict rather than
+    # generous.
+    assert not is_address(text)
+
+
+def test_an_address_is_never_title_cased():
+    # The local part is case-sensitive per RFC 5321 §2.4 — a server may
+    # treat "A.doe@" and "a.doe@" as different mailboxes. `_prettify`
+    # exists for lowercased alias keys ("samantha noh"), and an address
+    # with no capitals looks exactly like one to it.
+    forms = candidate_names("a.doe@globex.example")
+    assert forms == ["a.doe@globex.example"]
+
+
+def test_an_address_outranks_a_fuller_name():
+    # Token count alone gets this backwards: the address is one token
+    # and would sort behind the two-token attendee name, so the guess
+    # would be tried against the directory ahead of the address the
+    # invite stated outright.
+    forms = candidate_names(
+        "a.doe@globex.example", attendees=["Ana Doe", "Pat Roe"])
+    assert forms[0] == "a.doe@globex.example"
+
+
+def test_an_address_resolves_to_itself_without_a_directory_lookup():
+    def resolver(_name):
+        raise AssertionError("the directory must not be consulted")
+
+    r = resolve_recipient("a.doe@globex.example", resolver=resolver)
+
+    assert r.address == "a.doe@globex.example"
+    assert r.addressed is True
+    assert r.to_field == "a.doe@globex.example"
+    # No lookup happened, and the count says so rather than implying one.
+    assert r.forms_tried == 0
+
+
+def test_an_addressed_organiser_is_not_counted_as_needing_an_address():
+    # The v2.38.0 message exists to report unaddressed drafts honestly.
+    # A draft addressed to a literal invite address is addressed in
+    # fact, and must not land in the "9 of 10 need an email address"
+    # tally that message reports.
+    delivery = DraftDelivery()
+    delivery.note_created(
+        addressed=resolve_recipient("a.doe@globex.example").addressed,
+        location="Drafts", account="user@example.com")
+
+    assert delivery.addressed == 1
+    assert delivery.unaddressed == 0
+
+
+def test_no_directory_still_addresses_a_literal_address():
+    # macOS passes resolver=None because there is no GAL. A name
+    # correctly reports itself unaddressed there; an address does not
+    # need the directory in the first place.
+    assert resolve_recipient("Jane Doe", resolver=None).addressed is False
+    assert resolve_recipient(
+        "a.doe@globex.example", resolver=None).addressed is True

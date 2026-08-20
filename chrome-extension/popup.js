@@ -80,20 +80,26 @@ async function renderCalendarStatus() {
       // Per-field coverage, not just a count. `organizer` and
       // `join_url` were both declared on every captured event and
       // never assigned — always "" — which looked identical to "this
-      // meeting genuinely has none". Organizer now comes out of the
-      // label's own "By <name>" tail; join_url still has no source on
-      // this path (Outlook Web's grid labels a meeting "Microsoft
-      // Teams Meeting" but never exposes the URL), and saying so here
-      // is the difference between a known gap and an invisible one.
-      // Settings → Diagnose calendar capture reports whether a join
-      // link is reachable at all in this tenant.
+      // meeting genuinely has none". Both now come out of the label
+      // the capture already parses: the organizer from its "By <name>"
+      // tail, the join link from the Location segment when the
+      // organiser's add-in wrote one there.
+      //
+      // A zero here is a real answer, not a broken one, and the wording
+      // has to say so without claiming more than it knows: a Teams-only
+      // week genuinely has no URL in any label (a Teams event's
+      // Location is the words "Microsoft Teams Meeting"), which is not
+      // the same as extraction having failed. Settings → Diagnose
+      // calendar capture tells the two apart.
       const s = r.stats || {};
       const extras = [];
       if (typeof s.withOrganizer === "number") {
         extras.push(`organizer on ${s.withOrganizer}/${n}`);
       }
       const joins = s.withJoinUrl || 0;
-      extras.push(joins > 0 ? `join link on ${joins}/${n}` : "no join links (not exposed)");
+      extras.push(joins > 0
+        ? `join link on ${joins}/${n}`
+        : "no join link in any label");
       el.innerHTML = `Calendar: ${ago} · ${n} event${n === 1 ? "" : "s"} · ` +
         `${layerLabel} · ${extras.join(" · ")}`;
     }

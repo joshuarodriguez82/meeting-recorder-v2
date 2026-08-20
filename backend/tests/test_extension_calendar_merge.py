@@ -422,11 +422,15 @@ def test_events_from_structured_carries_organizer_end_to_end(tmp_path: Path):
     events = events_from_structured(raw)
     assert [e["organizer"] for e in events] == [
         "Jane Doe", "Roe, Pat Jr. [US-US]", "Zoë Døe", ""]
-    # join_url is still empty on this path (Outlook Web's grid exposes
-    # "Microsoft Teams Meeting" as a label, never the URL) — it must be
-    # an empty string, never None, so downstream falsiness checks like
+    # None of THESE rows carries a join link — a Teams event's Location
+    # is the words "Microsoft Teams Meeting" and never the URL, so this
+    # is what a Teams-only calendar looks like. It must be an empty
+    # string, never None, so downstream falsiness checks like
     # record-view.tsx's `det.data.join_url && …` render nothing rather
-    # than a broken link.
+    # than a broken link. The rows that DO carry one (an organiser whose
+    # add-in wrote the link into Location) are covered by
+    # `test_events_from_structured_carries_join_url_and_email_organizer`
+    # below.
     assert all(e["join_url"] == "" for e in events)
 
     svc = ExtensionCalendarService(tmp_path)
@@ -448,6 +452,90 @@ def test_events_from_structured_carries_organizer_end_to_end(tmp_path: Path):
         "Northwind collection script review": "Roe, Pat Jr. [US-US]",
         "Acme Daily Pulse Call": "Zoë Døe",
         "Ad-hoc sync": "",
+    }
+
+
+def test_events_from_structured_carries_join_url_and_email_organizer(
+        tmp_path: Path):
+    """`join_url` now arrives populated on this path, and `organizer`
+    can be an SMTP address rather than a display name.
+
+    Both come out of the same aria-label the extension already parses
+    (chrome-extension/background.js's `extractUrlsFromLabel` /
+    `extractOrganizerFromLabel`): OWA renders the event's LOCATION into
+    the label, so a meeting whose organiser used an add-in that writes
+    the join link there carries the URL as TEXT. A Teams event does not
+    — its Location is the words "Microsoft Teams Meeting" — which is why
+    the row below with no link must stay exactly as empty as it always
+    was.
+
+    The line this pins is the one that matters: only a recognised
+    CONFERENCING link becomes `join_url`. A link to a training library
+    sitting in the very same Location position is a place, not a meeting
+    to join, so it travels in `location` and `join_url` stays "". A
+    "Join" button pointed at somewhere that isn't the meeting is worse
+    than no button.
+
+    An email organiser is the direct fix for the 2026-08-19 report where
+    nine of ten follow-up drafts had no recipient:
+    `services/follow_up_recipients.py` has to resolve a bare name
+    through a directory and usually cannot, whereas an address needs no
+    resolving at all — so the address must survive this path byte for
+    byte, not be normalised into something that no longer is one.
+
+    URLs here are synthetic. A real join URL is a single-use credential.
+    """
+    zoom_join = "https://zoom.us/j/0000000000?pwd=EXAMPLEPWDVALUE&from=addon"
+    teams_join = (
+        "https://teams.microsoft.com/l/meetup-join/"
+        "19%3ameeting_EXAMPLEID%40thread.v2/0")
+    training_link = "https://learning.example.com/library/course-42"
+    raw = [
+        {"subject": "Onboarding call",
+         "start": "2026-08-14T09:00:00", "end": "2026-08-14T09:30:00",
+         "organizer": "a.doe@globex.example", "join_url": zoom_join},
+        {"subject": "Partner sync",
+         "start": "2026-08-14T11:00:00", "end": "2026-08-14T11:30:00",
+         "organizer": "Noh, Kim", "join_url": teams_join},
+        # Incidental Location URL: a location, never a join link.
+        {"subject": "Training block",
+         "start": "2026-08-14T14:00:00", "end": "2026-08-14T15:00:00",
+         "organizer": "Northwind Evite", "location": training_link,
+         "join_url": ""},
+        # Teams-only row: no URL in the label at all, unchanged forever.
+        {"subject": "Ad-hoc sync",
+         "start": "2026-08-14T16:00:00", "end": "2026-08-14T16:30:00",
+         "organizer": "Jane Doe"},
+    ]
+    events = events_from_structured(raw)
+    assert [e["join_url"] for e in events] == [
+        zoom_join, teams_join, "", ""]
+    assert [e["organizer"] for e in events] == [
+        "a.doe@globex.example", "Noh, Kim", "Northwind Evite", "Jane Doe"]
+    assert [e["location"] for e in events] == ["", "", training_link, ""]
+
+    # ...through the on-disk store...
+    svc = ExtensionCalendarService(tmp_path)
+    svc.replace_all(events, now=datetime(2026, 8, 14, 8, 0))
+    back = ExtensionCalendarService(tmp_path).get_events()
+    assert {e["subject"]: e["join_url"] for e in back} == {
+        "Onboarding call": zoom_join,
+        "Partner sync": teams_join,
+        "Training block": "",
+        "Ad-hoc sync": "",
+    }
+    # The address survives verbatim — same case, same dots, still an
+    # address after a JSON round trip.
+    onboarding = next(e for e in back if e["subject"] == "Onboarding call")
+    assert onboarding["organizer"] == "a.doe@globex.example"
+
+    # ...and through the merge, where an extension-only row keeps both.
+    merged = merge_meetings([], back)
+    assert {e["subject"]: (e["organizer"], e["join_url"]) for e in merged} == {
+        "Onboarding call": ("a.doe@globex.example", zoom_join),
+        "Partner sync": ("Noh, Kim", teams_join),
+        "Training block": ("Northwind Evite", ""),
+        "Ad-hoc sync": ("Jane Doe", ""),
     }
 
 

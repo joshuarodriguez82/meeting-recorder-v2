@@ -103,6 +103,56 @@
 //      SAYS it is empty; clicking into every event to scrape a detail
 //      pane is not a default anyone gets by accident.
 //
+// v1.5 — v1.4's join-link probe asked the wrong question and then
+// stated a confident negative from the answer. It searched for join-
+// shaped ANCHOR elements (`a[href]`), found none, and concluded "no
+// join-shaped links anywhere in the scanned roots — the grid does not
+// expose them; join_url cannot be filled from this DOM". The same
+// diagnostic's own `longestLabels` array disproved it in the same
+// report: a join URL sat in the aria-label TEXT, between the date
+// segment and the `By <organiser>` segment, on the labels this file
+// already parses twice.
+//
+// It varies by provider, and that is the whole explanation: a Teams
+// event renders the literal words "Microsoft Teams Meeting" and no
+// URL, while an add-in that writes the join link into the event's
+// LOCATION field (Zoom's Outlook add-in does) gets that Location
+// rendered into the label by OWA. So the link is there for any meeting
+// whose organiser used such an add-in, and absent for the rest — which
+// is a per-event fact, not a per-tenant impossibility.
+//
+//   1. `join_url` is now populated from the label text
+//      (`extractUrlsFromLabel`), for RECOGNISED CONFERENCING PROVIDERS
+//      ONLY (the same four the probe already knows: Teams
+//      `meetup-join`, Zoom, Webex, Google Meet — see
+//      JOIN_PROVIDER_PATTERNS). Any OTHER https URL in that position is
+//      a location, not a meeting to join — a link to a training site
+//      in the Location field is where the thing happens, and calling it
+//      a join link would send the user somewhere that isn't the
+//      meeting. Those land in `location` (a field that also already
+//      shipped empty on this path) and never in `join_url`. The two are
+//      never blurred: `join_url` means "this URL joins THIS meeting".
+//   2. `organizer` handles the shapes the field data actually contains
+//      beyond a display name — most importantly an SMTP ADDRESS where a
+//      display name normally sits, which is kept verbatim (an address
+//      is what `services/follow_up_recipients.py` needs; a name has to
+//      be resolved into one and usually can't be).
+//   3. The probe's verdict now distinguishes found-in-anchors /
+//      found-in-label-text / genuinely absent, and says which places it
+//      looked in. A diagnostic that reports "cannot be done" when it
+//      means "I looked in one place" is worse than one that says
+//      nothing.
+//
+// Nothing about candidate discovery, `parseMeetingLabel`,
+// `TIME_RANGE_RE`, the date resolution, the zero-reason classification
+// or the merge/dedup changes. Every new extraction returns "" on
+// failure, so a label with no URL produces byte-identical events.
+//
+// A join URL is a single-use meeting credential: it is never logged,
+// never put in a diagnostic report, and never included in an error
+// string. The counting in `stats` counts and classifies only, and the
+// probe's examples stay host+path SHAPE only (see `redact`).
+//
 // Still true, and still the point of all of the above: none of the
 // live-DOM behavior here has been exercised against a real Outlook
 // Web tenant in this change — there is no way to sign in to one from
@@ -223,42 +273,59 @@ const DIAGNOSTIC_SNAPSHOT_DELAYS_MS = [2000, 5000, 10000, 15000];
 
 // ── Join-link probe config (diagnostic only) ────────────────────────
 //
-// `join_url` is declared on every captured event and has never been
-// populated on this path: both NATIVE calendar backends
-// (`services/_calendar_outlook.py:559`,
-// `services/_calendar_eventkit.py:579`) get it by running
-// `_extract_join_url(location, body)` over the invite BODY, and the
-// extension scrape has no body — Outlook Web's aria-label carries
-// "Microsoft Teams Meeting" as a LABEL, never the URL.
+// Both NATIVE calendar backends (`services/_calendar_outlook.py:559`,
+// `services/_calendar_eventkit.py:579`) get `join_url` by running
+// `_extract_join_url(location, body)` over the invite BODY, which this
+// scrape does not have. The extension's route is different: OWA renders
+// the event's LOCATION into the aria-label, so when the organiser's
+// add-in wrote the join link into Location, the URL is right there in
+// the label text (see `extractUrlsFromLabel`). A Teams event renders
+// the words "Microsoft Teams Meeting" and no URL, so the label route
+// covers some meetings and not others.
 //
-// Whether a join link is nonetheless reachable from the elements the
-// capture already scans is an open question that cannot be answered
-// from this environment (no way to sign in to a real tenant). Rather
-// than guess, the diagnostic below counts join-shaped anchors in the
-// same roots the real scan walks and reports whether each one sits
-// inside — or next to — an element carrying a meeting-shaped
-// aria-label. That is the whole decision: if those numbers come back
-// non-zero, `join_url` can be filled from the DOM we already have; if
-// they come back zero, the only remaining route is opening every event
-// to scrape its detail pane, which is slow, fragile and exactly the
-// DOM dependency that broke calendar capture before — an owner
-// decision, not a default.
+// The probe below measures which, against a live tenant this
+// environment can never sign in to. It looks in BOTH places — anchors
+// (`a[href]`) in the same roots the real scan walks, and the aria-label
+// TEXT the real parse reads — and reports them separately, because
+// v1.4's probe looked only at anchors, found zero, and reported that
+// join_url "cannot be filled from this DOM" while a Zoom join URL sat
+// in the label text of the very same report. An anchor is reported as
+// usable only if it sits inside — or next to — an element carrying a
+// meeting-shaped aria-label; anything else could only be matched by
+// grid position, which is how a link gets attached to the WRONG
+// meeting, so those are counted and never used. A URL found in a
+// meeting-shaped label needs no association at all: it is part of that
+// meeting's own description.
 //
 // Passed to `_calendarDiagnosticProbeFunc` as ARGS (regex sources, not
 // RegExp objects) for the same reason TIME_RANGE_RE.source already is:
 // an injected script cannot close over this file's module scope, and
 // duplicating the vocabulary inside the probe would let the two drift.
+
+// The conferencing providers a URL must match to be a JOIN link rather
+// than a location. Host AND path both have to match: `zoom.us/j/<id>`
+// joins a meeting, `zoom.us/pricing` does not, and a link to some other
+// site entirely is a place, not a meeting. Regex SOURCES, not RegExp
+// objects, because this list is handed to an injected script as an arg
+// (see JOIN_URL_PROBE_CONFIG below) and structured-cloned on the way.
+//
+// One list, two consumers — `extractUrlsFromLabel` (which fills
+// `join_url` from label text) and the diagnostic probe — precisely so
+// the field and the diagnostic that measures the field can never
+// disagree about what counts as a join link.
+const JOIN_PROVIDER_PATTERNS = [
+  {
+    name: "teams",
+    host: "^(?:teams\\.microsoft\\.com|teams\\.live\\.com|teams\\.cloud\\.microsoft)$",
+    path: "^/l/meetup-join/|^/l/meeting/|^/meet/",
+  },
+  { name: "zoom", host: "(?:^|\\.)zoom\\.us$", path: "^/(?:j|w|s|my|wc)/" },
+  { name: "webex", host: "(?:^|\\.)webex\\.com$", path: "^/(?:meet|join|wbxmjs)/|/j\\.php|/m\\.php" },
+  { name: "meet", host: "^meet\\.google\\.com$", path: "^/[A-Za-z0-9]" },
+];
+
 const JOIN_URL_PROBE_CONFIG = {
-  providers: [
-    {
-      name: "teams",
-      host: "^(?:teams\\.microsoft\\.com|teams\\.live\\.com|teams\\.cloud\\.microsoft)$",
-      path: "^/l/meetup-join/|^/l/meeting/|^/meet/",
-    },
-    { name: "zoom", host: "(?:^|\\.)zoom\\.us$", path: "^/(?:j|w|s|my|wc)/" },
-    { name: "webex", host: "(?:^|\\.)webex\\.com$", path: "^/(?:meet|join|wbxmjs)/|/j\\.php|/m\\.php" },
-    { name: "meet", host: "^meet\\.google\\.com$", path: "^/[A-Za-z0-9]" },
-  ],
+  providers: JOIN_PROVIDER_PATTERNS,
   // Hosts safe to print verbatim. Anything else keeps only its last two
   // labels ("acme.webex.com" -> "*.webex.com") — a Webex/Zoom site
   // subdomain is usually the CUSTOMER's name, which must not land in a
@@ -1268,6 +1335,43 @@ function _isOrganizerStatusSegment(seg) {
     String(seg || "").trim().replace(/[.\s]+$/, "").toLowerCase());
 }
 
+// An organiser segment that is an SMTP ADDRESS rather than a display
+// name — the shape a tenant writes when it has no resolved display name
+// for the organiser (an external organiser, a distribution list, a
+// room). Field report 2026-08-19: nine of ten follow-up drafts went out
+// with no recipient because the only thing the app had for a person was
+// a bare first name, which a corporate directory will not resolve. An
+// address needs no resolving at all, so when the label hands us one it
+// is kept EXACTLY as written — not title-cased, not split, not
+// "cleaned". `services/follow_up_recipients.py` is the consumer, and
+// unchanged by this file: it currently treats every organiser label as
+// a NAME (`candidate_names` -> `_prettify` title-cases a lowercase
+// one), so recognising an address as already-resolved is a change that
+// belongs in that module, not here. Passing the address through
+// verbatim is the half this side owes it.
+//
+// Deliberately structural and narrow: one `@`, a dot-bearing domain, no
+// whitespace or segment punctuation on either side. It is a
+// classification, not a validator — the address is passed through
+// whether or not it matches; matching only decides that the surname-
+// first join below must NOT fire for it.
+const ORGANIZER_EMAIL_RE =
+  /^[^\s@,;:<>()[\]]+@[^\s@,;:<>()[\]]+\.[A-Za-z]{2,}$/;
+
+// A bare token that could be the SURNAME half of a "Last, First" split:
+// letters (any script), plus the punctuation that lives inside real
+// surnames. Deliberately excludes anything with a digit or an `@`, so
+// an address (`a.doe@globex.example`) and an id-bearing room or
+// distribution-list name are never glued to the segment after them.
+const ORGANIZER_SURNAME_TOKEN_RE = /^[\p{L}][\p{L}'’.\-]*$/u;
+
+// The segment that may be joined BACK onto a bare surname as the given
+// name: starts with a letter and carries no digit and no `@`. Keeps
+// "Pat Jr. [US-US]" (a real given-name segment with a suffix and a
+// bracketed region) while rejecting "Umbrella HQ Room 3" (a place that
+// merely follows the organiser in the tail).
+const ORGANIZER_GIVEN_SEGMENT_RE = /^[\p{L}][^@\d]*$/u;
+
 // Longest an organizer name is allowed to be before we assume the
 // segment split went wrong and report nothing rather than a sentence.
 const ORGANIZER_MAX_LEN = 80;
@@ -1284,6 +1388,22 @@ const ORGANIZER_MAX_LEN = 80;
 // rule instead: take the first segment; join the SECOND one to it only
 // when the first is a single bare token (the "Last, First Suffix
 // [REGION]" form), and stop at the first status segment either way.
+//
+// The organiser is not always a person, and not always a name. Every
+// shape below turned up in real capture output (v1.5):
+//
+//   By a.doe@globex.example   an SMTP address where a display name
+//                             normally sits — kept verbatim, never
+//                             joined to the following segment
+//   By Noh, Kim               surname-first, comma inside the name
+//   By Jane  Doe              a double space inside the name —
+//                             collapsed, like every other run of
+//                             whitespace in the label
+//   By Zoë Døe                non-ASCII, preserved byte for byte
+//   By Northwind Evite        a distribution list, not a person
+//   By Umbrella HQ Room 3     a room — a digit in it must not stop it
+//                             being read, only stop it being glued
+//                             onto a preceding bare token
 function extractOrganizerFromLabel(label) {
   try {
     const raw = String(label || "").replace(/\s+/g, " ").trim();
@@ -1304,9 +1424,27 @@ function extractOrganizerFromLabel(label) {
     if (!segments.length) return "";
     if (_isOrganizerStatusSegment(segments[0])) return "";
 
-    let name = segments[0];
-    const looksLikeBareSurname = !/\s/.test(name);
-    if (looksLikeBareSurname && segments[1] && !_isOrganizerStatusSegment(segments[1])) {
+    // An address is complete on its own. The "Last, First" join below
+    // must not fire for one: `a.doe@globex.example` is a single bare
+    // token, so the pre-v1.5 rule would have glued whatever segment
+    // followed onto it ("a.doe@globex.example, Umbrella HQ Room 3")
+    // whenever that segment wasn't a known status word. A `mailto:`
+    // prefix, if OWA ever writes one, is dropped — the address itself
+    // is what a directory and a To: field want.
+    let name = segments[0].replace(/^mailto:/i, "").trim();
+    const isEmail = ORGANIZER_EMAIL_RE.test(name);
+
+    // "Last, First Suffix [REGION]" — the ONE case where the tail's own
+    // comma is part of the name rather than a segment boundary. Both
+    // halves have to look the part: a bare surname-shaped token, then a
+    // segment that could be a given name. Anything else (an address, a
+    // room with a number in it, a distribution list) is taken as-is,
+    // because gluing the next segment onto it invents a name nobody has.
+    if (!isEmail
+        && ORGANIZER_SURNAME_TOKEN_RE.test(name)
+        && segments[1]
+        && !_isOrganizerStatusSegment(segments[1])
+        && ORGANIZER_GIVEN_SEGMENT_RE.test(segments[1])) {
       name = `${name}, ${segments[1]}`;
     }
     name = name.replace(/[,;\s]+$/, "").trim();
@@ -1317,6 +1455,113 @@ function extractOrganizerFromLabel(label) {
     return name;
   } catch (_) {
     return "";
+  }
+}
+
+// ── Pure: join URL / location URL out of the same label tail (v1.5) ──
+//
+// Third read of the same string. Outlook Web renders the event's
+// LOCATION field into the label, in the segment between the date and
+// the `By <organiser>` segment:
+//
+//   "Onboarding call, 9:00 AM to 9:30 AM, Friday, August 14, 2026,
+//    https://zoom.us/j/0000000000?pwd=…, By Jane Doe, Busy"
+//                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+//
+// so whether a join URL is available comes down to whether the
+// ORGANISER'S client put one in Location. Zoom's Outlook add-in does.
+// Teams does not — a Teams event's Location reads "Microsoft Teams
+// Meeting", the words, and the URL only ever lives in the invite body,
+// which this scrape has never had. Both outcomes are normal and neither
+// is a failure; `stats.withJoinUrl` is what tells the two apart.
+//
+// THE LINE BETWEEN A JOIN LINK AND A LOCATION URL — the one decision
+// this function exists to make. `join_url` is a promise that following
+// the URL puts you IN this meeting. Only a recognised conferencing
+// provider (JOIN_PROVIDER_PATTERNS: Teams meetup-join, Zoom, Webex,
+// Google Meet — host AND path both matching) can keep that promise. A
+// real capture also carried an `https://…/library/…` training-site link
+// in the very same Location position: that is where the meeting is
+// ABOUT something, or at most where to go — following it does not join
+// anything. Treating it as a join link would put a "Join" button in
+// front of the user that silently goes somewhere else, which is worse
+// than the empty field this replaces. So a non-conferencing URL is
+// returned SEPARATELY, as `locationUrl`, and the caller puts it in
+// `location` (also empty until now on this path) — never in `join_url`.
+// An unrecognised conferencing provider therefore degrades to a
+// location, not to a wrong join link.
+//
+// Never logged. A join URL with its `?pwd=` is a single-use credential;
+// it goes into the event record and nowhere else. Diagnostics count and
+// classify, never print (see `stats` in extractEventsFromCandidates and
+// `redact` in the probe).
+
+// A URL inside a comma-delimited label segment. Stops at whitespace and
+// at the `,` / `;` that end the segment, so the trailing ", By <name>"
+// can never be swallowed into the URL.
+const LABEL_URL_RE_SRC = "https?://[^\\s,;]+";
+
+// Beyond this a "URL" is not a URL, it is a parse that went wrong.
+const LABEL_URL_MAX_LEN = 2000;
+
+// Which provider (if any) this URL joins a meeting on. null for a URL
+// that is merely a place. Returns the provider NAME only — the URL
+// itself never goes anywhere but the event record.
+function joinProviderForUrl(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || ""));
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    for (const p of JOIN_PROVIDER_PATTERNS) {
+      if (new RegExp(p.host, "i").test(u.host)
+          && new RegExp(p.path, "i").test(u.pathname || "")) {
+        return p.name;
+      }
+    }
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Pull the FIRST conferencing join URL and the FIRST other URL out of
+// one candidate label. Returns { joinUrl, joinProvider, locationUrl },
+// each "" when that shape isn't present — so a label with no URL at all
+// (the overwhelming majority, and every Teams-only calendar) produces
+// exactly the values the field already had.
+function extractUrlsFromLabel(label) {
+  const empty = { joinUrl: "", joinProvider: "", locationUrl: "" };
+  try {
+    const raw = String(label || "").replace(/\s+/g, " ").trim();
+    // Cheap reject first: this runs on every scanned candidate, and
+    // most labels have no URL in them at all.
+    if (!raw || !/https?:\/\//i.test(raw)) return empty;
+
+    // Same region as the organiser: the tail after the time range,
+    // which is where OWA puts Location. A candidate whose time came
+    // from a `<time datetime>` pair has no text range to slice at, so
+    // for those the whole label is searched — a URL in a subject is
+    // still that meeting's own link, unlike a stray word "by".
+    const m = TIME_RANGE_RE.exec(raw);
+    const searchIn = m ? raw.slice(m.index + m[0].length) : raw;
+
+    const out = { ...empty };
+    const re = new RegExp(LABEL_URL_RE_SRC, "gi");
+    let hit;
+    while ((hit = re.exec(searchIn)) !== null) {
+      // Trailing sentence punctuation belongs to the label, not the URL.
+      const url = hit[0].replace(/[.,;:!?)\]}>"']+$/, "");
+      if (!url || url.length > LABEL_URL_MAX_LEN) continue;
+      const provider = joinProviderForUrl(url);
+      if (provider) {
+        if (!out.joinUrl) { out.joinUrl = url; out.joinProvider = provider; }
+      } else if (!out.locationUrl) {
+        out.locationUrl = url;
+      }
+      if (out.joinUrl && out.locationUrl) break;
+    }
+    return out;
+  } catch (_) {
+    return empty;
   }
 }
 
@@ -1380,6 +1625,15 @@ function extractEventsFromCandidates(candidates, opts = {}) {
     // the popup or the logs — see the popup's calendar status line.
     withOrganizer: 0,
     withJoinUrl: 0,
+    // v1.5, counts and classifications ONLY — no URL and no organiser
+    // string is ever put in these, or anywhere else that gets logged.
+    // `joinUrlByProvider` is what makes "this tenant is Teams-only, so
+    // no label carries a URL" distinguishable from "extraction broke";
+    // `withLocationUrl` counts the non-conferencing Location URLs that
+    // were deliberately NOT called join links.
+    joinUrlByProvider: {},
+    withLocationUrl: 0,
+    withOrganizerEmail: 0,
   };
   const seen = new Map();
 
@@ -1396,29 +1650,44 @@ function extractEventsFromCandidates(candidates, opts = {}) {
 
     const layer = (c && c.layer) || "unknown";
     const organizer = (c && c.organizer) || extractOrganizerFromLabel(c && c.label);
-    const joinUrl = (c && c.joinUrl) || "";
+    // Third read of the same label — see extractUrlsFromLabel. A
+    // DOM-supplied value, if one is ever added, still wins.
+    const urls = extractUrlsFromLabel(c && c.label);
+    const joinUrl = (c && c.joinUrl) || urls.joinUrl;
+    const location = (c && c.location) || urls.locationUrl;
     if (organizer) stats.withOrganizer++;
-    if (joinUrl) stats.withJoinUrl++;
+    if (organizer && ORGANIZER_EMAIL_RE.test(organizer)) stats.withOrganizerEmail++;
+    if (joinUrl) {
+      stats.withJoinUrl++;
+      const p = (c && c.joinUrl) ? (joinProviderForUrl(joinUrl) || "other") : urls.joinProvider;
+      stats.joinUrlByProvider[p] = (stats.joinUrlByProvider[p] || 0) + 1;
+    }
+    if (location && urls.locationUrl && location === urls.locationUrl) stats.withLocationUrl++;
     seen.set(key, {
       subject: r.subject,
       start: r.startIso,
       end: r.endIso,
-      location: (c && c.location) || "",
+      // Was always "" unless the DOM layer supplied one (nothing does
+      // today). A NON-conferencing URL in the label's Location position
+      // lands here rather than in join_url — it is a place, not a
+      // meeting to join. See extractUrlsFromLabel.
+      location,
       // Was always "" — nothing ever assigned `c.organizer`. Now
       // recovered from the label's own tail (see
       // extractOrganizerFromLabel); a DOM-supplied value, if one is
       // ever added, still wins. Extraction failure returns "", i.e.
       // exactly the value this field always had.
       organizer,
-      // Still always "": Outlook Web's calendar grid carries "Microsoft
-      // Teams Meeting" as a LABEL, never the join URL, and no join link
-      // has been shown to be reachable from the elements this scan
-      // already visits. `diagnoseCalendarCapture`'s joinLinks probe is
-      // what answers that question against a real tenant — see
-      // JOIN_URL_PROBE_CONFIG. Deliberately NOT backfilled by opening
-      // each event to scrape its detail pane: that is slow, fragile,
-      // and exactly the DOM dependency that broke calendar capture
-      // before — an owner decision, not a default.
+      // v1.5: filled from the label's own text when the organiser's
+      // add-in wrote a RECOGNISED CONFERENCING link into the event's
+      // Location (Zoom's does; a Teams event carries only the words
+      // "Microsoft Teams Meeting"), and left "" — exactly the value it
+      // always had — otherwise. A non-conferencing URL never reaches
+      // this field; it is a location and goes in `location`.
+      // Still deliberately NOT backfilled by opening each event to
+      // scrape its detail pane: that is slow, fragile, and exactly the
+      // DOM dependency that broke calendar capture before — an owner
+      // decision, not a default.
       join_url: joinUrl,
     });
     stats.layerCounts[layer] = (stats.layerCounts[layer] || 0) + 1;
@@ -2173,15 +2442,27 @@ function _calendarDiagnosticProbeFunc(timeRangeSource, timeHintSource, joinConfi
 
     // ── Join-link probe (read-only; never emits a full URL) ─────────
     //
-    // Answers exactly one question: is a meeting join link reachable
-    // from the DOM the real capture already walks? Three numbers say
-    // it — how many join-shaped links exist at all, how many sit
-    // INSIDE an element whose aria-label is meeting-shaped (safe to
-    // associate by containment), and how many merely sit NEXT TO one
-    // (weaker, but still positional-free). Links that are neither are
-    // counted as unassociated: those could only be matched by grid
-    // position, which is precisely the association a wrong answer
-    // comes from, so they are reported, never used.
+    // Answers one question — is a meeting join link reachable from what
+    // the real capture already reads? — by looking in the TWO places a
+    // URL can be, and reporting them separately:
+    //
+    //   ANCHORS. How many join-shaped `a[href]` exist at all, how many
+    //   sit INSIDE an element whose aria-label is meeting-shaped (safe
+    //   to associate by containment), and how many merely sit NEXT TO
+    //   one (weaker, but still positional-free). Links that are neither
+    //   are counted as unassociated: those could only be matched by
+    //   grid position, which is precisely the association a wrong
+    //   answer comes from, so they are reported, never used.
+    //
+    //   LABEL TEXT. How many join-shaped URLs appear as TEXT inside an
+    //   aria-label, and of those, how many inside a MEETING-shaped one
+    //   (where the URL is part of that meeting's own description and
+    //   needs no association at all). v1.4's probe had only the anchor
+    //   half and reported its zero as "join_url cannot be filled from
+    //   this DOM" — while a Zoom join URL sat in the label text of the
+    //   same report. Non-conferencing URLs in labels are counted too,
+    //   separately: those are locations, not join links, and conflating
+    //   them is what the verdict must never do.
     function joinLinkProbe() {
       const cfg = joinConfig || {};
       const providers = (cfg.providers || []).map((p) => ({
@@ -2202,8 +2483,17 @@ function _calendarDiagnosticProbeFunc(timeRangeSource, timeHintSource, joinConfi
         adjacentToMeetingLabelledElement: 0,
         unassociated: 0,
         redactedExamples: [],
+        // The half v1.4 never asked about — URLs living in aria-label
+        // TEXT rather than in an anchor element.
+        labelUrlCount: 0,
+        labelJoinCount: 0,
+        labelJoinInMeetingShapedLabel: 0,
+        labelNonJoinUrlCount: 0,
+        labelByProvider: {},
+        labelRedactedExamples: [],
       };
       for (const p of providers) out.byProvider[p.name] = 0;
+      for (const p of providers) out.labelByProvider[p.name] = 0;
 
       // Host + path SHAPE only. Query strings are dropped whole and
       // every non-structural path segment is elided — a join URL is a
@@ -2291,18 +2581,70 @@ function _calendarDiagnosticProbeFunc(timeRangeSource, timeHintSource, joinConfi
         }
       }
 
+      // Second place: URL-shaped TEXT inside an aria-label. `labels` is
+      // every aria-label on the page (collected above); a label that is
+      // also meeting-shaped is the strong case, since the URL is then
+      // part of that meeting's own description.
+      const urlInTextSrc = "https?://[^\\s,;]+";
+      for (const l of labels) {
+        const re = new RegExp(urlInTextSrc, "gi");
+        let hit;
+        const labelIsMeeting = timeRangeRe.test(l);
+        while ((hit = re.exec(l)) !== null) {
+          const url = hit[0].replace(/[.,;:!?)\]}>"']+$/, "");
+          if (!url) continue;
+          out.labelUrlCount++;
+          const provider = providerFor(url);
+          if (!provider) { out.labelNonJoinUrlCount++; continue; }
+          out.labelJoinCount++;
+          out.labelByProvider[provider] = (out.labelByProvider[provider] || 0) + 1;
+          if (labelIsMeeting) out.labelJoinInMeetingShapedLabel++;
+          const shape = redact(url);
+          if (shape && out.labelRedactedExamples.length < maxExamples
+              && !out.labelRedactedExamples.some((e) => e.shape === shape)) {
+            out.labelRedactedExamples.push({ provider, shape, where: "aria-label text" });
+          }
+        }
+      }
+
       const associated = out.insideMeetingLabelledElement +
         out.adjacentToMeetingLabelledElement;
-      out.verdict = out.matchCount === 0
-        ? "no join-shaped links anywhere in the scanned roots — the grid " +
-          "does not expose them; join_url cannot be filled from this DOM"
-        : (associated === 0
-          ? `found ${out.matchCount} join-shaped link(s), but none inside or ` +
-            `adjacent to a meeting-shaped aria-label — associating them would ` +
-            `have to be positional, which is not safe enough to use`
-          : `found ${out.matchCount} join-shaped link(s), ${associated} of them ` +
-            `associable by containment/adjacency — join_url IS fillable from ` +
-            `the DOM the capture already scans`);
+      const inLabels = out.labelJoinInMeetingShapedLabel;
+      // Four distinct answers, never collapsed: usable from anchors /
+      // usable from label text / present but only positionally
+      // associable / genuinely absent from BOTH places. The last one is
+      // the only negative, and it now names what was checked — v1.4's
+      // version said "cannot be filled from this DOM" on the strength
+      // of the anchor count alone, which was a confident negative about
+      // a question it had not asked.
+      const alsoInLabels = inLabels > 0
+        ? `, plus ${inLabels} in meeting-shaped aria-label TEXT`
+        : "";
+      if (out.matchCount > 0 && associated > 0) {
+        out.verdict =
+          `found ${out.matchCount} join-shaped anchor link(s), ${associated} of them ` +
+          `associable by containment/adjacency${alsoInLabels} — join_url IS fillable ` +
+          `from the DOM the capture already scans`;
+      } else if (inLabels > 0) {
+        out.verdict =
+          `found ${inLabels} join-shaped URL(s) in the TEXT of a meeting-shaped ` +
+          `aria-label (anchors: ${out.matchCount} join-shaped, ${associated} associable) — ` +
+          `join_url IS fillable from the label the capture already parses, no anchor ` +
+          `needed; this is the path extractUrlsFromLabel takes`;
+      } else if (out.matchCount > 0) {
+        out.verdict =
+          `found ${out.matchCount} join-shaped anchor link(s), but none inside or ` +
+          `adjacent to a meeting-shaped aria-label and none in label text — associating ` +
+          `them would have to be positional, which is not safe enough to use`;
+      } else {
+        out.verdict =
+          `no join-shaped links anywhere in the scanned roots — BOTH places checked: ` +
+          `${out.anchorCount} anchor(s) carried none, and ${out.labelUrlCount} URL(s) in ` +
+          `aria-label text were all non-conferencing (${out.labelNonJoinUrlCount} of them, ` +
+          `i.e. locations rather than meetings to join). join_url is genuinely absent ` +
+          `here — a Teams-only calendar looks exactly like this, since a Teams event's ` +
+          `Location is the words "Microsoft Teams Meeting" and never the URL`;
+      }
       return out;
     }
 
@@ -2434,13 +2776,18 @@ async function diagnoseCalendarCapture() {
       ariaLabelCount: s.ariaLabelCount,
       timeRangeMatchCount: s.patternsTried && s.patternsTried[0] && s.patternsTried[0].matchCount,
       joinLinkMatchCount: s.joinLinks && s.joinLinks.matchCount,
+      // Both halves in the timeline, so "the anchors were never there
+      // but the labels always were" is readable at a glance rather than
+      // only from the final snapshot's verdict.
+      joinLinkInLabelTextCount: s.joinLinks && s.joinLinks.labelJoinInMeetingShapedLabel,
       error: s.error,
     })),
     // Read-only join-link probe — the answer to "can join_url be filled
-    // from the DOM we already scan, or would it need a click into every
-    // event?" See JOIN_URL_PROBE_CONFIG. Examples are host+path SHAPE
-    // only; a full join URL is a single-use credential and never leaves
-    // the page.
+    // from what we already read, or would it need a click into every
+    // event?" Looks in BOTH places (anchor elements AND aria-label
+    // text) and says which one produced the answer; see
+    // JOIN_URL_PROBE_CONFIG. Examples are host+path SHAPE only; a full
+    // join URL is a single-use credential and never leaves the page.
     joinLinks: final.joinLinks || null,
     ariaLabelCount: final.ariaLabelCount,
     longestLabels: final.longestLabels || [],

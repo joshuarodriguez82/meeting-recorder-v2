@@ -987,6 +987,15 @@ export const api = {
     client: string;
     project: string;
     attendees: string[];
+    // Who called the meeting, from the calendar invite's organiser
+    // field — set when the recording was started from a calendar tile
+    // (record-view.tsx's `useMeeting`), omitted for an ad-hoc one. The
+    // backend puts it at the head of the speaker-identification roster
+    // (backend/core/speaker_roster.py). Worth sending even though
+    // `attendees` exists: an extension-sourced calendar can only ever
+    // scrape the organiser out of Outlook Web's grid label, so for
+    // those meetings `attendees` is [] and this is the whole roster.
+    organizer?: string;
     // ISO datetime when the calendar meeting is scheduled to end.
     // Optional; only meaningful when the recording was started from a
     // calendar tile. The backend's auto-stop watchdog uses this for
