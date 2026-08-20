@@ -46,6 +46,35 @@ class Session:
         self.client_source: Optional[str] = None
         self.client_source_detail: Optional[str] = None
         self.attendees: List[str] = []
+        # WHO CALLED THE MEETING, from the calendar invite. A display
+        # name ("Jane Doe", or the surname-first "Doe, Jane [EMEA]"
+        # form Outlook produces) or an address — whatever the calendar
+        # source hands over, passed through unparsed, exactly like the
+        # entries in `attendees`. core/speaker_roster.py owns the
+        # reading of both shapes.
+        #
+        # This field exists because `attendees` is ALWAYS EMPTY for one
+        # whole class of user. The Chrome-extension calendar source
+        # scrapes Outlook Web's grid, and the grid's aria-label carries
+        # the organiser but not the attendee list (that lives in the
+        # event detail pane, one click deeper — the same reason join
+        # links have to be resolved separately). So a user whose entire
+        # calendar is extension-sourced gets `attendees == []` on every
+        # session, and the v2.40.0 speaker roster — built purely from
+        # `attendees` — is inert for them. The organiser is the one
+        # invite-derived name that path CAN supply, and
+        # `speaker_roster.roster_names()` already accepts it and puts
+        # it first (they're the likeliest person to be both present and
+        # speaking).
+        #
+        # Set at record start from the calendar event, on BOTH paths —
+        # server._auto_record_start and the Record tab's Use button.
+        # Always a string: "" means "no organiser was resolved", a
+        # normal non-error state that degrades to exactly the
+        # pre-organiser behaviour (roster_names drops the empty entry).
+        # Absent from every session written before this field existed,
+        # which from_dict reads as "" rather than failing.
+        self.organizer: str = ""
         self.decisions: Optional[str] = None
         # Structured counterparts to the markdown fields above. The
         # markdown stays the source of truth for the current per-session
@@ -236,6 +265,7 @@ class Session:
             "client_source": self.client_source,
             "client_source_detail": self.client_source_detail,
             "attendees": self.attendees,
+            "organizer": self.organizer,
             "decisions": self.decisions,
             "requirements_struct": [r.to_dict() for r in self.requirements_struct],
             "decisions_struct": [d.to_dict() for d in self.decisions_struct],
@@ -291,6 +321,12 @@ class Session:
         session.client_source = data.get("client_source") or None
         session.client_source_detail = data.get("client_source_detail") or None
         session.attendees = list(data.get("attendees") or [])
+        # Missing on every session written before the organiser was
+        # carried through, and on every ad-hoc recording that was never
+        # started from a calendar entry. Both read as "" — the same
+        # value a resolved-but-empty organiser produces — so a legacy
+        # session loads unchanged rather than raising.
+        session.organizer = str(data.get("organizer") or "")
         session.decisions = data.get("decisions")
         session.requirements_struct = [
             Requirement.from_dict(x) for x in (data.get("requirements_struct") or [])

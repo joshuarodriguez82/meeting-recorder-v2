@@ -101,6 +101,42 @@ _WEAK_TOKENS = {
 _TOKEN_SPLIT_RE = re.compile(r"[\s,]+")
 _PUNCT_TRIM = ".,;:()[]'\""
 
+# An owner label that IS a mailbox rather than a name.
+#
+# This became reachable in v2.41.0. The extension calendar source reads
+# the organiser out of Outlook Web's grid label, and OWA renders the
+# literal SMTP address there whenever the organiser has no resolved
+# display name — so `Session.organizer`, and through it the speaker
+# roster and this module, can now be handed `a.doe@globex.example`
+# where a person's name has always sat before. Every assumption below
+# this line was written for names, and three of them are wrong for an
+# address:
+#
+#   * `_prettify` title-cases anything with no capitals, turning
+#     `a.doe@…` into `A.doe@…`. The local part is formally
+#     case-sensitive (RFC 5321 §2.4) — a mail server is entitled to
+#     treat those as different mailboxes.
+#   * `_richness` ranks by token count, so a one-token address sorts
+#     BELOW any two-token name — the alias- or attendee-derived guess
+#     would be tried against the directory ahead of the address the
+#     invite stated outright.
+#   * `resolve_recipient` would report `addressed=False` for a draft
+#     that is, in fact, addressed — counting it among the "9 of 10 with
+#     no recipient" the v2.38.0 message exists to report honestly.
+#
+# Deliberately narrow, because a false positive here skips the
+# directory lookup entirely and puts the label straight into To:. One
+# token (no whitespace, no comma), exactly one "@", and a dotted domain
+# ending in a 2+ letter label. "Roe, Pat Jr." has no "@" and a comma;
+# "ask @sam about it" has whitespace; "sam@localhost" has no dot.
+_ADDRESS_RE = re.compile(
+    r"^[^\s@,]+@[^\s@,.]+(?:\.[^\s@,.]+)*\.[A-Za-z]{2,}$")
+
+
+def is_address(text: str) -> bool:
+    """True when `text` is a bare email address rather than a name."""
+    return bool(_ADDRESS_RE.match((text or "").strip()))
+
 
 def _name_tokens(name: str) -> FrozenSet[str]:
     """Lowercase token set for `name`, punctuation trimmed.
@@ -130,8 +166,13 @@ def _prettify(display: str) -> str:
     existing capital is left exactly as written — "Ana van der Noh" and
     "McRoe" must survive untouched, and directory lookups are
     case-insensitive either way, so this is presentation only.
+
+    An address is never touched: its local part is case-sensitive, so
+    "presentation only" stops being true the moment one arrives.
     """
     if not display or any(ch.isupper() for ch in display):
+        return display
+    if is_address(display):
         return display
     return " ".join(w[:1].upper() + w[1:] for w in display.split(" "))
 
@@ -139,12 +180,18 @@ def _prettify(display: str) -> str:
 def _richness(name: str) -> tuple:
     """Sort key for "how much has a directory got to match on?".
 
-    Token count first (two-token names resolve where one-token names do
-    not), then raw length as the tie-break.
+    Address first, then token count (two-token names resolve where
+    one-token names do not), then raw length as the tie-break.
+
+    The address rank exists because token count alone gets this exactly
+    backwards: an address is a single token and would sort last, behind
+    every inferred two-token name — so the one candidate that needs no
+    directory at all would be tried after the ones that might resolve
+    to somebody else.
     """
     toks = _name_tokens(name)
     key, _display = normalize_owner(name or "")
-    return (len(toks), len(key))
+    return (1 if is_address(name) else 0, len(toks), len(key))
 
 
 # ── Candidate forms of one person's name ─────────────────────────────
@@ -245,7 +292,7 @@ def candidate_names(
 
     return sorted(
         forms.values(),
-        key=lambda n: (-_richness(n)[0], -_richness(n)[1], n.lower()),
+        key=lambda n: (*(-x for x in _richness(n)), n.lower()),
     )
 
 
@@ -285,7 +332,23 @@ def resolve_recipient(
     Windows. Pass None where there is no directory (macOS): the richest
     form is still chosen for the To: field, and the result honestly
     reports itself as unaddressed rather than implying a lookup happened.
+
+    An owner label that is already an address short-circuits: there is
+    nothing for a directory to add, and `forms_tried=0` is the truth —
+    no lookup was performed. This is the path an extension-sourced
+    organiser takes, since Outlook Web's grid label states the SMTP
+    address outright when it has no display name to render.
     """
+    if is_address(owner):
+        stated = (owner or "").strip()
+        return RecipientResolution(
+            owner=owner,
+            display_name=stated,
+            address=stated,
+            resolved_from=stated,
+            forms_tried=0,
+        )
+
     forms = candidate_names(owner, alias_index, attendees)
     resolution = RecipientResolution(
         owner=owner, display_name=forms[0] if forms else (owner or "").strip())
