@@ -853,3 +853,185 @@ def test_a_meeting_merely_ABOUT_a_cancellation_survives():
 
     assert not is_cancelled_subject("Discuss cancelled orders process")
     assert not is_cancelled_subject("Cancellation policy review")
+
+
+# ── The store must survive its own write (v2.47.0) ───────────────────
+#
+# THE BUG THESE EXIST FOR. `replace_all` built its payload from `{}`
+# and hand-copied a whitelist of keys forward, making every write a
+# whole-file replacement and every unlisted key a silent deletion.
+#
+# `record_capture_diag` runs on the SAME request, milliseconds before
+# `replace_all` (server.py's extension-import handler calls them in
+# that order), so its key was not going stale — it was recorded and
+# then destroyed, on every single POST.
+#
+# Field evidence: a diagnostics bundle exported minutes after three
+# v1.9.0 captures reported `extension_capture_diag: {}` while
+# `extension_last_seen_version` in the SAME file said "1.9.0". The
+# version survived because it was on the whitelist; the capture
+# counters did not because they were not.
+#
+# The v2.44.0 tests passed because they wrote and read the diag with no
+# `replace_all` between them — the one sequence production always runs
+# was the one sequence never tested. So these drive the REAL order.
+
+
+def _import_sequence(svc: "ExtensionCalendarService", now: datetime,
+                     diag: dict, events: list) -> None:
+    """The exact call order server.py uses on a calendar POST."""
+    svc.record_extension_version("1.9.0", now=now)
+    svc.record_capture_diag(diag)
+    svc.replace_all(events, now=now)
+
+
+def test_capture_diag_survives_the_replace_all_on_the_same_request(tmp_path: Path):
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 20, 14, 45)
+    _import_sequence(
+        svc, now,
+        {"recorderInstalled": True, "responsesSeen": 42, "responsesMatched": 0},
+        [ext("Client Call", now + timedelta(hours=2))])
+
+    back = ExtensionCalendarService(tmp_path).last_capture_diag()
+    assert back.get("responsesSeen") == 42, (
+        "replace_all destroyed the capture diagnostics written "
+        "milliseconds earlier on the same request")
+    assert back.get("recorderInstalled") is True
+    assert back.get("responsesMatched") == 0
+
+
+def test_the_version_and_the_diag_survive_together(tmp_path: Path):
+    # The asymmetry that made the bug so confusing to read in the field:
+    # the version came through and the diag didn't, so the store looked
+    # like it was working.
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 20, 14, 45)
+    _import_sequence(svc, now, {"responsesSeen": 7},
+                     [ext("Client Call", now + timedelta(hours=2))])
+
+    reopened = ExtensionCalendarService(tmp_path)
+    assert reopened.capture_status().get("last_seen_version") == "1.9.0"
+    assert reopened.last_capture_diag().get("responsesSeen") == 7
+
+
+def test_a_key_replace_all_has_never_heard_of_is_kept_not_deleted(tmp_path: Path):
+    """The STRUCTURAL guarantee, not just the two keys that broke.
+
+    `replace_all` now inherits the existing file and overwrites only
+    what it owns, so a key added by some future writer survives by
+    default. Under the old whitelist every such key was destroyed on
+    the next capture, silently — which is exactly how this shipped
+    twice without being noticed.
+    """
+    import json
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 20, 14, 45)
+    svc.replace_all([ext("Seed", now + timedelta(hours=1))], now=now)
+
+    path = svc.path
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["some_future_field"] = {"written_by": "a later feature"}
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    svc.replace_all([ext("Client Call", now + timedelta(hours=2))], now=now)
+
+    after = json.loads(path.read_text(encoding="utf-8"))
+    assert after.get("some_future_field") == {"written_by": "a later feature"}, (
+        "replace_all deleted a key it does not own — the whitelist "
+        "failure mode is back")
+    # ...and it still owns what it owns.
+    assert len(after["events"]) >= 1
+
+
+# ── Rescheduled meetings must not ratchet (v2.47.0) ──────────────────
+#
+# `replace_all`'s merge-instead-of-shrink guard protects good data from
+# a partial capture. On its own it had no exit: meetings move, get
+# cancelled or declined, so an HONEST capture legitimately returns
+# fewer events than an accumulated store. Once the store held more than
+# any correct capture returned, every capture was "fewer", every
+# capture merged, and nothing ever left.
+#
+# Field evidence 2026-08-20: the same warning three times in an
+# afternoon ("returned fewer events (36) than the store already holds
+# (43)"), and two copies of one recurring training block rendering as
+# simultaneously LIVE on the Record tab — a series instance had MOVED
+# (1:30 → 2:00 via an "Exception to recurring event"), so the capture
+# carried the new time while the merge kept resurrecting the old one.
+
+
+def test_a_moved_meeting_does_not_leave_a_ghost_at_the_old_time(tmp_path: Path):
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 20, 9, 0)
+
+    # Monday's capture: the series instance is at 13:30.
+    svc.replace_all([
+        ext("Training Block", datetime(2026, 8, 20, 13, 30), minutes=90),
+        ext("Standup", datetime(2026, 8, 20, 9, 30)),
+        ext("Client Call", datetime(2026, 8, 20, 16, 0)),
+    ], now=now)
+
+    # Later capture: the instance MOVED to 14:00, and two unrelated
+    # meetings dropped off — so this capture is "fewer" and the guard
+    # fires. The moved one must still not survive at both times.
+    svc.replace_all([
+        ext("Training Block", datetime(2026, 8, 20, 14, 0), minutes=90),
+    ], now=now)
+
+    starts = [m["start"] for m in ExtensionCalendarService(tmp_path).get_events()
+              if normalize_subject(m["subject"]) == normalize_subject("Training Block")]
+    assert datetime(2026, 8, 20, 14, 0) in starts
+    assert datetime(2026, 8, 20, 13, 30) not in starts, (
+        "the pre-move copy survived — this is the duplicate LIVE row")
+
+
+def test_a_day_the_capture_said_nothing_about_is_still_protected(tmp_path: Path):
+    # The partial-capture case the guard exists for. A capture that
+    # covers Thursday must not delete Friday.
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 20, 9, 0)
+    svc.replace_all([
+        ext("Thursday Sync", datetime(2026, 8, 20, 10, 0)),
+        ext("Friday Review", datetime(2026, 8, 21, 10, 0)),
+    ], now=now)
+
+    svc.replace_all([ext("Thursday Sync", datetime(2026, 8, 20, 10, 0))], now=now)
+
+    subjects = {normalize_subject(m["subject"])
+                for m in ExtensionCalendarService(tmp_path).get_events()}
+    assert normalize_subject("Friday Review") in subjects
+
+
+def test_the_same_meeting_at_the_same_time_is_not_treated_as_a_move(tmp_path: Path):
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 20, 9, 0)
+    svc.replace_all([
+        ext("Standup", datetime(2026, 8, 20, 9, 30)),
+        ext("Extra", datetime(2026, 8, 20, 11, 0)),
+    ], now=now)
+    svc.replace_all([ext("Standup", datetime(2026, 8, 20, 9, 30))], now=now)
+
+    got = [m for m in ExtensionCalendarService(tmp_path).get_events()
+           if normalize_subject(m["subject"]) == normalize_subject("Standup")]
+    assert len(got) == 1
+
+
+def test_a_recurring_series_on_other_days_is_untouched_by_one_days_move(tmp_path: Path):
+    # Same subject every week. Moving Thursday's instance must not
+    # disturb Friday's — the match is scoped to the calendar day.
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 20, 9, 0)
+    svc.replace_all([
+        ext("Daily Pulse", datetime(2026, 8, 20, 9, 30), minutes=15),
+        ext("Daily Pulse", datetime(2026, 8, 21, 9, 30), minutes=15),
+    ], now=now)
+
+    svc.replace_all([
+        ext("Daily Pulse", datetime(2026, 8, 20, 10, 30), minutes=15),
+    ], now=now)
+
+    starts = sorted(m["start"] for m in ExtensionCalendarService(tmp_path).get_events())
+    assert datetime(2026, 8, 20, 10, 30) in starts   # moved instance
+    assert datetime(2026, 8, 20, 9, 30) not in starts  # ghost gone
+    assert datetime(2026, 8, 21, 9, 30) in starts    # other day untouched

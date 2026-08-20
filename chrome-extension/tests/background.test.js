@@ -2053,3 +2053,146 @@ test("detail read from the screen merges additively, like every other source", a
   assert.equal(events[0].join_url, "https://kept.example/j/1");
   assert.equal(stats.gainedJoinUrl, 0);
 });
+
+// ── The screen pass must run while the week is rendered (v1.10) ──────
+//
+// THE BUG. v1.9 ran a single detail pass AFTER both weeks were
+// scanned — i.e. after goToNextCalendarWeek had navigated away from
+// the current week, with no navigation back. Mechanism 2 finds an
+// event's tile by aria-label and clicks it, and only considers events
+// starting inside DETAIL_WINDOW_HOURS (72h) — all of which are tiles in
+// the CURRENT week. So it looked for tiles that were no longer
+// rendered, matched nothing, counted everything skipped, and returned
+// in under a second having opened nothing.
+//
+// Field evidence: a whole calendar-only capture finished in ~21s. A
+// pass that actually opened ~20 events cannot finish in under a
+// minute. The mechanism shipped in v2.45.0 never clicked once.
+
+function fakeScripting(handler) {
+  const prev = sandbox.chrome.scripting.executeScript;
+  sandbox.chrome.scripting.executeScript = handler;
+  return () => { sandbox.chrome.scripting.executeScript = prev; };
+}
+
+const NOW_ISO = () => {
+  const d = new Date(Date.now() + 3600 * 1000);   // an hour from now
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` +
+         `T${p(d.getHours())}:${p(d.getMinutes())}:00`;
+};
+
+function labelFor(subject, startIso) {
+  // "Subject, 9:30 AM to 10:00 AM, Thursday, August 20, 2026, ..."
+  const d = new Date(startIso);
+  const end = new Date(d.getTime() + 30 * 60000);
+  const t = (x) => {
+    let h = x.getHours(); const m = String(x.getMinutes()).padStart(2, "0");
+    const ap = h >= 12 ? "PM" : "AM"; h = h % 12 || 12;
+    return `${h}:${m} ${ap}`;
+  };
+  const MONTHS = ["January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"];
+  const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday",
+    "Friday", "Saturday"];
+  return `${subject}, ${t(d)} to ${t(end)}, ${DAYS[d.getDay()]}, ` +
+         `${MONTHS[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}, ` +
+         `Microsoft Teams Meeting, By Ana Poe, Busy`;
+}
+
+test("collectWeekDetail opens the events of the week it is given", async () => {
+  const startIso = NOW_ISO();
+  const candidates = [{ label: labelFor("Team Sync", startIso), layer: "aria-label" }];
+  let handedToClicker = null;
+
+  const restore = fakeScripting(async ({ args }) => {
+    handedToClicker = args[0];
+    return [{ result: {
+      details: [{
+        subject: "Team Sync", startIso,
+        attendees: ["a.doe@globex.example"], body: "Agenda here", joinUrl: "",
+      }],
+      opened: 1, matchedElement: 1, grew: 1, skipped: 0, error: null,
+    } }];
+  });
+  try {
+    const diag = { domDetailAttempted: 0, domDetailOpened: 0, domDetailGrew: 0,
+                   domDetailSkipped: 0, domDetailNoTile: 0 };
+    const into = new Map();
+    await sandbox.collectWeekDetail(1, candidates, [], diag, into);
+
+    assert.equal(diag.domDetailAttempted, 1, "the event was never offered to the clicker");
+    assert.equal(diag.domDetailOpened, 1);
+    assert.equal(handedToClicker.length, 1);
+    assert.equal(handedToClicker[0].subject, "Team Sync");
+
+    const hit = into.get(sandbox.detailKey("Team Sync", startIso));
+    assert.ok(hit, "detail was not recorded");
+    assert.deepEqual([...hit.attendees], ["a.doe@globex.example"]);
+    assert.equal(hit.body, "Agenda here");
+  } finally { restore(); }
+});
+
+test("an event beyond the 72h window is not opened", async () => {
+  const far = new Date(Date.now() + 10 * 24 * 3600 * 1000).toISOString().slice(0, 19);
+  const candidates = [{ label: labelFor("Far Future", far), layer: "aria-label" }];
+  let called = false;
+  const restore = fakeScripting(async () => { called = true; return [{ result: null }]; });
+  try {
+    const diag = { domDetailAttempted: 0, domDetailOpened: 0, domDetailGrew: 0,
+                   domDetailSkipped: 0, domDetailNoTile: 0 };
+    await sandbox.collectWeekDetail(1, candidates, [], diag, new Map());
+    assert.equal(diag.domDetailAttempted, 0);
+    assert.equal(called, false, "clicked an event outside the window");
+  } finally { restore(); }
+});
+
+test("an event the response recorder already answered is not opened", async () => {
+  // Mechanism 1 is cheap and runs first; mechanism 2 must not pay to
+  // re-open what it already has.
+  const startIso = NOW_ISO();
+  const candidates = [{ label: labelFor("Team Sync", startIso), layer: "aria-label" }];
+  const body = { value: [{
+    subject: "Team Sync", start: startIso,
+    attendees: [{ emailAddress: { name: "Ana Doe" } }],
+  }] };
+  let called = false;
+  const restore = fakeScripting(async () => { called = true; return [{ result: null }]; });
+  try {
+    const diag = { domDetailAttempted: 0, domDetailOpened: 0, domDetailGrew: 0,
+                   domDetailSkipped: 0, domDetailNoTile: 0 };
+    const into = new Map();
+    await sandbox.collectWeekDetail(1, candidates, [body], diag, into);
+    assert.equal(called, false, "re-opened an event mechanism 1 had already filled");
+    assert.deepEqual([...into.get(sandbox.detailKey("Team Sync", startIso)).attendees],
+                     ["Ana Doe"]);
+  } finally { restore(); }
+});
+
+test("a clicker that throws is not fatal and is reported", async () => {
+  const startIso = NOW_ISO();
+  const candidates = [{ label: labelFor("Team Sync", startIso), layer: "aria-label" }];
+  const restore = fakeScripting(async () => { throw new Error("tab closed"); });
+  try {
+    const diag = { domDetailAttempted: 0, domDetailOpened: 0, domDetailGrew: 0,
+                   domDetailSkipped: 0, domDetailNoTile: 0 };
+    await sandbox.collectWeekDetail(1, candidates, [], diag, new Map());
+    assert.match(diag.domDetailError, /tab closed/);
+  } finally { restore(); }
+});
+
+test("the screen pass is invoked BEFORE the week navigation", () => {
+  // The ordering IS the bug. A functional test cannot easily drive the
+  // whole two-week capture, but the order of these three calls in
+  // captureCalendarTab is exactly what broke, so it is pinned directly.
+  const src = fs.readFileSync(BG_PATH, "utf8");
+  const body = src.slice(src.indexOf("async function captureCalendarTab()"));
+  const firstDetail = body.indexOf("collectWeekDetail(tabId, week1.candidates");
+  const nav = body.indexOf("goToNextCalendarWeek(tabId)");
+  assert.ok(firstDetail > 0, "week 1 detail pass is gone");
+  assert.ok(nav > 0, "week navigation is gone");
+  assert.ok(
+    firstDetail < nav,
+    "the week-1 screen pass runs AFTER navigating to week 2 — its tiles " +
+    "are no longer rendered, which is the v2.45.0 no-op");
+});
