@@ -4007,6 +4007,14 @@ async def _auto_identify_and_save_speakers(session) -> int:
     the speaker AND persist their voice fingerprint to the known-speaker
     store so future meetings auto-match without the user typing anything.
 
+    The session's CALENDAR INVITE goes in alongside the transcript. The
+    invite is ground truth for who was in the room, so it supplies the
+    candidate set: a transcript that only ever says "Jane" resolves to
+    the roster's "Jane Doe" instead of stopping at a first name, which
+    is what follow_up_recipients.py needs to resolve an address at all.
+    Additive — a session with no attendees sends the same prompt it
+    always did. See core/speaker_roster.py.
+
     Mirrors the create/link/refine logic of the manual rename endpoint.
     Best-effort: returns the number of speakers named; logs and continues
     on any failure."""
@@ -4016,7 +4024,17 @@ async def _auto_identify_and_save_speakers(session) -> int:
         return 0
     try:
         mapping = await svc.summarizer.identify_speakers(
-            session.full_transcript())
+            session.full_transcript(),
+            attendees=list(getattr(session, "attendees", None) or []),
+            # SEAM, not a stub. `Session` carries no `organizer` field
+            # today — organiser extraction is being added to the Chrome
+            # extension on a separate branch, and StartRecordingRequest
+            # would need the field too. Reading it defensively means the
+            # organiser joins the roster the moment that field lands,
+            # with no change here; until then this is the empty string
+            # and roster_names() ignores it.
+            organizer=str(getattr(session, "organizer", "") or ""),
+        )
     except Exception as e:
         logger.warning(f"auto speaker-id call failed: {e}")
         return 0
