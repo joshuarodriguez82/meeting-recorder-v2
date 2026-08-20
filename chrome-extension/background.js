@@ -70,6 +70,39 @@
 //      none had a parseable time" / "found N candidates, all all-day"
 //      — each points at a different fix.
 //
+// v1.4 — two fields that shipped in the captured-event schema and
+// were NEVER assigned by anything: `organizer` and `join_url` were
+// both hard-coded to "" on every event this file has ever produced.
+// Strictly additive; nothing about candidate discovery,
+// parseMeetingLabel, TIME_RANGE_RE, the date resolution or the
+// merge/dedup changes, and every new extraction returns "" on failure,
+// i.e. exactly the value the field already had.
+//
+//   1. `organizer` is now populated — from data already being scanned.
+//      Outlook Web writes "By <name>" into the SAME label tail the
+//      date resolver reads, so `extractOrganizerFromLabel` reads that
+//      string a second time and lifts the name out of it. The awkward
+//      shapes are the whole job: the name routinely contains commas
+//      ("Roe, Pat Jr. [US-US]"), so the tail cannot be split on comma,
+//      and show-as/recurrence/cancellation words trail it and must not
+//      be absorbed. Beyond display this feeds
+//      services/follow_up_recipients.py, which resolves an address out
+//      of a directory far more often from a full name than from the
+//      bare first name an action item usually carries.
+//   2. `join_url` is NOT populated, and the reason is now measurable
+//      rather than assumed. Both native backends get it from the
+//      invite BODY (`_extract_join_url(location, body)`), which this
+//      scrape does not have — the aria-label carries "Microsoft Teams
+//      Meeting" as a label, never the URL. Whether a link is
+//      nonetheless reachable from the elements already scanned is a
+//      question about a live tenant, so "Diagnose calendar capture"
+//      grew a read-only join-link probe that counts join-shaped
+//      anchors and reports how many sit inside — or beside — a
+//      meeting-shaped aria-label (see JOIN_URL_PROBE_CONFIG). Until
+//      that comes back non-zero the field stays empty and the popup
+//      SAYS it is empty; clicking into every event to scrape a detail
+//      pane is not a default anyone gets by accident.
+//
 // Still true, and still the point of all of the above: none of the
 // live-DOM behavior here has been exercised against a real Outlook
 // Web tenant in this change — there is no way to sign in to one from
@@ -187,6 +220,67 @@ const CALENDAR_DEDUP_WINDOW_MS = 20 * 60 * 1000;
 // this is a one-shot user-triggered diagnostic, not the retry loop
 // the real capture uses.
 const DIAGNOSTIC_SNAPSHOT_DELAYS_MS = [2000, 5000, 10000, 15000];
+
+// ── Join-link probe config (diagnostic only) ────────────────────────
+//
+// `join_url` is declared on every captured event and has never been
+// populated on this path: both NATIVE calendar backends
+// (`services/_calendar_outlook.py:559`,
+// `services/_calendar_eventkit.py:579`) get it by running
+// `_extract_join_url(location, body)` over the invite BODY, and the
+// extension scrape has no body — Outlook Web's aria-label carries
+// "Microsoft Teams Meeting" as a LABEL, never the URL.
+//
+// Whether a join link is nonetheless reachable from the elements the
+// capture already scans is an open question that cannot be answered
+// from this environment (no way to sign in to a real tenant). Rather
+// than guess, the diagnostic below counts join-shaped anchors in the
+// same roots the real scan walks and reports whether each one sits
+// inside — or next to — an element carrying a meeting-shaped
+// aria-label. That is the whole decision: if those numbers come back
+// non-zero, `join_url` can be filled from the DOM we already have; if
+// they come back zero, the only remaining route is opening every event
+// to scrape its detail pane, which is slow, fragile and exactly the
+// DOM dependency that broke calendar capture before — an owner
+// decision, not a default.
+//
+// Passed to `_calendarDiagnosticProbeFunc` as ARGS (regex sources, not
+// RegExp objects) for the same reason TIME_RANGE_RE.source already is:
+// an injected script cannot close over this file's module scope, and
+// duplicating the vocabulary inside the probe would let the two drift.
+const JOIN_URL_PROBE_CONFIG = {
+  providers: [
+    {
+      name: "teams",
+      host: "^(?:teams\\.microsoft\\.com|teams\\.live\\.com|teams\\.cloud\\.microsoft)$",
+      path: "^/l/meetup-join/|^/l/meeting/|^/meet/",
+    },
+    { name: "zoom", host: "(?:^|\\.)zoom\\.us$", path: "^/(?:j|w|s|my|wc)/" },
+    { name: "webex", host: "(?:^|\\.)webex\\.com$", path: "^/(?:meet|join|wbxmjs)/|/j\\.php|/m\\.php" },
+    { name: "meet", host: "^meet\\.google\\.com$", path: "^/[A-Za-z0-9]" },
+  ],
+  // Hosts safe to print verbatim. Anything else keeps only its last two
+  // labels ("acme.webex.com" -> "*.webex.com") — a Webex/Zoom site
+  // subdomain is usually the CUSTOMER's name, which must not land in a
+  // report the user pastes into a chat window.
+  safeHosts: [
+    "teams.microsoft.com", "teams.live.com", "teams.cloud.microsoft",
+    "meet.google.com", "zoom.us", "www.zoom.us", "webex.com", "www.webex.com",
+  ],
+  // Path segments that are structural, not identifying. Every OTHER
+  // segment is elided: a join URL's identifying segments ARE the
+  // meeting credential (and "zoom.us/my/<name>" is a person's handle),
+  // so an example may only ever show the SHAPE of the path.
+  safePathSegments: [
+    "l", "meetup-join", "meeting", "meet", "j", "join", "w", "s", "my",
+    "wc", "wbxmjs", "j.php", "m.php", "0",
+  ],
+  maxExamples: 3,
+  // How far up from an anchor to look for a meeting-shaped aria-label
+  // before calling it unassociated. A link matched to the WRONG meeting
+  // is worse than no link, so this stays deliberately short.
+  maxAncestorHops: 6,
+};
 
 // ──────────────────────────────────────────────────────────────────
 // Lifecycle: re-arm alarms whenever the service worker (re)starts.
@@ -1120,6 +1214,112 @@ function parseMeetingLabel(label, columnDateIso, fallbackYear) {
   return { kind: "event", subject, startIso: toNaiveIsoString(start), endIso: toNaiveIsoString(end) };
 }
 
+// ── Pure: organizer out of the same label tail ───────────────────────
+//
+// Outlook Web writes the organizer into the tail that follows the time
+// range — the SAME tail `resolveDateParts`/`dateAtomAnywhere` already
+// read the date out of:
+//
+//   "Globex sync, 8:30 AM to 9:00 AM, Friday, August 14, 2026,
+//    Microsoft Teams Meeting, By Jane Doe, Busy"
+//                              ^^^^^^^^^^^^
+//
+// Before this, `extractEventsFromCandidates` declared an `organizer`
+// field on every captured event and nothing ever assigned it — the
+// field shipped in the schema, through the backend's
+// `events_from_structured`, into the store, always "". This fills it
+// from data already being scanned. Nothing about candidate discovery,
+// `parseMeetingLabel`, `TIME_RANGE_RE` or the date resolution changes:
+// this reads the same string a second time, and every failure mode
+// returns "" so an event is exactly what it was before.
+//
+// Why the organizer is worth having beyond display: the follow-up
+// draft path (`backend/services/follow_up_recipients.py`) resolves an
+// address out of a directory far more often from a two-token name than
+// from the bare first name an action item usually carries, and the
+// organizer is a full name.
+
+// The organizer segment starts a comma-delimited segment of the tail
+// (or the tail itself). Anchoring on the segment boundary is what keeps
+// a subject like "Design Review by the numbers" from reading as one —
+// a subject sits BEFORE the time range and is never in the tail at all,
+// but the no-time-range path below falls back to the whole label.
+const ORGANIZER_TAIL_RE = /(?:^|,)\s*by\s+/i;
+const ORGANIZER_ANYWHERE_RE = /,\s*by\s+/i;
+
+// Whole segments that are show-as / recurrence / cancellation status,
+// not part of anybody's name. Matched case-insensitively against a
+// WHOLE trimmed segment — never as a substring, so a person whose name
+// merely contains one of these words is unaffected.
+const ORGANIZER_STATUS_SEGMENTS = new Set([
+  "busy", "free", "tentative", "away", "out of office", "oof",
+  "working elsewhere", "unknown", "private",
+  "recurring event", "exception to recurring event",
+  "occurrence of a recurring event", "series",
+  "canceled", "cancelled", "canceled event", "cancelled event",
+  "declined", "accepted", "no response", "not responded", "organizer",
+  "all day", "all-day",
+  "microsoft teams meeting", "skype meeting", "teams meeting",
+  "zoom meeting", "webex meeting", "google meet",
+]);
+
+function _isOrganizerStatusSegment(seg) {
+  return ORGANIZER_STATUS_SEGMENTS.has(
+    String(seg || "").trim().replace(/[.\s]+$/, "").toLowerCase());
+}
+
+// Longest an organizer name is allowed to be before we assume the
+// segment split went wrong and report nothing rather than a sentence.
+const ORGANIZER_MAX_LEN = 80;
+
+// Pull the organizer out of ONE candidate label. Returns "" for every
+// shape it doesn't confidently recognize — an absent segment, a
+// segment that is only status words, a runaway length, or a throw.
+//
+// The comma problem: the name itself routinely CONTAINS commas
+// ("Roe, Pat Jr. [US-US]", "Noh, Kim"), so the tail cannot simply be
+// split on comma and the first piece taken — that truncates real
+// surnames, the same failure `owner_service.split_owners` deliberately
+// avoids (see `test_owner_service.py::test_comma_is_not_split`). The
+// rule instead: take the first segment; join the SECOND one to it only
+// when the first is a single bare token (the "Last, First Suffix
+// [REGION]" form), and stop at the first status segment either way.
+function extractOrganizerFromLabel(label) {
+  try {
+    const raw = String(label || "").replace(/\s+/g, " ").trim();
+    if (!raw) return "";
+
+    // Prefer the tail after the time range — the position Outlook Web
+    // actually uses. A candidate whose time came from a `<time
+    // datetime>` pair has no text range in its label at all; for those
+    // fall back to the whole label, but require the stricter
+    // comma-anchored form so a subject can't be mistaken for a name.
+    const m = TIME_RANGE_RE.exec(raw);
+    const searchIn = m ? raw.slice(m.index + m[0].length) : raw;
+    const marker = (m ? ORGANIZER_TAIL_RE : ORGANIZER_ANYWHERE_RE).exec(searchIn);
+    if (!marker) return "";
+
+    const rest = searchIn.slice(marker.index + marker[0].length);
+    const segments = rest.split(",").map((s) => s.trim()).filter(Boolean);
+    if (!segments.length) return "";
+    if (_isOrganizerStatusSegment(segments[0])) return "";
+
+    let name = segments[0];
+    const looksLikeBareSurname = !/\s/.test(name);
+    if (looksLikeBareSurname && segments[1] && !_isOrganizerStatusSegment(segments[1])) {
+      name = `${name}, ${segments[1]}`;
+    }
+    name = name.replace(/[,;\s]+$/, "").trim();
+    if (!name || name.length > ORGANIZER_MAX_LEN) return "";
+    // A clock time surviving into the "name" means the segmentation
+    // went somewhere unexpected; report nothing rather than garbage.
+    if (/\d{1,2}:\d{2}/.test(name)) return "";
+    return name;
+  } catch (_) {
+    return "";
+  }
+}
+
 // Given a candidate's structured start/end (raw strings straight off
 // a `<time datetime>` or `data-start`/`data-end`-style attribute — see
 // `findExternalTime` in the DOM scan below), build real Date objects.
@@ -1174,6 +1374,12 @@ function extractEventsFromCandidates(candidates, opts = {}) {
     dateUnresolved: 0,
     deduped: 0,
     layerCounts: {},
+    // How many of the kept events actually carry each of the two
+    // fields that used to ship declared-but-never-assigned. Counted so
+    // "populated" and "silently empty" are never the same number in
+    // the popup or the logs — see the popup's calendar status line.
+    withOrganizer: 0,
+    withJoinUrl: 0,
   };
   const seen = new Map();
 
@@ -1189,13 +1395,31 @@ function extractEventsFromCandidates(candidates, opts = {}) {
     if (seen.has(key)) { stats.deduped++; continue; }
 
     const layer = (c && c.layer) || "unknown";
+    const organizer = (c && c.organizer) || extractOrganizerFromLabel(c && c.label);
+    const joinUrl = (c && c.joinUrl) || "";
+    if (organizer) stats.withOrganizer++;
+    if (joinUrl) stats.withJoinUrl++;
     seen.set(key, {
       subject: r.subject,
       start: r.startIso,
       end: r.endIso,
       location: (c && c.location) || "",
-      organizer: (c && c.organizer) || "",
-      join_url: (c && c.joinUrl) || "",
+      // Was always "" — nothing ever assigned `c.organizer`. Now
+      // recovered from the label's own tail (see
+      // extractOrganizerFromLabel); a DOM-supplied value, if one is
+      // ever added, still wins. Extraction failure returns "", i.e.
+      // exactly the value this field always had.
+      organizer,
+      // Still always "": Outlook Web's calendar grid carries "Microsoft
+      // Teams Meeting" as a LABEL, never the join URL, and no join link
+      // has been shown to be reachable from the elements this scan
+      // already visits. `diagnoseCalendarCapture`'s joinLinks probe is
+      // what answers that question against a real tenant — see
+      // JOIN_URL_PROBE_CONFIG. Deliberately NOT backfilled by opening
+      // each event to scrape its detail pane: that is slow, fragile,
+      // and exactly the DOM dependency that broke calendar capture
+      // before — an owner decision, not a default.
+      join_url: joinUrl,
     });
     stats.layerCounts[layer] = (stats.layerCounts[layer] || 0) + 1;
     stats.parsed++;
@@ -1857,16 +2081,22 @@ async function captureCalendarOnly(backendUrl, token) {
 // with a Copy button. The probe is read-only — it never clicks
 // anything and never navigates.
 //
-// This function is deliberately NOT unit-tested: it relies on real
-// `querySelectorAll` (including inside iframe documents and shadow
-// roots, which support it natively), and the fake DOM used elsewhere
-// in this file's tests doesn't implement a CSS selector engine. It
-// stays self-contained (no closures over this file's module scope)
+// It stays self-contained (no closures over this file's module scope)
 // for the same chrome.scripting.executeScript constraint as
-// _calendarDomScanFunc above.
+// _calendarDomScanFunc above — which is why the regex sources and the
+// join-link vocabulary arrive as ARGS rather than being read from
+// module scope directly.
+//
+// The container/label half of this probe used to be untested because
+// the fake DOM in chrome-extension/tests/ had no CSS selector engine.
+// That double now supports compound selectors and one descendant
+// combinator, so the join-link half added below IS covered there
+// (association by containment/adjacency, provider classification, and
+// — most importantly — that a redacted example can never carry the
+// credential, the query string, or the customer's host).
 // ──────────────────────────────────────────────────────────────────
 
-function _calendarDiagnosticProbeFunc(timeRangeSource, timeHintSource) {
+function _calendarDiagnosticProbeFunc(timeRangeSource, timeHintSource, joinConfig) {
   try {
     // Discover every reachable root: the top document, every
     // same-origin iframe document, and every open shadow root —
@@ -1941,6 +2171,148 @@ function _calendarDiagnosticProbeFunc(timeRangeSource, timeHintSource) {
     const timeRangeMatchCount = labels.filter((l) => timeRangeRe.test(l)).length;
     const timeHintMatchCount = labels.filter((l) => timeHintRe.test(l)).length;
 
+    // ── Join-link probe (read-only; never emits a full URL) ─────────
+    //
+    // Answers exactly one question: is a meeting join link reachable
+    // from the DOM the real capture already walks? Three numbers say
+    // it — how many join-shaped links exist at all, how many sit
+    // INSIDE an element whose aria-label is meeting-shaped (safe to
+    // associate by containment), and how many merely sit NEXT TO one
+    // (weaker, but still positional-free). Links that are neither are
+    // counted as unassociated: those could only be matched by grid
+    // position, which is precisely the association a wrong answer
+    // comes from, so they are reported, never used.
+    function joinLinkProbe() {
+      const cfg = joinConfig || {};
+      const providers = (cfg.providers || []).map((p) => ({
+        name: p.name,
+        hostRe: new RegExp(p.host, "i"),
+        pathRe: new RegExp(p.path, "i"),
+      }));
+      const safeHosts = new Set(cfg.safeHosts || []);
+      const safeSegments = new Set(cfg.safePathSegments || []);
+      const maxExamples = cfg.maxExamples || 3;
+      const maxUp = cfg.maxAncestorHops || 6;
+
+      const out = {
+        anchorCount: 0,
+        matchCount: 0,
+        byProvider: {},
+        insideMeetingLabelledElement: 0,
+        adjacentToMeetingLabelledElement: 0,
+        unassociated: 0,
+        redactedExamples: [],
+      };
+      for (const p of providers) out.byProvider[p.name] = 0;
+
+      // Host + path SHAPE only. Query strings are dropped whole and
+      // every non-structural path segment is elided — a join URL is a
+      // single-use meeting credential, and this report gets pasted
+      // into a chat window.
+      function redact(href) {
+        let u;
+        try { u = new URL(href, location.href); } catch (_) { return null; }
+        const host = u.host.toLowerCase();
+        const shownHost = safeHosts.has(host)
+          ? host
+          : (host.split(".").length > 2
+            ? "*." + host.split(".").slice(-2).join(".")
+            : host);
+        const segs = (u.pathname || "/").split("/").filter(Boolean)
+          .map((s) => (safeSegments.has(s.toLowerCase()) ? s : "…"));
+        return shownHost + "/" + segs.join("/") + (u.search ? "?…" : "");
+      }
+
+      function providerFor(href) {
+        let u;
+        try { u = new URL(href, location.href); } catch (_) { return null; }
+        for (const p of providers) {
+          if (p.hostRe.test(u.host) && p.pathRe.test(u.pathname || "")) return p.name;
+        }
+        return null;
+      }
+
+      function labelIsMeetingShaped(el) {
+        const a = el && el.getAttribute ? el.getAttribute("aria-label") : null;
+        return !!(a && timeRangeRe.test(a));
+      }
+
+      // Containment: this anchor is a descendant of (or is) an element
+      // whose own aria-label describes a meeting.
+      function insideMeetingLabelled(el) {
+        let node = el;
+        for (let i = 0; node && i <= maxUp; i++, node = node.parentElement) {
+          if (labelIsMeetingShaped(node)) return true;
+        }
+        return false;
+      }
+
+      // Adjacency: a sibling (or a sibling's descendant) of this anchor
+      // or of one of its near ancestors carries a meeting-shaped label.
+      function adjacentToMeetingLabelled(el) {
+        let node = el;
+        for (let i = 0; node && i <= maxUp; i++, node = node.parentElement) {
+          const parent = node.parentElement;
+          if (!parent || !parent.children) continue;
+          for (const kid of parent.children) {
+            if (kid === node) continue;
+            if (labelIsMeetingShaped(kid)) return true;
+            let inner = [];
+            try { inner = kid.querySelectorAll("[aria-label]"); } catch (_) { inner = []; }
+            for (const d of inner) if (labelIsMeetingShaped(d)) return true;
+          }
+        }
+        return false;
+      }
+
+      const anchors = [];
+      for (const e of entries) {
+        try {
+          anchors.push(...e.root.querySelectorAll('a[href], area[href], [role="link"][href]'));
+        } catch (_) { /* ignore */ }
+      }
+      out.anchorCount = anchors.length;
+
+      const seenShapes = new Set();
+      for (const a of anchors) {
+        const href = a.getAttribute ? a.getAttribute("href") : null;
+        if (!href) continue;
+        const provider = providerFor(href);
+        if (!provider) continue;
+        out.matchCount++;
+        out.byProvider[provider] = (out.byProvider[provider] || 0) + 1;
+        if (insideMeetingLabelled(a)) out.insideMeetingLabelledElement++;
+        else if (adjacentToMeetingLabelled(a)) out.adjacentToMeetingLabelledElement++;
+        else out.unassociated++;
+        const shape = redact(href);
+        if (shape && !seenShapes.has(shape) && out.redactedExamples.length < maxExamples) {
+          seenShapes.add(shape);
+          out.redactedExamples.push({ provider, shape });
+        }
+      }
+
+      const associated = out.insideMeetingLabelledElement +
+        out.adjacentToMeetingLabelledElement;
+      out.verdict = out.matchCount === 0
+        ? "no join-shaped links anywhere in the scanned roots — the grid " +
+          "does not expose them; join_url cannot be filled from this DOM"
+        : (associated === 0
+          ? `found ${out.matchCount} join-shaped link(s), but none inside or ` +
+            `adjacent to a meeting-shaped aria-label — associating them would ` +
+            `have to be positional, which is not safe enough to use`
+          : `found ${out.matchCount} join-shaped link(s), ${associated} of them ` +
+            `associable by containment/adjacency — join_url IS fillable from ` +
+            `the DOM the capture already scans`);
+      return out;
+    }
+
+    let joinLinks;
+    try {
+      joinLinks = joinLinkProbe();
+    } catch (e) {
+      joinLinks = { error: String((e && e.message) || e) };
+    }
+
     // First grid container found (in root-discovery order — document
     // first, then iframes/shadow roots in BFS order), so we know
     // whether the calendar grid itself lives inside an iframe.
@@ -1969,6 +2341,7 @@ function _calendarDiagnosticProbeFunc(timeRangeSource, timeHintSource) {
       shadowRootCount,
       gridInsideIframe,
       gridInnerTextSample: gridInnerText.slice(0, 2000),
+      joinLinks,
     };
   } catch (e) {
     return { error: String((e && e.message) || e) };
@@ -1997,7 +2370,11 @@ async function diagnoseCalendarCapture() {
       try {
         const result = await chrome.scripting.executeScript({
           target: { tabId },
-          args: [TIME_RANGE_RE.source, "\\d{1,2}(:\\d{2})?\\s*[AaPp]?\\.?[Mm]?\\b|\\d{1,2}:\\d{2}\\b"],
+          args: [
+            TIME_RANGE_RE.source,
+            "\\d{1,2}(:\\d{2})?\\s*[AaPp]?\\.?[Mm]?\\b|\\d{1,2}:\\d{2}\\b",
+            JOIN_URL_PROBE_CONFIG,
+          ],
           func: _calendarDiagnosticProbeFunc,
         });
         snap = (result && result[0] && result[0].result) || null;
@@ -2056,8 +2433,15 @@ async function diagnoseCalendarCapture() {
       eventNodeCounts: s.eventNodeCounts,
       ariaLabelCount: s.ariaLabelCount,
       timeRangeMatchCount: s.patternsTried && s.patternsTried[0] && s.patternsTried[0].matchCount,
+      joinLinkMatchCount: s.joinLinks && s.joinLinks.matchCount,
       error: s.error,
     })),
+    // Read-only join-link probe — the answer to "can join_url be filled
+    // from the DOM we already scan, or would it need a click into every
+    // event?" See JOIN_URL_PROBE_CONFIG. Examples are host+path SHAPE
+    // only; a full join URL is a single-use credential and never leaves
+    // the page.
+    joinLinks: final.joinLinks || null,
     ariaLabelCount: final.ariaLabelCount,
     longestLabels: final.longestLabels || [],
     patternsTried: final.patternsTried || [],

@@ -385,6 +385,72 @@ def test_events_from_structured_drops_items_without_subject_or_start():
     assert [e["subject"] for e in events] == ["Good"]
 
 
+def test_events_from_structured_carries_organizer_end_to_end(tmp_path: Path):
+    """The extension now fills `organizer` from the aria-label's own
+    "By <name>" tail (chrome-extension/background.js's
+    `extractOrganizerFromLabel`) — a field that was declared on every
+    captured event and never once assigned, so it arrived here as ""
+    forever.
+
+    This pins the whole path the new value travels: POST payload ->
+    `events_from_structured` -> the on-disk store -> `merge_meetings`.
+    If any of those quietly dropped the field, the extraction would be
+    invisible to the follow-up-draft recipient resolver
+    (`services/follow_up_recipients.py`), which is the reason a FULL
+    name is worth having rather than a first name.
+
+    The awkward shapes are the point: a name containing a comma plus a
+    suffix and a bracketed region is exactly what a naive
+    split-on-comma would truncate — see
+    `test_owner_service.py::test_comma_is_not_split`.
+    """
+    raw = [
+        {"subject": "Globex sync",
+         "start": "2026-08-14T08:30:00", "end": "2026-08-14T09:00:00",
+         "organizer": "Jane Doe", "join_url": ""},
+        {"subject": "Northwind collection script review",
+         "start": "2026-08-14T10:30:00", "end": "2026-08-14T11:00:00",
+         "organizer": "Roe, Pat Jr. [US-US]", "join_url": ""},
+        {"subject": "Acme Daily Pulse Call",
+         "start": "2026-08-14T09:30:00", "end": "2026-08-14T09:45:00",
+         "organizer": "Zoë Døe", "join_url": ""},
+        # No "By" segment in the source label -> still "", and that must
+        # stay a clean empty string rather than a None or a placeholder.
+        {"subject": "Ad-hoc sync",
+         "start": "2026-08-14T13:00:00", "end": "2026-08-14T13:30:00"},
+    ]
+    events = events_from_structured(raw)
+    assert [e["organizer"] for e in events] == [
+        "Jane Doe", "Roe, Pat Jr. [US-US]", "Zoë Døe", ""]
+    # join_url is still empty on this path (Outlook Web's grid exposes
+    # "Microsoft Teams Meeting" as a label, never the URL) — it must be
+    # an empty string, never None, so downstream falsiness checks like
+    # record-view.tsx's `det.data.join_url && …` render nothing rather
+    # than a broken link.
+    assert all(e["join_url"] == "" for e in events)
+
+    svc = ExtensionCalendarService(tmp_path)
+    svc.replace_all(events, now=datetime(2026, 8, 14, 8, 0))
+    back = ExtensionCalendarService(tmp_path).get_events()
+    assert {e["subject"]: e["organizer"] for e in back} == {
+        "Globex sync": "Jane Doe",
+        "Northwind collection script review": "Roe, Pat Jr. [US-US]",
+        "Acme Daily Pulse Call": "Zoë Døe",
+        "Ad-hoc sync": "",
+    }
+    assert all(e["join_url"] == "" for e in back)
+
+    # And through the merge into the local list, where an extension row
+    # that local Outlook can't see keeps its own organizer.
+    merged = merge_meetings([], back)
+    assert {e["subject"]: e["organizer"] for e in merged} == {
+        "Globex sync": "Jane Doe",
+        "Northwind collection script review": "Roe, Pat Jr. [US-US]",
+        "Acme Daily Pulse Call": "Zoë Døe",
+        "Ad-hoc sync": "",
+    }
+
+
 def test_events_from_structured_tolerates_end_before_start():
     events = events_from_structured([
         {"subject": "Backwards", "start": "2026-08-13T10:00:00",
