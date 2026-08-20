@@ -2786,7 +2786,7 @@ def _organizer_for_meeting(meeting: Any) -> str:
     STARTING A RECORDING. A meeting that arrives without the key, with
     None, or as something that isn't a dict at all must cost the user
     a name in the roster — never the recording. Everything degrades to
-    "" , which is precisely the state every pre-organiser session is
+    "", which is precisely the state every pre-organiser session is
     already in.
     """
     try:
@@ -4173,8 +4173,12 @@ async def _auto_identify_and_save_speakers(session) -> int:
     candidate set: a transcript that only ever says "Jane" resolves to
     the roster's "Jane Doe" instead of stopping at a first name, which
     is what follow_up_recipients.py needs to resolve an address at all.
-    Additive — a session with no attendees sends the same prompt it
-    always did. See core/speaker_roster.py.
+    Both the ATTENDEES and the ORGANISER feed it; the organiser leads,
+    and for an extension-sourced calendar they are the whole roster,
+    because that scrape can read the organiser out of Outlook Web's
+    grid label but not the attendee list. Additive — a session with
+    neither still sends the prompt it always did, byte for byte. See
+    core/speaker_roster.py.
 
     Mirrors the create/link/refine logic of the manual rename endpoint.
     Best-effort: returns the number of speakers named; logs and continues
