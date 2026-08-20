@@ -221,6 +221,13 @@ class Session:
         # the failure message can still say how long it ran before it
         # died (finalize_duration_s is the authoritative number for that,
         # but this is the raw timestamp it was computed from).
+        # Whether echo cancellation is part of the finalize currently
+        # running. Set before the finalize stub is written, so a UI
+        # reading a session mid-finalize can describe what is actually
+        # happening. `aec_outcome` cannot serve this: it exists only
+        # after finalize returns, which is precisely when the progress
+        # banner is no longer shown.
+        self.finalize_aec_requested: bool = False
         self.finalize_started_at: Optional[datetime.datetime] = None
         # Human-readable reason the finalize subprocess failed. Only set
         # when finalize_status == "failed"; None otherwise.
@@ -284,6 +291,7 @@ class Session:
             "finalize_duration_s": self.finalize_duration_s,
             "aec_outcome": self.aec_outcome,
             "finalize_status": self.finalize_status,
+            "finalize_aec_requested": self.finalize_aec_requested,
             "finalize_started_at": (
                 self.finalize_started_at.isoformat()
                 if self.finalize_started_at else None
@@ -352,7 +360,13 @@ class Session:
         session.sync_warning = data.get("sync_warning") or None
         session.finalize_duration_s = data.get("finalize_duration_s")
         session.aec_outcome = data.get("aec_outcome") or None
-        session.finalize_status = data.get("finalize_status") or None
+        session.finalize_status = data.get("finalize_status")
+        # Absent on every session written before this field existed,
+        # which reads as False — i.e. "do not claim AEC is running".
+        # The safe direction: a banner that under-claims is a cosmetic
+        # miss, one that over-claims is what produced the bug report.
+        session.finalize_aec_requested = bool(
+            data.get("finalize_aec_requested") or False) or None
         finalize_started = data.get("finalize_started_at")
         if finalize_started:
             try:

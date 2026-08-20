@@ -307,3 +307,126 @@ def test_get_session_audio_still_404s_when_genuinely_missing(monkeypatch):
         asyncio.run(server.get_session_audio("S1"))
 
     assert exc_info.value.status_code == 404
+
+
+# ── The finalize message must not name work that is not running ──────
+#
+# FIELD REPORT 2026-08-20. The Sessions list showed
+# "Finalizing (running for 14s) — echo cancellation can take several
+# minutes" on a session whose own event log recorded
+# `aec_requested: False`. Echo cancellation was OFF in settings, was
+# correctly NOT running, and the banner named it anyway because the
+# sentence was unconditional.
+#
+# Two costs, and the second is the real one:
+#   * the user reasonably concluded a setting was being ignored;
+#   * "several minutes" is true of AEC and false of a WAV merge that
+#     takes seconds, so a normal 12-second finalize read as stuck.
+#
+# Describing work that is not happening is the same defect as reporting
+# a result that was never established — it just points the other way.
+
+
+def _finalizing_session(app_mod, *, aec_requested):
+    from models.session import Session
+    s = Session.__new__(Session)
+    s.session_id = "S-AEC"
+    s.finalize_status = "finalizing"
+    s.finalize_started_at = app_mod.datetime.now()
+    s.finalize_aec_requested = aec_requested
+    return s
+
+
+def test_finalize_message_is_silent_about_aec_when_it_is_not_running(monkeypatch):
+    import server as app_mod
+    monkeypatch.setattr(
+        app_mod.svc, "settings",
+        SimpleNamespace(echo_cancellation_enabled=False), raising=False)
+
+    code, detail = app_mod._finalize_status_detail(
+        _finalizing_session(app_mod, aec_requested=False))
+
+    assert code == 409
+    assert "echo cancellation" not in detail.lower()
+    # ...while still telling the user the useful part.
+    assert "still being finalized" in detail
+    assert "no data has" in detail
+
+
+def test_finalize_message_mentions_aec_when_it_IS_running(monkeypatch):
+    import server as app_mod
+    monkeypatch.setattr(
+        app_mod.svc, "settings",
+        SimpleNamespace(echo_cancellation_enabled=True), raising=False)
+
+    _, detail = app_mod._finalize_status_detail(
+        _finalizing_session(app_mod, aec_requested=True))
+
+    assert "echo cancellation" in detail.lower()
+
+
+def test_the_running_finalize_wins_over_a_setting_toggled_since(monkeypatch):
+    # The user turns echo cancellation ON while a finalize started with
+    # it OFF is still going. The live setting now describes the NEXT
+    # run; the message is about this one.
+    import server as app_mod
+    monkeypatch.setattr(
+        app_mod.svc, "settings",
+        SimpleNamespace(echo_cancellation_enabled=True), raising=False)
+
+    _, detail = app_mod._finalize_status_detail(
+        _finalizing_session(app_mod, aec_requested=False))
+
+    assert "echo cancellation" not in detail.lower()
+
+
+def test_a_session_written_before_the_field_existed_falls_back(monkeypatch):
+    # No `finalize_aec_requested` at all — the live setting is the only
+    # evidence available, so it is used.
+    import server as app_mod
+    from models.session import Session
+    monkeypatch.setattr(
+        app_mod.svc, "settings",
+        SimpleNamespace(echo_cancellation_enabled=True), raising=False)
+
+    s = Session.__new__(Session)
+    s.session_id = "S-LEGACY"
+    s.finalize_status = "finalizing"
+    s.finalize_started_at = app_mod.datetime.now()
+    # deliberately no finalize_aec_requested attribute
+
+    _, detail = app_mod._finalize_status_detail(s)
+    assert "echo cancellation" in detail.lower()
+
+
+def test_the_sessions_banner_gates_its_aec_claim():
+    """The UI banner — the thing the user actually saw — must not name
+    echo cancellation unconditionally.
+
+    This is a SOURCE-LEVEL guard, and it exists because the project has
+    no frontend test harness. The reported bug lived entirely in
+    sessions-view.tsx: the backend message was already conditional, so
+    every Python test above passes against the broken build. Without
+    this, the one defect that was actually reported would be the one
+    thing left uncovered.
+
+    Crude on purpose — it asserts the claim sits inside a branch on
+    `finalize_aec_requested` rather than trying to render React. Same
+    pattern as the extension suite's check that a registered content
+    script file exists: a cheap guard beats an untested behaviour that
+    a future edit can silently revert.
+    """
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[2]
+    src = (repo / "src" / "components" / "sessions-view.tsx").read_text(
+        encoding="utf-8")
+
+    idx = src.find("echo cancellation can take several minutes")
+    assert idx != -1, "banner text moved — update this guard"
+    # The claim must be the true arm of a finalize_aec_requested check,
+    # not free-standing text.
+    window = src[max(0, idx - 400):idx]
+    assert "finalize_aec_requested" in window, (
+        "the Sessions finalize banner names echo cancellation without "
+        "checking whether it is actually running — the 2026-08-20 "
+        "field report")

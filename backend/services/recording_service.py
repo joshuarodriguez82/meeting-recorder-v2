@@ -778,9 +778,25 @@ class RecordingService:
             # (e.g. a concurrent /sessions/{id}/process request) that
             # loads the session JSON while finalize is running sees the
             # real state instead of the stale pre-stop stub.
-            self._write_session_stub(session)
             echo_cancellation_requested = bool(
                 getattr(self._settings, "echo_cancellation_enabled", False))
+            # Recorded BEFORE the stub write so a reader that loads this
+            # session mid-finalize can tell whether AEC is part of THIS
+            # finalize. `aec_outcome` cannot answer that: it is only set
+            # once finalize returns, so for the entire window the user
+            # is actually looking at the progress banner it is None.
+            #
+            # Field report 2026-08-20: the Sessions list said
+            # "Finalizing — echo cancellation can take several minutes"
+            # on a session whose event log recorded
+            # `aec_requested: False`. AEC was correctly OFF and
+            # correctly not running; the banner named it anyway, because
+            # the text was unconditional. Reporting work that is not
+            # happening is the same class of defect as reporting a
+            # result that was never established — it just points the
+            # other way.
+            session.finalize_aec_requested = echo_cancellation_requested
+            self._write_session_stub(session)
             # Channel-dominance attribution, default ON (see
             # config/settings.py's channel_attribution_enabled). This is
             # the ONLY point in the app's lifetime where both raw

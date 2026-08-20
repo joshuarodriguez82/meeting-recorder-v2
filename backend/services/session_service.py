@@ -399,6 +399,12 @@ class SessionService:
             # instead of every session's full JSON. See
             # Session.finalize_status for the three-state contract.
             "finalize_status": data.get("finalize_status"),
+            # So the Sessions list's finalize banner can say what is
+            # actually running. Without it the banner named echo
+            # cancellation on every finalize, including the ones where
+            # AEC was off and correctly not running.
+            "finalize_aec_requested": bool(
+                data.get("finalize_aec_requested") or False),
             "finalize_started_at": data.get("finalize_started_at"),
             "finalize_error": data.get("finalize_error"),
         }

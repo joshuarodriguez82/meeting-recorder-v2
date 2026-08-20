@@ -419,6 +419,13 @@ export interface SessionSummary {
   // for the full four-state contract (adds "queued" — serialized
   // finalize, 2026-08).
   finalize_status?: "finalizing" | "queued" | "failed" | null;
+  // Whether echo cancellation is part of the finalize currently
+  // running. `aec_outcome` cannot answer this — it only exists once
+  // finalize has returned, which is exactly when the progress banner
+  // stops being shown. Optional: false for anything written before the
+  // field existed, which is the safe direction (a banner that
+  // under-claims is cosmetic; one that over-claims is the bug).
+  finalize_aec_requested?: boolean;
   finalize_started_at?: string | null;
   finalize_error?: string | null;
 }
@@ -632,6 +639,13 @@ export interface SessionFull {
   //                    a genuinely-missing file: this is a known,
   //                    explainable failure.
   finalize_status?: "finalizing" | "queued" | "failed" | null;
+  // Whether echo cancellation is part of the finalize currently
+  // running. `aec_outcome` cannot answer this — it only exists once
+  // finalize has returned, which is exactly when the progress banner
+  // stops being shown. Optional: false for anything written before the
+  // field existed, which is the safe direction (a banner that
+  // under-claims is cosmetic; one that over-claims is the bug).
+  finalize_aec_requested?: boolean;
   finalize_started_at?: string | null;
   finalize_error?: string | null;
 }
