@@ -6,6 +6,7 @@ import {
   type SessionSummary, type ClientExportStatus, type ClientKnowledgeStatus,
   type DocumentSkip,
 } from "@/lib/api";
+import { PortalSyncControls } from "@/components/portal-sync-controls";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -388,6 +389,19 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
               Projects
             </CardTitle>
             <div className="flex gap-2">
+              {/* Portal binding lives HERE, with the rest of the
+                  per-client/per-project configuration — not in the
+                  Engagements view, which is where the register is
+                  read. (User feedback 2026-08-21.) Bindings are
+                  strictly per-project, so the control appears only
+                  when one is selected. */}
+              {selected && selectedProject && (
+                <PortalSyncControls
+                  client={selected}
+                  project={selectedProject}
+                  mode="manage"
+                />
+              )}
               {selectedProject && (
                 <Button variant="outline" size="sm" onClick={() => setShowRenameProject(true)}>
                   <Pencil className="h-3.5 w-3.5 mr-2" />
