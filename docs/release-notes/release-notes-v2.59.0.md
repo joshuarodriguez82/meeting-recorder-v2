@@ -123,3 +123,40 @@ extension regressions verified to **fail against the shipped 1.16.0
 build**: the button-with-attribute link, the escaped-JSON link, and the
 rule that a link already on screen before the click is never
 attributed. bandit 0 new, semgrep 0 new, personal-data 0.
+
+## Installing no longer churns your export folder
+
+Every install re-exported every session into the synced Drive folder,
+so all of them jumped to the top of a Date-modified sort carrying the
+install's timestamp. The bytes were identical — only the mtimes moved.
+
+That is not cosmetic. "Date modified" is how you find what you were
+last working on, and a sync client re-uploads every file it sees
+touched, so an install cost a full folder re-sync and destroyed the
+ordering that makes the folder usable.
+
+An export writes what the session says. If the file already says
+exactly that, the export is already done. All five exporters skip
+identical content now; a real edit still writes.
+
+## Decisions and requirements stop counting tasks and facts
+
+One real discovery call produced **fourteen** "decisions". Read against
+the transcript, about four were decisions actually made in the meeting.
+The rest were tasks already listed as action items, a pre-existing
+roadmap a participant merely reported, plain facts (a contract's expiry
+date nobody decided), and restatements of entries already in the list.
+
+Worse, the same meeting was extracted **twice** — the action-items pass
+also produced a "Decisions Made" section while the decisions pass
+independently extracted every decision. The two lists disagreed: 11 in
+one file, 14 in the other, neither a subset of the other.
+
+- Decisions now have **one** extractor and one file.
+- The decisions prompt states what a decision is **not**: a task, a
+  pre-existing agreement being reported, a fact or date, an unaccepted
+  recommendation, or a restatement. It requires an **Evidence** quote
+  of the moment the decision was made, and says plainly that a long
+  list means miscounting.
+- Requirements get the same treatment — 39 rows from one discovery
+  call has the same cause.
