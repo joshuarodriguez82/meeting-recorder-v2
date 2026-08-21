@@ -29,6 +29,34 @@ class ExportService:
             return safe or session.session_id
         return f"session_{session.session_id}"
 
+    @staticmethod
+    def _write_text_if_changed(path: Path, content: str) -> bool:
+        """Write only when the file does not already say exactly this.
+        Returns True if it wrote.
+
+        FIELD REPORT 2026-08-21: every app install re-exported every
+        session into the user's synced Drive folder, so all 79 files
+        jumped to the top of a Date-modified sort carrying the install's
+        timestamp. The bytes were identical; only the mtimes moved.
+
+        That is not cosmetic. "Date modified" is how someone finds what
+        they were last working on, and a sync client re-uploads every
+        file it sees touched — so an install cost a full folder re-sync
+        and destroyed the ordering that makes it navigable.
+
+        An export writes what the session says. If the file already
+        says that, the export is already done.
+        """
+        try:
+            if path.read_text(encoding="utf-8") == content:
+                return False
+        except (FileNotFoundError, OSError, UnicodeDecodeError):
+            # Missing, unreadable, or written in some other encoding —
+            # all cases where writing is the right answer.
+            pass
+        path.write_text(content, encoding="utf-8")
+        return True
+
     def _resolve_target_dir(self, override: Optional[str]) -> Path:
         if override:
             p = Path(override).expanduser()
@@ -110,7 +138,7 @@ class ExportService:
             lines.append("=" * 60)
             lines.append("")
         lines.append(session.full_transcript())
-        path.write_text("\n".join(lines), encoding="utf-8")
+        self._write_text_if_changed(path, "\n".join(lines))
         logger.info(f"Transcript exported: {path}")
         return str(path)
 
@@ -125,7 +153,7 @@ class ExportService:
             lines.append("=" * 60)
             lines.append("")
         lines.append(session.summary)
-        path.write_text("\n".join(lines), encoding="utf-8")
+        self._write_text_if_changed(path, "\n".join(lines))
         logger.info(f"Summary exported: {path}")
         return str(path)
 
@@ -140,7 +168,7 @@ class ExportService:
             lines.append("=" * 60)
             lines.append("")
         lines.append(session.action_items)
-        path.write_text("\n".join(lines), encoding="utf-8")
+        self._write_text_if_changed(path, "\n".join(lines))
         logger.info(f"Action items exported: {path}")
         return str(path)
 
@@ -155,7 +183,7 @@ class ExportService:
             lines.append("=" * 60)
             lines.append("")
         lines.append(session.decisions)
-        path.write_text("\n".join(lines), encoding="utf-8")
+        self._write_text_if_changed(path, "\n".join(lines))
         logger.info(f"Decisions exported: {path}")
         return str(path)
 
@@ -170,6 +198,6 @@ class ExportService:
             lines.append("=" * 60)
             lines.append("")
         lines.append(session.requirements)
-        path.write_text("\n".join(lines), encoding="utf-8")
+        self._write_text_if_changed(path, "\n".join(lines))
         logger.info(f"Requirements exported: {path}")
         return str(path)
