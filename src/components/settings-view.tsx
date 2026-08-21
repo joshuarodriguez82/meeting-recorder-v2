@@ -693,6 +693,29 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
       {/* Summary Templates */}
       <SummaryTemplatesCard />
 
+      {/* SA Tools Portal */}
+      <Card>
+        <CardHeader>
+          <CardTitle>SA Tools Portal</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <Label>Portal base URL</Label>
+          <Input
+            value={settings.portal_url || ""}
+            onChange={(e) => update("portal_url", e.target.value)}
+            placeholder="https://…execute-api…amazonaws.com/prod"
+          />
+          <p className="text-xs text-muted-foreground">
+            The engagement-register push target. A setting rather than a
+            constant because the portal has dev and prod hosts; leave
+            empty to turn the integration off. Projects are bound to
+            portal opportunities from the Engagements tab — each
+            project&apos;s edit token is stored in the OS keychain, not
+            in any config file.
+          </p>
+        </CardContent>
+      </Card>
+
       {/* Email */}
       <Card>
         <CardHeader>

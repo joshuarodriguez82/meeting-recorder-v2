@@ -269,6 +269,10 @@ class Settings:
     live_claude_model: str
     live_openai_api_key: str
     live_openai_base_url: str
+    # SA Tools Portal base URL (engagement-register push). A setting,
+    # not a constant: the portal has dev and prod hosts. Empty = the
+    # portal integration is off.
+    portal_url: str
     live_anthropic_api_key: str
     # Active co-pilot persona + meeting-type modifier names. Both resolve
     # through the CoPilotMode / CoPilotMeetingType services, which seed
@@ -547,6 +551,7 @@ class Settings:
             live_claude_model=_get("LIVE_CLAUDE_MODEL", ""),
             live_openai_api_key=_get("LIVE_OPENAI_API_KEY", ""),
             live_openai_base_url=_get("LIVE_OPENAI_BASE_URL", ""),
+            portal_url=_get("PORTAL_URL", ""),
             live_anthropic_api_key=_get("LIVE_ANTHROPIC_API_KEY", ""),
             live_copilot_mode=_get("LIVE_COPILOT_MODE", "SA"),
             live_copilot_meeting_type=_get(
@@ -646,6 +651,7 @@ class Settings:
         live_claude_model: str = "",
         live_openai_api_key: str = "",
         live_openai_base_url: str = "",
+        portal_url: str = "",
         live_anthropic_api_key: str = "",
         live_copilot_mode: str = "SA",
         live_copilot_meeting_type: str = "General",
@@ -751,6 +757,7 @@ class Settings:
             f"LIVE_CLAUDE_MODEL={live_claude_model}\n"
             f"LIVE_OPENAI_API_KEY={env_live_openai_api_key}\n"
             f"LIVE_OPENAI_BASE_URL={live_openai_base_url}\n"
+            f"PORTAL_URL={portal_url}\n"
             f"LIVE_ANTHROPIC_API_KEY={env_live_anthropic_api_key}\n"
             f"LIVE_COPILOT_MODE={live_copilot_mode}\n"
             f"LIVE_COPILOT_MEETING_TYPE={live_copilot_meeting_type}\n"
