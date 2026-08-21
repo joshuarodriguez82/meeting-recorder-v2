@@ -456,6 +456,21 @@ def events_from_structured(events: Iterable[Any],
             "attendees": attendees,
             "duration": max(1, int((end - start).total_seconds() // 60)),
             "join_url": str(item.get("join_url") or "").strip(),
+            # THE FIELD THAT WAS DROPPED AT THE DOOR. The extension has
+            # sent the invite body since 1.7, the store has serialized
+            # it since v2.43.0, and the display has rendered it since
+            # the same release — but this function, the one every
+            # extension POST passes through on its way to the store,
+            # was never taught the field. Every body ever captured was
+            # discarded right here, so "(No description on this
+            # invite.)" was guaranteed no matter what the extension
+            # did, through six releases of fixing the extension.
+            #
+            # The lesson is the drop-list pattern again, inverted from
+            # replace_all's: a whitelist-shaped constructor silently
+            # deletes any field added after it was written. Same cap as
+            # the store's, since this now precedes it.
+            "body": str(item.get("body") or "").strip()[:8000],
             "source": SOURCE_EXTENSION,
         })
     if stats is not None:
