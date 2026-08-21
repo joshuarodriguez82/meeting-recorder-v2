@@ -6191,14 +6191,20 @@ async def engagement_overlay_put(client: str, req: EngagementOverlayRequest):
 class PortalBindRequest(BaseModel):
     client: str
     project: str
-    customer_id: str
+    # THE way to bind: the connection block pasted verbatim as the
+    # portal hands it over ({"portal","api","opportunity","customerId",
+    # "editToken"}). It carries the edit token, so it gets the same
+    # never-echoed treatment the token itself does.
+    connection: str = ""
+    # Manual fields, used only when no connection block is pasted.
+    customer_id: str = ""
     opportunity_name: str = ""
     parent_name: str = ""
     # The edit token. Accepted in this request body, stored in the OS
     # keychain, and NEVER echoed back: no response, log line or error
     # from this API carries it. Paste-once — the Cognito picker flow
     # can replace this later without changing the wire format.
-    edit_token: str
+    edit_token: str = ""
 
 
 class PortalScopeRequest(BaseModel):
@@ -6221,14 +6227,30 @@ async def portal_bind(req: PortalBindRequest):
     if not svc.portal_push_svc:
         raise HTTPException(status_code=503, detail="portal service not ready")
     try:
-        binding = await asyncio.to_thread(
-            svc.portal_push_svc.bind,
-            (req.client or "").strip().lower(),
-            (req.project or "").strip().lower(),
+        fields = dict(
             customer_id=req.customer_id,
             opportunity_name=req.opportunity_name,
             parent_name=req.parent_name,
             edit_token=req.edit_token,
+        )
+        if (req.connection or "").strip():
+            from services.portal_push_service import parse_connection
+            conn = parse_connection(req.connection)
+            fields.update(
+                customer_id=conn["customer_id"],
+                edit_token=conn["edit_token"],
+                api_base=conn["api_base"],
+                portal_url=conn["portal_url"],
+                # The block's opportunity name wins unless the user
+                # typed one alongside the paste.
+                opportunity_name=(req.opportunity_name.strip()
+                                  or conn["opportunity_name"]),
+            )
+        binding = await asyncio.to_thread(
+            svc.portal_push_svc.bind,
+            (req.client or "").strip().lower(),
+            (req.project or "").strip().lower(),
+            **fields,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -8495,6 +8517,45 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
         raise HTTPException(status_code=400,
                             detail="No content sent from extension")
 
+    # ── The calendar lands BEFORE the briefing can fail ──────────────
+    #
+    # Structured events are parsed CLIENT-side. They need no LLM, and
+    # the fast path above already proves the backend knows that. What
+    # the full-capture path did was check the LLM gate first — so a
+    # Capture & Send with no API key configured, or with an LLM that
+    # threw mid-parse, discarded a calendar the extension had just
+    # spent ninety seconds opening panes to build (proven end to end
+    # against a real extension + real backend, 2026-08-21).
+    #
+    # The briefing failing is not the calendar failing. Storing here
+    # is idempotent with respect to everything below: the briefing
+    # branch neither reads nor rewrites the calendar store.
+    calendar_stored: Optional[Dict[str, Any]] = None
+    if calendar_events_in and svc.extension_calendar_svc:
+        cal_stats: Dict[str, Any] = {}
+        cal_events = events_from_structured(calendar_events_in,
+                                            stats=cal_stats)
+        cal_dropped = (cal_stats.get("raw", len(cal_events))
+                       - cal_stats.get("kept", len(cal_events)))
+        cal_kept = await asyncio.to_thread(
+            svc.extension_calendar_svc.replace_all, cal_events, None, {
+                "path": "structured",
+                "raw": cal_stats.get("raw", len(cal_events)),
+                "kept": cal_stats.get("kept", len(cal_events)),
+                "dropped": cal_dropped,
+                "fallback_reason": None,
+            })
+        logger.info(
+            f"Extension calendar (full capture): {len(cal_events)} parsed "
+            f"-> {len(cal_kept)} kept")
+        _emit_calendar_import_event(
+            "structured", cal_stats, cal_dropped, None,
+            req.extension_version, calendar_only=False)
+        calendar_stored = {
+            "parsed_events": len(cal_events),
+            "kept_events": len(cal_kept),
+        }
+
     summ = svc.summarizer or svc.live_summarizer
     if summ is None:
         raise HTTPException(
@@ -8559,7 +8620,13 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
     # extension that never sends calendar_events at all.
     ext_kept = 0
     ext_log_path = "unavailable"  # svc.extension_calendar_svc missing, or update failed
-    if svc.extension_calendar_svc:
+    if calendar_stored is not None:
+        # Already stored above, before the briefing gate — storing the
+        # same events twice is pure waste, and the pre-gate write is
+        # the one that survives a briefing failure.
+        ext_kept = calendar_stored["kept_events"]
+        ext_log_path = "structured"
+    elif svc.extension_calendar_svc:
         try:
             calendar_stats: Dict[str, Any] = {}
             fallback_reason = None

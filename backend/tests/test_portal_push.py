@@ -240,6 +240,80 @@ def test_the_worker_requeues_transient_and_only_transient(monkeypatch):
     assert fired == []
 
 
+# ── the portal's connection block binds paste-once ───────────────────
+#
+# The portal hands the SA ONE JSON block (portal / api / opportunity /
+# customerId / editToken). The user pastes it; nobody dissects it into
+# form fields. The push target is the block's `api` URL — the API
+# Gateway host — NOT the portal website and NOT a Settings value.
+
+
+SYNTH_CONNECTION = {
+    "portal": "https://portal.example",
+    "api": "https://abc123.execute-api.example.com/prod",
+    "opportunity": "Genesys Migration",
+    "customerId": "00000000-0000-4000-8000-000000000001",
+    "editToken": TOKEN,
+}
+
+
+def test_the_connection_block_parses_exactly_as_the_portal_hands_it_over():
+    parsed = pps.parse_connection(json.dumps(SYNTH_CONNECTION))
+    assert parsed == {
+        "api_base": "https://abc123.execute-api.example.com/prod",
+        "portal_url": "https://portal.example",
+        "opportunity_name": "Genesys Migration",
+        "customer_id": "00000000-0000-4000-8000-000000000001",
+        "edit_token": TOKEN,
+    }
+    # Pasted with the code fence it often arrives in.
+    fenced = "```json\n" + json.dumps(SYNTH_CONNECTION) + "\n```"
+    assert pps.parse_connection(fenced)["api_base"] == parsed["api_base"]
+
+
+def test_connection_parse_failures_name_the_key_and_never_echo_the_token():
+    with pytest.raises(ValueError) as exc:
+        pps.parse_connection(json.dumps({"editToken": TOKEN}))
+    assert TOKEN not in str(exc.value)
+    assert "api" in str(exc.value) or "customerId" in str(exc.value)
+    with pytest.raises(ValueError):
+        pps.parse_connection("this is not json {")
+    with pytest.raises(ValueError):
+        pps.parse_connection(json.dumps(
+            dict(SYNTH_CONNECTION, api="ftp://abc.example/prod")))
+
+
+def test_push_targets_the_connection_api_url_not_a_settings_value(
+        tmp_path, fake_secrets, monkeypatch):
+    """Settings has NO portal URL — the binding carries its own api base
+    from the pasted block, and the push must reach exactly
+    {api}/customers/{customerId}/engagement/ingest."""
+    svc = PortalPushService(tmp_path, get_portal_url=lambda: "")
+    svc.bind("acme", "genesys migration",
+             customer_id=SYNTH_CONNECTION["customerId"],
+             opportunity_name="Genesys Migration", parent_name="",
+             edit_token=TOKEN,
+             api_base=SYNTH_CONNECTION["api"],
+             portal_url=SYNTH_CONNECTION["portal"])
+    path = svc.register_path("acme", "genesys migration")
+    path.write_text(json.dumps({"client": "acme", "action_items": []}),
+                    encoding="utf-8")
+    calls = _patch_http(monkeypatch, lambda req: FakeResponse(
+        200, json.dumps({"added": 1, "updated": 0, "items": 1})))
+
+    svc.push("acme", "genesys migration")
+
+    assert calls[0].get_full_url() == (
+        "https://abc123.execute-api.example.com/prod/customers/"
+        "00000000-0000-4000-8000-000000000001/engagement/ingest")
+    b = svc.binding_for("acme", "genesys migration")
+    assert b["apiBase"] == SYNTH_CONNECTION["api"]
+    # The block's website URL is display metadata, never the target.
+    assert b["portalUrl"] == "https://portal.example"
+    assert TOKEN not in (tmp_path / pps.BINDINGS_FILENAME).read_text(
+        encoding="utf-8")
+
+
 # ── criterion 4: 403 breaks the binding and stops the line ───────────
 
 

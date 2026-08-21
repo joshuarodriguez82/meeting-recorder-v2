@@ -4,9 +4,15 @@ Push engagement registers to the SA Tools Portal.
 THE CONTRACT (portal side is built, deployed, tested — this side only
 delivers the file):
 
-    POST {portal_url}/customers/{customerId}/engagement/ingest
+    POST {api}/customers/{customerId}/engagement/ingest
     X-Edit-Token: {editToken}
     {"register": <the parsed contents of engagement_<slug>.register.json>}
+
+where {api} is the API base URL from the connection block the portal
+hands the SA ({"portal", "api", "opportunity", "customerId",
+"editToken"}) — the API Gateway host, NOT the portal website. The
+block is pasted once and parse_connection() dissects it; the user
+never retypes UUIDs into form fields.
 
 The register is sent EXACTLY as written to disk. No key renaming, no
 flattening of occurrences[], no owner resolution, no status filtering —
@@ -106,6 +112,62 @@ def scope_key(client_key: str, project_key: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", raw.strip().lower())
 
 
+def _base_url_error(url: str) -> Optional[str]:
+    """Scheme allow-list for any base URL a push could target: https
+    only, plus http for a localhost dev portal. urllib would happily
+    open file:// or a custom scheme otherwise — this is the actual
+    mitigation the B310/semgrep audit rules exist to prompt."""
+    if not url:
+        return "no URL"
+    if not (url.startswith("https://")
+            or url.startswith("http://127.0.0.1")
+            or url.startswith("http://localhost")):
+        return ("URL must be https:// (or http://localhost for a dev "
+                "portal)")
+    return None
+
+
+def parse_connection(text: str) -> Dict[str, str]:
+    """Parse the connection block the portal hands the SA, verbatim:
+
+        {"portal": ..., "api": ..., "opportunity": ...,
+         "customerId": ..., "editToken": ...}
+
+    The user pastes this once; nobody retypes UUIDs into form fields.
+    `api` is the push target (the API Gateway base); `portal` is the
+    website, kept for display only. Error messages name the missing or
+    bad KEY and never echo a value — the block carries the edit token,
+    and a parse error must not launder it into a toast or a log line."""
+    cleaned = (text or "").strip()
+    # The block often arrives wrapped in a markdown code fence.
+    cleaned = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", cleaned).strip()
+    try:
+        blob = json.loads(cleaned)
+    except json.JSONDecodeError:
+        raise ValueError("that isn't the portal's connection block — "
+                         "paste the JSON exactly as the portal shows it")
+    if not isinstance(blob, dict):
+        raise ValueError("the connection block must be a JSON object")
+    api = str(blob.get("api") or "").strip().rstrip("/")
+    customer_id = str(blob.get("customerId") or "").strip()
+    edit_token = str(blob.get("editToken") or "").strip()
+    missing = [k for k, v in (("api", api), ("customerId", customer_id),
+                              ("editToken", edit_token)) if not v]
+    if missing:
+        raise ValueError(
+            f"the connection block is missing {', '.join(missing)}")
+    err = _base_url_error(api)
+    if err:
+        raise ValueError(f"the connection block's api {err}")
+    return {
+        "api_base": api,
+        "portal_url": str(blob.get("portal") or "").strip().rstrip("/"),
+        "opportunity_name": str(blob.get("opportunity") or "").strip(),
+        "customer_id": customer_id,
+        "edit_token": edit_token,
+    }
+
+
 class PortalPushService:
     """Bindings + the push itself. Thread-safe; called from HTTP
     handlers (bind/unbind/status) and from the push worker (push)."""
@@ -143,14 +205,24 @@ class PortalPushService:
 
     def bind(self, client_key: str, project_key: str, *,
              customer_id: str, opportunity_name: str,
-             parent_name: str, edit_token: str) -> Dict[str, Any]:
+             parent_name: str, edit_token: str,
+             api_base: str = "", portal_url: str = "") -> Dict[str, Any]:
         """Create/replace a binding. The token goes to the keychain;
         everything else to the JSON. Binding again clears `broken` —
-        re-binding IS the recovery path for a revoked token."""
+        re-binding IS the recovery path for a revoked token.
+
+        `api_base` comes from the pasted connection block and is THE
+        push target for this binding; the Settings-level portal URL is
+        only a fallback for bindings made before the block existed."""
         if not (customer_id or "").strip():
             raise ValueError("customer_id is required")
         if not (edit_token or "").strip():
             raise ValueError("edit_token is required")
+        api_base = (api_base or "").strip().rstrip("/")
+        if api_base:
+            err = _base_url_error(api_base)
+            if err:
+                raise ValueError(f"api {err}")
         if not (project_key or "").strip():
             # Per-project only, by the same rule pushes enforce: the
             # client rollup must never bind, or it will double-file
@@ -173,6 +245,8 @@ class PortalPushService:
                 "customerId": customer_id.strip(),
                 "opportunityName": (opportunity_name or "").strip(),
                 "parentName": (parent_name or "").strip(),
+                "apiBase": api_base,
+                "portalUrl": (portal_url or "").strip().rstrip("/"),
                 "boundAt": datetime.now(timezone.utc).isoformat(),
                 "enabled": True,
                 "broken": False,
@@ -246,20 +320,22 @@ class PortalPushService:
             raise PortalBindingBroken(
                 binding.get("broken_reason") or "binding marked broken")
 
-        portal_url = (self._get_portal_url() or "").strip().rstrip("/")
-        if not portal_url:
-            raise PortalPermanent("portal URL is not configured in Settings")
-        # Scheme allow-list, checked BEFORE the request is built: the
-        # URL comes from a user-editable setting, and urllib would
-        # happily open file:// or a custom scheme with it. https only
-        # (plus http for a localhost dev portal) — this is the actual
-        # mitigation the B310/semgrep audit rules exist to prompt.
-        if not (portal_url.startswith("https://")
-                or portal_url.startswith("http://127.0.0.1")
-                or portal_url.startswith("http://localhost")):
+        # The binding's own api base (from the pasted connection block)
+        # is the push target. The Settings portal URL is only a fallback
+        # for bindings made before the block carried the api host.
+        base_url = (binding.get("apiBase") or "").strip().rstrip("/")
+        if not base_url:
+            base_url = (self._get_portal_url() or "").strip().rstrip("/")
+        if not base_url:
             raise PortalPermanent(
-                "portal URL must be https:// (or http://localhost for a "
-                "dev portal)")
+                "this binding has no api URL — re-bind by pasting the "
+                "portal's connection block")
+        # Scheme allow-list, checked BEFORE the request is built:
+        # bind() validates at bind time, but the bindings file and the
+        # Settings value are both user-editable on disk.
+        err = _base_url_error(base_url)
+        if err:
+            raise PortalPermanent(f"portal api {err}")
 
         token = secrets.get_secret(_TOKEN_KEY_FMT.format(scope=scope)) or ""
         if not token:
@@ -280,7 +356,7 @@ class PortalPushService:
         # VERBATIM. The file's parsed object, under one key. Nothing
         # renamed, resolved, flattened or filtered.
         body = json.dumps({"register": register}).encode("utf-8")
-        url = (f"{portal_url}/customers/{binding['customerId']}"
+        url = (f"{base_url}/customers/{binding['customerId']}"
                f"/engagement/ingest")
         req = urllib.request.Request(
             url, data=body, method="POST",
