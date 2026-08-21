@@ -8719,6 +8719,31 @@ async def import_briefing_from_extension(req: ExtensionImportRequest):
 # updating is "click Install/Update, click Reload in Chrome" instead of
 # a file hunt.
 
+@app.get("/calendar/capture-diagnostics")
+async def calendar_capture_diagnostics():
+    """The last capture's own counters, for the Record tab.
+
+    These numbers have existed since v2.47.0 and were reachable ONLY by
+    generating a diagnostics zip and sending it to someone who could
+    read it. That is why every round of "the join link still is not
+    there" cost a file transfer and a day: the app knew how many panes
+    it opened and how many join-shaped URLs it found in them, and had
+    no way to say so.
+
+    {} means no capture has reported since the field existed — which is
+    NOT "a capture ran and found nothing". The two render differently.
+    """
+    if not svc.extension_calendar_svc:
+        return {"available": False, "diag": {}}
+    try:
+        diag = await asyncio.to_thread(
+            svc.extension_calendar_svc.last_capture_diag)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"capture diagnostics unavailable: {e}")
+        return {"available": False, "diag": {}}
+    return {"available": bool(diag), "diag": diag or {}}
+
+
 @app.get("/extension/info")
 async def extension_info():
     """Bundled vs. last-seen Chrome extension version, for the Settings

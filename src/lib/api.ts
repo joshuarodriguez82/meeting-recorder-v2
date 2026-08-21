@@ -1858,6 +1858,12 @@ export const api = {
   // dev build with no zip-bundle run) — see backend/services/
   // extension_bundle_service.py's extension_version_status for the exact
   // rules.
+  // The last capture's own counters — how many panes were opened, how
+  // many join-shaped URLs were found in them, and where they came
+  // from. Previously reachable only inside a diagnostics zip.
+  getCaptureDiagnostics: () =>
+    request<{ available: boolean; diag: Record<string, unknown> }>(
+      "/calendar/capture-diagnostics"),
   getExtensionInfo: () =>
     request<{
       bundled_version: string | null;

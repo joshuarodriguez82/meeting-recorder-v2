@@ -389,18 +389,40 @@ export function RecordView({
     status: string;
   } | null>(null);
 
+  // WHAT THE LAST CAPTURE ACTUALLY DID.
+  //
+  // These counters have existed since v2.47.0 and were reachable only
+  // by generating a diagnostics zip and sending it to someone who
+  // could read it. That is precisely why every round of "the join link
+  // still isn't there" cost a file transfer and a day: the app knew
+  // how many panes it opened and how many join-shaped URLs it found in
+  // them, and had no way to say so on screen.
+  const [captureDiag, setCaptureDiag] =
+    useState<Record<string, unknown> | null>(null);
+  const [diagOpen, setDiagOpen] = useState(false);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const info = await api.getExtensionInfo();
-        if (!cancelled) setExtInfo(info);
+        const [info, diag] = await Promise.all([
+          api.getExtensionInfo(),
+          api.getCaptureDiagnostics().catch(() => null),
+        ]);
+        if (cancelled) return;
+        setExtInfo(info);
+        setCaptureDiag(diag?.available ? diag.diag : null);
       } catch {
         if (!cancelled) setExtInfo(null);
       }
     })();
     return () => { cancelled = true; };
   }, [meetings.length]);
+
+  const diagNum = (k: string): number | null => {
+    const v = captureDiag?.[k];
+    return typeof v === "number" ? v : null;
+  };
 
   // Load initial data. Calendar data is owned by the parent (page.tsx)
   // so it survives nav switches; we only load local things here.
@@ -2178,6 +2200,61 @@ export function RecordView({
                   </div>
                 );
               })}
+            </div>
+          )}
+          {/* WHAT THE LAST CAPTURE DID, ON SCREEN.
+
+              Every previous round of "the detail still is not there"
+              needed a diagnostics zip to answer one question: did the
+              capture open this meeting and find nothing, or never
+              reach it at all? The app has always had the counters.
+              They just were not readable without a file transfer. */}
+          {captureDiag && (
+            <div className="mt-4 border-t border-border pt-3">
+              <button
+                type="button"
+                className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+                onClick={() => setDiagOpen((v) => !v)}
+              >
+                <ChevronRight
+                  className={"h-3.5 w-3.5 transition-transform " + (diagOpen ? "rotate-90" : "")}
+                />
+                What the last capture found
+              </button>
+              {diagOpen && (
+                <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-muted-foreground sm:grid-cols-3">
+                  {([
+                    ["Meetings queued for detail", "domDetailAttempted"],
+                    ["Panes opened", "domDetailOpened"],
+                    ["Tile not found", "domDetailNoTile"],
+                    ["Skipped (time budget)", "domDetailSkipped"],
+                    ["Join links from invite text", "detailGainedJoinUrl"],
+                    ["Join links from a button/anchor", "joinFromAnchor"],
+                    ["Join links found in markup", "joinFromMarkup"],
+                    ["Invite bodies gained", "detailGainedBody"],
+                    ["Attendee lists gained", "detailGainedAttendees"],
+                    ["Outlook responses captured", "responsesMatched"],
+                  ] as [string, string][]).map(([label, key]) => {
+                    const n = diagNum(key);
+                    if (n === null) return null;
+                    return (
+                      <div key={key} className="flex justify-between gap-3">
+                        <span>{label}</span>
+                        <span className="font-medium text-foreground">{n}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {diagOpen && (
+                <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                  If panes were opened but every join-link count is 0, the
+                  meeting&apos;s join URL is not present in the page when the
+                  capture reads it — that is a different problem from the
+                  capture never reaching the meeting, and this is where the
+                  two stop looking alike.
+                </p>
+              )}
             </div>
           )}
         </CardContent>
