@@ -29,10 +29,25 @@ export function PortalSyncControls({ client, project, mode = "manage" }: {
   const [binding, setBinding] = useState<PortalBinding | null>(null);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  // The portal's connection block, pasted verbatim. Primary bind path.
+  const [connection, setConnection] = useState("");
+  const [manual, setManual] = useState(false);
   const [customerId, setCustomerId] = useState("");
   const [oppName, setOppName] = useState("");
   const [parentName, setParentName] = useState("");
   const [token, setToken] = useState("");
+
+  // Light client-side peek at the paste, purely to enable the button
+  // and preview the opportunity — the backend owns real validation.
+  const pasted = (() => {
+    const t = connection.trim().replace(/^```[a-zA-Z]*\s*|\s*```$/g, "");
+    if (!t) return null;
+    try {
+      const b = JSON.parse(t) as Record<string, unknown>;
+      return b && typeof b === "object" && b.api && b.customerId && b.editToken
+        ? { opportunity: String(b.opportunity ?? "") } : null;
+    } catch { return null; }
+  })();
 
   const reload = useCallback(async () => {
     try {
@@ -51,13 +66,18 @@ export function PortalSyncControls({ client, project, mode = "manage" }: {
   const bind = async () => {
     setBusy(true);
     try {
-      await api.portalBind({
-        client, project, customer_id: customerId.trim(),
-        opportunity_name: oppName.trim(), parent_name: parentName.trim(),
-        edit_token: token.trim(),
-      });
-      // Cleared the moment the bind lands — the token now lives in the
-      // OS keychain and nowhere in this page.
+      await api.portalBind(
+        !manual && connection.trim()
+          ? { client, project, connection: connection.trim() }
+          : {
+              client, project, customer_id: customerId.trim(),
+              opportunity_name: oppName.trim(), parent_name: parentName.trim(),
+              edit_token: token.trim(),
+            });
+      // Cleared the moment the bind lands — the token (inside the
+      // block or the field) now lives in the OS keychain and nowhere
+      // in this page.
+      setConnection("");
       setToken("");
       setOpen(false);
       toast.success("Project bound to the portal");
@@ -112,17 +132,46 @@ export function PortalSyncControls({ client, project, mode = "manage" }: {
             {binding
               ? `Bound to ${binding.opportunityName || binding.customerId}`
                 + (binding.parentName ? ` (${binding.parentName})` : "")
-              : "Paste the opportunity's customer id and edit token from the portal. The token is stored in the OS keychain and never shown again."}
+              : "Paste the connection block from the portal — the whole JSON, exactly as shown. The edit token inside it goes to the OS keychain and is never shown again."}
           </div>
-          <Input placeholder="Customer ID" value={customerId}
-                 onChange={(e) => setCustomerId(e.target.value)} />
-          <Input placeholder="Opportunity name (optional)" value={oppName}
-                 onChange={(e) => setOppName(e.target.value)} />
-          <Input placeholder="Parent company (optional)" value={parentName}
-                 onChange={(e) => setParentName(e.target.value)} />
-          <Input placeholder="Edit token" type="password" value={token}
-                 onChange={(e) => setToken(e.target.value)} />
-          <div className="flex gap-2 justify-end">
+          {!manual && (
+            <>
+              <textarea
+                className="w-full h-28 rounded-md border border-input bg-transparent px-3 py-2 text-xs font-mono shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                placeholder={'{\n  "portal": "https://…",\n  "api": "https://…",\n  "opportunity": "…",\n  "customerId": "…",\n  "editToken": "…"\n}'}
+                value={connection}
+                onChange={(e) => setConnection(e.target.value)}
+              />
+              {connection.trim() && (
+                <div className={"text-xs " + (pasted ? "text-muted-foreground" : "text-red-600 dark:text-red-400")}>
+                  {pasted
+                    ? `Ready to bind${pasted.opportunity ? `: ${pasted.opportunity}` : ""}`
+                    : "That doesn't look like the portal's connection block yet."}
+                </div>
+              )}
+            </>
+          )}
+          {manual && (
+            <>
+              <Input placeholder="Customer ID" value={customerId}
+                     onChange={(e) => setCustomerId(e.target.value)} />
+              <Input placeholder="Opportunity name (optional)" value={oppName}
+                     onChange={(e) => setOppName(e.target.value)} />
+              <Input placeholder="Parent company (optional)" value={parentName}
+                     onChange={(e) => setParentName(e.target.value)} />
+              <Input placeholder="Edit token" type="password" value={token}
+                     onChange={(e) => setToken(e.target.value)} />
+            </>
+          )}
+          <div className="flex gap-2 items-center">
+            <button
+              type="button"
+              className="text-xs text-muted-foreground underline underline-offset-2"
+              onClick={() => setManual((v) => !v)}
+            >
+              {manual ? "Paste connection block instead" : "Enter fields manually"}
+            </button>
+            <div className="flex-1" />
             {binding && (
               <Button size="sm" variant="ghost" disabled={busy}
                 onClick={async () => {
@@ -133,7 +182,10 @@ export function PortalSyncControls({ client, project, mode = "manage" }: {
                 Unbind
               </Button>
             )}
-            <Button size="sm" disabled={busy || !customerId.trim() || !token.trim()}
+            <Button size="sm"
+                    disabled={busy || (manual
+                      ? !customerId.trim() || !token.trim()
+                      : !pasted)}
                     onClick={() => void bind()}>
               {binding ? "Re-bind" : "Bind"}
             </Button>

@@ -400,3 +400,64 @@ def test_extension_version_is_recorded_even_on_full_narrative_capture(monkeypatc
     asyncio.run(server.import_briefing_from_extension(req))
 
     assert record_spy.calls == ["1.2.0"]
+
+
+# ── the calendar must survive a failing briefing ─────────────────────
+#
+# E2E RIG, 2026-08-21. A real extension 1.15.0 ran a real "Capture &
+# Send" against a real backend: it opened every meeting, read the
+# panes, extracted the join links and the bodies — and the backend
+# threw ALL of it away with a 400, because the briefing half of the
+# same request had no LLM configured.
+#
+# The calendar events are CLIENT-parsed. They need no AI, and the
+# calendar-only fast path above proves the backend knows that. The
+# full-capture path just happened to check the LLM gate first.
+#
+# This is the project's oldest defect wearing a new hat: a result you
+# COULD read, discarded because something ELSE in the same request
+# could not be read. The briefing failing is not the calendar failing.
+
+
+def test_structured_calendar_is_stored_even_when_the_llm_gate_rejects(monkeypatch):
+    """Capture & Send with narrative text AND calendar events, with no
+    AI provider configured. The briefing half must fail — but the
+    calendar must be in the store before it does."""
+    replace_all = _ReplaceAllSpy(kept=REALISTIC_STRUCTURED_EVENTS)
+    _wire(monkeypatch, summarizer=None, save_parsed=_SaveParsedSpy(),
+          replace_all=replace_all)
+
+    req = server.ExtensionImportRequest(
+        owa_text="Today's calendar\n9:30 AM Acme Daily Pulse Call",
+        calendar_events=REALISTIC_STRUCTURED_EVENTS,
+    )
+    with pytest.raises(server.HTTPException) as exc:
+        asyncio.run(server.import_briefing_from_extension(req))
+
+    # The briefing half still fails honestly...
+    assert exc.value.status_code == 400
+    assert "AI provider" in str(exc.value.detail)
+    # ...and the calendar the extension worked for is NOT lost.
+    assert len(replace_all.calls) == 1, (
+        "the client-parsed calendar needs no LLM and must be stored "
+        "before the briefing gate can reject the request")
+    assert len(replace_all.calls[0]) == 5
+
+
+def test_structured_calendar_is_stored_even_when_the_llm_parse_throws(monkeypatch):
+    """Same guarantee for the other failure: an LLM that is configured
+    but blows up mid-parse (502). The calendar is already stored."""
+    replace_all = _ReplaceAllSpy(kept=REALISTIC_STRUCTURED_EVENTS)
+    _wire(monkeypatch, summarizer=_FakeSummarizer(raise_error=True),
+          save_parsed=_SaveParsedSpy(), replace_all=replace_all)
+
+    req = server.ExtensionImportRequest(
+        owa_text="Today's calendar\n9:30 AM Acme Daily Pulse Call",
+        calendar_events=REALISTIC_STRUCTURED_EVENTS,
+    )
+    with pytest.raises(server.HTTPException) as exc:
+        asyncio.run(server.import_briefing_from_extension(req))
+
+    assert exc.value.status_code == 502
+    assert len(replace_all.calls) == 1
+    assert len(replace_all.calls[0]) == 5

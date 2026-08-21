@@ -134,6 +134,10 @@ export interface PortalBinding {
   customerId: string;
   opportunityName: string;
   parentName: string;
+  // From the pasted connection block: apiBase is the push target (the
+  // API Gateway host); portalUrl is the website, display only.
+  apiBase?: string;
+  portalUrl?: string;
   boundAt: string;
   enabled: boolean;
   // Set when the portal rejected the edit token (403). Pushes stop
@@ -1002,11 +1006,17 @@ export const api = {
   portalBindings: (): Promise<Record<string, PortalBinding>> =>
     request("/portal/bindings"),
   portalBind: (body: {
-    client: string; project: string; customer_id: string;
+    client: string; project: string;
+    // The portal's connection block, pasted verbatim — the primary
+    // bind path. Carries the edit token, so it gets the same
+    // sent-once, never-echoed treatment.
+    connection?: string;
+    // Manual fields, used only when no block is pasted.
+    customer_id?: string;
     opportunity_name?: string; parent_name?: string;
     // The edit token. Sent once, stored in the OS keychain server-side,
     // never echoed back by any endpoint.
-    edit_token: string;
+    edit_token?: string;
   }): Promise<{ ok: boolean; binding: PortalBinding }> =>
     request("/portal/bind", { method: "POST", body: JSON.stringify(body) }),
   portalUnbind: (body: { client: string; project: string }): Promise<{ ok: boolean }> =>
