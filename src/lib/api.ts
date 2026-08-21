@@ -128,6 +128,22 @@ export interface TemplateEntry {
   default_prompt: string | null;
 }
 
+export interface PortalBinding {
+  client: string;
+  project: string;
+  customerId: string;
+  opportunityName: string;
+  parentName: string;
+  boundAt: string;
+  enabled: boolean;
+  // Set when the portal rejected the edit token (403). Pushes stop
+  // until the user re-binds; the reason says so.
+  broken?: boolean;
+  broken_reason?: string;
+  last_push_at?: string | null;
+  last_push_result?: string | null;
+}
+
 export interface Settings {
   anthropic_api_key: string;
   hf_token: string;
@@ -188,6 +204,10 @@ export interface Settings {
   live_claude_model: string;
   live_openai_api_key: string;
   live_openai_base_url: string;
+  // SA Tools Portal base URL (engagement-register push). A setting,
+  // not a constant — the portal has dev and prod hosts. Empty = the
+  // integration is off.
+  portal_url: string;
   live_anthropic_api_key: string;
   // Active co-pilot persona + meeting-type modifier names. Resolved
   // through the mode / meeting-type libraries (separate from the
@@ -973,6 +993,24 @@ export interface SessionsDiagnostics {
 }
 
 export const api = {
+  // ── SA Tools Portal (engagement-register push) ────────────────────
+  portalBindings: (): Promise<Record<string, PortalBinding>> =>
+    request("/portal/bindings"),
+  portalBind: (body: {
+    client: string; project: string; customer_id: string;
+    opportunity_name?: string; parent_name?: string;
+    // The edit token. Sent once, stored in the OS keychain server-side,
+    // never echoed back by any endpoint.
+    edit_token: string;
+  }): Promise<{ ok: boolean; binding: PortalBinding }> =>
+    request("/portal/bind", { method: "POST", body: JSON.stringify(body) }),
+  portalUnbind: (body: { client: string; project: string }): Promise<{ ok: boolean }> =>
+    request("/portal/unbind", { method: "POST", body: JSON.stringify(body) }),
+  portalSync: (body: { client: string; project: string }): Promise<{
+    ok: boolean; added?: number; updated?: number; items?: number; sessions?: number;
+  }> =>
+    request("/portal/sync", { method: "POST", body: JSON.stringify(body) }),
+
   // Resolve the cached backend base URL. Exposed for non-`request`
   // callers that need the URL directly — most notably the live
   // transcript SSE EventSource, which can't go through `request`.
