@@ -2097,8 +2097,30 @@ export function RecordView({
                                   {det.data.body}
                                 </div>
                               ) : (
+                                /* The cause, not a blanket claim.
+                                   "(No description on this invite.)"
+                                   was shown for every failure mode —
+                                   pane never opened, capture never
+                                   ran, budget exhausted — and for six
+                                   releases it was indistinguishable
+                                   from the truth. detail_status is
+                                   stamped by the capture per meeting,
+                                   so the empty state can finally say
+                                   which case this is. */
                                 <div className="text-xs text-muted-foreground">
-                                  (No description on this invite.)
+                                  {(() => {
+                                    switch (m.detail_status) {
+                                      case "opened":
+                                      case "opened_empty":
+                                        return "No description on this invite (the capture opened it and found none).";
+                                      case "no_tile":
+                                        return "Not captured yet — the last capture couldn't locate this meeting on the calendar grid. It will retry on the next capture.";
+                                      case "budget":
+                                        return "Not captured yet — the last capture ran out of time before reaching this meeting. It will retry on the next capture.";
+                                      default:
+                                        return "No description captured yet — details fill in when the extension next captures this meeting.";
+                                    }
+                                  })()}
                                 </div>
                               )}
                             </div>
