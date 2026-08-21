@@ -2872,3 +2872,136 @@ test("a Join anchor inside a shadow root is found", async () => {
                "the Teams anchor in the shadow root was not found");
   assert.equal(out.joinFromAnchor, 1);
 });
+
+// ── the join URL, without assuming the button's shape ────────────────
+//
+// Three releases assumed a shape for the Join control and were wrong
+// three times: 1.10 assumed text (Teams renders a button), 1.15
+// assumed the button was an anchor, 1.16 assumed the anchor was
+// reachable through open shadow roots and same-origin frames. The
+// field answer never changed: no link.
+//
+// A join URL is a highly specific string, and if the meeting has one
+// it is SOMEWHERE in the markup the click produced. The markup scan
+// keeps the same safety rule the anchor scan used — it must have
+// appeared WITH this meeting — on a surface that does not care how
+// Outlook renders a button this quarter.
+
+function fakeDetailPageMarkup({ tiles, reveal }) {
+  const base = "Calendar grid baseline text that is already on screen.";
+  let text = "";
+  let markup = "";
+  const els = tiles.map((t) => ({
+    getAttribute: (n) => (n === "aria-label" ? t.label : null),
+    click() {
+      const r = reveal[t.subject] || {};
+      text = "\n" + (r.text || "");
+      markup = r.markup || "";
+    },
+  }));
+  return {
+    // No anchors anywhere, ever — the point of this fake.
+    documentElement: { get innerHTML() { return markup; } },
+    body: { get innerText() { return base + text; } },
+    querySelectorAll: (sel) => {
+      const s = String(sel);
+      if (s.includes("a[href]") || s.includes("iframe") || s === "*") return [];
+      return els;
+    },
+    dispatchEvent: () => { text = ""; markup = ""; return true; },
+  };
+}
+
+async function runMarkupDetailReader({ tiles, reveal, wanted }) {
+  const prevDoc = sandbox.document;
+  const prevKE = sandbox.KeyboardEvent;
+  const prevST = sandbox.setTimeout;
+  sandbox.document = fakeDetailPageMarkup({ tiles, reveal });
+  sandbox.KeyboardEvent = function () {};
+  sandbox.setTimeout = setTimeout;
+  try {
+    return await sandbox._readEventDetailsFunc(
+      wanted, JOIN_PATTERNS_FROM_SOURCE, 25, 90000);
+  } finally {
+    sandbox.document = prevDoc;
+    sandbox.KeyboardEvent = prevKE;
+    sandbox.setTimeout = prevST;
+  }
+}
+
+test("a Join BUTTON with the URL in an attribute still yields the link",
+     async () => {
+  const url = "https://teams.microsoft.com/l/meetup-join/19%3ameeting_ZZ%40thread.v2/0";
+  const out = await runMarkupDetailReader({
+    tiles: [{ subject: "Pulse", label: "Pulse, 9:30 AM to 9:45 AM" }],
+    reveal: {
+      "Pulse": {
+        text: "Join\nChat\nNo location added\nDaily status sync.",
+        // A button. No <a> in the document at all.
+        markup: `<button data-join-url="${url}">Join</button>`,
+      },
+    },
+    wanted: [{ subject: "Pulse", startIso: "2026-08-21T09:30:00" }],
+  });
+  const d = out.details[0];
+  assert.ok(d, "the pane produced no detail at all");
+  assert.equal(d.joinUrl, url,
+               "the URL was in the markup and was not recovered");
+  assert.equal(out.joinFromMarkup, 1);
+});
+
+test("a join URL escaped inside an inline JSON blob is recovered", async () => {
+  // The card is hydrated from JSON in the markup; the URL is
+  // HTML-escaped and percent-encoded, as it arrives in practice.
+  const out = await runMarkupDetailReader({
+    tiles: [{ subject: "Sync", label: "Sync, 1:00 PM to 1:30 PM" }],
+    reveal: {
+      "Sync": {
+        text: "Join\nProject sync.",
+        markup: '<script type="application/json">'
+          + '{"joinUrl":"https%3A%2F%2Facme.webex.com%2Fmeet%2Fjordan.poe'
+          + '?a=1&amp;b=2"}</script>',
+      },
+    },
+    wanted: [{ subject: "Sync", startIso: "2026-08-21T13:00:00" }],
+  });
+  const d = out.details[0];
+  assert.ok(d, "the pane produced no detail at all");
+  assert.match(d.joinUrl, /acme\.webex\.com\/meet\/jordan\.poe/);
+});
+
+test("a join URL already in the markup before the click is not attributed",
+     async () => {
+  // The previous meeting's Join button is still rendered. Attaching it
+  // here would send the user into the wrong call.
+  const stale = "https://teams.microsoft.com/l/meetup-join/19%3ameeting_STALE%40thread.v2/0";
+  const page = fakeDetailPageMarkup({
+    tiles: [{ subject: "Second", label: "Second, 11:00 AM to 11:30 AM" }],
+    reveal: { "Second": { text: "Some agenda text", markup: `<button data-join-url="${stale}">Join</button>` } },
+  });
+  // Present BEFORE the click too.
+  const origHtml = Object.getOwnPropertyDescriptor(
+    page.documentElement, "innerHTML").get;
+  Object.defineProperty(page.documentElement, "innerHTML", {
+    get() { return `<button data-join-url="${stale}">Join</button>` + origHtml.call(this); },
+  });
+
+  const prevDoc = sandbox.document;
+  const prevKE = sandbox.KeyboardEvent;
+  const prevST = sandbox.setTimeout;
+  sandbox.document = page;
+  sandbox.KeyboardEvent = function () {};
+  sandbox.setTimeout = setTimeout;
+  try {
+    const out = await sandbox._readEventDetailsFunc(
+      [{ subject: "Second", startIso: "2026-08-21T11:00:00" }],
+      JOIN_PATTERNS_FROM_SOURCE, 25, 90000);
+    const d = out.details[0];
+    if (d) assert.equal(d.joinUrl, "",
+                        "a pre-existing join URL was attributed");
+  } finally {
+    sandbox.document = prevDoc;
+    sandbox.KeyboardEvent = prevKE;
+    sandbox.setTimeout = prevST;
+  }
+});
