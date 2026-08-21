@@ -471,6 +471,14 @@ def events_from_structured(events: Iterable[Any],
             # deletes any field added after it was written. Same cap as
             # the store's, since this now precedes it.
             "body": str(item.get("body") or "").strip()[:8000],
+            # Why the click pass did or didn't get detail for this
+            # meeting ("opened" / "opened_empty" / "no_tile" /
+            # "budget" / ""). Carried so the UI can name the cause —
+            # and added HERE at the same time as everywhere else,
+            # because this constructor silently deleting late-added
+            # fields is the defect that hid invite bodies for six
+            # releases.
+            "detail_status": str(item.get("detail_status") or "")[:32],
             "source": SOURCE_EXTENSION,
         })
     if stats is not None:
@@ -698,6 +706,7 @@ class ExtensionCalendarService:
             # the store, and "the extension already trims it" stops
             # being true the moment anything else POSTs.
             "body": str(event.get("body") or "")[:8000],
+            "detail_status": str(event.get("detail_status") or "")[:32],
             "source": SOURCE_EXTENSION,
         }
 
@@ -721,6 +730,7 @@ class ExtensionCalendarService:
             # which reads as "" — the same value an event with no
             # description has — so an old store loads unchanged.
             "body": str(raw.get("body") or "")[:8000],
+            "detail_status": str(raw.get("detail_status") or "")[:32],
             "source": SOURCE_EXTENSION,
         }
 
