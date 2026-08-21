@@ -2185,15 +2185,101 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
       } catch (_) { return false; }
     };
 
-    // Every aria-label-bearing element, flat — the same surface the
-    // capture scan already trusts, no depth walk.
-    const labelled = () => Array.from(document.querySelectorAll("[aria-label]"));
+    // EVERY REACHABLE ROOT, NOT JUST `document`.
+    //
+    // FIELD SCREENSHOT 2026-08-21, v2.57.0. The captured "agenda" for a
+    // real meeting read, in full:
+    //
+    //     Join / Chat / Fri 8/21/2026 10:00 AM - 11:00 AM /
+    //     No location added / GG / <organizer> invited you.
+    //
+    // That is the detail pane's CHROME — its buttons, its date line,
+    // its footer. The invite's actual description was not in it, and
+    // neither was the Join URL. Both were present on screen.
+    //
+    // Outlook renders the invite body in its own same-origin IFRAME
+    // (the message-body frame), and renders parts of the card inside
+    // SHADOW ROOTS. `document.body.innerText` stops at both
+    // boundaries, and so does `document.querySelectorAll("a[href]")`.
+    // So the reader saw the frame around the content and never the
+    // content: a Teams pane yields no anchor (joinFromAnchor: 0 in
+    // every field diagnostic to date) and a Webex invite yields no
+    // pasted URL, because the URL is one frame deeper.
+    //
+    // `_calendarDomScanFunc` has always walked iframes and shadow
+    // roots — that is why the GRID scan works. The detail reader was
+    // the only DOM consumer here that did not, and it is the one whose
+    // whole job is reading the pane.
+    //
+    // Cross-origin frames throw on access; they are skipped, not
+    // fatal. Depth and count are bounded so a pathological page costs
+    // a fixed budget rather than the run.
+    const MAX_ROOTS = 400;
+    const collectRoots = () => {
+      const roots = [];
+      const seen = new Set();
+      const pushDoc = (doc, depth) => {
+        if (!doc || depth > 4 || roots.length >= MAX_ROOTS) return;
+        if (seen.has(doc)) return;
+        seen.add(doc);
+        roots.push(doc);
+        // Shadow roots hosted anywhere in this document.
+        let hosts = [];
+        try { hosts = Array.from(doc.querySelectorAll("*")); }
+        catch (_) { hosts = []; }
+        for (const el of hosts) {
+          if (roots.length >= MAX_ROOTS) break;
+          let sr = null;
+          try { sr = el.shadowRoot; } catch (_) { sr = null; }
+          if (sr && !seen.has(sr)) { seen.add(sr); roots.push(sr); }
+        }
+        // Same-origin frames, recursively. Cross-origin access throws.
+        let frames = [];
+        try { frames = Array.from(doc.querySelectorAll("iframe,frame")); }
+        catch (_) { frames = []; }
+        for (const f of frames) {
+          if (roots.length >= MAX_ROOTS) break;
+          let sub = null;
+          try { sub = f.contentDocument; } catch (_) { sub = null; }
+          if (sub) pushDoc(sub, depth + 1);
+        }
+      };
+      pushDoc(document, 0);
+      return roots;
+    };
+
+    const queryAll = (sel) => {
+      const out = [];
+      for (const root of collectRoots()) {
+        try {
+          const found = root.querySelectorAll(sel);
+          for (const el of found) out.push(el);
+        } catch (_) { /* detached root — skip */ }
+      }
+      return out;
+    };
+
+    // Every aria-label-bearing element, across every reachable root —
+    // the tile itself can sit inside a shadow root on newer OWA.
+    const labelled = () => queryAll("[aria-label]");
 
     const norm = (t) => String(t || "").replace(/\s+/g, " ").trim().toLowerCase();
 
+    // Text from every reachable root, so the invite body inside the
+    // message iframe counts as text this pane showed. Ordered
+    // outermost-first, which keeps the main document's line order
+    // intact for the diff below and appends frame content after it.
     const visibleText = () => {
-      try { return document.body ? (document.body.innerText || "") : ""; }
-      catch (_) { return ""; }
+      const parts = [];
+      for (const root of collectRoots()) {
+        try {
+          const host = root.body || root;
+          const t = host ? (host.innerText != null
+                            ? host.innerText : host.textContent) : "";
+          if (t) parts.push(t);
+        } catch (_) { /* skip */ }
+      }
+      return parts.join("\n");
     };
 
     const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
@@ -2221,7 +2307,7 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
     const anchorUrls = () => {
       const out = [];
       try {
-        for (const a of document.querySelectorAll("a[href]")) {
+        for (const a of queryAll("a[href]")) {
           const h = a.getAttribute("href") || "";
           if (h.startsWith("http")) out.push(h);
         }
