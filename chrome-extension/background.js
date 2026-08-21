@@ -2165,7 +2165,12 @@ const DETAIL_WINDOW_HOURS = 72;
 async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) {
   const started = Date.now();
   const out = { details: [], opened: 0, matchedElement: 0, skipped: 0,
-                grew: 0, joinFromAnchor: 0, error: null };
+                grew: 0, joinFromAnchor: 0,
+                // Per-event outcome, so the app can tell the user WHY a
+                // specific meeting has no detail instead of a flat "(No
+                // description on this invite.)" for every cause.
+                statuses: [],
+                error: null };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   try {
@@ -2258,8 +2263,13 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
     // honest zero, which the 24-button lie was not.
 
     for (const want of wanted || []) {
-      if (out.details.length >= maxEvents) { out.skipped++; continue; }
-      if (Date.now() - started > budgetMs) { out.skipped++; continue; }
+      if (out.details.length >= maxEvents
+          || Date.now() - started > budgetMs) {
+        out.skipped++;
+        out.statuses.push({ subject: want.subject, startIso: want.startIso,
+                            status: "budget" });
+        continue;
+      }
 
       const target = norm(want.subject);
       if (!target) { out.skipped++; continue; }
@@ -2274,7 +2284,32 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
         if (!lab.startsWith(target)) continue;
         if (lab.length > best) { best = lab.length; el = cand; }
       }
-      if (!el) { out.skipped++; continue; }
+      if (!el) {
+        // A stuck pane from the previous event hides the grid, and
+        // then EVERY later tile "does not exist" — the field run's
+        // signature was 11 opens followed by 12 consecutive misses.
+        // One Escape + settle + re-scan recovers the cascade case
+        // without costing the genuinely-absent-tile case more than
+        // half a second.
+        try {
+          document.dispatchEvent(new KeyboardEvent("keydown", {
+            key: "Escape", code: "Escape", keyCode: 27, bubbles: true,
+          }));
+        } catch (_) { /* ignore */ }
+        await sleep(400);
+        best = -1;
+        for (const cand of labelled()) {
+          const lab = norm(cand.getAttribute("aria-label"));
+          if (!lab.startsWith(target)) continue;
+          if (lab.length > best) { best = lab.length; el = cand; }
+        }
+      }
+      if (!el) {
+        out.skipped++;
+        out.statuses.push({ subject: want.subject, startIso: want.startIso,
+                            status: "no_tile" });
+        continue;
+      }
       out.matchedElement++;
 
       const before = visibleText();
@@ -2464,6 +2499,14 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
             body,
             joinUrl,
           });
+          out.statuses.push({ subject: want.subject, startIso: want.startIso,
+                              status: "opened" });
+        } else {
+          // The pane rendered and genuinely offered none of the three
+          // fields — an invite with no description and no visible
+          // detail. Distinct from every failure mode.
+          out.statuses.push({ subject: want.subject, startIso: want.startIso,
+                              status: "opened_empty" });
         }
       }
 
@@ -2929,7 +2972,7 @@ async function settleAndCollectCalendar(tabId, label) {
 // captured bodies are harvested per-week too, and running it first
 // means mechanism 2 only pays for what mechanism 1 could not fill.
 async function collectWeekDetail(tabId, candidates, capturedBodies, diag, into,
-                                 harvest) {
+                                 harvest, statusInto) {
   // What this week's tiles parse to. A separate extraction from the
   // final one, on this week's candidates only, so the subjects and
   // start times handed to the clicker correspond to tiles that are
@@ -2955,6 +2998,9 @@ async function collectWeekDetail(tabId, candidates, capturedBodies, diag, into,
   // ── Mechanism 2: the rendered event ───────────────────────────────
   try {
     const cutoff = Date.now() + DETAIL_WINDOW_HOURS * 3600 * 1000;
+    // Ended meetings get a short grace (still useful minutes after a
+    // call), then stop competing for clicks entirely.
+    const floor = Date.now() - 4 * 3600 * 1000;
     const needing = weekEvents.filter((e) => {
       const already = into.get(detailKey(e.subject, e.start));
       if (already && (already.attendees.length || already.body || already.joinUrl)) {
@@ -2964,8 +3010,22 @@ async function collectWeekDetail(tabId, candidates, capturedBodies, diag, into,
       // answered — no reason to open an event we can already join.
       if ((e.attendees && e.attendees.length) || e.body || e.join_url) return false;
       const t = Date.parse(e.start);
+      const tEnd = Date.parse(e.end);
+      // FIELD ARITHMETIC 2026-08-20 22:07: 23 attempted, 11 opened,
+      // then 12 consecutive misses — and the user's next-morning
+      // meeting was among the missed. The 72h window had an upper
+      // bound only, so the whole PAST week inside the current view
+      // ("needing" detail nobody would ever read) queued ahead of
+      // tomorrow's meetings and burned the opens. Upcoming meetings
+      // are the product; finished ones are an archive.
+      if (Number.isFinite(tEnd) && tEnd < floor) return false;
       return Number.isFinite(t) && t <= cutoff;
     });
+    // Soonest first, for the same reason: whatever budget or breakage
+    // cuts the run short must cut it at the meetings that matter
+    // least, and the meeting the user will expand next is by
+    // definition the soonest one.
+    needing.sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
     diag.domDetailAttempted += needing.length;
     if (!needing.length) return;
 
@@ -2985,6 +3045,16 @@ async function collectWeekDetail(tabId, candidates, capturedBodies, diag, into,
     diag.domDetailOpened += got.opened || 0;
     diag.domDetailGrew += got.grew || 0;
     diag.joinFromAnchor += got.joinFromAnchor || 0;
+
+    // Record each event's outcome into the SHARED map so the final
+    // merge (which runs on the final extraction, not these local
+    // weekEvents) can stamp the POSTed events. An earlier draft
+    // stamped weekEvents — a throwaway local — and the statuses would
+    // have evaporated before the payload was built.
+    for (const st of got.statuses || []) {
+      const k = detailKey(st.subject, st.startIso);
+      if (k && !statusInto.has(k)) statusInto.set(k, st.status);
+    }
     diag.domDetailSkipped += got.skipped || 0;
     diag.domDetailNoTile += got.matchedElement != null
       ? Math.max(0, (needing.length) - (got.matchedElement || 0)) : 0;
@@ -3088,6 +3158,10 @@ async function captureCalendarTab() {
   // the relevant week was still rendered. Folded into the final
   // extraction below.
   const detailByKey = new Map();
+  // detailKey -> "opened" | "opened_empty" | "no_tile" | "budget".
+  // Stamped onto the FINAL events below so the app can tell the user
+  // why a given meeting has no detail.
+  const detailStatusByKey = new Map();
   let fallbackText = "";
   // Assigned inside the try (the DOM detail pass needs the live tab).
   // Left null if the try threw before extraction, which the guard
@@ -3163,7 +3237,7 @@ async function captureCalendarTab() {
     // tiles are only on screen now — this is the bug that made the
     // whole screen-reading mechanism a no-op in v2.45.0.
     await collectWeekDetail(tabId, week1.candidates, capturedBodies, diag,
-                            detailByKey, harvest);
+                            detailByKey, harvest, detailStatusByKey);
 
     const navOk = await goToNextCalendarWeek(tabId);
     diag.nextWeekNavOk = navOk;
@@ -3175,7 +3249,7 @@ async function captureCalendarTab() {
       if (!week2.stabilized) diag.anyWeekUnstable = true;
       await harvest("week2");
       await collectWeekDetail(tabId, week2.candidates, capturedBodies, diag,
-                              detailByKey, harvest);
+                              detailByKey, harvest, detailStatusByKey);
     }
 
     // Final extraction over BOTH weeks, then fold in the detail that
@@ -3193,6 +3267,13 @@ async function captureCalendarTab() {
     extraction.stats.withBody = merged.stats.gainedBody;
     extraction.stats.withJoinUrl =
       (extraction.stats.withJoinUrl || 0) + merged.stats.gainedJoinUrl;
+    // Stamp each POSTed event with its click-pass outcome, so the app
+    // can say "the capture could not find this meeting's tile" instead
+    // of a cause-blind "(No description on this invite.)".
+    for (const ev of extraction.events) {
+      const st = detailStatusByKey.get(detailKey(ev.subject, ev.start));
+      if (st) ev.detail_status = st;
+    }
   } finally {
     try { await chrome.tabs.remove(tabId); } catch (_) { /* ignore */ }
     // Unregistered whatever happened: this must not stay installed on

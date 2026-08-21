@@ -1237,3 +1237,20 @@ def test_the_invite_body_survives_the_import_door(tmp_path: Path):
     svc.replace_all(events, now=datetime(2026, 8, 21, 8, 0))
     back = ExtensionCalendarService(tmp_path).get_events()
     assert back[0]["body"] == "Agenda: finalize the SOW, then next steps."
+
+
+def test_detail_status_survives_the_import_door_and_store(tmp_path: Path):
+    """Added in the same commit as the field itself — the constructor
+    that silently deleted late-added fields hid invite bodies for six
+    releases, and detail_status must not repeat that history."""
+    events = events_from_structured([{
+        "subject": "Follow up session",
+        "start": "2026-08-21T10:00:00",
+        "end": "2026-08-21T11:00:00",
+        "detail_status": "no_tile",
+    }])
+    assert events[0]["detail_status"] == "no_tile"
+    svc = ExtensionCalendarService(tmp_path)
+    svc.replace_all(events, now=datetime(2026, 8, 21, 8, 0))
+    back = ExtensionCalendarService(tmp_path).get_events()
+    assert back[0]["detail_status"] == "no_tile"

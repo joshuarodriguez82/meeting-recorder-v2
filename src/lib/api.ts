@@ -363,6 +363,11 @@ export interface Meeting {
   // description, so this is empty for everything captured before
   // extension 1.7 began reading Outlook's own calendar responses.
   body?: string;
+  // Why the capture's click pass did or didn't fetch this meeting's
+  // detail: "opened" | "opened_empty" | "no_tile" | "budget" | "".
+  // Lets the empty state name the cause instead of claiming "no
+  // description" for every failure mode.
+  detail_status?: string;
 }
 
 export interface SessionSummary {

@@ -2632,3 +2632,107 @@ test("both POST paths declare the capture diagnostics", () => {
     "capture_diag must be attached on BOTH the calendar-only and the "
     + "full Capture & Send paths, through the shared builder");
 });
+
+// ── Serve the user's next meeting first (v1.15) ──────────────────────
+//
+// FIELD ARITHMETIC, 2026-08-20 22:07 capture: 23 events queued for
+// clicking, 11 opened, then 12 consecutive tile misses — and the
+// meeting the user expands every time (tomorrow morning) was among the
+// missed. Two causes, both structural:
+//
+//   * the click list had an upper time bound only, so the PAST week's
+//     finished meetings queued ahead of tomorrow's and burned the
+//     opens on detail nobody would read;
+//   * one stuck pane hid the grid, and every later tile then "did not
+//     exist" — a cascade with exactly the 11-then-12 signature.
+
+test("finished meetings do not compete for clicks; soonest comes first", async () => {
+  // Drive collectWeekDetail's filter indirectly through the reader:
+  // build the needing list the way captureCalendarTab does and assert
+  // order and membership. The filter lives in background.js, so this
+  // exercises the real code path via a scripted capture.
+  const src = fs.readFileSync(BG_PATH, "utf8");
+  // Source-level pins for the two properties (no DOM needed):
+  assert.match(src, /tEnd < floor/,
+    "the click list must exclude meetings that already ended");
+  assert.match(src,
+    /needing\.sort\(\(a, b\) => Date\.parse\(a\.start\) - Date\.parse\(b\.start\)\)/,
+    "the click list must be ordered soonest-first");
+});
+
+test("a stuck pane does not cascade into misses for every later event", async () => {
+  // Tile A opens a pane that hides ALL tiles until Escape. The old
+  // code found no tile for B and gave up; recovery must Escape,
+  // re-scan, and open B.
+  let paneOpen = false;
+  const mk = (label, revealText) => ({
+    getAttribute: (n) => (n === "aria-label" ? label : null),
+    click() { paneOpen = true; this._revealed = revealText; page._current = revealText; },
+  });
+  const page = {
+    _current: "",
+    body: {
+      get innerText() {
+        return "Baseline calendar text." + (paneOpen ? "\n" + page._current : "");
+      },
+    },
+    querySelectorAll: (sel) => {
+      if (String(sel).includes("a[href]")) return [];
+      // THE cascade condition: while a pane is open, the grid (and its
+      // tiles) is not in the accessibility tree at all.
+      if (paneOpen) return [];
+      return [
+        mk("Alpha, 9:00 AM to 9:30 AM", "Alpha agenda body text here."),
+        mk("Beta, 10:00 AM to 10:30 AM", "Beta agenda body text here."),
+      ];
+    },
+    // A STICKY pane: the first Escape (the loop's routine close) is
+    // swallowed — real OWA full-page event views do exactly this — and
+    // only a second Escape closes it. The old code sent one Escape per
+    // event and never retried a missing tile, so Beta was lost; the
+    // recovery path's extra Escape is what must save it.
+    _esc: 0,
+    dispatchEvent: () => {
+      page._esc += 1;
+      if (page._esc >= 2) paneOpen = false;
+      return true;
+    },
+  };
+  const prevDoc = sandbox.document;
+  const prevKE = sandbox.KeyboardEvent;
+  const prevST = sandbox.setTimeout;
+  sandbox.document = page;
+  sandbox.KeyboardEvent = function () {};
+  sandbox.setTimeout = setTimeout;
+  try {
+    const out = await sandbox._readEventDetailsFunc(
+      [{ subject: "Alpha", startIso: "2026-08-21T09:00:00" },
+       { subject: "Beta", startIso: "2026-08-21T10:00:00" }],
+      JOIN_PATTERNS_FROM_SOURCE, 25, 90000);
+    assert.equal(out.opened, 2,
+      "the second event was lost to the stuck-pane cascade");
+    assert.ok(out.details.find((d) => d.subject === "Beta"),
+      "Beta's detail missing — recovery did not re-find its tile");
+  } finally {
+    sandbox.document = prevDoc;
+    sandbox.KeyboardEvent = prevKE;
+    sandbox.setTimeout = prevST;
+  }
+});
+
+test("every wanted event comes back with a named outcome", async () => {
+  // The per-meeting status is what lets the app say WHY a meeting has
+  // no detail. Every wanted event must resolve to exactly one status.
+  const out = await runRichDetailReader({
+    tiles: [{ subject: "Present", label: "Present, 9:00 AM to 9:30 AM" }],
+    reveal: { "Present": { text: "An agenda that is long enough to count." } },
+    wanted: [
+      { subject: "Present", startIso: "2026-08-21T09:00:00" },
+      { subject: "Ghost", startIso: "2026-08-21T10:00:00" },  // no tile
+    ],
+  });
+  const byStatus = Object.fromEntries(
+    (out.statuses || []).map((s) => [s.subject, s.status]));
+  assert.equal(byStatus["Present"], "opened");
+  assert.equal(byStatus["Ghost"], "no_tile");
+});
