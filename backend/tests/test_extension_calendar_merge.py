@@ -1176,3 +1176,36 @@ def test_the_scrub_runs_once_and_spares_later_names(tmp_path: Path):
     assert back[0]["attendees"] == ["Ana Doe", "Pat Roe"], (
         "post-scrub response-derived names were wiped — the scrub "
         "must be one-time, not ongoing")
+
+
+def test_the_scrub_runs_at_read_time_with_no_capture_at_all(tmp_path: Path):
+    """THE field complaint about v2.51.0: the fix shipped, the user
+    opened the app, and the same 24-button attendee wall was still
+    there — because the scrub only ran on the next extension capture,
+    which had not happened (and never would with Chrome closed).
+
+    Reading the store must clean it. No POST, no capture, no browser.
+    """
+    svc = ExtensionCalendarService(tmp_path)
+    now = datetime(2026, 8, 20, 8, 0)
+    start = now + timedelta(hours=2)
+    svc.replace_all([_enriched(
+        "Follow up session", start,
+        attendees=["Skip to main content", "App launcher",
+                   "Chat with Copilot", "k.noh@zorg.example"],
+    )], now=now)
+    # Store as a v2.50.0 install left it: junk present, no flag.
+    store_path = tmp_path / "extension_calendar.json"
+    data = json.loads(store_path.read_text(encoding="utf-8"))
+    data.pop("attendee_scrub_v1", None)
+    store_path.write_text(json.dumps(data), encoding="utf-8")
+
+    # The app starts and the Record tab reads. That alone must clean.
+    back = ExtensionCalendarService(tmp_path).get_events()
+    assert back[0]["attendees"] == ["k.noh@zorg.example"]
+
+    # And it persisted — the next reader finds the flag set and the
+    # junk gone, not a scrub re-run.
+    data_after = json.loads(store_path.read_text(encoding="utf-8"))
+    assert data_after.get("attendee_scrub_v1") is True
+    assert data_after["events"][0]["attendees"] == ["k.noh@zorg.example"]

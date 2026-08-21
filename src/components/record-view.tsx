@@ -2040,16 +2040,17 @@ export function RecordView({
                                   ) : attendees.length === 0 ? (
                                     <div className="text-xs text-muted-foreground">None listed.</div>
                                   ) : (
-                                    <div className="flex flex-wrap gap-1 max-h-28 overflow-auto">
-                                      {attendees.map((a, ai) => (
-                                        <span
-                                          key={ai}
-                                          className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-foreground/80"
-                                        >
-                                          {a}
-                                        </span>
-                                      ))}
-                                    </div>
+                                    /* Collapsed past six chips (user
+                                       request 2026-08-21): a large
+                                       invite rendered a wall of chips
+                                       that pushed every other meeting
+                                       off screen. Six keeps the common
+                                       small-meeting case fully visible;
+                                       anything more sits behind an
+                                       explicit "show all" that names
+                                       the hidden count, so nothing is
+                                       silently truncated. */
+                                    <AttendeeChips attendees={attendees} />
                                   )}
                                 </div>
                               );
@@ -2411,6 +2412,47 @@ function ReadinessRow({
  * or a tie) — in that case the user types the client manually like
  * they always have.
  */
+// Attendee chips, collapsed past six. Its own component because the
+// expand state must be PER MEETING and survive re-renders of the list
+// — a shared useState in the parent would open every meeting's list at
+// once, and an inline IIFE cannot hold state at all.
+function AttendeeChips({ attendees }: { attendees: string[] }) {
+  const LIMIT = 6;
+  const [showAll, setShowAll] = useState(false);
+  const shown = showAll ? attendees : attendees.slice(0, LIMIT);
+  const hidden = attendees.length - shown.length;
+  return (
+    <div className="flex flex-wrap gap-1 max-h-40 overflow-auto items-center">
+      {shown.map((a, ai) => (
+        <span
+          key={ai}
+          className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-foreground/80"
+        >
+          {a}
+        </span>
+      ))}
+      {hidden > 0 && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); setShowAll(true); }}
+          className="rounded px-1.5 py-0.5 text-[11px] text-primary hover:underline"
+        >
+          +{hidden} more
+        </button>
+      )}
+      {showAll && attendees.length > LIMIT && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); setShowAll(false); }}
+          className="rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:underline"
+        >
+          show fewer
+        </button>
+      )}
+    </div>
+  );
+}
+
 function suggestClientFromAttendees(
   meetingAttendees: string[],
   allSessions: SessionSummary[],
