@@ -371,6 +371,37 @@ export function RecordView({
     last_import_fallback_reason?: string | null;
   } | null>(null);
 
+  // WHICH EXTENSION ACTUALLY CAPTURED THIS.
+  //
+  // Field exchange 2026-08-21: a release whose whole point was a
+  // capture-side fix was installed, the panel looked identical, and
+  // there was no way — for the user OR for diagnosis — to tell whether
+  // the extension had been reloaded or the fix simply had not worked.
+  // Those two states are completely different problems and looked
+  // exactly the same, which is this project's oldest defect wearing
+  // yet another hat.
+  //
+  // The backend has always known both numbers (/extension/info). They
+  // just were not shown anywhere near the meetings they explain.
+  const [extInfo, setExtInfo] = useState<{
+    bundled_version: string | null;
+    last_seen_version: string | null;
+    status: string;
+  } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const info = await api.getExtensionInfo();
+        if (!cancelled) setExtInfo(info);
+      } catch {
+        if (!cancelled) setExtInfo(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [meetings.length]);
+
   // Load initial data. Calendar data is owned by the parent (page.tsx)
   // so it survives nav switches; we only load local things here.
   useEffect(() => {
@@ -1804,6 +1835,22 @@ export function RecordView({
               hour: "2-digit",
               minute: "2-digit",
             })}
+          </div>
+        )}
+        {/* A stale extension explains missing detail exactly, so say
+            so here rather than letting it look like the capture is
+            broken. */}
+        {extInfo?.status === "update_available" && (
+          <div className="mx-6 mb-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+            <span className="font-medium">
+              Chrome extension {extInfo.last_seen_version ?? "?"} is what last
+              captured these meetings — this app ships {extInfo.bundled_version}.
+            </span>{" "}
+            Join links, attendees and invite descriptions come from the
+            extension, so they stay as they were until you update it:
+            Settings → Templates &amp; Integrations → Install / Update
+            extension files, then Reload it in chrome://extensions and run
+            one Capture &amp; Send.
           </div>
         )}
         <CardContent>
