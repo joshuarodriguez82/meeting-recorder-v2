@@ -1209,3 +1209,31 @@ def test_the_scrub_runs_at_read_time_with_no_capture_at_all(tmp_path: Path):
     data_after = json.loads(store_path.read_text(encoding="utf-8"))
     assert data_after.get("attendee_scrub_v1") is True
     assert data_after["events"][0]["attendees"] == ["k.noh@zorg.example"]
+
+
+def test_the_invite_body_survives_the_import_door(tmp_path: Path):
+    """THE root cause of six releases of '(No description on this
+    invite.)'. The extension sent bodies since 1.7, the store
+    serialized them since v2.43.0, the UI rendered them since v2.43.0 —
+    and `events_from_structured`, which every extension POST passes
+    through on its way to the store, silently dropped the field. This
+    drives the REAL import path end to end: structured POST shape in,
+    stored event with the body out.
+    """
+    events = events_from_structured([{
+        "subject": "Quarterly review",
+        "start": "2026-08-21T10:00:00",
+        "end": "2026-08-21T11:00:00",
+        "organizer": "Kim Noh",
+        "attendees": ["Ana Doe", "a.doe@globex.example"],
+        "join_url": "https://teams.microsoft.com/l/meetup-join/EXAMPLE",
+        "body": "Agenda: finalize the SOW, then next steps.",
+    }])
+    assert events[0]["body"] == "Agenda: finalize the SOW, then next steps."
+    # ...and the fields around it still make the trip too.
+    assert events[0]["attendees"] == ["Ana Doe", "a.doe@globex.example"]
+
+    svc = ExtensionCalendarService(tmp_path)
+    svc.replace_all(events, now=datetime(2026, 8, 21, 8, 0))
+    back = ExtensionCalendarService(tmp_path).get_events()
+    assert back[0]["body"] == "Agenda: finalize the SOW, then next steps."
