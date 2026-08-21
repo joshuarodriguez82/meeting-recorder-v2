@@ -6191,14 +6191,20 @@ async def engagement_overlay_put(client: str, req: EngagementOverlayRequest):
 class PortalBindRequest(BaseModel):
     client: str
     project: str
-    customer_id: str
+    # THE way to bind: the connection block pasted verbatim as the
+    # portal hands it over ({"portal","api","opportunity","customerId",
+    # "editToken"}). It carries the edit token, so it gets the same
+    # never-echoed treatment the token itself does.
+    connection: str = ""
+    # Manual fields, used only when no connection block is pasted.
+    customer_id: str = ""
     opportunity_name: str = ""
     parent_name: str = ""
     # The edit token. Accepted in this request body, stored in the OS
     # keychain, and NEVER echoed back: no response, log line or error
     # from this API carries it. Paste-once — the Cognito picker flow
     # can replace this later without changing the wire format.
-    edit_token: str
+    edit_token: str = ""
 
 
 class PortalScopeRequest(BaseModel):
@@ -6221,14 +6227,30 @@ async def portal_bind(req: PortalBindRequest):
     if not svc.portal_push_svc:
         raise HTTPException(status_code=503, detail="portal service not ready")
     try:
-        binding = await asyncio.to_thread(
-            svc.portal_push_svc.bind,
-            (req.client or "").strip().lower(),
-            (req.project or "").strip().lower(),
+        fields = dict(
             customer_id=req.customer_id,
             opportunity_name=req.opportunity_name,
             parent_name=req.parent_name,
             edit_token=req.edit_token,
+        )
+        if (req.connection or "").strip():
+            from services.portal_push_service import parse_connection
+            conn = parse_connection(req.connection)
+            fields.update(
+                customer_id=conn["customer_id"],
+                edit_token=conn["edit_token"],
+                api_base=conn["api_base"],
+                portal_url=conn["portal_url"],
+                # The block's opportunity name wins unless the user
+                # typed one alongside the paste.
+                opportunity_name=(req.opportunity_name.strip()
+                                  or conn["opportunity_name"]),
+            )
+        binding = await asyncio.to_thread(
+            svc.portal_push_svc.bind,
+            (req.client or "").strip().lower(),
+            (req.project or "").strip().lower(),
+            **fields,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
