@@ -869,7 +869,34 @@ class ExtensionCalendarService:
             except CloudFileNotReadyError:
                 raw_before = {}
             prior_kept = self._prior_kept_from_raw(raw_before, lo, hi)
-
+            # ONE-TIME SCRUB of attendees produced by the deleted
+            # name-shape scanner (extensions 1.11–1.12).
+            #
+            # That scanner harvested any 2-4-word title-case label on
+            # the page as a person, and the field result was stored
+            # attendee lists reading "Skip to main content", "App
+            # launcher", "Chat with Copilot" — and the user's own
+            # account button. The v2.50.0 enrichment ratchet, doing its
+            # job, would preserve that junk FOREVER: every bare capture
+            # inherits it.
+            #
+            # Junk and genuine display names are indistinguishable in
+            # the store (both are just strings without "@"), so the
+            # scrub keeps only address-shaped entries and drops the
+            # rest — accepting that real response-derived names are
+            # dropped with them, because they refill on the next
+            # capture from Outlook's own detail responses (field
+            # diagnostics: 19 of 23 meetings), while the junk, with its
+            # producer deleted, would never be replaced by anything.
+            #
+            # Flag-gated so it runs once: names stored AFTER the scrub
+            # come only from response data and must not be wiped.
+            if not (raw_before or {}).get("attendee_scrub_v1"):
+                for pm in prior_kept:
+                    kept_addrs = [a for a in (pm.get("attendees") or [])
+                                  if "@" in str(a)]
+                    if len(kept_addrs) != len(pm.get("attendees") or []):
+                        pm["attendees"] = kept_addrs
             # ENRICHMENT RATCHETS UP, NEVER DOWN.
             #
             # The grid labels a capture starts from never carry
@@ -999,6 +1026,7 @@ class ExtensionCalendarService:
             # visible wrong value; deleting it is invisible, and this
             # module has now paid for that difference twice.
             payload = dict(raw_before or {})
+            payload["attendee_scrub_v1"] = True
             payload.update({
                 "updated_at": ref.isoformat(),
                 "events": [self._serialize(e) for e in kept],
