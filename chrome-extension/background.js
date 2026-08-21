@@ -654,6 +654,9 @@ async function captureAndSend(backendUrl, token, opts = {}) {
     } else if (calendarCapture.fallbackText) {
       payload.calendar_text = calendarCapture.fallbackText;
     }
+    // The path the user actually presses when investigating. See
+    // buildCaptureDiag for why its absence here cost two rounds.
+    payload.capture_diag = buildCaptureDiag(calendarCapture);
     counts.calendar = calendarCapture.events.length;
     console.log(
       `[ext] Calendar: ${calendarCapture.events.length} event(s) ` +
@@ -2378,10 +2381,32 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
         // found the pasted Webex links); only the BODY is held to a
         // genuine diff, because the body is the one field where "the
         // whole page" is worse than nothing.
-        const addedFrom = before.length > 40 ? fresh.split(before.slice(0, 40))[0] : "";
-        let added = "";
-        if (after.startsWith(before)) added = after.slice(beforeLen);
-        else if (addedFrom && addedFrom.length > 40) added = addedFrom;
+        // ORDER-INDEPENDENT DIFF. The previous version assumed the
+        // pane's text lands AFTER the existing page text in document
+        // order (a prefix match, with a split heuristic behind it).
+        // Nothing guarantees that: where Outlook's event panel sits in
+        // the DOM relative to the grid is exactly the kind of fact
+        // this project cannot observe and keeps guessing wrong. If the
+        // panel renders BEFORE the grid, both heuristics produce an
+        // EMPTY diff for every event — no body, no addresses, no
+        // pasted Webex URL — while looking identical to "the pane had
+        // nothing". An extraction pipeline must not have a failure
+        // mode that depends on element order.
+        //
+        // Lines in `after` minus (counted) lines in `before`: immune
+        // to where the pane inserts, and duplicated lines survive in
+        // the right quantity. Order within the pane is preserved.
+        const beforeCounts = new Map();
+        for (const ln of before.split("\n")) {
+          beforeCounts.set(ln, (beforeCounts.get(ln) || 0) + 1);
+        }
+        const newLines = [];
+        for (const ln of after.split("\n")) {
+          const c = beforeCounts.get(ln) || 0;
+          if (c > 0) beforeCounts.set(ln, c - 1);
+          else newLines.push(ln);
+        }
+        const added = newLines.join("\n").trim();
         // NOTHING is scanned page-wide any more. The whole-page email
         // scan attributed another meeting's organiser — whose address
         // is literally rendered in that meeting's grid tile label —
@@ -3207,6 +3232,44 @@ function _todayIsoLocal() {
 // updates only the Record tab's calendar store, never spends an LLM
 // call on every tick, and never overwrites today's saved greeting /
 // top_priority / needs_response with a partial calendar-only parse.
+// Counts and booleans ONLY — no URL, subject, attendee or body text.
+// ONE builder for BOTH POST paths.
+//
+// Field incident 2026-08-20/21, twice over: capture_diag was attached
+// only on the calendar-only alarm path, so every capture the user
+// triggered THEMSELVES — the popup's Capture & Send, the button they
+// press precisely when investigating a problem — reported nothing.
+// Three consecutive diagnostic zips carried a stale alarm-path diag
+// while the runs under investigation were the invisible manual ones.
+// The path a user reaches for when things are broken is the LAST path
+// that may go unreported.
+function buildCaptureDiag(capture) {
+  const d = capture && capture.diag;
+  return {
+    recorderRegistered: !!d?.recorderRegistered,
+    recorderInstalled: !!d?.recorderInstalled,
+    recorderInjectedLate: !!d?.recorderInjectedLate,
+    recorderReloaded: !!d?.recorderReloaded,
+    responsesSeen: d?.responsesSeen || 0,
+    responsesMatched: d?.responsesMatched || 0,
+    responsesDropped: d?.responsesDropped || 0,
+    responsesNotMeetingShaped: d?.responsesNotMeetingShaped || 0,
+    detailMatched: d?.detailMatched || 0,
+    detailGainedAttendees: d?.detailGainedAttendees || 0,
+    detailGainedBody: d?.detailGainedBody || 0,
+    detailGainedJoinUrl: d?.detailGainedJoinUrl || 0,
+    domDetailAttempted: d?.domDetailAttempted || 0,
+    domDetailOpened: d?.domDetailOpened || 0,
+    domDetailGrew: d?.domDetailGrew || 0,
+    domDetailSkipped: d?.domDetailSkipped || 0,
+    domDetailNoTile: d?.domDetailNoTile || 0,
+    postClickBodies: d?.postClickBodies || 0,
+    postClickImproved: d?.postClickImproved || 0,
+    joinFromAnchor: d?.joinFromAnchor || 0,
+    eventsExtracted: (capture && capture.events && capture.events.length) || 0,
+  };
+}
+
 async function captureCalendarOnly(backendUrl, token) {
   if (!backendUrl || !token) {
     // Every OTHER return path in this function already persists
@@ -3244,40 +3307,7 @@ async function captureCalendarOnly(backendUrl, token) {
   // which case this is" and then shipping a bundle that could not say
   // is the same defect as the rest of this saga, committed one layer
   // out.
-  payload.capture_diag = {
-    recorderRegistered: !!capture.diag?.recorderRegistered,
-    recorderInstalled: !!capture.diag?.recorderInstalled,
-    recorderInjectedLate: !!capture.diag?.recorderInjectedLate,
-    recorderReloaded: !!capture.diag?.recorderReloaded,
-    responsesSeen: capture.diag?.responsesSeen || 0,
-    responsesMatched: capture.diag?.responsesMatched || 0,
-    responsesDropped: capture.diag?.responsesDropped || 0,
-    responsesNotMeetingShaped: capture.diag?.responsesNotMeetingShaped || 0,
-    detailMatched: capture.diag?.detailMatched || 0,
-    detailGainedAttendees: capture.diag?.detailGainedAttendees || 0,
-    detailGainedBody: capture.diag?.detailGainedBody || 0,
-    detailGainedJoinUrl: capture.diag?.detailGainedJoinUrl || 0,
-    // Mechanism 2 — reading the rendered event. Reported separately
-    // from mechanism 1 so a bug report says WHICH one worked, and so
-    // "both were tried and both failed" is distinguishable from "only
-    // one ran".
-    domDetailAttempted: capture.diag?.domDetailAttempted || 0,
-    domDetailOpened: capture.diag?.domDetailOpened || 0,
-    domDetailGrew: capture.diag?.domDetailGrew || 0,
-    domDetailSkipped: capture.diag?.domDetailSkipped || 0,
-    // How many events wanted detail but had no tile on screen to
-    // click. Non-zero here means the clicker is looking at the wrong
-    // view — the exact v2.45.0 failure, which was invisible because
-    // every mechanism-2 failure reported the same way.
-    domDetailNoTile: capture.diag?.domDetailNoTile || 0,
-    // Mechanism 3 and the two extraction widenings, reported
-    // separately so the next bug report says WHICH source produced the
-    // detail rather than only that some did.
-    postClickBodies: capture.diag?.postClickBodies || 0,
-    postClickImproved: capture.diag?.postClickImproved || 0,
-    joinFromAnchor: capture.diag?.joinFromAnchor || 0,
-    eventsExtracted: capture.events.length,
-  };
+  payload.capture_diag = buildCaptureDiag(capture);
   if (capture.events.length > 0) {
     payload.calendar_events = capture.events;
   } else if (capture.fallbackText) {

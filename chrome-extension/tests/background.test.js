@@ -2554,3 +2554,81 @@ test("a previous pane's attendees do not bleed into the next meeting", async () 
     sandbox.setTimeout = prevST;
   }
 });
+
+// ── The diff must not care where the pane renders (v1.14) ────────────
+//
+// Every fake page in this suite APPENDED the pane's text to the body,
+// so the old prefix-match diff always worked here — and nothing
+// guaranteed it worked on real Outlook, where the event panel's
+// position in the DOM relative to the grid is unknown. If the panel
+// renders BEFORE the grid, the prefix diff yields "" for every event:
+// no body, no addresses, no pasted URL, indistinguishable from "the
+// pane had nothing".
+
+async function runPositionalPage(position) {
+  // position: where the pane's text lands in body.innerText —
+  // "append", "prepend", or "middle".
+  let open = false;
+  const base1 = "Calendar grid first half with meetings and labels.";
+  const base2 = "Calendar grid second half with more meetings.";
+  const pane = "Invite body agenda text.\nJoin here https://globex.webex.com/globex/j.php?MTID=EXAMPLE\nAlso invited: a.doe@globex.example";
+  const page = {
+    body: {
+      get innerText() {
+        if (!open) return base1 + "\n" + base2;
+        if (position === "append") return base1 + "\n" + base2 + "\n" + pane;
+        if (position === "prepend") return pane + "\n" + base1 + "\n" + base2;
+        return base1 + "\n" + pane + "\n" + base2;
+      },
+    },
+    querySelectorAll: (sel) => (String(sel).includes("a[href]") ? [] : [{
+      getAttribute: (n) => (n === "aria-label"
+        ? "Standup, 9:30 AM to 9:45 AM" : null),
+      click() { open = true; },
+    }]),
+    dispatchEvent: () => { open = false; return true; },
+  };
+  const prevDoc = sandbox.document;
+  const prevKE = sandbox.KeyboardEvent;
+  const prevST = sandbox.setTimeout;
+  sandbox.document = page;
+  sandbox.KeyboardEvent = function () {};
+  sandbox.setTimeout = setTimeout;
+  try {
+    return await sandbox._readEventDetailsFunc(
+      [{ subject: "Standup", startIso: "2026-08-21T09:30:00" }],
+      JOIN_PATTERNS_FROM_SOURCE, 25, 90000);
+  } finally {
+    sandbox.document = prevDoc;
+    sandbox.KeyboardEvent = prevKE;
+    sandbox.setTimeout = prevST;
+  }
+}
+
+for (const position of ["append", "prepend", "middle"]) {
+  test(`pane text is extracted when it renders at: ${position}`, async () => {
+    const out = await runPositionalPage(position);
+    const d = out.details[0];
+    assert.ok(d, `nothing extracted for position=${position}`);
+    assert.match(d.joinUrl, /webex\.com/,
+      `the pasted URL was lost when the pane rendered at ${position}`);
+    assert.deepEqual([...d.attendees], ["a.doe@globex.example"]);
+    assert.match(d.body, /agenda text/);
+    assert.ok(!d.body.includes("Calendar grid"),
+      "grid text leaked into the body");
+  });
+}
+
+test("both POST paths declare the capture diagnostics", () => {
+  // Field incident, twice: capture_diag rode only the alarm path, so
+  // every capture the user triggered THEMSELVES — the popup button
+  // they press precisely when investigating — reported nothing, and
+  // three diagnostic zips in a row carried a stale alarm-path diag
+  // while the runs under investigation were invisible. Source guard:
+  // both payload builders must attach it via the one shared builder.
+  const src = fs.readFileSync(BG_PATH, "utf8");
+  const count = (src.match(/payload\.capture_diag = buildCaptureDiag\(/g) || []).length;
+  assert.equal(count, 2,
+    "capture_diag must be attached on BOTH the calendar-only and the "
+    + "full Capture & Send paths, through the shared builder");
+});
