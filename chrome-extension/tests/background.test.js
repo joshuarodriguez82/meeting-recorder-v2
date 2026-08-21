@@ -2736,3 +2736,139 @@ test("every wanted event comes back with a named outcome", async () => {
   assert.equal(byStatus["Present"], "opened");
   assert.equal(byStatus["Ghost"], "no_tile");
 });
+
+// ── the invite body lives one frame deeper ───────────────────────────
+//
+// FIELD SCREENSHOT 2026-08-21 (v2.57.0). A real meeting's captured
+// "agenda" read, in full:
+//
+//     Join / Chat / Fri 8/21/2026 10:00 AM - 11:00 AM /
+//     No location added / GG / <organizer> invited you.
+//
+// The pane's own chrome. Not one word of the invite, and no join URL —
+// both of which were on screen. Outlook renders the invite body in a
+// same-origin IFRAME and parts of the card in SHADOW ROOTS;
+// `document.body.innerText` and `document.querySelectorAll` stop at
+// both boundaries. The grid scanner has always crossed them. The
+// detail reader — whose entire job is reading that pane — did not.
+
+function fakeDetailPageFramed({ tiles, reveal }) {
+  const base = "Calendar grid baseline text that is already on screen.";
+  let chrome = "";
+  let frameText = "";
+  let frameHrefs = [];
+  let shadowHrefs = [];
+  const mkAttr = (attrs) => ({
+    getAttribute: (n) => (n in attrs ? attrs[n] : null),
+  });
+
+  // The message-body iframe: its own document, unreachable from the
+  // top document's queries.
+  const frameDoc = {
+    body: { get innerText() { return frameText; } },
+    querySelectorAll: (sel) => (String(sel).includes("a[href]")
+      ? frameHrefs.map((h) => mkAttr({ href: h }))
+      : []),
+  };
+  const frameEl = { getAttribute: () => null, contentDocument: frameDoc };
+  // A shadow host whose root holds the Join anchor (Teams' shape).
+  const shadowRoot = {
+    querySelectorAll: (sel) => (String(sel).includes("a[href]")
+      ? shadowHrefs.map((h) => mkAttr({ href: h }))
+      : []),
+    textContent: "",
+  };
+  const shadowHost = { getAttribute: () => null, shadowRoot };
+
+  const els = tiles.map((t) => ({
+    getAttribute: (n) => (n === "aria-label" ? t.label : null),
+    click() {
+      const r = reveal[t.subject] || {};
+      chrome = "\n" + (r.chrome || "");
+      frameText = r.frameText || "";
+      frameHrefs = r.frameHrefs || [];
+      shadowHrefs = r.shadowHrefs || [];
+    },
+  }));
+
+  return {
+    body: { get innerText() { return base + chrome; } },
+    querySelectorAll: (sel) => {
+      const s = String(sel);
+      if (s.includes("iframe")) return [frameEl];
+      if (s === "*") return [shadowHost];
+      if (s.includes("a[href]")) return [];
+      return els;
+    },
+    dispatchEvent: () => {
+      chrome = ""; frameText = ""; frameHrefs = []; shadowHrefs = [];
+      return true;
+    },
+  };
+}
+
+async function runFramedDetailReader({ tiles, reveal, wanted }) {
+  const prevDoc = sandbox.document;
+  const prevKE = sandbox.KeyboardEvent;
+  const prevST = sandbox.setTimeout;
+  sandbox.document = fakeDetailPageFramed({ tiles, reveal });
+  sandbox.KeyboardEvent = function () {};
+  sandbox.setTimeout = setTimeout;
+  try {
+    return await sandbox._readEventDetailsFunc(
+      wanted, JOIN_PATTERNS_FROM_SOURCE, 25, 90000);
+  } finally {
+    sandbox.document = prevDoc;
+    sandbox.KeyboardEvent = prevKE;
+    sandbox.setTimeout = prevST;
+  }
+}
+
+test("the invite body inside the message iframe is read, not the pane chrome",
+     async () => {
+  const out = await runFramedDetailReader({
+    tiles: [{ subject: "Follow Up Session",
+              label: "Follow Up Session, 10:00 AM to 11:00 AM" }],
+    reveal: {
+      "Follow Up Session": {
+        // Exactly the shape the field screenshot showed.
+        chrome: "Join\nChat\nFri 8/21/2026 10:00 AM - 11:00 AM\n"
+                + "No location added\nJP\nJordan Poe invited you.",
+        frameText: "Agenda: walk the final requirements list.\n"
+                   + "jordan.poe@example.com\n"
+                   + "Join the Webex meeting: https://acme.webex.com/meet/jordan.poe",
+      },
+    },
+    wanted: [{ subject: "Follow Up Session", startIso: "2026-08-21T10:00:00" }],
+  });
+  const d = out.details[0];
+  assert.ok(d, "the pane produced no detail at all");
+  assert.match(d.body, /Agenda: walk the final requirements list/,
+               "the invite body was never read out of the iframe");
+  assert.equal(d.joinUrl, "https://acme.webex.com/meet/jordan.poe",
+               "the pasted join URL was one frame deeper than the scan");
+  assert.ok(d.attendees.includes("jordan.poe@example.com"),
+            "addresses in the iframe body were not collected");
+});
+
+test("a Join anchor inside a shadow root is found", async () => {
+  // Teams renders Join as a button whose anchor sits in a shadow root;
+  // every field diagnostic to date reported joinFromAnchor: 0.
+  const teamsUrl = "https://teams.microsoft.com/l/meetup-join/19%3ameeting_X%40thread.v2/0";
+  const out = await runFramedDetailReader({
+    tiles: [{ subject: "Daily Pulse", label: "Daily Pulse, 9:30 AM to 9:45 AM" }],
+    reveal: {
+      "Daily Pulse": {
+        chrome: "Join\nChat\nNo location added",
+        frameText: "Daily sync on the rollout blockers.",
+        shadowHrefs: [teamsUrl],
+      },
+    },
+    wanted: [{ subject: "Daily Pulse", startIso: "2026-08-21T09:30:00" }],
+  });
+  const d = out.details[0];
+  assert.ok(d, "the pane produced no detail at all");
+  assert.equal(d.joinUrl, teamsUrl,
+               "the Teams anchor in the shadow root was not found");
+  assert.equal(out.joinFromAnchor, 1);
+});

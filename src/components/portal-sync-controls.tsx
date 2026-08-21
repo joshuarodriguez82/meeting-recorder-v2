@@ -5,6 +5,11 @@ import { api, type PortalBinding } from "@/lib/api";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Loader2 } from "lucide-react";
 
 /**
@@ -126,71 +131,91 @@ export function PortalSyncControls({ client, project, mode = "manage" }: {
           {binding ? "Portal…" : "Bind to portal…"}
         </Button>
       )}
-      {mode === "manage" && open && (
-        <div className="absolute z-20 mt-2 top-full right-0 w-80 rounded-lg border border-border bg-popover p-3 space-y-2 shadow-lg">
-          <div className="text-xs text-muted-foreground">
-            {binding
-              ? `Bound to ${binding.opportunityName || binding.customerId}`
-                + (binding.parentName ? ` (${binding.parentName})` : "")
-              : "Paste the connection block from the portal — the whole JSON, exactly as shown. The edit token inside it goes to the OS keychain and is never shown again."}
-          </div>
-          {!manual && (
-            <>
-              <textarea
-                className="w-full h-28 rounded-md border border-input bg-transparent px-3 py-2 text-xs font-mono shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder={'{\n  "portal": "https://…",\n  "api": "https://…",\n  "opportunity": "…",\n  "customerId": "…",\n  "editToken": "…"\n}'}
-                value={connection}
-                onChange={(e) => setConnection(e.target.value)}
-              />
-              {connection.trim() && (
-                <div className={"text-xs " + (pasted ? "text-muted-foreground" : "text-red-600 dark:text-red-400")}>
-                  {pasted
-                    ? `Ready to bind${pasted.opportunity ? `: ${pasted.opportunity}` : ""}`
-                    : "That doesn't look like the portal's connection block yet."}
-                </div>
+      {/* A DIALOG, NOT A POPOVER. The popover was absolutely
+          positioned inside the Projects card, so the card's own
+          bounds clipped it: the paste box was cut off mid-height and
+          the Bind button was off-screen entirely — the field report
+          was "I can't even paste the JSON" (2026-08-21). A bind form
+          is a task, not a tooltip; it gets its own layer, where no
+          ancestor's overflow can crop it. */}
+      {mode === "manage" && (
+        <Dialog open={open} onOpenChange={setOpen}>
+          <DialogContent className="sm:max-w-lg">
+            <DialogHeader>
+              <DialogTitle>
+                {binding ? "Portal binding" : "Bind to portal"}
+              </DialogTitle>
+              <DialogDescription>
+                {binding
+                  ? `Bound to ${binding.opportunityName || binding.customerId}`
+                    + (binding.parentName ? ` (${binding.parentName})` : "")
+                  : "Paste the connection block from the portal — the whole JSON, exactly as shown. The edit token inside it goes to the OS keychain and is never shown again."}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-3">
+              {!manual && (
+                <>
+                  <Textarea
+                    className="h-44 font-mono text-xs"
+                    autoFocus
+                    spellCheck={false}
+                    placeholder={'{\n  "portal": "https://…",\n  "api": "https://…",\n  "opportunity": "…",\n  "customerId": "…",\n  "editToken": "…"\n}'}
+                    value={connection}
+                    onChange={(e) => setConnection(e.target.value)}
+                  />
+                  {connection.trim() && (
+                    <div className={"text-xs " + (pasted ? "text-muted-foreground" : "text-red-600 dark:text-red-400")}>
+                      {pasted
+                        ? `Ready to bind${pasted.opportunity ? `: ${pasted.opportunity}` : ""}`
+                        : "That doesn't look like the portal's connection block yet."}
+                    </div>
+                  )}
+                </>
               )}
-            </>
-          )}
-          {manual && (
-            <>
-              <Input placeholder="Customer ID" value={customerId}
-                     onChange={(e) => setCustomerId(e.target.value)} />
-              <Input placeholder="Opportunity name (optional)" value={oppName}
-                     onChange={(e) => setOppName(e.target.value)} />
-              <Input placeholder="Parent company (optional)" value={parentName}
-                     onChange={(e) => setParentName(e.target.value)} />
-              <Input placeholder="Edit token" type="password" value={token}
-                     onChange={(e) => setToken(e.target.value)} />
-            </>
-          )}
-          <div className="flex gap-2 items-center">
-            <button
-              type="button"
-              className="text-xs text-muted-foreground underline underline-offset-2"
-              onClick={() => setManual((v) => !v)}
-            >
-              {manual ? "Paste connection block instead" : "Enter fields manually"}
-            </button>
-            <div className="flex-1" />
-            {binding && (
-              <Button size="sm" variant="ghost" disabled={busy}
-                onClick={async () => {
-                  await api.portalUnbind({ client, project });
-                  setOpen(false);
-                  await reload();
-                }}>
-                Unbind
-              </Button>
-            )}
-            <Button size="sm"
-                    disabled={busy || (manual
-                      ? !customerId.trim() || !token.trim()
-                      : !pasted)}
-                    onClick={() => void bind()}>
-              {binding ? "Re-bind" : "Bind"}
-            </Button>
-          </div>
-        </div>
+              {manual && (
+                <>
+                  <Input placeholder="Customer ID" value={customerId}
+                         onChange={(e) => setCustomerId(e.target.value)} />
+                  <Input placeholder="Opportunity name (optional)" value={oppName}
+                         onChange={(e) => setOppName(e.target.value)} />
+                  <Input placeholder="Parent company (optional)" value={parentName}
+                         onChange={(e) => setParentName(e.target.value)} />
+                  <Input placeholder="Edit token" type="password" value={token}
+                         onChange={(e) => setToken(e.target.value)} />
+                </>
+              )}
+            </div>
+            <DialogFooter className="sm:justify-between items-center gap-2">
+              <button
+                type="button"
+                className="text-xs text-muted-foreground underline underline-offset-2"
+                onClick={() => setManual((v) => !v)}
+              >
+                {manual ? "Paste connection block instead" : "Enter fields manually"}
+              </button>
+              <div className="flex gap-2">
+                {binding && (
+                  <Button size="sm" variant="ghost" disabled={busy}
+                    onClick={async () => {
+                      await api.portalUnbind({ client, project });
+                      setOpen(false);
+                      await reload();
+                    }}>
+                    Unbind
+                  </Button>
+                )}
+                <Button size="sm"
+                        disabled={busy || (manual
+                          ? !customerId.trim() || !token.trim()
+                          : !pasted)}
+                        onClick={() => void bind()}>
+                  {busy ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null}
+                  {binding ? "Re-bind" : "Bind"}
+                </Button>
+              </div>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       )}
     </div>
   );
