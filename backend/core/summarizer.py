@@ -942,8 +942,19 @@ class Summarizer:
             "List each action item with: who is responsible, what they "
             "need to do, and by when (if mentioned). Use checkboxes.\n"
             "Format: - [ ] **[Owner]**: Action description (Due: date if mentioned)\n\n"
-            "## Decisions Made\n"
-            "List each decision that was agreed upon in the meeting.\n\n"
+            # NO DECISIONS SECTION HERE, ON PURPOSE.
+            #
+            # This prompt used to ask for "## Decisions Made" as well,
+            # while extract_decisions independently asked for every
+            # decision in the same meeting. Two independent extractions
+            # of one meeting do not agree: a field pair (2026-08-21)
+            # produced 11 decisions in the action-items blob and 14 in
+            # the decisions file, overlapping but neither a subset of
+            # the other. The user sees both and cannot tell which is
+            # real — and the count is what made the output feel
+            # untrustworthy.
+            #
+            # Decisions have ONE extractor and one file.
             "## Open Questions\n"
             "List questions that were raised but not resolved.\n\n"
             "If a section has no items, write 'None identified.'\n\n"
@@ -989,6 +1000,31 @@ class Summarizer:
             "(if any mentioned)\n"
             "- **Owner:** who made the call (if identifiable)\n"
             "- **Impact:** systems/teams/clients affected\n\n"
+            "- **Evidence:** a short quote from the transcript showing "
+            "the decision being made\n\n"
+            "WHAT COUNTS AS A DECISION. A decision is a choice made "
+            "DURING this meeting that changes what will happen. If you "
+            "cannot quote the moment it was made, it is not one.\n\n"
+            "These are NOT decisions — do not emit them:\n"
+            "- A task, commitment or next step ('X will send Y', 'X will "
+            "build the model', 'X will set up the call'). Those are "
+            "action items and are extracted separately. A decision is "
+            "WHAT was chosen; an action item is WHO does what next.\n"
+            "- Something already true or already agreed BEFORE this "
+            "meeting that a participant merely reported or restated. A "
+            "roadmap someone describes is context, not a decision made "
+            "here.\n"
+            "- A fact, date or contract term ('the contract expires in "
+            "September'). Nobody decided it in the meeting.\n"
+            "- A recommendation, opinion or capability someone described "
+            "that was not explicitly accepted.\n"
+            "- A restatement of a decision you already listed. If two "
+            "entries describe the same choice from different angles, "
+            "emit ONE.\n\n"
+            "Most meetings produce a HANDFUL of real decisions. A long "
+            "list is a sign that action items, context and facts have "
+            "been miscounted as decisions. Prefer precision: a missing "
+            "borderline entry costs far less than a list nobody trusts.\n\n"
             "Only include decisions that were actually MADE, not just "
             "discussed. Skip discussions without conclusions. If the USER "
             "NOTES record additional decisions made off-audio (in hallway "
@@ -1378,6 +1414,22 @@ class Summarizer:
             "List any technical, business, or timeline constraints mentioned.\n\n"
             "## Assumptions\n"
             "List assumptions made during the discussion.\n\n"
+            "WHAT COUNTS AS A REQUIREMENT. Something the solution MUST "
+            "do or satisfy, stated by someone in the meeting. These are "
+            "NOT requirements — do not emit them:\n"
+            "- A task or next step someone committed to (that is an "
+            "action item, extracted separately).\n"
+            "- A decision about scope or sequencing (extracted "
+            "separately).\n"
+            "- A capability a vendor described, unless the customer "
+            "stated they need it.\n"
+            "- Background, history or a restatement of a row you "
+            "already emitted. One row per requirement.\n\n"
+            "A discovery call typically surfaces a modest number of real "
+            "requirements. A long table is a sign that discussion has "
+            "been miscounted as requirements — every row looks equally "
+            "authoritative once it has an ID, so precision matters more "
+            "than coverage here.\n\n"
             "Assign priority based on context clues (urgency, emphasis, "
             "stakeholder tone). If the USER NOTES list additional requirements "
             "or constraints the transcript doesn't capture, include those — "
