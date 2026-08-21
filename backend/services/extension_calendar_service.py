@@ -1108,6 +1108,41 @@ class ExtensionCalendarService:
         """
         with self._lock:
             raw = self._read_locked()
+            # THE SCRUB RUNS HERE, AT READ TIME — not only on the next
+            # extension capture.
+            #
+            # v2.51.0 gated the junk-attendee cleanup on `replace_all`,
+            # i.e. on the extension POSTing again. That was a design
+            # mistake the field found within hours: the user installed
+            # the fix, opened the app, and saw the exact same
+            # "Attendees (24)" wall of Outlook buttons — because the
+            # 30-minute capture alarm had not fired yet (and never
+            # would, with Chrome closed). A cleanup of data the APP
+            # OWNS must not be held hostage by whether a browser is
+            # running. Same flag, so whichever side reaches the store
+            # first does the work and the other finds it done.
+            if raw and raw.get("events") and not raw.get("attendee_scrub_v1"):
+                changed = False
+                for entry in raw.get("events") or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    atts = entry.get("attendees") or []
+                    kept_atts = [a for a in atts if "@" in str(a)]
+                    if len(kept_atts) != len(atts):
+                        entry["attendees"] = kept_atts
+                        changed = True
+                raw["attendee_scrub_v1"] = True
+                try:
+                    self._write_locked(raw)
+                    if changed:
+                        logger.info(
+                            "Extension calendar store: scrubbed "
+                            "name-shape-scanner attendee junk at read "
+                            "time (no capture required)")
+                except Exception as e:  # noqa: BLE001
+                    # Reading must never fail because cleanup could not
+                    # persist; the scrubbed copy still serves this call.
+                    logger.warning(f"Attendee scrub could not persist: {e}")
         out: List[dict] = []
         for entry in (raw or {}).get("events") or []:
             if not isinstance(entry, dict):

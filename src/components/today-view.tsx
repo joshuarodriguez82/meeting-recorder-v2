@@ -343,21 +343,13 @@ export function TodayView({ onNavigate }: Props) {
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap justify-end">
-          {/* v1.1 of the Chrome extension is the canonical data path
-              now — Sync Now + Sign in to Microsoft buttons that drove
-              the doomed Playwright path (services/outlook_web_scraper)
-              are gone. The extension's toolbar icon → Capture & Send
-              replaces them. Import briefing stays for the manual
-              fallback paste flow. */}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setImportOpen(true)}
-            className="gap-2"
-          >
-            <ClipboardPaste className="h-4 w-4" />
-            {briefing ? "Re-import briefing" : "Import briefing"}
-          </Button>
+          {/* The Import/Re-import briefing button is gone (user
+              request, 2026-08-21): the extension's automatic capture
+              is the data path, and the manual paste flow it opened
+              was never used. The import DIALOG and its backend
+              endpoint remain — only this header entry point is
+              removed — so the flow can come back as a Settings
+              escape hatch if an extension outage ever demands it. */}
           <Button
             variant="ghost"
             size="sm"
