@@ -2345,64 +2345,83 @@ test("an anchor already on screen before the click is not attributed", async () 
   }
 });
 
-// ── Attendees are NAMES, not addresses (v1.11) ───────────────────────
+// ── Attendees are DATA, never text-shape guesses (v1.13) ─────────────
 //
-// v1.10 matched email addresses only. Outlook's pane renders people as
-// NAMES, so a meeting with a dozen invitees reported "Attendees (1)" —
-// the single row that happened to show an address — or (0).
+// FIELD RESULT 2026-08-20, extension 1.12: a meeting showed
+// "Attendees (24)" — 22 of them Outlook's own controls ("Skip to main
+// content", "App launcher", "Ribbon tabs", "Chat with Copilot"), plus
+// the user's OWN account button, plus another meeting's organiser
+// address pulled in by the whole-page email scan. The name-shape
+// scanner is deleted; these tests pin what replaced it.
 
-test("attendee names are read from the pane's accessible labels", async () => {
-  const out = await runRichDetailReader({
-    tiles: [{ subject: "Standup", label: "Standup, 9:30 AM to 9:45 AM" }],
-    reveal: {
-      "Standup": {
-        text: "Recurring daily",
-        names: ["Ana Doe", "Pat Roe", "Kim Noh"],
-      },
-    },
-    wanted: [{ subject: "Standup", startIso: "2026-08-21T09:30:00" }],
-  });
-  const d = out.details[0];
-  assert.ok(d, "nothing extracted");
-  assert.deepEqual([...d.attendees].sort(), ["Ana Doe", "Kim Noh", "Pat Roe"]);
-  assert.equal(out.attendeesFromNames, 1);
-});
-
-test("interface chrome is never mistaken for a person", async () => {
-  // The pane is full of labelled controls. A wrong attendee propagates
-  // into speaker identification and follow-up recipients, so this
-  // stays strict rather than generous.
+test("no label on the page is ever reported as an attendee", async () => {
+  // The pane reveals text and the page is littered with name-shaped
+  // labels. None of them may become people: attendees from the screen
+  // pass are pane-diff EMAILS only. (Real display names come from
+  // Outlook's own detail responses, which are data, not shapes.)
   const out = await runRichDetailReader({
     tiles: [{ subject: "Review", label: "Review, 3:00 PM to 3:30 PM" }],
     reveal: {
       "Review": {
-        text: "Agenda",
-        names: [
-          "Join meeting", "Accept", "Decline", "Tentative", "Show as Busy",
-          "Microsoft Teams Meeting", "Every weekday", "Optional attendees",
-          "a.doe@globex.example", "https://example.com/x",
-          "Ana Doe",                      // the only real person
-        ],
+        text: "Agenda for the review session.",
+        names: ["App launcher", "Skip to main content", "Ana Doe",
+                "Chat with Copilot", "Jordan Poe"],
       },
     },
     wanted: [{ subject: "Review", startIso: "2026-08-20T15:00:00" }],
   });
-  assert.deepEqual([...out.details[0].attendees], ["Ana Doe"]);
+  const d = out.details[0];
+  assert.ok(d, "nothing extracted");
+  assert.deepEqual([...d.attendees], [],
+    "a page label was reported as a person");
 });
 
-test("addresses in the text are still collected alongside names", async () => {
+test("emails in the pane's own text are collected as attendees", async () => {
   const out = await runRichDetailReader({
     tiles: [{ subject: "Mixed", label: "Mixed, 1:00 PM to 2:00 PM" }],
     reveal: {
-      "Mixed": {
-        text: "Also invited: k.noh@zorg.example",
-        names: ["Ana Doe"],
-      },
+      "Mixed": { text: "Also invited: k.noh@zorg.example and a.doe@globex.example" },
     },
     wanted: [{ subject: "Mixed", startIso: "2026-08-20T13:00:00" }],
   });
   assert.deepEqual([...out.details[0].attendees].sort(),
-                   ["Ana Doe", "k.noh@zorg.example"]);
+                   ["a.doe@globex.example", "k.noh@zorg.example"]);
+});
+
+test("an address visible elsewhere on the page is not attributed", async () => {
+  // The field case: a DIFFERENT meeting's organiser address is
+  // rendered in that meeting's grid tile label, i.e. it is on screen
+  // before the click. The whole-page scan attributed it to whichever
+  // meeting was clicked; the pane-diff scan must not.
+  const prevDoc = sandbox.document;
+  const prevKE = sandbox.KeyboardEvent;
+  const prevST = sandbox.setTimeout;
+  let extra = "";
+  const base = "Grid baseline. UPS-AWS Flow, 12:30 PM, By k.noh@zorg.example, Tentative.";
+  sandbox.document = {
+    body: { get innerText() { return base + extra; } },
+    querySelectorAll: (sel) => (String(sel).includes("a[href]") ? [] : [{
+      getAttribute: (n) => (n === "aria-label"
+        ? "Follow up session, 10:00 AM to 11:00 AM" : null),
+      click() { extra = "\nAgenda: finalize the SOW."; },
+    }]),
+    dispatchEvent: () => { extra = ""; return true; },
+  };
+  sandbox.KeyboardEvent = function () {};
+  sandbox.setTimeout = setTimeout;
+  try {
+    const out = await sandbox._readEventDetailsFunc(
+      [{ subject: "Follow up session", startIso: "2026-08-21T10:00:00" }],
+      JOIN_PATTERNS_FROM_SOURCE, 25, 90000);
+    const d = out.details[0];
+    assert.ok(d, "nothing extracted");
+    assert.deepEqual([...d.attendees], [],
+      "another meeting's organiser address was attributed to this one");
+  } finally {
+    sandbox.document = prevDoc;
+    sandbox.KeyboardEvent = prevKE;
+    sandbox.setTimeout = prevST;
+  }
 });
 
 // ── The 1.11 field regression: extraction fired before the pane loaded ─
@@ -2490,37 +2509,26 @@ test("page churn does not trigger extraction before the pane loads", async () =>
 });
 
 test("a previous pane's attendees do not bleed into the next meeting", async () => {
-  // Escape does not always close the pane; the next event's pre-click
-  // snapshot then contains the previous invitees. Set subtraction must
-  // keep them out of the next meeting.
-  let phase = 0; // 0 = nothing open, 1 = pane A open, 2 = pane B open
+  // Escape does not always close a pane. Its text — including invitee
+  // addresses — is then part of meeting B's BEFORE snapshot, and the
+  // pane-diff scoping must keep it out of B.
+  let phase = 0;
   const mk = (label, n) => ({
     getAttribute: (name) => (name === "aria-label" ? label : null),
     click() { phase = n; },
-  });
-  const person = (name) => ({
-    getAttribute: (n) => (n === "aria-label" ? name : null),
   });
   const page = {
     body: {
       get innerText() {
         return "Baseline calendar text on the screen already here."
-          + (phase >= 1 ? "\nAlpha meeting agenda body text." : "")
-          + (phase >= 2 ? "\nBeta meeting agenda body text." : "");
+          + (phase >= 1 ? "\nAlpha agenda. Invited: ana.doe@globex.example" : "")
+          + (phase >= 2 ? "\nBeta agenda. Invited: pat.roe@globex.example" : "");
       },
     },
-    querySelectorAll: (sel) => {
-      const tiles = [mk("Alpha, 9:00 AM to 9:30 AM", 1),
-                     mk("Beta, 10:00 AM to 10:30 AM", 2)];
-      if (String(sel).includes("a[href]")) return [];
-      if (String(sel).includes("[title]")) {
-        const people = [];
-        if (phase >= 1) people.push(person("Ana Doe"));   // pane A, never closes
-        if (phase >= 2) people.push(person("Pat Roe"));   // pane B
-        return [...people, ...tiles];
-      }
-      return tiles;
-    },
+    querySelectorAll: (sel) => (String(sel).includes("a[href]") ? [] : [
+      mk("Alpha, 9:00 AM to 9:30 AM", 1),
+      mk("Beta, 10:00 AM to 10:30 AM", 2),
+    ]),
     dispatchEvent: () => true,  // Escape does nothing — pane A stays
   };
   const prevDoc = sandbox.document;
@@ -2537,8 +2545,8 @@ test("a previous pane's attendees do not bleed into the next meeting", async () 
     const alpha = out.details.find((d) => d.subject === "Alpha");
     const beta = out.details.find((d) => d.subject === "Beta");
     assert.ok(alpha && beta, "both meetings should yield detail");
-    assert.deepEqual([...alpha.attendees], ["Ana Doe"]);
-    assert.deepEqual([...beta.attendees], ["Pat Roe"],
+    assert.deepEqual([...alpha.attendees], ["ana.doe@globex.example"]);
+    assert.deepEqual([...beta.attendees], ["pat.roe@globex.example"],
       "pane A's invitee bled into meeting B");
   } finally {
     sandbox.document = prevDoc;
