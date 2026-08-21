@@ -200,7 +200,9 @@ _INVITE_CHROME_EXACT = frozenset({
     "add to calendar", "forward", "edit", "cancel", "save", "close",
     "what are key talking points?", "help me prepare for this meeting",
     "help me understand the risks", "show more", "show less",
-    "more options", "copy link",
+    "more options", "copy link", "email organizer", "email attendees",
+    "email everyone", "join online", "join meeting", "reply",
+    "reply all", "delete", "decline", "propose new time",
 })
 
 _INVITE_CHROME_PATTERNS = (
@@ -223,7 +225,7 @@ _INVITE_CHROME_PATTERNS = (
 _PUA_RE = re.compile("[\uE000-\uF8FF\uFFFD]")
 
 
-def clean_invite_body(text: Any) -> str:
+def clean_invite_body(text: Any, subject: Any = "") -> str:
     """Strip Outlook's own UI out of an invite body, at READ time.
 
     Extension 1.17.0 fixes this at capture time and structurally: the
@@ -247,6 +249,10 @@ def clean_invite_body(text: Any) -> str:
     """
     if not text:
         return ""
+    # The card renders the meeting's own subject as its heading, so the
+    # captured "agenda" opens by repeating the title already on screen
+    # directly above it (field screenshot 2026-08-21).
+    subject_norm = re.sub(r"\s+", " ", str(subject or "")).strip().lower()
     out: List[str] = []
     for raw_line in str(text).split("\n"):
         line = _PUA_RE.sub("", raw_line).strip()
@@ -256,6 +262,8 @@ def clean_invite_body(text: Any) -> str:
                 out.append("")
             continue
         if line.lower() in _INVITE_CHROME_EXACT:
+            continue
+        if subject_norm and not out and line.lower() == subject_norm:
             continue
         if any(p.match(line) for p in _INVITE_CHROME_PATTERNS):
             continue
@@ -810,7 +818,8 @@ class ExtensionCalendarService:
             # attendee tally, Copilot prompts and toolbar-icon
             # characters, and the user should not have to re-capture a
             # meeting to stop seeing them. See clean_invite_body.
-            "body": clean_invite_body(raw.get("body"))[:8000],
+            "body": clean_invite_body(
+                raw.get("body"), raw.get("subject"))[:8000],
             "detail_status": str(raw.get("detail_status") or "")[:32],
             "source": SOURCE_EXTENSION,
         }
