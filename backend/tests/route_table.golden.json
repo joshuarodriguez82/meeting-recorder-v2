@@ -90,6 +90,12 @@
   ]
  ],
  [
+  "/calendar/capture-diagnostics",
+  [
+   "GET"
+  ]
+ ],
+ [
   "/calendar/meeting-detail",
   [
    "GET"
