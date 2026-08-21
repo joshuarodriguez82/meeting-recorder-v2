@@ -2166,6 +2166,15 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
   const started = Date.now();
   const out = { details: [], opened: 0, matchedElement: 0, skipped: 0,
                 grew: 0, joinFromAnchor: 0,
+                // How many bodies came from the invite's own frame
+                // rather than a whole-page diff. Reported so "the frame
+                // walk found nothing" is never mistaken for "the invite
+                // had nothing".
+                bodyFromFrame: 0,
+                // Join URLs recovered from markup when neither the
+                // pane text nor an anchor carried one — the count that
+                // says "the button's shape was the problem".
+                joinFromMarkup: 0,
                 // Per-event outcome, so the app can tell the user WHY a
                 // specific meeting has no detail instead of a flat "(No
                 // description on this invite.)" for every cause.
@@ -2282,6 +2291,66 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
       return parts.join("\n");
     };
 
+    // THE INVITE IS THE FRAME; EVERYTHING ELSE IS OUTLOOK.
+    //
+    // FIELD SCREENSHOT 2026-08-21 (v2.58.0). Crossing into the frames
+    // worked — the invite's real text arrived. But it arrived buried:
+    //
+    //     GG / <organizer> invited you. / Accepted 1, Didn't respond 11
+    //     / Prepare for this meeting /
+    //     Follow up session to our first discussion on 17th Monday.. /
+    //     Accepted / Change / What are key talking points? /
+    //     Help me prepare for this meeting / Help me understand the risks
+    //
+    // ONE of those lines is the invite. The rest is the RSVP control,
+    // the attendee tally, and Copilot's suggested prompts — Outlook's
+    // own UI, which lives in the TOP document.
+    //
+    // The tempting fix is a list of UI phrases to drop. That is the
+    // exact mistake the attendee scanner made in 1.11-1.12, where a
+    // blacklist of interface vocabulary produced "Attendees (24)" of
+    // which 22 were buttons: a product's UI vocabulary cannot be
+    // enumerated, in every language it ships in, across every
+    // redesign.
+    //
+    // The structural fact is better than any vocabulary: Outlook
+    // renders the invite body in its OWN frame. So the body is not
+    // "the page text minus things that look like chrome" — it IS the
+    // subframe text, and Outlook's UI is definitionally not in it.
+    // Whole-page diffing stays as the fallback for a tenant that
+    // renders the body inline, where it is still the best available
+    // answer.
+    const subframeText = () => {
+      const parts = [];
+      const roots = collectRoots();
+      for (let i = 1; i < roots.length; i++) {   // skip the top document
+        try {
+          const host = roots[i].body || roots[i];
+          const t = host ? (host.innerText != null
+                            ? host.innerText : host.textContent) : "";
+          if (t) parts.push(t);
+        } catch (_) { /* skip */ }
+      }
+      return parts.join("\n");
+    };
+
+    // Lines in `after` that are not in `before`, counted — immune to
+    // where content inserts, and duplicates survive in the right
+    // quantity.
+    const newLinesOf = (beforeText, afterText) => {
+      const counts = new Map();
+      for (const ln of String(beforeText || "").split("\n")) {
+        counts.set(ln, (counts.get(ln) || 0) + 1);
+      }
+      const out = [];
+      for (const ln of String(afterText || "").split("\n")) {
+        const c = counts.get(ln) || 0;
+        if (c > 0) counts.set(ln, c - 1);
+        else out.push(ln);
+      }
+      return out;
+    };
+
     const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
     const URL_RE = /https?:\/\/[^\s"'<>)\]]+/g;
 
@@ -2313,6 +2382,61 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
         }
       } catch (_) { /* ignore */ }
       return out;
+    };
+
+    // JOIN URLS WITHOUT DEPENDING ON ELEMENT SHAPE AT ALL.
+    //
+    // Three releases have now assumed a shape for the Join control and
+    // been wrong three times: v1.10 assumed it was text (Teams renders
+    // a button), v1.15 assumed the button was an anchor in the top
+    // document, v1.16 assumed the anchor was reachable through open
+    // shadow roots and same-origin frames. The field answer each time
+    // was the same: no link.
+    //
+    // The shape is not knowable from here, and guessing it again is
+    // the definition of this bug's history. What IS knowable: a join
+    // URL is a highly specific string — the provider host and path
+    // patterns are already the contract — and if the meeting has one,
+    // that string is SOMEWHERE in the markup the click produced,
+    // whether as an href, a data- attribute, an aria-label, an
+    // iframe's srcdoc, or a blob of inline JSON the card was rendered
+    // from.
+    //
+    // So: scan the markup for provider-shaped URLs, and keep only the
+    // ones that were not there before this click. That is exactly the
+    // safety rule the anchor scan already used — the link must have
+    // appeared WITH this meeting — applied to a surface that does not
+    // care how Outlook chose to render a button this quarter.
+    //
+    // Bounded: markup per root is capped, and the regex only ever
+    // matches join-provider URLs, so this cannot widen into the
+    // whole-page scans that mis-attributed data in v1.11.
+    const MARKUP_CAP = 400000;
+    const markupJoinUrls = () => {
+      const found = new Set();
+      for (const root of collectRoots()) {
+        let html = "";
+        try {
+          const host = root.documentElement || root.body || root;
+          html = host && host.innerHTML ? host.innerHTML : "";
+        } catch (_) { html = ""; }
+        if (!html) continue;
+        if (html.length > MARKUP_CAP) html = html.slice(0, MARKUP_CAP);
+        // Attribute-encoded URLs arrive HTML-escaped (&amp;) and
+        // sometimes percent-encoded inside a JSON blob.
+        const candidates = html.replace(/&amp;/g, "&")
+          .match(/https?(?::|%3[Aa])(?:\/|%2[Ff])(?:\/|%2[Ff])[^\s"'<>)\]\\]+/g) || [];
+        for (const raw of candidates) {
+          let u = raw;
+          if (u.includes("%2F") || u.includes("%2f")) {
+            try { u = decodeURIComponent(u); } catch (_) { /* keep raw */ }
+          }
+          // Trailing punctuation from surrounding markup/JSON.
+          u = u.replace(/[.,;)\]}"']+$/, "");
+          if (isJoin(u)) found.add(u);
+        }
+      }
+      return found;
     };
 
     // Attendees render as NAMES in the detail pane; addresses usually do
@@ -2400,11 +2524,18 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
 
       const before = visibleText();
       const beforeLen = before.length;
+      // Text from the SUBFRAMES only (frames and shadow roots, not the
+      // top document). See subframeText's comment: this is what makes
+      // the invite separable from Outlook's UI.
+      const subBefore = subframeText();
       // Anchors present BEFORE the click, so the join link is taken
       // from what this event added rather than from a Join button
       // belonging to some other meeting already on screen. Attaching a
       // link to the wrong meeting is worse than having none.
       const anchorsBefore = new Set(anchorUrls());
+      // Provider-shaped URLs anywhere in the markup before the click,
+      // so anything found after it belongs to THIS meeting.
+      const markupJoinBefore = markupJoinUrls();
       // Person-shaped labels already present — as a SET, not a count.
       // The set serves two jobs: render detection compares membership
       // (a churning page re-rendering the SAME labels is not a
@@ -2517,17 +2648,15 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
         // Lines in `after` minus (counted) lines in `before`: immune
         // to where the pane inserts, and duplicated lines survive in
         // the right quantity. Order within the pane is preserved.
-        const beforeCounts = new Map();
-        for (const ln of before.split("\n")) {
-          beforeCounts.set(ln, (beforeCounts.get(ln) || 0) + 1);
-        }
-        const newLines = [];
-        for (const ln of after.split("\n")) {
-          const c = beforeCounts.get(ln) || 0;
-          if (c > 0) beforeCounts.set(ln, c - 1);
-          else newLines.push(ln);
-        }
-        const added = newLines.join("\n").trim();
+        const pageAdded = newLinesOf(before, after).join("\n").trim();
+        // The subframe's new text — the invite itself, with none of
+        // Outlook's UI in it (see subframeText). Preferred when this
+        // click produced any; the whole-page diff is the fallback for
+        // a tenant that renders the body inline.
+        const frameAdded = newLinesOf(subBefore, subframeText())
+          .join("\n").trim();
+        const added = frameAdded || pageAdded;
+        if (frameAdded) out.bodyFromFrame++;
         // NOTHING is scanned page-wide any more. The whole-page email
         // scan attributed another meeting's organiser — whose address
         // is literally rendered in that meeting's grid tile label —
@@ -2548,10 +2677,24 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
         // BUTTON and puts the URL only in the href). Text is preferred
         // where both exist: a pasted URL is unambiguously part of THIS
         // invite, whereas an anchor is located by having newly appeared.
-        const urls = added.match(URL_RE) || [];
+        // URLs are searched in the frame's text AND the page diff: the
+        // body is preferred for the BODY field (Outlook's UI must not
+        // become the agenda), but a join link is worth having wherever
+        // this click revealed it, and some tenants render the meeting's
+        // join block outside the body frame.
+        const urls = ((frameAdded ? frameAdded + "\n" : "") + pageAdded)
+          .match(URL_RE) || [];
         const newAnchors = anchorUrls().filter((u) => !anchorsBefore.has(u));
-        const joinUrl = urls.find(isJoin) || newAnchors.find(isJoin) || "";
+        // Last resort, shape-agnostic: a provider-shaped URL that
+        // appeared anywhere in the markup with this click.
+        const fromMarkup = Array.from(markupJoinUrls())
+          .filter((u) => !markupJoinBefore.has(u));
+        const joinUrl = urls.find(isJoin) || newAnchors.find(isJoin)
+          || fromMarkup[0] || "";
         if (!urls.find(isJoin) && newAnchors.find(isJoin)) out.joinFromAnchor++;
+        if (!urls.find(isJoin) && !newAnchors.find(isJoin) && fromMarkup[0]) {
+          out.joinFromMarkup++;
+        }
 
         // Attendee NAMES from the pane's accessible labels, plus any
         // addresses in the text. Names are what Outlook actually
@@ -2568,7 +2711,17 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
 
         // Body: the new text with addresses and links removed, so the
         // agenda does not re-state the attendee list.
-        let body = added.replace(EMAIL_RE, " ").replace(URL_RE, " ")
+        // ICON GLYPHS ARE NOT TEXT. Outlook's toolbar icons are a
+        // private-use font: each one is a character in the Unicode
+        // Private Use Area that innerText dutifully returns and every
+        // font renders as a hollow box. The field screenshots are full
+        // of those boxes on their own lines. Nothing downstream — the
+        // UI, the LLM, a follow-up email — has any use for them.
+        let body = added
+          .replace(/[\uE000-\uF8FF\uFFFD]/g, "")
+          .replace(EMAIL_RE, " ").replace(URL_RE, " ")
+          // Lines that held nothing but an icon are now empty.
+          .split("\n").filter((ln) => ln.trim()).join("\n")
           .replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
         if (body.length > 8000) body = body.slice(0, 8000);
 
