@@ -1023,6 +1023,12 @@ export const api = {
     request("/portal/unbind", { method: "POST", body: JSON.stringify(body) }),
   portalSync: (body: { client: string; project: string }): Promise<{
     ok: boolean; added?: number; updated?: number; items?: number; sessions?: number;
+    // What the app SENT, so "0 added, 0 updated" can be told apart
+    // from "the register was empty" and from "wrong project".
+    sent?: {
+      session_count: number; action_items: number; decisions: number;
+      requirements: number; open_questions: number; total: number;
+    };
   }> =>
     request("/portal/sync", { method: "POST", body: JSON.stringify(body) }),
 

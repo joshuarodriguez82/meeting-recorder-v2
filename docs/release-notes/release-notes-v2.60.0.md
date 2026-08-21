@@ -88,3 +88,33 @@ sentence and drop everything around it — plus a genuine invite that
 must pass through byte-identical, a chrome-only body that must become
 empty so the UI can say "no description" honestly, and a line that
 merely *contains* a keyword and must survive.
+
+## "0 synced" now says which zero it is
+
+Pressing **Sync to portal** after reprocessing reported `0 synced`,
+which covers three unrelated situations in one sentence:
+
+- the register for this project is **empty** — nothing was sent;
+- the portal **already held exactly this** and correctly did nothing
+  (ingest is idempotent by contract, so re-pushing unchanged content
+  *should* report 0/0);
+- the bound scope is **not the project** the sessions are tagged to, so
+  a different register was pushed.
+
+Only the first two are healthy, and none of them are actionable without
+knowing which one happened.
+
+Sync already rebuilt the register from current session data before
+pushing — that part was working, so reprocessed content *was* being
+sent. What was missing was any way to see it. The response now carries
+the register's own shape next to the portal's answer, and the toast
+reads one of:
+
+- *Nothing to sync — "<project>" has no register content yet (0
+  processed sessions in this project). If the meeting you expected is
+  under a different project, re-tag it and sync again.*
+- *Sent 47 items from 3 sessions — portal: 12 added, 5 updated, 275 on
+  record.*
+- *…0 added, 0 updated (already had this content).*
+
+An empty register is a statement now, not a silence.

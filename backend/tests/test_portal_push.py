@@ -414,3 +414,81 @@ def test_the_rollup_register_does_not_fire_the_hook(tmp_path):
     svc.build_register("acme")            # client-level rollup
     svc.build_register("acme", "poc")     # per-project
     assert calls == [("acme", "poc")]
+
+
+# ── "0 synced" must say WHICH zero it is ─────────────────────────────
+#
+# FIELD REPORT 2026-08-21: the user reprocessed their sessions, pressed
+# Sync to portal, and got "0 synced". That single sentence covers three
+# unrelated situations:
+#
+#   * the register for this project is empty — nothing was sent;
+#   * the portal already held exactly this content and correctly no-op'd
+#     (ingest is idempotent by contract, so a re-push of unchanged
+#     bytes SHOULD report 0/0);
+#   * the bound scope is not the project the sessions are tagged to, so
+#     some other register was pushed.
+#
+# Only the first two are healthy, and the user cannot act on any of
+# them without knowing which. The endpoint now returns the register's
+# own shape next to the portal's answer.
+
+
+def test_the_sync_response_carries_what_was_sent(tmp_path, fake_secrets,
+                                                 monkeypatch):
+    """The register's shape travels back with the portal's counts, so
+    an empty register is a statement rather than a silence."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import server
+
+    svc, register = _bound(tmp_path, fake_secrets)
+    _patch_http(monkeypatch, lambda req: FakeResponse(
+        200, json.dumps({"added": 0, "updated": 0, "items": 275})))
+
+    monkeypatch.setattr(server.svc, "portal_push_svc", svc,
+                        raising=False)
+    monkeypatch.setattr(
+        server.svc, "engagement_svc",
+        SimpleNamespace(build_register=lambda c, p: register),
+        raising=False)
+
+    out = asyncio.run(server.portal_sync(
+        server.PortalScopeRequest(client="acme", project="genesys migration")))
+
+    assert out["ok"] is True
+    # The portal's own answer is preserved verbatim...
+    assert out["added"] == 0 and out["updated"] == 0 and out["items"] == 275
+    # ...and what we sent is now visible next to it.
+    assert out["sent"]["session_count"] == 2
+    assert out["sent"]["action_items"] == 1
+    assert out["sent"]["total"] == 1
+
+
+def test_an_empty_register_reports_zero_sent_rather_than_looking_healthy(
+        tmp_path, fake_secrets, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    import server
+
+    empty = {"client": "acme", "project": "genesys migration",
+             "session_count": 0, "action_items": [], "decisions": [],
+             "requirements": [], "open_questions": []}
+    svc, _ = _bound(tmp_path, fake_secrets, register=empty)
+    _patch_http(monkeypatch, lambda req: FakeResponse(
+        200, json.dumps({"added": 0, "updated": 0, "items": 0})))
+
+    monkeypatch.setattr(server.svc, "portal_push_svc", svc,
+                        raising=False)
+    monkeypatch.setattr(
+        server.svc, "engagement_svc",
+        SimpleNamespace(build_register=lambda c, p: empty),
+        raising=False)
+
+    out = asyncio.run(server.portal_sync(
+        server.PortalScopeRequest(client="acme", project="genesys migration")))
+
+    assert out["sent"]["total"] == 0
+    assert out["sent"]["session_count"] == 0
