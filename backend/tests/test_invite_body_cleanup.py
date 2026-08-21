@@ -1,0 +1,115 @@
+"""
+The app cleans invite bodies it ALREADY HAS, at read time.
+
+FIELD SCREENSHOT 2026-08-21, v2.59.0 installed. The panel rendered:
+
+    □
+    □
+    No location added
+    GG
+    <organizer> invited you.
+    Accepted 1, Didn't respond 5
+    Prepare for this meeting
+    □
+    Turning this to "Daily" 15min on the following and ...
+    □
+    □
+    Accepted
+
+One line of that is the invite. The rest is Outlook's RSVP control,
+its attendee tally, Copilot's prompt suggestions, and its toolbar
+icons — which are a private-use font, so each icon is a Unicode
+Private Use Area character that innerText returns and every font draws
+as a hollow box.
+
+Extension 1.17.0 fixes this AT CAPTURE TIME, structurally: the invite
+body is read out of its own frame, where Outlook's UI is definitionally
+not present. But that only helps text captured AFTERWARDS. Every body
+already in the store stays exactly as ugly until something re-captures
+that meeting — and the user, reasonably, judges the app by what it is
+showing right now.
+
+This is the lesson v2.52.0 already paid for with the attendee scrub: a
+cleanup of data the APP OWNS must not be held hostage by whether a
+browser is running, or by which extension version the user managed to
+reload. So the read path cleans it too.
+
+Deliberately a DROP-ONLY transform on display: it removes lines and
+characters, never adds or rewrites, so the worst case for an unknown
+tenant is text that is still there. And it is not the primary fix —
+the frame-scoped capture is. This is what makes the primary fix visible
+today instead of after the next capture.
+"""
+
+from __future__ import annotations
+
+from tests._app_import import _stub_optional_modules
+
+_stub_optional_modules()
+
+from services.extension_calendar_service import clean_invite_body  # noqa: E402
+
+
+FIELD_BODY = (
+    "\n"
+    "\n"
+    "No location added\n"
+    "GG\n"
+    "Jordan Poe invited you.\n"
+    "Accepted 1, Didn't respond 5\n"
+    "Prepare for this meeting\n"
+    "\n"
+    'Turning this to "Daily" 15min on the following and Jordan (Acme) '
+    "added to the audience for the rest of the month.\n"
+    "\n"
+    "Accepted\n"
+    "Change\n"
+    "What are key talking points?\n"
+    "Help me prepare for this meeting\n"
+    "Help me understand the risks"
+)
+
+
+def test_the_field_body_is_reduced_to_the_invite():
+    out = clean_invite_body(FIELD_BODY)
+    assert "Turning this to" in out, "the invite itself was dropped"
+    # The boxes.
+    assert "" not in out and "" not in out
+    # Outlook's own controls and tallies.
+    for junk in ("No location added", "invited you.", "Didn't respond",
+                 "Prepare for this meeting", "Accepted", "Change"):
+        assert junk not in out, f"chrome line survived: {junk!r}"
+    # Copilot's suggested prompts.
+    for junk in ("key talking points", "Help me prepare",
+                 "understand the risks"):
+        assert junk not in out, f"Copilot prompt survived: {junk!r}"
+    # A two-letter avatar monogram is not an agenda.
+    assert "\nGG" not in out and out.strip() != "GG"
+
+
+def test_a_real_invite_is_left_alone():
+    """Drop-only means a genuine description passes through intact."""
+    body = ("Agenda:\n"
+            "1. Review the migration timeline\n"
+            "2. Confirm the cutover window\n"
+            "\n"
+            "Please read the draft SOW before we meet.")
+    assert clean_invite_body(body) == body
+
+
+def test_a_body_that_was_only_chrome_becomes_empty():
+    """So the UI can say 'no description' honestly rather than showing
+    a wall of buttons."""
+    assert clean_invite_body("Join\nChat\nNo location added\n") == ""
+
+
+def test_lines_that_merely_contain_a_keyword_are_kept():
+    """The match is on the whole line, not a substring anywhere — an
+    invite that happens to discuss acceptance criteria keeps its text."""
+    body = "We need to agree the acceptance criteria and change process."
+    assert clean_invite_body(body) == body
+
+
+def test_none_and_empty_are_safe():
+    assert clean_invite_body("") == ""
+    assert clean_invite_body(None) == ""

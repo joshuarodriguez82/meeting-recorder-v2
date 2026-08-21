@@ -6285,8 +6285,8 @@ async def portal_sync(req: PortalScopeRequest):
     client = (req.client or "").strip().lower()
     project = (req.project or "").strip().lower()
     try:
-        await asyncio.to_thread(svc.engagement_svc.build_register,
-                                client, project)
+        register = await asyncio.to_thread(
+            svc.engagement_svc.build_register, client, project)
         result = await asyncio.to_thread(
             svc.portal_push_svc.push, client, project)
     except PortalBindingBroken as e:
@@ -6300,7 +6300,30 @@ async def portal_sync(req: PortalScopeRequest):
         raise HTTPException(status_code=502, detail=(
             f"The portal is unreachable right now; the push will retry "
             f"automatically in the background. ({e})"))
-    return {"ok": True, **(result or {})}
+    # WHAT WE SENT, ALONGSIDE WHAT THE PORTAL DID WITH IT.
+    #
+    # "0 added, 0 updated" is three completely different situations
+    # wearing one sentence: the register was empty and we sent nothing;
+    # the portal already had exactly this and correctly no-op'd
+    # (ingest is idempotent by contract); or the scope is wrong and we
+    # pushed some other project's register. The user cannot act on any
+    # of them without knowing which — the same "an unreadable result
+    # rendered as a result that isn't there" defect this app keeps
+    # paying for.
+    #
+    # So the response carries the register's own shape. An empty
+    # register is now a statement, not a silence.
+    reg = register if isinstance(register, dict) else {}
+    sent = {
+        "session_count": int(reg.get("session_count") or 0),
+        "action_items": len(reg.get("action_items") or []),
+        "decisions": len(reg.get("decisions") or []),
+        "requirements": len(reg.get("requirements") or []),
+        "open_questions": len(reg.get("open_questions") or []),
+    }
+    sent["total"] = (sent["action_items"] + sent["decisions"]
+                     + sent["requirements"] + sent["open_questions"])
+    return {"ok": True, "sent": sent, **(result or {})}
 
 
 @app.get("/engagements/known-statuses")

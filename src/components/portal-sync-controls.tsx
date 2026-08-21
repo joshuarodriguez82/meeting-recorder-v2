@@ -98,9 +98,31 @@ export function PortalSyncControls({ client, project, mode = "manage" }: {
     setBusy(true);
     try {
       const r = await api.portalSync({ client, project });
-      toast.success(
-        `Portal sync: ${r.added ?? 0} added, ${r.updated ?? 0} updated `
-        + `(${r.items ?? "?"} items total)`);
+      // "0 added, 0 updated" is three different situations in one
+      // sentence: nothing was sent, the portal already had exactly
+      // this, or the wrong project was pushed. Say which.
+      const sent = r.sent;
+      if (sent && sent.total === 0) {
+        toast.warning(
+          `Nothing to sync — "${project}" has no register content yet `
+          + `(${sent.session_count} processed session`
+          + `${sent.session_count === 1 ? "" : "s"} in this project). `
+          + `If the meeting you expected is under a different project, `
+          + `re-tag it and sync again.`);
+      } else if (sent) {
+        const noop = (r.added ?? 0) === 0 && (r.updated ?? 0) === 0;
+        toast.success(
+          `Sent ${sent.total} item${sent.total === 1 ? "" : "s"} from `
+          + `${sent.session_count} session`
+          + `${sent.session_count === 1 ? "" : "s"} — portal: `
+          + `${r.added ?? 0} added, ${r.updated ?? 0} updated`
+          + (noop ? " (already had this content)" : "")
+          + (r.items != null ? `, ${r.items} on record` : ""));
+      } else {
+        toast.success(
+          `Portal sync: ${r.added ?? 0} added, ${r.updated ?? 0} updated `
+          + `(${r.items ?? "?"} items total)`);
+      }
       await reload();
     } catch (e) {
       toast.error(`${e instanceof Error ? e.message : e}`);

@@ -190,6 +190,81 @@ _DURATION_RE = re.compile(
 DEFAULT_DURATION_MIN = 30
 
 
+# Lines Outlook's event card contributes that are never part of an
+# invite. Matched against the WHOLE trimmed line, case-insensitively —
+# never as a substring — so an invite that discusses "the change
+# process" or "acceptance criteria" keeps its text.
+_INVITE_CHROME_EXACT = frozenset({
+    "join", "chat", "accepted", "declined", "tentative", "change",
+    "no location added", "prepare for this meeting", "rsvp",
+    "add to calendar", "forward", "edit", "cancel", "save", "close",
+    "what are key talking points?", "help me prepare for this meeting",
+    "help me understand the risks", "show more", "show less",
+    "more options", "copy link",
+})
+
+_INVITE_CHROME_PATTERNS = (
+    # "Jordan Poe invited you." / "... invited you"
+    re.compile(r"^.{1,80}\binvited you\.?$", re.IGNORECASE),
+    # "Accepted 1, Didn't respond 5" — the attendee tally.
+    re.compile(r"^(accepted|declined|tentative|didn'?t respond|no response)"
+               r"\s*\d+([,;].*)?$", re.IGNORECASE),
+    # A bare avatar monogram: "GG", "JP".
+    re.compile(r"^[A-Z]{1,3}$"),
+    # The card's own date line: "Fri 8/21/2026 10:00 AM - 11:00 AM".
+    re.compile(r"^[A-Za-z]{3,9}\s+\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\s+"
+               r"\d{1,2}:\d{2}\s*[AaPp]\.?[Mm]\.?\s*[-–—]\s*"
+               r"\d{1,2}:\d{2}\s*[AaPp]\.?[Mm]\.?$"),
+)
+
+# Unicode Private Use Area: Outlook's toolbar icons are a private-use
+# font, so every icon is a character innerText returns and every font
+# renders as a hollow box. Plus the replacement char.
+_PUA_RE = re.compile("[\uE000-\uF8FF\uFFFD]")
+
+
+def clean_invite_body(text: Any) -> str:
+    """Strip Outlook's own UI out of an invite body, at READ time.
+
+    Extension 1.17.0 fixes this at capture time and structurally: the
+    body is read out of the invite's own frame, where Outlook's UI is
+    definitionally not present. That is the real fix. But it only helps
+    text captured afterwards, and every body already in the store stays
+    exactly as ugly until something re-captures that meeting — while
+    the user, reasonably, judges the app by what it is showing right
+    now (field screenshot, v2.59.0: a body consisting of two hollow
+    boxes, an RSVP tally, an avatar monogram and three Copilot prompt
+    suggestions, with one real sentence in the middle).
+
+    This is the lesson v2.52.0 already paid for with the attendee
+    scrub: a cleanup of data the APP OWNS must not be held hostage by
+    whether a browser is running, or by which extension version the
+    user managed to reload.
+
+    DROP-ONLY, by construction: it removes characters and whole lines,
+    and never adds or rewrites. The worst case on an unfamiliar tenant
+    is text that is still there.
+    """
+    if not text:
+        return ""
+    out: List[str] = []
+    for raw_line in str(text).split("\n"):
+        line = _PUA_RE.sub("", raw_line).strip()
+        if not line:
+            # Preserve paragraph breaks, but never lead with one.
+            if out and out[-1] != "":
+                out.append("")
+            continue
+        if line.lower() in _INVITE_CHROME_EXACT:
+            continue
+        if any(p.match(line) for p in _INVITE_CHROME_PATTERNS):
+            continue
+        out.append(line)
+    while out and out[-1] == "":
+        out.pop()
+    return "\n".join(out)
+
+
 # ── pure helpers (no I/O, no LLM) ───────────────────────────────────
 
 def normalize_subject(subject: Any) -> str:
@@ -729,7 +804,13 @@ class ExtensionCalendarService:
             # Absent from every event stored before this field existed,
             # which reads as "" — the same value an event with no
             # description has — so an old store loads unchanged.
-            "body": str(raw.get("body") or "")[:8000],
+            #
+            # Cleaned on the way OUT, every read: a body captured by an
+            # older extension still carries Outlook's RSVP control,
+            # attendee tally, Copilot prompts and toolbar-icon
+            # characters, and the user should not have to re-capture a
+            # meeting to stop seeing them. See clean_invite_body.
+            "body": clean_invite_body(raw.get("body"))[:8000],
             "detail_status": str(raw.get("detail_status") or "")[:32],
             "source": SOURCE_EXTENSION,
         }
