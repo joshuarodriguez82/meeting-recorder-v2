@@ -113,6 +113,11 @@ export function RecordView({
     catch { return false; }
   });
   const [attendees, setAttendees] = useState<string[]>([]);
+  // Whether the all-green readiness checklist is expanded. Applies
+  // ONLY when everything passes — a failing checklist ignores this and
+  // stays open (see the render site). Default collapsed: four rows of
+  // "Connected" are confirmation, not information.
+  const [readinessOpen, setReadinessOpen] = useState(false);
   // Who called the meeting, off the calendar tile the user clicked Use
   // on. "" for an ad-hoc recording. Threaded through to
   // /recording/start, which stores it on the session so the speaker-
@@ -1552,7 +1557,28 @@ export function RecordView({
               endpoint already fetched above; no new polling. */}
           {!recording && (
             <div className="md:col-span-2 space-y-1 rounded-lg border border-border bg-muted/30 p-3">
-              <div className="flex items-center gap-2 pb-1.5">
+              {/* Collapsed to the one-line verdict by default (user
+                  request 2026-08-21): four green rows repeating
+                  "Connected" is confirmation, not information, and it
+                  pushed Upcoming Meetings below the fold on every
+                  visit. The chevron reopens the per-item detail.
+
+                  NOT collapsible when something is wrong: readiness
+                  problems auto-expand and stay expanded, because a
+                  folded-away failure is exactly the "unreadable
+                  result rendered as fine" defect this app keeps
+                  paying for — the row that says WHICH item failed and
+                  what to do about it must be on screen while it is
+                  true. */}
+              <button
+                type="button"
+                onClick={() => readyToRecord && setReadinessOpen((v) => !v)}
+                className={
+                  "flex w-full items-center gap-2 pb-1.5 " +
+                  (readyToRecord ? "cursor-pointer" : "cursor-default")
+                }
+                aria-expanded={!readyToRecord || readinessOpen}
+              >
                 {readyToRecord ? (
                   <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
                 ) : (
@@ -1568,7 +1594,13 @@ export function RecordView({
                 >
                   {readyToRecord ? "Ready to record" : "Not ready to record"}
                 </span>
-              </div>
+                {readyToRecord && (
+                  readinessOpen
+                    ? <ChevronDown className="h-3.5 w-3.5 ml-auto text-muted-foreground" />
+                    : <ChevronRight className="h-3.5 w-3.5 ml-auto text-muted-foreground" />
+                )}
+              </button>
+              {(!readyToRecord || readinessOpen) && (
               <div className="divide-y divide-border/60">
                 <ReadinessRow
                   status={micReady ? "pass" : "fail"}
@@ -1613,6 +1645,7 @@ export function RecordView({
                   hint="Optional — connect a calendar in Settings for upcoming meetings and auto-record. Recording works fine without it."
                 />
               </div>
+              )}
             </div>
           )}
           <div className="space-y-2">
