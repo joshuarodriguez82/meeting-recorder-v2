@@ -411,8 +411,10 @@ from services._cloud_sync import CloudFileNotReadyError
 from services.client_config_service import ClientConfig, ClientConfigService
 from services import document_service
 from services.engagement_service import EngagementService
+from services.portal_push_service import (
+    PortalBindingBroken, PortalPermanent, PortalPushService, PortalTransient)
 from services.export_service import ExportService
-from services.export_worker import ExportWorker, resolve_export_folder
+from services.export_worker import ExportWorker, PortalPushWorker, resolve_export_folder
 from services import export_reconcile
 from services import archive_reconcile
 from services import shared_state_sync
@@ -914,8 +916,31 @@ class Services:
             # Pure aggregator over session JSONs + client configs +
             # commitments — no state of its own, so it's safe to build
             # eagerly here.
+            # Portal push: bindings + the ingest POST. The worker is
+            # a dedicated daemon thread (see export_worker's 2026-07-09
+            # incident note) so a flaky HTTPS endpoint can never touch
+            # record → finalize → process. The URL is read per push so
+            # the dev/prod host is a live setting.
+            self.portal_push_svc = PortalPushService(
+                _recordings_dir,
+                get_portal_url=lambda: getattr(
+                    self.settings, "portal_url", "") if self.settings else "")
+            self.portal_push_worker = PortalPushWorker(
+                self.portal_push_svc.push)
+
+            def _on_register_written(client_key: str, project_key: str,
+                                     _svc=self) -> None:
+                # The enqueue filter lives here, not in the worker: a
+                # project with no enabled, unbroken binding never even
+                # queues (acceptance criterion 5), and a broken binding
+                # stays silent instead of error-logging on every
+                # register regeneration.
+                if _svc.portal_push_svc.should_push(client_key, project_key):
+                    _svc.portal_push_worker.enqueue(client_key, project_key)
+
             self.engagement_svc = EngagementService(
-                self.session_svc, self.client_cfg_svc, self.commitments_svc)
+                self.session_svc, self.client_cfg_svc, self.commitments_svc,
+                on_register_written=_on_register_written)
             self.template_svc = TemplateService(_recordings_dir)
             # Co-Pilot mode + meeting-type libraries. Same shape as
             # TemplateService — seeds defaults on first launch, user
@@ -1158,6 +1183,7 @@ class SettingsDTO(BaseModel):
     live_claude_model: str = ""
     live_openai_api_key: str = ""
     live_openai_base_url: str = ""
+    portal_url: str = ""
     live_anthropic_api_key: str = ""
     # Active co-pilot persona + meeting-type modifier. Names resolve
     # through CoPilotModeService / CoPilotMeetingTypeService; the
@@ -1714,6 +1740,7 @@ async def get_settings():
         live_claude_model=s.live_claude_model,
         live_openai_api_key=s.live_openai_api_key,
         live_openai_base_url=s.live_openai_base_url,
+        portal_url=getattr(s, "portal_url", ""),
         live_anthropic_api_key=s.live_anthropic_api_key,
         live_copilot_mode=s.live_copilot_mode,
         live_copilot_meeting_type=s.live_copilot_meeting_type,
@@ -1828,6 +1855,7 @@ async def save_settings(payload: SettingsDTO):
         live_claude_model=(payload.live_claude_model or "").strip(),
         live_openai_api_key=payload.live_openai_api_key or "",
         live_openai_base_url=(payload.live_openai_base_url or "").strip(),
+        portal_url=(payload.portal_url or "").strip().rstrip("/"),
         live_anthropic_api_key=payload.live_anthropic_api_key or "",
         live_copilot_mode=(payload.live_copilot_mode or "").strip() or "SA",
         live_copilot_meeting_type=(payload.live_copilot_meeting_type or "").strip() or "General",
@@ -5135,8 +5163,15 @@ def _reset_shared_state_services() -> None:
     # through it on every call rather than caching), but rebuild it too
     # so it never holds a reference to the OLD ClientConfigService
     # instance — cheap, and removes any doubt.
+    def _on_register_written_rebuilt(client_key: str,
+                                     project_key: str) -> None:
+        if svc.portal_push_svc and svc.portal_push_svc.should_push(
+                client_key, project_key):
+            svc.portal_push_worker.enqueue(client_key, project_key)
+
     svc.engagement_svc = EngagementService(
-        svc.session_svc, svc.client_cfg_svc, svc.commitments_svc)
+        svc.session_svc, svc.client_cfg_svc, svc.commitments_svc,
+        on_register_written=_on_register_written_rebuilt)
 
 
 # Last outcome of shared_state_sync.sanitize_local_paths(), captured so
@@ -6151,6 +6186,99 @@ async def engagement_overlay_put(client: str, req: EngagementOverlayRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"ok": True, "overlay": overlay.to_dict()}
+
+
+class PortalBindRequest(BaseModel):
+    client: str
+    project: str
+    customer_id: str
+    opportunity_name: str = ""
+    parent_name: str = ""
+    # The edit token. Accepted in this request body, stored in the OS
+    # keychain, and NEVER echoed back: no response, log line or error
+    # from this API carries it. Paste-once — the Cognito picker flow
+    # can replace this later without changing the wire format.
+    edit_token: str
+
+
+class PortalScopeRequest(BaseModel):
+    client: str
+    project: str
+
+
+@app.get("/portal/bindings")
+async def portal_bindings():
+    """Every project→opportunity binding, tokenless by construction —
+    tokens never enter the bindings JSON, so there is nothing here to
+    redact."""
+    if not svc.portal_push_svc:
+        return {}
+    return svc.portal_push_svc.bindings()
+
+
+@app.post("/portal/bind")
+async def portal_bind(req: PortalBindRequest):
+    if not svc.portal_push_svc:
+        raise HTTPException(status_code=503, detail="portal service not ready")
+    try:
+        binding = await asyncio.to_thread(
+            svc.portal_push_svc.bind,
+            (req.client or "").strip().lower(),
+            (req.project or "").strip().lower(),
+            customer_id=req.customer_id,
+            opportunity_name=req.opportunity_name,
+            parent_name=req.parent_name,
+            edit_token=req.edit_token,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        # Keychain refusal — the binding was NOT created; saying so
+        # beats a binding that pushes tokenless forever.
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"ok": True, "binding": binding}
+
+
+@app.post("/portal/unbind")
+async def portal_unbind(req: PortalScopeRequest):
+    if not svc.portal_push_svc:
+        raise HTTPException(status_code=503, detail="portal service not ready")
+    existed = await asyncio.to_thread(
+        svc.portal_push_svc.unbind,
+        (req.client or "").strip().lower(),
+        (req.project or "").strip().lower())
+    return {"ok": True, "existed": existed}
+
+
+@app.post("/portal/sync")
+async def portal_sync(req: PortalScopeRequest):
+    """Manual 'sync now'. Regenerates the register (which itself
+    enqueues a background push via the register-written hook) and then
+    pushes SYNCHRONOUSLY once so the caller gets the portal's actual
+    answer — added/updated counts on success, and the specific failure
+    class otherwise. Ingest is idempotent, so the background push this
+    also triggers adds nothing on top."""
+    if not (svc.portal_push_svc and svc.engagement_svc):
+        raise HTTPException(status_code=503, detail="portal service not ready")
+    client = (req.client or "").strip().lower()
+    project = (req.project or "").strip().lower()
+    try:
+        await asyncio.to_thread(svc.engagement_svc.build_register,
+                                client, project)
+        result = await asyncio.to_thread(
+            svc.portal_push_svc.push, client, project)
+    except PortalBindingBroken as e:
+        raise HTTPException(status_code=409, detail=(
+            f"The portal rejected this project's edit token — the binding "
+            f"is marked broken and automatic pushes have stopped. Re-bind "
+            f"the project to resume. ({e})"))
+    except PortalPermanent as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except PortalTransient as e:
+        raise HTTPException(status_code=502, detail=(
+            f"The portal is unreachable right now; the push will retry "
+            f"automatically in the background. ({e})"))
+    return {"ok": True, **(result or {})}
 
 
 @app.get("/engagements/known-statuses")

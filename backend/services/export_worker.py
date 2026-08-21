@@ -166,3 +166,99 @@ class ExportWorker:
                 logger.error(
                     f"Export of session {session_id} failed after "
                     f"{attempt + 1} attempts: {e} — giving up")
+
+class PortalPushWorker:
+    """Single daemon thread pushing engagement registers to the SA
+    Tools Portal, off the hot path — the same architecture, retry
+    schedule and reasoning as ExportWorker above (see the 2026-07-09
+    incident in its docstring: flaky I/O must never share a thread with
+    record → finalize → process; a flaky HTTPS endpoint belongs on
+    exactly this kind of thread).
+
+    ``do_push(client_key, project_key)`` is injected
+    (PortalPushService.push). Retry contract, matching the portal's
+    documented failure semantics:
+
+      * PortalTransient  → re-queued on the (5s, 30s, 120s) schedule.
+        503 is a partial write and is the one status that MEANS retry.
+      * PortalBindingBroken → dropped. The service has already marked
+        the binding broken, which also stops FUTURE enqueues; retrying
+        a bad token forever is silent failure wearing a schedule.
+      * PortalPermanent → dropped and logged. Identical bytes cannot
+        produce a different answer from a 400/422.
+
+    Enqueues coalesce per scope: a register regenerated three times
+    while the portal is down pushes once on recovery, with the newest
+    file — push() reads the register from disk at send time, so the
+    queue never holds stale content.
+    """
+
+    def __init__(self, do_push: Callable[[str, str], object]):
+        self._do_push = do_push
+        self._q: "queue.Queue[tuple[str, str, int]]" = queue.Queue()
+        self._pending: set[tuple[str, str]] = set()
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(
+            target=self._run, name="portal-push-worker", daemon=True)
+        self._thread.start()
+
+    def enqueue(self, client_key: str, project_key: str) -> None:
+        """Never blocks, never raises — this is called from the
+        register-write path, and acceptance criterion 7 is that the
+        portal being unreachable (or this worker being broken) cannot
+        affect recording, finalizing or processing."""
+        try:
+            key = (client_key, project_key)
+            with self._lock:
+                if key in self._pending:
+                    return
+                self._pending.add(key)
+            self._q.put((client_key, project_key, 0))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"portal push enqueue failed: {e}")
+
+    def _run(self) -> None:
+        # Imported here, not at module top: this module predates the
+        # portal service and is imported by the processing path's
+        # neighbours; a cycle would be easy to create and hard to see.
+        from services.portal_push_service import (
+            PortalBindingBroken, PortalPermanent, PortalTransient)
+        while True:
+            client_key, project_key, attempt = self._q.get()
+            try:
+                if attempt == 0:
+                    with self._lock:
+                        self._pending.discard((client_key, project_key))
+                try:
+                    self._do_push(client_key, project_key)
+                except PortalTransient as e:
+                    if attempt < len(_RETRY_DELAYS_S):
+                        delay = _RETRY_DELAYS_S[attempt]
+                        logger.warning(
+                            f"portal push {client_key}/{project_key} "
+                            f"transient failure (attempt {attempt + 1}): "
+                            f"{e} — retrying in {delay:.0f}s")
+                        t = threading.Timer(
+                            delay, self._q.put,
+                            args=((client_key, project_key, attempt + 1),))
+                        t.daemon = True
+                        t.start()
+                    else:
+                        logger.error(
+                            f"portal push {client_key}/{project_key} "
+                            f"failed after {attempt + 1} attempts: {e} — "
+                            f"giving up until the next register write")
+                except PortalBindingBroken as e:
+                    logger.error(
+                        f"portal push {client_key}/{project_key}: binding "
+                        f"broken ({e}) — not retrying; re-bind in Settings")
+                except PortalPermanent as e:
+                    logger.error(
+                        f"portal push {client_key}/{project_key}: "
+                        f"rejected ({e}) — not retrying")
+                except Exception as e:  # noqa: BLE001
+                    logger.error(
+                        f"portal push {client_key}/{project_key}: "
+                        f"unexpected error: {e} — not retrying")
+            finally:
+                self._q.task_done()

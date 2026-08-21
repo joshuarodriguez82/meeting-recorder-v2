@@ -59,7 +59,8 @@ def _scope_key(client: str, project: str = "") -> str:
 
 
 class EngagementService:
-    def __init__(self, session_svc, client_cfg_svc=None, commitments_svc=None):
+    def __init__(self, session_svc, client_cfg_svc=None, commitments_svc=None,
+                 on_register_written=None):
         self._sessions = session_svc
         self._client_cfg = client_cfg_svc
         # Optional — when provided, the register surfaces rolled-up
@@ -67,6 +68,13 @@ class EngagementService:
         # engagement view can show "what's still owed across every call
         # on this account." Tolerant of None for tests / older callers.
         self._commitments = commitments_svc
+        # Fires (client_key, project_key) after a register cache file
+        # is successfully (re)written — the portal-push trigger. The
+        # spec is explicit that the trigger is THIS event, not a timer
+        # and not a folder scan: registers regenerate at uneven times,
+        # so anything polling the filesystem pushes stale files and
+        # misses fresh ones. Must never raise into the register path.
+        self._on_register_written = on_register_written
 
     # ---- public API -------------------------------------------------
 
@@ -284,3 +292,15 @@ class EngagementService:
             tmp.replace(dest)
         except Exception as e:
             logger.warning(f"engagement register cache write failed: {e}")
+            return
+        # Only after a SUCCESSFUL write — a failed write must not push
+        # a stale file — and only for per-project registers: the
+        # client-level rollup (project "") is the union of the project
+        # registers, and pushing both would file the same items twice
+        # under the same ids, then flap between the two on every run.
+        if self._on_register_written and project_key:
+            try:
+                self._on_register_written(client_key, project_key)
+            except Exception as cb_err:  # noqa: BLE001
+                logger.warning(
+                    f"register-written callback failed: {cb_err}")
