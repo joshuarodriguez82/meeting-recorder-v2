@@ -854,10 +854,26 @@ class ExtensionCalendarService:
         # deciding what this file stores, and this payload is opaque
         # by design — cheap to bound, and it keeps a future extension
         # from writing something large or unexpected into the store.
+        def _keep(k, v):
+            if isinstance(v, (bool, int, float)) or v is None:
+                return True
+            # ONE named exception to scalars-only: responseKeyNames,
+            # the extension's census of an unparseable response shape.
+            # Key NAMES only — each entry must LOOK like a key name
+            # (identifier characters), so an email address, URL or
+            # subject line cannot ride a list through this door. That
+            # is how a tenant's new shape is read from a diagnostics
+            # bundle instead of guessed, one release per guess.
+            return (k == "responseKeyNames"
+                    and isinstance(v, list) and len(v) <= 64
+                    and all(isinstance(x, str) and 0 < len(x) <= 40
+                            and re.fullmatch(r"[a-z0-9_.$-]+", x)
+                            for x in v))
+
         clean = {
             str(k)[:64]: v
             for k, v in diag.items()
-            if isinstance(v, (bool, int, float)) or v is None
+            if _keep(str(k), v)
         }
         with self._lock:
             data = self._read_locked()
