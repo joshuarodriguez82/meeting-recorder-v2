@@ -133,3 +133,11 @@ def test_a_subject_repeated_later_in_a_real_body_is_kept():
             "Bring the slides.")
     out = clean_invite_body(body, subject="Montefiore demo - use cases")
     assert "Montefiore demo - use cases" in out
+
+
+def test_the_series_label_line_is_dropped():
+    """Field screenshot 2026-08-23: a recurring meeting's captured
+    agenda opened with the card's "Series" toggle label."""
+    body = "Series\nTurning this to Daily 15min for the rest of the month."
+    assert clean_invite_body(body) == (
+        "Turning this to Daily 15min for the rest of the month.")
