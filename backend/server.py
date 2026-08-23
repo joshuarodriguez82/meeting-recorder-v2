@@ -6219,7 +6219,10 @@ async def portal_bindings():
     redact."""
     if not svc.portal_push_svc:
         return {}
-    return svc.portal_push_svc.bindings()
+    # token_present is computed per machine, never persisted — the
+    # bindings file roams between the user's machines (it lives in the
+    # recordings dir); each machine's keychain does not.
+    return svc.portal_push_svc.bindings_with_token_state()
 
 
 @app.post("/portal/bind")
