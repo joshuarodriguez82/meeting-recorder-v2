@@ -1859,6 +1859,36 @@ export function RecordView({
             })}
           </div>
         )}
+        {/* THE SIGNED-OUT SESSION, NAMED. Field diagnostics 2026-08-23:
+            the browser's Outlook session expired, every capture read
+            zero from Outlook tabs while Teams read fine, and the panel
+            silently served two-day-old detail. The capture now
+            classifies where the tab landed; this is where the app
+            finally says it out loud. */}
+        {captureDiag?.authRedirect === true && (
+          <div className="mx-6 mb-3 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-800 dark:text-red-300">
+            <span className="font-medium">
+              Outlook Web is signed out in Chrome — the last capture was
+              bounced to a sign-in page and could read nothing.
+            </span>{" "}
+            The meetings below are from the last successful capture and
+            will not update. Open outlook.office.com in Chrome, sign in,
+            then run Capture &amp; Send.
+          </div>
+        )}
+        {captureDiag?.authRedirect !== true
+          && captureDiag?.calendarUnreadable === true && (
+          <div className="mx-6 mb-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+            <span className="font-medium">
+              The last capture opened Outlook Web and could not read the
+              calendar at all — no meetings, no page text.
+            </span>{" "}
+            That usually means a sign-in prompt or an Outlook change, not
+            an empty week. Open outlook.office.com in Chrome, confirm the
+            calendar itself loads, then run Capture &amp; Send. The
+            meetings below are from the last successful capture.
+          </div>
+        )}
         {/* A stale extension explains missing detail exactly, so say
             so here rather than letting it look like the capture is
             broken. */}

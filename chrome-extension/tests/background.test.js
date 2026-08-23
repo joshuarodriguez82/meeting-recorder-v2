@@ -3005,3 +3005,53 @@ test("a join URL already in the markup before the click is not attributed",
     sandbox.setTimeout = prevST;
   }
 });
+
+// ── the signed-out session stops being invisible ─────────────────────
+//
+// FIELD DIAGNOSTICS 2026-08-23. Friday evening: four structured
+// captures in a row, 51 events each. Saturday morning onward: OWA tab
+// 0 chars, Inbox 0 chars, recorder never installed, 0 candidates, 0
+// responses — while the Teams tabs kept reading ~2,400 chars. The
+// browser's Outlook session had expired: the background tab bounced
+// to a sign-in origin the extension has no permission to script, so
+// every read failed in a way indistinguishable from "the calendar was
+// empty", and the app silently served Friday's stale detail for two
+// days.
+//
+// The capture now classifies where the tab LANDED, and the flag rides
+// the existing diag to the app.
+
+test("sign-in origins are recognized, Outlook origins are not", () => {
+  for (const url of [
+    "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?x=1",
+    "https://login.live.com/login.srf",
+    "https://login.microsoft.com/anything",
+    "https://account.microsoft.com/",
+    "https://sts.login.windows.net/whatever",
+  ]) {
+    assert.equal(sandbox.isSignInUrl(url), true, url);
+  }
+  for (const url of [
+    "https://outlook.office.com/calendar/view/week",
+    "https://outlook.cloud.microsoft/mail/",
+    "https://teams.microsoft.com/v2/",
+    // Suffix matching, never substring: a hostile lookalike host must
+    // not count as a sign-in page.
+    "https://login.microsoftonline.com.evil.example/phish",
+    "https://notlogin.live.com.evil.example/",
+    "not a url at all",
+    "",
+  ]) {
+    assert.equal(sandbox.isSignInUrl(url), false, url);
+  }
+});
+
+test("the capture stamps authRedirect into the diag it POSTs", () => {
+  // Source pin: the wiring from tab-landed-URL to the diag object the
+  // backend stores. Without this line the classification exists and
+  // never leaves the extension — the exact counters-kept-invisible
+  // defect record_capture_diag documents.
+  const src = fs.readFileSync(BG_PATH, "utf8");
+  assert.match(src, /diag\.authRedirect\s*=\s*isSignInUrl\(/);
+  assert.match(src, /diag\.calendarUnreadable\s*=/);
+});
