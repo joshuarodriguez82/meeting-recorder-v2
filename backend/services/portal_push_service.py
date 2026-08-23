@@ -277,6 +277,22 @@ class PortalPushService:
         with self._lock:
             return self._read()
 
+    def bindings_with_token_state(self) -> Dict[str, Any]:
+        """bindings() plus a computed, PER-MACHINE `token_present` on
+        each entry. Never written to the file: the file roams between
+        machines and must know nothing about any machine's keychain —
+        this is how the Clients tab can say "token needed on this
+        device, paste the connection block once" instead of rendering a
+        roamed binding as broken."""
+        out = {}
+        for scope, b in self.bindings().items():
+            entry = dict(b) if isinstance(b, dict) else b
+            if isinstance(entry, dict):
+                entry["token_present"] = bool(secrets.get_secret(
+                    _TOKEN_KEY_FMT.format(scope=scope)))
+            out[scope] = entry
+        return out
+
     def should_push(self, client_key: str, project_key: str) -> bool:
         """The enqueue filter: per-project scope, binding present,
         enabled, and not marked broken. A project with no binding never
@@ -284,7 +300,14 @@ class PortalPushService:
         if not (project_key or "").strip():
             return False
         b = self.binding_for(client_key, project_key)
-        return bool(b and b.get("enabled") and not b.get("broken"))
+        if not (b and b.get("enabled") and not b.get("broken")):
+            return False
+        # And the token must exist ON THIS MACHINE: the binding roams
+        # with the recordings dir, the keychain does not. A machine
+        # without the token quietly declines instead of erroring on
+        # every register write.
+        scope = scope_key(client_key, project_key)
+        return bool(secrets.get_secret(_TOKEN_KEY_FMT.format(scope=scope)))
 
     def _record_result(self, scope: str, *, ok: bool, note: str,
                        broken: bool = False) -> None:
@@ -339,10 +362,19 @@ class PortalPushService:
 
         token = secrets.get_secret(_TOKEN_KEY_FMT.format(scope=scope)) or ""
         if not token:
-            self._record_result(scope, ok=False, broken=True,
-                                note="edit token missing from the OS "
-                                     "keychain — re-bind this project")
-            raise PortalBindingBroken("edit token missing — re-bind")
+            # PER-MACHINE state, never binding damage. The bindings
+            # file can live in a synced folder and roam between the
+            # user's machines; the token, by the integration spec,
+            # lives only in each machine's OS keychain and cannot
+            # roam. Marking the SHARED binding broken here poisoned
+            # every machine: the flag synced back and stopped pushes
+            # on the machine that had the token all along
+            # (field requirement 2026-08-23). This machine simply
+            # does not push; should_push() already keeps it out of
+            # the queue.
+            raise PortalPermanent(
+                "no edit token on this device — paste the portal's "
+                "connection block once on this machine to push from it")
 
         reg_path = self.register_path(client_key, project_key)
         try:

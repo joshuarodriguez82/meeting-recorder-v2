@@ -138,6 +138,11 @@ export interface PortalBinding {
   // API Gateway host); portalUrl is the website, display only.
   apiBase?: string;
   portalUrl?: string;
+  // Computed PER MACHINE by /portal/bindings, never stored: the
+  // bindings file roams with the recordings dir; each machine's
+  // keychain does not. False on a machine that hasn't pasted the
+  // connection block yet — a paste-once state, not a broken binding.
+  token_present?: boolean;
   boundAt: string;
   enabled: boolean;
   // Set when the portal rejected the edit token (403). Pushes stop

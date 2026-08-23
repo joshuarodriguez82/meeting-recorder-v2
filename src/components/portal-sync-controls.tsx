@@ -140,6 +140,14 @@ export function PortalSyncControls({ client, project, mode = "manage" }: {
           Sync to portal
         </Button>
       )}
+      {binding && !binding.broken && binding.token_present === false && (
+        <span
+          className="text-xs text-amber-700 dark:text-amber-400 max-w-[18rem] truncate"
+          title="This project is bound (the binding travels with your recordings folder), but this machine's keychain has no edit token yet. Open Portal… and paste the connection block once on this machine."
+        >
+          Token needed on this device — paste the connection block once
+        </span>
+      )}
       {binding?.broken && (
         <span
           className="text-xs text-red-600 dark:text-red-400 max-w-[16rem] truncate"
