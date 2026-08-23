@@ -76,6 +76,13 @@
       // "we saw calendar traffic we could not read" from "we saw no
       // calendar traffic".
       notMeetingShaped: 0,
+      // Key names (regex over the text head — no parse) from JSON
+      // responses the subject-hint gate DECLINED. The gate's
+      // vocabulary is a guess about a tenant this project cannot see,
+      // and when the guess is wrong the old symptom was silence: the
+      // response was never recorded, so nothing downstream could say
+      // why. Names only, bounded — never a value.
+      declinedKeyNames: [],
     };
     window.__mrCal = store;
 
@@ -91,9 +98,33 @@
       return SUBJECT_HINTS.some((h) => head.includes(h));
     };
 
+    const KEY_NAME_RE = /"([A-Za-z_][A-Za-z0-9_]{2,30})"\s*:/g;
+    const censusDeclined = (text) => {
+      try {
+        if (store.declinedKeyNames.length >= 48) return;
+        const head = text.slice(0, 100000);
+        const t = head.trimStart();
+        if (t[0] !== "{" && t[0] !== "[") return;  // not JSON-shaped
+        const seen = new Set(store.declinedKeyNames);
+        let m;
+        KEY_NAME_RE.lastIndex = 0;
+        while ((m = KEY_NAME_RE.exec(head)) !== null && seen.size < 48) {
+          seen.add(m[1].toLowerCase());
+        }
+        store.declinedKeyNames = Array.from(seen);
+      } catch (_) { /* census must never break recording */ }
+    };
+
     const record = (text) => {
       if (!text) return;
-      if (!looksLikeMeetingJson(text)) return;
+      if (!looksLikeMeetingJson(text)) {
+        // Declined by the vocabulary gate — report what it looked
+        // like instead of vanishing (field repro 2026-08-23: a
+        // response naming its subject "cardTitle" was never recorded,
+        // and the silence was indistinguishable from no traffic).
+        censusDeclined(text || "");
+        return;
+      }
       let parsed;
       try {
         parsed = JSON.parse(text);
