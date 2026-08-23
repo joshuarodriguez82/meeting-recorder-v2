@@ -107,3 +107,32 @@ def test_record_extension_version_preserves_existing_events(tmp_path: Path):
     events = svc.get_events()
     assert len(events) == 1
     assert events[0]["subject"] == "Standup"
+
+
+def test_capture_diag_keeps_the_bounded_key_name_census(tmp_path):
+    """The response key-name census (names only, never values) must
+    survive the scalars-only sanitizer — it is how a tenant's new
+    response shape is read from a diagnostics bundle instead of
+    guessed, one release per guess (field run 2026-08-23: 19 captured
+    responses, zero parseable, no way to see why)."""
+    from services.extension_calendar_service import ExtensionCalendarService
+
+    svc = ExtensionCalendarService(tmp_path)
+    svc.record_capture_diag({
+        "responsesMatched": 19,
+        "responseKeyNames": ["data", "calendarevents", "eventtitle"],
+        "responsesContainJoinShapedUrl": True,
+        # Still rejected: lists under any other key, oversized lists,
+        # entries that don't look like key names, nested junk.
+        "otherList": ["subject", "start"],
+        "tooMany": ["k"] * 65,
+        "smuggledAddress": ["a.doe@globex.example"],
+        "nested": {"no": 1},
+    })
+    diag = svc.last_capture_diag()
+    assert diag["responseKeyNames"] == ["data", "calendarevents", "eventtitle"]
+    assert diag["responsesContainJoinShapedUrl"] is True
+    assert "otherList" not in diag
+    assert "tooMany" not in diag
+    assert "smuggledAddress" not in diag
+    assert "nested" not in diag

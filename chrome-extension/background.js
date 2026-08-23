@@ -3115,6 +3115,53 @@ function detailsFromResponses(bodies, diag) {
   };
 
   for (const b of bodies || []) visit(b, 0);
+
+  // WHEN NOTHING MATCHED, REPORT THE SHAPE — STOP GUESSING IT.
+  //
+  // FIELD RUN 2026-08-23 13:52 (extension 1.19.0): 179 responses seen,
+  // 19 matched by the recorder's content gate — and this function
+  // recognized ZERO items in them, so every downstream fix (the
+  // body-href scan included) sat unreachable behind key names this
+  // tenant's new Outlook stack doesn't use. Finding the right aliases
+  // by guessing costs one full release/reinstall/capture cycle per
+  // guess; the payload we cannot read is IN OUR HANDS and can simply
+  // tell us its key names.
+  //
+  // Privacy stance identical to the API probe's fieldsPresent: key
+  // NAMES only, lowercased, bounded — never a value, never a subject,
+  // never an address. Additionally: whether any captured response
+  // contains a join-provider-shaped URL AT ALL, as one boolean — if
+  // true, the link is in the captured payload and only parsing stands
+  // between us and it; if false, the responses genuinely lack it and
+  // the next move is different.
+  if (diag && found.size === 0 && (bodies || []).length) {
+    const names = new Set();
+    let census = 0;
+    const walkNames = (v, depth) => {
+      if (v === null || typeof v !== "object" || depth > 10
+          || census > 50000 || names.size >= 64) return;
+      census++;
+      if (Array.isArray(v)) {
+        for (const x of v.slice(0, 30)) walkNames(x, depth + 1);
+        return;
+      }
+      for (const k of Object.keys(v)) {
+        if (names.size >= 64) break;
+        names.add(String(k).toLowerCase().slice(0, 40));
+        walkNames(v[k], depth + 1);
+      }
+    };
+    for (const b of bodies) walkNames(b, 0);
+    diag.responseKeyNames = Array.from(names);
+
+    let joinShaped = false;
+    for (const b of bodies) {
+      let text = "";
+      try { text = JSON.stringify(b).slice(0, 400000); } catch (_) { text = ""; }
+      if (_joinUrlFromHtml(text)) { joinShaped = true; break; }
+    }
+    diag.responsesContainJoinShapedUrl = joinShaped;
+  }
   return found;
 }
 
@@ -3698,6 +3745,16 @@ function buildCaptureDiag(capture) {
     const v = d[k];
     if (typeof v === "boolean"
         || (typeof v === "number" && Number.isFinite(v))) {
+      out[k] = v;
+    } else if (k === "responseKeyNames" && Array.isArray(v)
+               && v.length <= 64
+               && v.every((x) => typeof x === "string" && x.length > 0
+                          && x.length <= 40
+                          && /^[a-z0-9_.$-]+$/.test(x))) {
+      // ONE named exception to scalars-only: the response key-name
+      // census. Each entry must LOOK like a key name (identifier
+      // characters), so an address, URL or subject cannot ride a
+      // list through this door.
       out[k] = v;
     }
   }
