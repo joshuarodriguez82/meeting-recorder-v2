@@ -3055,3 +3055,95 @@ test("the capture stamps authRedirect into the diag it POSTs", () => {
   assert.match(src, /diag\.authRedirect\s*=\s*isSignInUrl\(/);
   assert.match(src, /diag\.calendarUnreadable\s*=/);
 });
+
+// ── the join URL inside the body's HTML, and the diag drop-list ──────
+//
+// FIELD CAPTURE 2026-08-23 12:19, the first healthy run after the
+// signed-out weekend: 18 responses matched, 10 invite bodies gained,
+// detailGainedJoinUrl 0. A Teams invite's join URL lives in the body
+// HTML as the href of "Join the meeting now" — and _stripHtml removed
+// every tag, href included, BEFORE the body was searched. The link
+// was captured on all 10 meetings and deleted during cleanup.
+
+test("a Teams join URL living only in the body's href is recovered", () => {
+  const html = '<div>You have been invited.</div>'
+    + '<a href="https://teams.microsoft.com/l/meetup-join/'
+    + '19%3ameeting_QQ%40thread.v2/0?context=%7b%22Tid%22%3a%22t%22%7d">'
+    + 'Join the meeting now</a><div>Meeting ID: 000 000 000</div>';
+  const diag = {};
+  const found = sandbox.detailsFromResponses([{
+    Items: [{
+      Subject: "Daily Pulse",
+      Start: "2026-08-24T09:30:00",
+      Body: { Content: html },
+    }],
+  }], diag);
+  const d = found.get(sandbox.detailKey("Daily Pulse", "2026-08-24T09:30:00"));
+  assert.ok(d, "the item never matched");
+  assert.match(d.joinUrl, /^https:\/\/teams\.microsoft\.com\/l\/meetup-join\//,
+               "the href inside the body HTML was stripped before the "
+               + "body was searched");
+  assert.equal(diag.joinFromResponseBody, 1);
+  // The stripped body still reads as text, without the URL re-stated.
+  assert.match(d.body, /You have been invited/);
+});
+
+test("an explicit join field still wins over the body scan", () => {
+  const found = sandbox.detailsFromResponses([{
+    Items: [{
+      Subject: "Sync",
+      Start: "2026-08-24T13:00:00",
+      OnlineMeeting: { JoinUrl: "https://teams.microsoft.com/l/meetup-join/REAL/0" },
+      Body: { Content: '<a href="https://zoom.us/j/999">stale forwarded link</a>' },
+    }],
+  }], {});
+  const d = found.get(sandbox.detailKey("Sync", "2026-08-24T13:00:00"));
+  assert.equal(d.joinUrl, "https://teams.microsoft.com/l/meetup-join/REAL/0");
+});
+
+test("the response key census reports key groups as booleans", () => {
+  const diag = {};
+  sandbox.detailsFromResponses([{
+    Items: [{
+      Subject: "S", Start: "2026-08-24T09:00:00",
+      Attendees: [{ Name: "Jordan Poe" }],
+      Body: { Content: "plain" },
+    }],
+  }], diag);
+  assert.equal(diag.respHadAttendeesKey, true);
+  assert.equal(diag.respHadBodyKey, true);
+  assert.ok(!("respHadJoinKey" in diag) || diag.respHadJoinKey === false);
+});
+
+test("buildCaptureDiag passes through every scalar the capture recorded",
+     () => {
+  // The whitelist it used to be ate joinFromMarkup (1.17.0) and the
+  // authRedirect/calendarUnreadable flags (1.18.0) — the drop-list
+  // constructor, in the diagnostics channel itself.
+  const out = sandbox.buildCaptureDiag({
+    events: [1, 2, 3],
+    diag: {
+      joinFromMarkup: 4,
+      joinFromResponseBody: 2,
+      authRedirect: true,
+      calendarUnreadable: false,
+      someFutureCounter: 7,
+      aString: "must not pass",
+      aNested: { no: 1 },
+    },
+  });
+  assert.equal(out.joinFromMarkup, 4);
+  assert.equal(out.joinFromResponseBody, 2);
+  assert.equal(out.authRedirect, true);
+  assert.equal(out.calendarUnreadable, false);
+  assert.equal(out.someFutureCounter, 7);
+  assert.equal(out.eventsExtracted, 3);
+  assert.ok(!("aString" in out));
+  assert.ok(!("aNested" in out));
+});
+
+test("the click pass's markup counter reaches the capture diag", () => {
+  const src = fs.readFileSync(BG_PATH, "utf8");
+  assert.match(src, /diag\.joinFromMarkup\s*\+=\s*got\.joinFromMarkup/,
+               "joinFromMarkup dies at the collectWeekDetail boundary");
+});

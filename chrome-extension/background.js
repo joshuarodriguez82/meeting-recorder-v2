@@ -3014,7 +3014,46 @@ function detailKey(subject, startIso) {
 // Walk captured response bodies and return Map(key -> {attendees,
 // body, joinUrl}). Node- and depth-capped: these payloads are large
 // and an unbounded walk would stall the service worker.
-function detailsFromResponses(bodies) {
+// THE JOIN URL IS IN THE BODY'S HTML, AND WE WERE STRIPPING IT.
+//
+// FIELD CAPTURE 2026-08-23 12:19 (first healthy run after the
+// signed-out weekend): 18 responses matched, 10 invite bodies gained —
+// and detailGainedJoinUrl: 0. A Teams invite's join URL lives inside
+// the invite body as the HREF of "Join the meeting now"; the visible
+// text often carries no URL at all. _stripHtml removes every tag —
+// href included — BEFORE the body was ever searched. The link was in
+// our hands on every one of those 10 meetings and deleted during
+// cleanup.
+//
+// So the RAW body HTML is scanned for provider-shaped URLs before
+// stripping. Provider host+path patterns only (the same contract as
+// everywhere else), &amp; decoded first because that is how an href
+// arrives inside serialized HTML.
+function _joinUrlFromHtml(html) {
+  const s = String(html || "");
+  if (!s) return "";
+  const candidates = s.replace(/&amp;/gi, "&")
+    .match(/https?:\/\/[^\s"'<>\\]+/g) || [];
+  for (let u of candidates) {
+    u = u.replace(/[.,;)\]}"']+$/, "");
+    try {
+      const parsed = new URL(u);
+      if (JOIN_PROVIDER_PATTERNS.some((p) =>
+        new RegExp(p.host, "i").test(parsed.hostname)
+        && new RegExp(p.path, "i").test(parsed.pathname))) {
+        return u;
+      }
+    } catch (_) { /* not a URL after trimming — skip */ }
+  }
+  return "";
+}
+
+// `diag`, when given, receives booleans about which field KEYS the
+// matched items carried (never values). detailGainedAttendees: 0 on a
+// run whose responses gained 10 bodies means the attendee KEY shape on
+// this tenant is unknown — and without this census, finding the right
+// key costs one release per guess.
+function detailsFromResponses(bodies, diag) {
   const found = new Map();
   let nodes = 0;
 
@@ -3032,13 +3071,32 @@ function detailsFromResponses(bodies) {
       const key = detailKey(subject, _detailDateTime(startRaw));
       if (key) {
         const attendees = _detailAttendees(_pick(v, DETAIL_KEYS.attendees));
-        const body = _stripHtml(_detailBody(_pick(v, DETAIL_KEYS.body)));
+        const rawBody = _detailBody(_pick(v, DETAIL_KEYS.body));
+        const body = _stripHtml(rawBody);
         let joinUrl = _pick(v, DETAIL_KEYS.joinUrl);
         if (typeof joinUrl !== "string") {
           const om = _pick(v, DETAIL_KEYS.onlineMeeting);
           joinUrl = (om && typeof om === "object") ? _pick(om, DETAIL_KEYS.joinUrl) : "";
         }
         if (typeof joinUrl !== "string") joinUrl = "";
+        if (!joinUrl) {
+          // No explicit join field on this item — the raw body HTML,
+          // BEFORE stripping, is where a Teams invite's href lives.
+          joinUrl = _joinUrlFromHtml(rawBody);
+          if (joinUrl && diag) {
+            diag.joinFromResponseBody = (diag.joinFromResponseBody || 0) + 1;
+          }
+        }
+        if (diag) {
+          // Key census, booleans only: which WANTED key groups exist
+          // on this tenant's matched items. Values never recorded.
+          if (_pick(v, DETAIL_KEYS.attendees) !== undefined) diag.respHadAttendeesKey = true;
+          if (_pick(v, DETAIL_KEYS.body) !== undefined) diag.respHadBodyKey = true;
+          if (_pick(v, DETAIL_KEYS.joinUrl) !== undefined
+              || _pick(v, DETAIL_KEYS.onlineMeeting) !== undefined) {
+            diag.respHadJoinKey = true;
+          }
+        }
 
         // Merge rather than overwrite: the same meeting can appear in
         // more than one response (a list call and a detail call), and
@@ -3224,7 +3282,7 @@ async function collectWeekDetail(tabId, candidates, capturedBodies, diag, into,
   // ── Mechanism 1: Outlook's own responses ──────────────────────────
   // Cheap, needs no clicking. Applied first so mechanism 2 skips
   // anything already answered.
-  const fromResponses = detailsFromResponses(capturedBodies);
+  const fromResponses = detailsFromResponses(capturedBodies, diag);
   for (const [k, v] of fromResponses) {
     const prev = into.get(k) || { attendees: [], body: "", joinUrl: "" };
     into.set(k, {
@@ -3284,6 +3342,12 @@ async function collectWeekDetail(tabId, candidates, capturedBodies, diag, into,
     diag.domDetailOpened += got.opened || 0;
     diag.domDetailGrew += got.grew || 0;
     diag.joinFromAnchor += got.joinFromAnchor || 0;
+    // EVERY counter the click pass produces, or it dies right here —
+    // joinFromMarkup was incremented inside the pane reader (1.17.0)
+    // and never copied out, so the field run that would have said
+    // whether the markup scan works reported nothing (2026-08-23).
+    diag.joinFromMarkup += got.joinFromMarkup || 0;
+    diag.bodyFromFrame += got.bodyFromFrame || 0;
 
     // Record each event's outcome into the SHARED map so the final
     // merge (which runs on the final extraction, not these local
@@ -3410,6 +3474,9 @@ async function captureCalendarTab() {
     postClickBodies: 0,
     postClickImproved: 0,
     joinFromAnchor: 0,
+    joinFromMarkup: 0,
+    joinFromResponseBody: 0,
+    bodyFromFrame: 0,
   };
   // Detail gathered from BOTH mechanisms, keyed by subject|start, while
   // the relevant week was still rendered. Folded into the final
@@ -3614,30 +3681,28 @@ function _todayIsoLocal() {
 // The path a user reaches for when things are broken is the LAST path
 // that may go unreported.
 function buildCaptureDiag(capture) {
-  const d = capture && capture.diag;
-  return {
-    recorderRegistered: !!d?.recorderRegistered,
-    recorderInstalled: !!d?.recorderInstalled,
-    recorderInjectedLate: !!d?.recorderInjectedLate,
-    recorderReloaded: !!d?.recorderReloaded,
-    responsesSeen: d?.responsesSeen || 0,
-    responsesMatched: d?.responsesMatched || 0,
-    responsesDropped: d?.responsesDropped || 0,
-    responsesNotMeetingShaped: d?.responsesNotMeetingShaped || 0,
-    detailMatched: d?.detailMatched || 0,
-    detailGainedAttendees: d?.detailGainedAttendees || 0,
-    detailGainedBody: d?.detailGainedBody || 0,
-    detailGainedJoinUrl: d?.detailGainedJoinUrl || 0,
-    domDetailAttempted: d?.domDetailAttempted || 0,
-    domDetailOpened: d?.domDetailOpened || 0,
-    domDetailGrew: d?.domDetailGrew || 0,
-    domDetailSkipped: d?.domDetailSkipped || 0,
-    domDetailNoTile: d?.domDetailNoTile || 0,
-    postClickBodies: d?.postClickBodies || 0,
-    postClickImproved: d?.postClickImproved || 0,
-    joinFromAnchor: d?.joinFromAnchor || 0,
-    eventsExtracted: (capture && capture.events && capture.events.length) || 0,
-  };
+  // NOT A WHITELIST, ON PURPOSE. The explicit field list this used to
+  // be has now eaten three diagnostics: joinFromMarkup (added 1.17.0,
+  // never listed here, so the run that would have proven the markup
+  // scan reported nothing), and authRedirect/calendarUnreadable
+  // (added 1.18.0 for the signed-out banner, never listed, so the
+  // banner could not fire). The same drop-list constructor that hid
+  // invite bodies for six releases, in the diagnostics channel itself.
+  //
+  // Every boolean and finite number the capture recorded goes through;
+  // the backend's record_capture_diag applies the same scalars-only
+  // bound on its side, so nothing large or nested can ride along.
+  const d = (capture && capture.diag) || {};
+  const out = {};
+  for (const k of Object.keys(d)) {
+    const v = d[k];
+    if (typeof v === "boolean"
+        || (typeof v === "number" && Number.isFinite(v))) {
+      out[k] = v;
+    }
+  }
+  out.eventsExtracted = (capture && capture.events && capture.events.length) || 0;
+  return out;
 }
 
 async function captureCalendarOnly(backendUrl, token) {
