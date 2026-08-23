@@ -3354,6 +3354,24 @@ async function collectWeekDetail(tabId, candidates, capturedBodies, diag, into,
   }
 }
 
+// Sign-in hosts a background Outlook tab gets bounced to when the
+// browser session is expired. These origins are OUTSIDE the
+// extension's host permissions, so every executeScript against the
+// tab throws — which is why an expired session produced the all-zero
+// capture of 2026-08-23 (recorder not installed, 0 candidates, 0
+// text, 0 responses) while Teams tabs kept reading fine. Suffix match
+// on the hostname, never substring: "login.microsoftonline.com.evil
+// .example" must not count.
+function isSignInUrl(url) {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return ["login.microsoftonline.com", "login.live.com",
+            "login.microsoft.com", "account.microsoft.com",
+            "login.windows.net"]
+      .some((d) => h === d || h.endsWith("." + d));
+  } catch (_) { return false; }
+}
+
 async function captureCalendarTab() {
   // Registered BEFORE the tab exists. Outlook's calendar request is in
   // flight within a second of navigation, and a recorder installed
@@ -3464,36 +3482,68 @@ async function captureCalendarTab() {
 
   try {
     await waitForTabComplete(tabId);
-    if (recorderOn) await ensureRecorderInstalled();
 
-    const week1 = await settleAndCollectCalendar(tabId, "week1 (current)");
-    allCandidates.push(...week1.candidates);
-    fallbackText = week1.text;
-    diag.weeksScanned += 1;
-    if (!week1.stabilized) diag.anyWeekUnstable = true;
-    await harvest("week1");
-    // BEFORE navigating away. Mechanism 2 clicks tiles, and week 1's
-    // tiles are only on screen now — this is the bug that made the
-    // whole screen-reading mechanism a no-op in v2.45.0.
-    await collectWeekDetail(tabId, week1.candidates, capturedBodies, diag,
-                            detailByKey, harvest, detailStatusByKey);
+    // WHERE DID THE TAB ACTUALLY LAND? An expired browser session
+    // bounces the calendar URL to a sign-in page — an origin this
+    // extension cannot script — and then every read below fails in a
+    // way that is indistinguishable from "the calendar was empty".
+    // Field capture 2026-08-23: recorder not installed, 0 candidates,
+    // 0 text, 0 responses, while Teams tabs read fine, and the app
+    // silently served Friday's stale data for two days. Booleans
+    // only — the URL itself never leaves this function.
+    try {
+      const landed = await chrome.tabs.get(tabId);
+      diag.authRedirect = isSignInUrl(landed.url || "");
+    } catch (_) { diag.authRedirect = false; }
+    if (recorderOn && !diag.authRedirect) await ensureRecorderInstalled();
 
-    const navOk = await goToNextCalendarWeek(tabId);
-    diag.nextWeekNavOk = navOk;
-    if (navOk) {
-      const week2 = await settleAndCollectCalendar(tabId, "week2 (next)");
-      allCandidates.push(...week2.candidates);
-      if (week2.text) fallbackText += "\n\n" + week2.text;
+    // On a sign-in page nothing is scriptable and nothing is worth
+    // 45 seconds of settle-polling — skip straight to the honest
+    // empty result. NOT a throw: this try has no catch, so a throw
+    // here would exit before the return that carries `diag`, and the
+    // authRedirect flag would never reach the app — the exact
+    // diag-lost-on-the-failure-path bug v2.54.0 fixed for the manual
+    // capture.
+    if (!diag.authRedirect) {
+      const week1 = await settleAndCollectCalendar(tabId, "week1 (current)");
+      allCandidates.push(...week1.candidates);
+      fallbackText = week1.text;
+      // The other unreadable shape: an Outlook origin that yields
+      // neither a single candidate nor any text — a login
+      // interstitial rendered ON outlook.office.com, a blocked
+      // iframe shell, or a redesign this scan cannot see. Distinct
+      // from a genuinely free calendar, which still renders plenty
+      // of page text.
+      diag.calendarUnreadable =
+        week1.candidates.length === 0 && (week1.text || "").length < 200;
       diag.weeksScanned += 1;
-      if (!week2.stabilized) diag.anyWeekUnstable = true;
-      await harvest("week2");
-      await collectWeekDetail(tabId, week2.candidates, capturedBodies, diag,
+      if (!week1.stabilized) diag.anyWeekUnstable = true;
+      await harvest("week1");
+      // BEFORE navigating away. Mechanism 2 clicks tiles, and week 1's
+      // tiles are only on screen now — this is the bug that made the
+      // whole screen-reading mechanism a no-op in v2.45.0.
+      await collectWeekDetail(tabId, week1.candidates, capturedBodies, diag,
                               detailByKey, harvest, detailStatusByKey);
+
+      const navOk = await goToNextCalendarWeek(tabId);
+      diag.nextWeekNavOk = navOk;
+      if (navOk) {
+        const week2 = await settleAndCollectCalendar(tabId, "week2 (next)");
+        allCandidates.push(...week2.candidates);
+        if (week2.text) fallbackText += "\n\n" + week2.text;
+        diag.weeksScanned += 1;
+        if (!week2.stabilized) diag.anyWeekUnstable = true;
+        await harvest("week2");
+        await collectWeekDetail(tabId, week2.candidates, capturedBodies, diag,
+                                detailByKey, harvest, detailStatusByKey);
+      }
     }
 
     // Final extraction over BOTH weeks, then fold in the detail that
     // was gathered while each week was rendered. Inside the try
-    // because the finally below closes the tab.
+    // because the finally below closes the tab. On an auth redirect
+    // both weeks were skipped, so this is the honest empty result —
+    // carrying the diag that says WHY it is empty.
     extraction = extractEventsFromCandidates(allCandidates, {
       fallbackYear: new Date().getFullYear(),
     });
