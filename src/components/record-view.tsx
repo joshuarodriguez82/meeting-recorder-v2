@@ -2277,6 +2277,25 @@ export function RecordView({
                   })}
                 </div>
               )}
+              {diagOpen && Array.isArray(captureDiag?.responseKeyNames)
+                && (captureDiag.responseKeyNames as string[]).length > 0 && (
+                <div className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                  <span className="font-medium">
+                    Outlook's responses used field names this version can't
+                    parse yet:
+                  </span>{" "}
+                  <code className="break-all">
+                    {(captureDiag.responseKeyNames as string[]).join(", ")}
+                  </code>
+                  {captureDiag?.responsesContainJoinShapedUrl === true && (
+                    <span>
+                      {" "}— and a join-shaped URL IS present in those
+                      responses, so this list is exactly what's needed to
+                      finish the job.
+                    </span>
+                  )}
+                </div>
+              )}
               {diagOpen && (
                 <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
                   If panes were opened but every join-link count is 0, the

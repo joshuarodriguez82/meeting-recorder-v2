@@ -3147,3 +3147,63 @@ test("the click pass's markup counter reaches the capture diag", () => {
   assert.match(src, /diag\.joinFromMarkup\s*\+=\s*got\.joinFromMarkup/,
                "joinFromMarkup dies at the collectWeekDetail boundary");
 });
+
+// ── unmatched responses report their shape instead of hiding it ──────
+//
+// FIELD RUN 2026-08-23 13:52 (1.19.0): 179 responses seen, 19 matched
+// by the recorder's gate — and detailsFromResponses recognized ZERO
+// items, so the body-href scan never ran and every census flag stayed
+// absent. The tenant's new Outlook stack uses key names this parser
+// doesn't know, and finding them by guessing costs one full release
+// cycle per guess. The payload we cannot read is in our hands: it can
+// simply tell us its key names.
+
+test("unmatched responses yield a key-name census and a join-URL boolean",
+     () => {
+  const diag = {};
+  const found = sandbox.detailsFromResponses([{
+    // A shape the parser does NOT recognize: no subject/start aliases.
+    data: {
+      calendarEvents: [{
+        eventTitle: "Pulse",
+        eventWindow: { begin: "2026-08-24T09:30:00" },
+        htmlPayload: '<a href="https://teams.microsoft.com/l/meetup-join/19%3aX/0">Join</a>',
+      }],
+    },
+  }], diag);
+  assert.equal(found.size, 0);
+  assert.ok(Array.isArray(diag.responseKeyNames), "no census emitted");
+  for (const k of ["data", "calendarevents", "eventtitle", "eventwindow",
+                   "begin", "htmlpayload"]) {
+    assert.ok(diag.responseKeyNames.includes(k), `census missing ${k}`);
+  }
+  // Values never leak: the census is names only.
+  assert.ok(!diag.responseKeyNames.some((n) => n.includes("pulse")));
+  assert.equal(diag.responsesContainJoinShapedUrl, true,
+               "the join URL is IN the captured payload and the diag "
+               + "must say so");
+});
+
+test("matched responses emit no census (payload stays small)", () => {
+  const diag = {};
+  sandbox.detailsFromResponses([{
+    Items: [{ Subject: "S", Start: "2026-08-24T09:00:00" }],
+  }], diag);
+  assert.ok(!("responseKeyNames" in diag));
+});
+
+test("buildCaptureDiag passes the bounded census list through", () => {
+  const out = sandbox.buildCaptureDiag({
+    events: [],
+    diag: {
+      responseKeyNames: ["subject", "start"],
+      otherList: ["subject"],
+      smuggled: ["a.doe@globex.example"],
+    },
+  });
+  assert.deepEqual(out.responseKeyNames, ["subject", "start"]);
+  // Lists under any OTHER key stay behind — an address or URL cannot
+  // ride a list through this door.
+  assert.ok(!("otherList" in out));
+  assert.ok(!("smuggled" in out));
+});
