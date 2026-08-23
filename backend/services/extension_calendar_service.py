@@ -200,7 +200,9 @@ _INVITE_CHROME_EXACT = frozenset({
     "add to calendar", "forward", "edit", "cancel", "save", "close",
     "what are key talking points?", "help me prepare for this meeting",
     "help me understand the risks", "show more", "show less",
-    "more options", "copy link", "email organizer", "email attendees",
+    "more options", "copy link", "series", "occurrence", "view series",
+    "edit series", "this event", "all events in the series",
+    "email organizer", "email attendees",
     "email everyone", "join online", "join meeting", "reply",
     "reply all", "delete", "decline", "propose new time",
 })

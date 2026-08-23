@@ -2261,6 +2261,7 @@ export function RecordView({
                     ["Join links from invite text", "detailGainedJoinUrl"],
                     ["Join links from a button/anchor", "joinFromAnchor"],
                     ["Join links found in markup", "joinFromMarkup"],
+                    ["Join links from invite HTML", "joinFromResponseBody"],
                     ["Invite bodies gained", "detailGainedBody"],
                     ["Attendee lists gained", "detailGainedAttendees"],
                     ["Outlook responses captured", "responsesMatched"],
