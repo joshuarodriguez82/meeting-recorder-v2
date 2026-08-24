@@ -131,6 +131,17 @@
   <input type="password" id="token" placeholder="paste the per-launch token here">
   <p class="help">From the same screen. New token on every recorder launch.</p>
 
+  <h2>Calendar detail</h2>
+  <div class="toggle-row">
+    <input type="checkbox" id="debuggerCapture">
+    <label for="debuggerCapture" style="margin: 0;">Read Outlook's own calendar data</label>
+  </div>
+  <p class="help">On the new Outlook web stack the join link, attendee list and invite body are fetched by Outlook's service worker, where page-level reading cannot see them. With this on, the capture reads those responses directly. Chrome shows a "Meeting Recorder is debugging this browser" bar on the capture tab while it runs; it detaches when the capture finishes. Turn it off to capture without the bar — subjects and times still work, detail may not.</p>
+
+  <label>Background calendar refresh (minutes; 0 = never)</label>
+  <input type="number" id="calendarRefreshMinutes" min="0" max="1440" step="15" placeholder="240">
+  <p class="help">How often the extension opens Outlook in a background tab to refresh Upcoming Meetings. Was every 30 minutes in earlier versions, which is why the calendar seemed to open constantly. Default 240 (4 hours). Set 0 to stop it entirely and refresh only with Capture &amp; Send.</p>
+
   <h2>Auto-capture schedule</h2>
   <div class="toggle-row">
     <input type="checkbox" id="autoCapture">

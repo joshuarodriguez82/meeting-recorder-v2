@@ -254,7 +254,24 @@ const NEXT_WEEK_SELECTORS = [
 ];
 
 const CALENDAR_ALARM_NAME = "calendar-refresh";
-const CALENDAR_REFRESH_MINUTES = 30;
+// FIELD REPORT 2026-08-24: "that extension is constantly bringing up
+// the calendar, almost feels like one an hour, even though my
+// schedule is not setup for that." It was: this alarm is independent
+// of the auto-capture schedule and fired every 30 minutes, opening an
+// Outlook tab each time. Four hours is enough to keep a 7-day panel
+// fresh; the manual button covers "I need it now". Configurable, and
+// 0 turns it off entirely.
+const CALENDAR_REFRESH_MINUTES_DEFAULT = 240;
+
+async function calendarRefreshMinutes() {
+  try {
+    const cfg = await chrome.storage.local.get(
+      { calendarRefreshMinutes: CALENDAR_REFRESH_MINUTES_DEFAULT });
+    const n = Number(cfg.calendarRefreshMinutes);
+    if (!Number.isFinite(n) || n < 0) return CALENDAR_REFRESH_MINUTES_DEFAULT;
+    return n;   // 0 = never
+  } catch (_) { return CALENDAR_REFRESH_MINUTES_DEFAULT; }
+}
 // Shorter dedupe window than the four-source capture's 60 minutes —
 // this store going stale for a whole hour after one missed run is
 // exactly the 2026-08-13 field failure (one capture, ever, then
@@ -383,12 +400,20 @@ async function setupAlarms() {
   // `calendar_source: "extension"` mode. Field report 2026-08-13: the
   // store held exactly one capture (a single manual click) and was
   // never refreshed again because nothing else was scheduling it.
-  chrome.alarms.create(CALENDAR_ALARM_NAME, {
-    delayInMinutes: 1,
-    periodInMinutes: CALENDAR_REFRESH_MINUTES,
-  });
-  console.log(
-    `[ext] calendar-refresh alarm scheduled (every ${CALENDAR_REFRESH_MINUTES} min)`);
+  const refreshMins = await calendarRefreshMinutes();
+  if (refreshMins > 0) {
+    chrome.alarms.create(CALENDAR_ALARM_NAME, {
+      delayInMinutes: 1,
+      periodInMinutes: refreshMins,
+    });
+    console.log(
+      `[ext] calendar-refresh alarm scheduled (every ${refreshMins} min)`);
+  } else {
+    // 0 means never: clear any alarm a previous version scheduled,
+    // or the old 30-minute one keeps firing forever.
+    try { await chrome.alarms.clear(CALENDAR_ALARM_NAME); } catch (_) { /* ignore */ }
+    console.log("[ext] calendar-refresh alarm disabled by setting");
+  }
 
   const cfg = await chrome.storage.local.get({
     autoCapture: false,
@@ -3644,6 +3669,219 @@ async function _harvestIndexedDbFunc() {
   return out;
 }
 
+// ── Reading the traffic the PAGE cannot see ──────────────────────────
+//
+// THE THREE PROBES THAT MADE THIS NECESSARY (field, 2026-08-23/24):
+//
+//   DOM scan     0 join-shaped anchors in any root, grid or pane.
+//   Response     190 responses captured through the page's own fetch:
+//   census       timezone config, group lists, mailbox metadata,
+//                license fields. Not one calendar event.
+//   Storage      msal.3|... entries are {id, nonce, data} — encrypted.
+//   dump         The one readable JWT (LokiAuthToken) carries scopes
+//                "Group.ReadWrite LLM.Read User.Read.All" and returns
+//                401 from every calendar endpoint. No usable
+//                credential exists in the browser.
+//
+// And `navigator.serviceWorker.controller` is non-null: a SERVICE
+// WORKER fetches the calendar. A service worker has its own global
+// scope, so patching `window.fetch` in the page — which is what the
+// passive recorder does — can never observe it. That single fact
+// explains every empty field for the last week.
+//
+// chrome.debugger sees network traffic at the browser level, below
+// whichever context issued the request. It is the only remaining way
+// to read data this project is entitled to read.
+//
+// COST, STATED PLAINLY: Chrome shows a "Meeting Recorder is debugging
+// this browser" bar on the captured tab while attached. It is
+// detached in a finally, so the bar lives for the capture only.
+//
+// SCOPE, deliberately narrow:
+//   * Only the capture's OWN tab and the service-worker targets whose
+//     URL is an Outlook origin. Never another tab, never the whole
+//     browser.
+//   * Network domain only. No Debugger domain, no script evaluation,
+//     no breakpoints — this reads responses, it does not control the
+//     page.
+//   * Response bodies only for JSON-ish responses, bounded in count
+//     and bytes, and discarded after the harvest.
+
+// Opt-out, defaulting ON. The debugger bar is intrusive enough that
+// the user must be able to turn it off, and honest enough that it
+// must not be hidden behind a default of OFF: without it, on the new
+// Outlook stack, the join link cannot be read at all.
+async function debuggerCaptureEnabled() {
+  try {
+    const cfg = await chrome.storage.local.get({ debuggerCapture: true });
+    if (!cfg.debuggerCapture) return false;
+  } catch (_) { /* storage unavailable — fall through to the API check */ }
+  // The permission may be absent on an extension folder that was
+  // updated without a reload; treat that as "off" rather than
+  // throwing mid-capture.
+  return typeof chrome !== "undefined" && !!chrome.debugger;
+}
+
+const DEBUGGER_PROTOCOL = "1.3";
+const DEBUGGER_MAX_BODIES = 120;
+const DEBUGGER_MAX_BYTES = 8 * 1024 * 1024;
+const DEBUGGER_MAX_ONE = 3 * 1024 * 1024;
+
+function _isOutlookTargetUrl(url) {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return ["outlook.office.com", "outlook.cloud.microsoft", "office.com",
+            "cloud.microsoft", "outlook.live.com"]
+      .some((d) => h === d || h.endsWith("." + d));
+  } catch (_) { return false; }
+}
+
+// Attaches to the tab plus every Outlook service-worker target, and
+// records JSON response bodies until stopped.
+// Bound with `var` rather than a bare `class` declaration: a class
+// binding is lexical and never becomes a property of the global, so
+// the test sandbox (which evaluates this file and reads exports off
+// the global, like every other helper here) could not see it.
+var DebuggerHarvest = class DebuggerHarvest {
+  constructor(tabId, diag) {
+    this.tabId = tabId;
+    this.diag = diag || {};
+    this.targets = [];          // debuggee objects we attached to
+    this.pending = new Map();   // requestId -> {url}
+    this.bodies = [];
+    this.bytes = 0;
+    this.seen = 0;
+    this.dropped = 0;
+    this._listener = null;
+  }
+
+  async start() {
+    this._listener = (source, method, params) => {
+      this._onEvent(source, method, params).catch(() => { /* never throw into Chrome */ });
+    };
+    chrome.debugger.onEvent.addListener(this._listener);
+    await this._attach({ tabId: this.tabId });
+    this.diag.debuggerAttached = this.targets.length > 0;
+    return this.diag.debuggerAttached;
+  }
+
+  // Service workers appear as their own targets, and the one we care
+  // about may not exist until the page has registered it — so this is
+  // called again after the page loads.
+  async attachWorkers() {
+    // POLLED, because the worker does not exist yet when the page
+    // reports "complete": registration and activation happen after.
+    // A single look right after load found zero targets in the rig,
+    // which is exactly how this would have failed in the field while
+    // looking like "the debugger cannot see workers".
+    const seenTypes = new Set();
+    for (let attempt = 0; attempt < 8; attempt++) {
+      let targets = [];
+      try { targets = await chrome.debugger.getTargets(); } catch (_) { targets = []; }
+      for (const t of targets) {
+        const outlook = _isOutlookTargetUrl(t.url || "");
+        if (outlook && seenTypes.size < 12) {
+          seenTypes.add(String(t.type || "?").slice(0, 24));
+        }
+        const isWorker = t.type === "service_worker" || t.type === "worker"
+          || t.type === "shared_worker";
+        if (!isWorker || !outlook) continue;
+        if (this.targets.some((d) => d.targetId === t.id)) continue;
+        await this._attach({ targetId: t.id });
+      }
+      if (this.targets.some((d) => d.targetId)) break;
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    // Reported so a field run can say WHICH targets existed rather
+    // than only that none matched.
+    this.diag.debuggerTargetTypes = Array.from(seenTypes);
+    this.diag.debuggerWorkerTargets =
+      this.targets.filter((d) => d.targetId).length;
+  }
+
+  async _attach(debuggee) {
+    try {
+      await chrome.debugger.attach(debuggee, DEBUGGER_PROTOCOL);
+    } catch (e) {
+      // Already attached (DevTools open on this tab) is the common
+      // case and is reported, not fatal: the capture still runs, it
+      // just cannot read this target's traffic.
+      const msg = (e && e.message) || String(e);
+      this.diag.debuggerAttachError =
+        (this.diag.debuggerAttachError || "") || msg.slice(0, 120);
+      return;
+    }
+    this.targets.push(debuggee);
+    try {
+      await chrome.debugger.sendCommand(debuggee, "Network.enable", {
+        maxResourceBufferSize: DEBUGGER_MAX_BYTES,
+        maxTotalBufferSize: DEBUGGER_MAX_BYTES,
+      });
+    } catch (_) { /* target died between attach and enable */ }
+  }
+
+  _tracks(source) {
+    if (source.tabId != null && source.tabId === this.tabId) return true;
+    return this.targets.some((d) => d.targetId && d.targetId === source.targetId);
+  }
+
+  async _onEvent(source, method, params) {
+    if (!this._tracks(source)) return;
+    if (method === "Network.responseReceived") {
+      this.seen++;
+      const r = params.response || {};
+      const mime = String(r.mimeType || "").toLowerCase();
+      // JSON only. Outlook's calendar answers are JSON; HTML, fonts,
+      // images and scripts are not worth a getResponseBody round trip.
+      if (!mime.includes("json") && !mime.includes("javascript")) return;
+      if (mime.includes("javascript") && !/api|svc|ows|calendar/i.test(r.url || "")) return;
+      this.pending.set(params.requestId, { url: r.url || "" });
+      return;
+    }
+    if (method !== "Network.loadingFinished") return;
+    const hit = this.pending.get(params.requestId);
+    if (!hit) return;
+    this.pending.delete(params.requestId);
+    if (this.bodies.length >= DEBUGGER_MAX_BODIES
+        || this.bytes >= DEBUGGER_MAX_BYTES) {
+      this.dropped++;
+      return;
+    }
+    let res;
+    try {
+      res = await chrome.debugger.sendCommand(
+        source.targetId ? { targetId: source.targetId } : { tabId: this.tabId },
+        "Network.getResponseBody", { requestId: params.requestId });
+    } catch (_) {
+      // Body already evicted, or the target detached. Counted by
+      // absence, never silently treated as "no calendar traffic".
+      this.dropped++;
+      return;
+    }
+    const raw = res && res.body ? res.body : "";
+    if (!raw || res.base64Encoded || raw.length > DEBUGGER_MAX_ONE) return;
+    let parsed;
+    try { parsed = JSON.parse(raw); } catch (_) { return; }
+    this.bodies.push(parsed);
+    this.bytes += raw.length;
+  }
+
+  async stop() {
+    if (this._listener) {
+      try { chrome.debugger.onEvent.removeListener(this._listener); } catch (_) { /* ignore */ }
+      this._listener = null;
+    }
+    for (const d of this.targets.splice(0)) {
+      try { await chrome.debugger.detach(d); } catch (_) { /* already gone */ }
+    }
+    this.diag.debuggerResponsesSeen = this.seen;
+    this.diag.debuggerBodies = this.bodies.length;
+    this.diag.debuggerDropped = this.dropped;
+    return this.bodies;
+  }
+};
+
+
 async function captureCalendarTab() {
   // Registered BEFORE the tab exists. Outlook's calendar request is in
   // flight within a second of navigation, and a recorder installed
@@ -3651,6 +3889,11 @@ async function captureCalendarTab() {
   // attendees. See calendar-recorder.js.
   const recorderOn = await registerCalendarRecorder();
   const tab = await chrome.tabs.create({ url: CALENDAR_WEEK_URL, active: false });
+  // Attached before the page finishes loading, because Outlook's
+  // first calendar fetch is in flight within a second of navigation.
+  // The reload below guarantees a second one while every target —
+  // including the service worker — is attached.
+  const useDebugger = await debuggerCaptureEnabled();
   const tabId = tab.id;
   const start = Date.now();
   const allCandidates = [];
@@ -3770,8 +4013,30 @@ async function captureCalendarTab() {
     }
   };
 
+  let dbg = null;
   try {
+    if (useDebugger) {
+      dbg = new DebuggerHarvest(tabId, diag);
+      await dbg.start();
+    }
     await waitForTabComplete(tabId);
+
+    if (dbg && diag.debuggerAttached) {
+      // The service worker exists only once the page has registered
+      // it, so workers are attached AFTER the first load — then the
+      // page is reloaded so the calendar is fetched again with every
+      // target listening. This is the only pass that can see the
+      // service worker's own traffic.
+      await dbg.attachWorkers();
+      try {
+        await chrome.tabs.reload(tabId);
+        await waitForTabComplete(tabId);
+        await sleep(2500);   // let the SW's calendar fetches finish
+      } catch (_) { /* reload failed — the first load may still have caught it */ }
+      const got = await dbg.stop();
+      dbg = null;
+      if (got.length) capturedBodies.push(...got);
+    }
 
     // WHERE DID THE TAB ACTUALLY LAND? An expired browser session
     // bounces the calendar URL to a sign-in page — an origin this
@@ -3880,6 +4145,9 @@ async function captureCalendarTab() {
       if (st) ev.detail_status = st;
     }
   } finally {
+    // The debugger bar must never outlive the capture, whatever
+    // happened above.
+    if (dbg) { try { await dbg.stop(); } catch (_) { /* ignore */ } }
     try { await chrome.tabs.remove(tabId); } catch (_) { /* ignore */ }
     // Unregistered whatever happened: this must not stay installed on
     // the user's Outlook between captures.
