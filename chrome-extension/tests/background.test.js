@@ -3207,3 +3207,22 @@ test("buildCaptureDiag passes the bounded census list through", () => {
   assert.ok(!("otherList" in out));
   assert.ok(!("smuggled" in out));
 });
+
+test("the post-click parser call carries the diag (mechanism 3)", () => {
+  // Field runs 2026-08-23: the bodies arrive WITH the clicks
+  // (postClickBodies 13), and this was the one call site without the
+  // diag — census, key flags and joinFromResponseBody all silently
+  // died on the richest payloads in the pipeline.
+  const src = fs.readFileSync(BG_PATH, "utf8");
+  assert.match(src,
+    /detailsFromResponses\(capturedBodies\.slice\(before\),\s*diag\)/);
+});
+
+test("the census accumulates across calls instead of overwriting", () => {
+  const diag = {};
+  sandbox.detailsFromResponses([{ shapeOne: { alpha: 1 } }], diag);
+  sandbox.detailsFromResponses([{ shapeTwo: { beta: 2 } }], diag);
+  for (const k of ["shapeone", "alpha", "shapetwo", "beta"]) {
+    assert.ok(diag.responseKeyNames.includes(k), `lost ${k}`);
+  }
+});
