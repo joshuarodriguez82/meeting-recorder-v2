@@ -1737,7 +1737,11 @@ test("detail is read from the NEW Outlook stack's shape", () => {
   const d = detailsFromResponses([GRAPH_BODY]);
   const hit = d.get(detailKey("Quarterly review", "2026-08-20T12:30"));
   assert.ok(hit, "no detail extracted");
-  assert.deepEqual([...hit.attendees], ["Ana Doe", "Pat Roe"]);
+  // Addresses, not display names — see "attendees prefer the ADDRESS":
+  // the store keeps only @-shaped entries, so a name extracted here
+  // is dropped at read time and shows as "Attendees (0)".
+  assert.deepEqual([...hit.attendees],
+                   ["a.doe@globex.example", "p.roe@globex.example"]);
   assert.match(hit.body, /Agenda/);
   assert.match(hit.joinUrl, /meetup-join/);
 });
@@ -1851,7 +1855,14 @@ test("the same meeting across two responses merges rather than overwrites", () =
   assert.equal(hit.body, "The agenda");
 });
 
-test("attendees fall back to an address only when there is no name", () => {
+test("attendees prefer the ADDRESS, and fall back to a name", () => {
+  // CONTRACT CHANGED 2026-08-24, and the store is the reason. The
+  // backend keeps only @-shaped attendees — the scrub that killed the
+  // "Attendees (24)" wall of Outlook buttons — so a display name
+  // extracted here is DROPPED at read time and the meeting renders
+  // "Attendees (0)" while the counters report attendees gained. The
+  // rig caught exactly that: 5 gained, 0 shown. Whichever form
+  // survives storage is the form to extract.
   const d = detailsFromResponses([{ value: [{
     subject: "M", start: "2026-08-20T09:00:00",
     attendees: [
@@ -1860,9 +1871,19 @@ test("attendees fall back to an address only when there is no name", () => {
     ],
   }] }]);
   const hit = d.get(detailKey("M", "2026-08-20T09:00"));
-  // "no attendees" and "attendees we could not name" are different
-  // states; the second must not silently become the first.
-  assert.deepEqual([...hit.attendees], ["Ana Doe", "unnamed@globex.example"]);
+  assert.deepEqual([...hit.attendees],
+                   ["a.doe@globex.example", "unnamed@globex.example"]);
+});
+
+test("an attendee with a name but no address still yields the name", () => {
+  // "No attendees" and "attendees we could not address" remain
+  // different states; the second must not silently become the first.
+  const d = detailsFromResponses([{ value: [{
+    subject: "M", start: "2026-08-20T09:00:00",
+    attendees: [{ emailAddress: { name: "Ana Doe" } }],
+  }] }]);
+  const hit = d.get(detailKey("M", "2026-08-20T09:00"));
+  assert.deepEqual([...hit.attendees], ["Ana Doe"]);
 });
 
 test("a person listed as both required and optional appears once", () => {

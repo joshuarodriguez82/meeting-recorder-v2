@@ -2262,6 +2262,7 @@ export function RecordView({
                     ["Join links from a button/anchor", "joinFromAnchor"],
                     ["Join links found in markup", "joinFromMarkup"],
                     ["Join links from invite HTML", "joinFromResponseBody"],
+                    ["Meetings found in Outlook's own cache", "idbMeetingLike"],
                     ["Invite bodies gained", "detailGainedBody"],
                     ["Attendee lists gained", "detailGainedAttendees"],
                     ["Outlook responses captured", "responsesMatched"],
