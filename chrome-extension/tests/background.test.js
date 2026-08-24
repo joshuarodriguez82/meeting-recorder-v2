@@ -3247,3 +3247,77 @@ test("the census accumulates across calls instead of overwriting", () => {
     assert.ok(diag.responseKeyNames.includes(k), `lost ${k}`);
   }
 });
+
+// ── reading the traffic the page cannot see ──────────────────────────
+//
+// The three field probes (2026-08-23/24) closed every page-level
+// route: no join-shaped anchors in any DOM root; 190 page-visible
+// responses carrying timezone/group/license data and no calendar; the
+// MSAL cache encrypted ({id,nonce,data}); and the one readable JWT
+// scoped "Group.ReadWrite LLM.Read User.Read.All", 401 from every
+// calendar endpoint. With navigator.serviceWorker.controller non-null,
+// the calendar is fetched in a scope window.fetch patching cannot
+// reach. chrome.debugger reads below that boundary.
+
+test("only Outlook origins are debugger-attach candidates", () => {
+  for (const u of ["https://outlook.office.com/calendar",
+                   "https://outlook.cloud.microsoft/sw.js",
+                   "https://x.office.com/a", "https://outlook.live.com/x"]) {
+    assert.equal(sandbox._isOutlookTargetUrl(u), true, u);
+  }
+  for (const u of ["https://teams.microsoft.com/v2/",
+                   "https://mail.google.com/",
+                   // Suffix match, never substring: a lookalike host
+                   // must never be attached to.
+                   "https://outlook.office.com.evil.example/x",
+                   "not a url", ""]) {
+    assert.equal(sandbox._isOutlookTargetUrl(u), false, u);
+  }
+});
+
+test("the debugger harvest detaches every target it attached", async () => {
+  const attached = [], detached = [];
+  const prev = sandbox.chrome;
+  sandbox.chrome = {
+    debugger: {
+      onEvent: { addListener() {}, removeListener() {} },
+      attach: async (d) => { attached.push(JSON.stringify(d)); },
+      detach: async (d) => { detached.push(JSON.stringify(d)); },
+      sendCommand: async () => ({}),
+      getTargets: async () => ([
+        { id: "sw1", type: "service_worker", url: "https://outlook.office.com/sw.js" },
+        { id: "other", type: "service_worker", url: "https://example.com/sw.js" },
+      ]),
+    },
+  };
+  try {
+    const diag = {};
+    const h = new sandbox.DebuggerHarvest(42, diag);
+    await h.start();
+    await h.attachWorkers();
+    await h.stop();
+    // The tab plus the Outlook worker — never the unrelated origin.
+    assert.deepEqual(attached, ['{"tabId":42}', '{"targetId":"sw1"}']);
+    assert.deepEqual(detached.sort(), attached.sort(),
+                     "a target was left attached — the debugger bar "
+                     + "would outlive the capture");
+    assert.equal(diag.debuggerWorkerTargets, 1);
+  } finally { sandbox.chrome = prev; }
+});
+
+test("the capture always detaches, even when the run throws", () => {
+  // The bar must never outlive the capture. Pinned at source because
+  // the failure mode is a browser left visibly in debug mode.
+  const src = fs.readFileSync(BG_PATH, "utf8");
+  assert.match(src, /\} finally \{[\s\S]{0,400}if \(dbg\) \{ try \{ await dbg\.stop\(\)/);
+});
+
+test("the background refresh interval is configurable and can be off", () => {
+  const src = fs.readFileSync(BG_PATH, "utf8");
+  // Field report: it fired every 30 minutes regardless of the user's
+  // schedule, opening a tab each time.
+  assert.match(src, /CALENDAR_REFRESH_MINUTES_DEFAULT = 240/);
+  assert.match(src, /if \(refreshMins > 0\)/);
+  assert.match(src, /alarms\.clear\(CALENDAR_ALARM_NAME\)/,
+               "0 must clear the alarm a previous version scheduled");
+});
