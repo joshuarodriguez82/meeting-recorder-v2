@@ -227,6 +227,38 @@ _INVITE_CHROME_PATTERNS = (
 _PUA_RE = re.compile("[\uE000-\uF8FF\uFFFD]")
 
 
+_JOIN_PROVIDERS = (
+    (re.compile(r"(?:^|\.)teams\.(?:microsoft\.com|live\.com)$|^teams\.cloud\.microsoft$", re.I),
+     re.compile(r"^/l/meetup-join/|^/l/meeting/|^/meet/", re.I)),
+    (re.compile(r"(?:^|\.)zoom\.us$", re.I), re.compile(r"^/(?:j|w|s|my|wc)/", re.I)),
+    (re.compile(r"(?:^|\.)webex\.com$", re.I),
+     re.compile(r"^/(?:meet|join|wbxmjs)/|/j\.php|/m\.php", re.I)),
+    (re.compile(r"^meet\.google\.com$", re.I), re.compile(r"^/[A-Za-z0-9]", re.I)),
+)
+
+_URLISH_RE = re.compile(r"https?://[^\s\"'<>)\]\\]+")
+
+
+def find_join_url_in_text(text: Any) -> str:
+    """First conferencing-provider URL in a text/HTML blob — the same
+    host+path contract the extension uses, applied server-side for the
+    Graph body fallback (some tenants leave onlineMeeting empty and
+    keep the link only in the invite HTML)."""
+    from urllib.parse import urlparse
+    s = str(text or "").replace("&amp;", "&")
+    for raw in _URLISH_RE.findall(s):
+        u = raw.rstrip(".,;)]}\"'")
+        try:
+            parsed = urlparse(u)
+        except ValueError:
+            continue
+        host = (parsed.hostname or "")
+        for host_re, path_re in _JOIN_PROVIDERS:
+            if host_re.search(host) and path_re.search(parsed.path or ""):
+                return u
+    return ""
+
+
 def clean_invite_body(text: Any, subject: Any = "") -> str:
     """Strip Outlook's own UI out of an invite body, at READ time.
 
@@ -792,7 +824,12 @@ class ExtensionCalendarService:
             # being true the moment anything else POSTs.
             "body": str(event.get("body") or "")[:8000],
             "detail_status": str(event.get("detail_status") or "")[:32],
-            "source": SOURCE_EXTENSION,
+            # The Graph path (services/ms_graph_calendar.py) writes
+            # source "m365"; the extension writes nothing and keeps
+            # its default. The chip in Upcoming Meetings renders from
+            # this, so an API-sourced meeting must not claim to be a
+            # web scrape.
+            "source": str(event.get("source") or SOURCE_EXTENSION)[:16],
         }
 
     @staticmethod
@@ -810,7 +847,12 @@ class ExtensionCalendarService:
             "organizer": str(raw.get("organizer") or ""),
             "attendees": [str(a) for a in (raw.get("attendees") or [])],
             "duration": int(raw.get("duration") or DEFAULT_DURATION_MIN),
-            "join_url": str(raw.get("join_url") or ""),
+            # A body that CONTAINS a join link but arrived with no
+            # join_url field still yields the link — applied at read
+            # time so meetings already in the store gain it without a
+            # re-capture (the v2.52 scrub lesson).
+            "join_url": (str(raw.get("join_url") or "")
+                         or find_join_url_in_text(raw.get("body"))),
             # Absent from every event stored before this field existed,
             # which reads as "" — the same value an event with no
             # description has — so an old store loads unchanged.
@@ -823,7 +865,7 @@ class ExtensionCalendarService:
             "body": clean_invite_body(
                 raw.get("body"), raw.get("subject"))[:8000],
             "detail_status": str(raw.get("detail_status") or "")[:32],
-            "source": SOURCE_EXTENSION,
+            "source": str(raw.get("source") or SOURCE_EXTENSION)[:16],
         }
 
     def record_capture_diag(self, diag: Optional[dict]) -> None:

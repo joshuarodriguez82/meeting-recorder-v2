@@ -2947,16 +2947,22 @@ function _detailAttendees(v) {
     if (!entry) return;
     if (typeof entry === "string") { out.push(entry); return; }
     if (typeof entry !== "object") return;
+    // ADDRESS FIRST, NAME SECOND — and the reason is the store, not
+    // taste. The backend keeps only @-shaped attendees (the scrub that
+    // killed the "Attendees (24)" wall of Outlook buttons), so a
+    // display name extracted here is dropped at read time and the
+    // meeting renders "Attendees (0)" while the counters cheerfully
+    // report attendees gained. Rig 2026-08-24: 5 gained, 0 shown.
     const name = _pick(entry, ["name", "displayname"]);
-    if (typeof name === "string" && name.trim()) { out.push(name.trim()); return; }
     const email = _pick(entry, ["emailaddress", "address", "mailbox"]);
     if (typeof email === "string" && email.includes("@")) { out.push(email.trim()); return; }
     if (email && typeof email === "object") {
-      const n = _pick(email, ["name", "displayname"]);
       const a = _pick(email, ["address", "emailaddress"]);
-      if (typeof n === "string" && n.trim()) out.push(n.trim());
-      else if (typeof a === "string" && a.trim()) out.push(a.trim());
+      const n = _pick(email, ["name", "displayname"]);
+      if (typeof a === "string" && a.includes("@")) { out.push(a.trim()); return; }
+      if (typeof n === "string" && n.trim()) { out.push(n.trim()); return; }
     }
+    if (typeof name === "string" && name.trim()) { out.push(name.trim()); return; }
   };
   if (Array.isArray(v)) v.forEach(push);
   else push(v);
@@ -3500,6 +3506,144 @@ function isSignInUrl(url) {
   } catch (_) { return false; }
 }
 
+
+// THE CALENDAR THE PWA ALREADY HAS ON DISK.
+//
+// FIELD PROOF 2026-08-23/24, three independent probes agreeing:
+//   * the join URL is in no page markup (DOM probe: 0 anchors, 0 in
+//     label text, grid and pane);
+//   * it is in no response the page's own fetch/XHR carries (census:
+//     190 seen, and the key names were timezone config, group lists,
+//     mailbox metadata and LICENSE fields — not one event field);
+//   * and the API path needs a managed device, which this machine is
+//     not (the user runs Outlook as a PWA precisely because app
+//     auth is not available to them).
+//
+// But the PWA RENDERS the calendar, offline, instantly. New Outlook
+// caches events in IndexedDB on the page's own origin — that is what
+// makes it a PWA. A MAIN-world script in that tab can read it with
+// no new permission, no credential, no sign-in, and no dependence on
+// which worker fetched it.
+//
+// Shape-agnostic, exactly like the response parser: walk the records,
+// keep anything with a subject-ish and start-ish key, and hand them
+// to the SAME extractor. No database name, store name or schema is
+// assumed — all three are Microsoft's to change.
+//
+// Bounded hard: this runs on the user's machine inside their Outlook
+// tab. Caps on databases, stores, records and wall-clock, and every
+// path wrapped — a throw here must never disturb Outlook.
+async function _harvestIndexedDbFunc() {
+  const out = { records: [], databases: 0, stores: 0, scanned: 0,
+                meetingLike: 0, error: null, supported: true };
+  const MAX_DBS = 12, MAX_STORES = 40, MAX_RECORDS = 4000, MAX_KEEP = 400;
+  const DEADLINE = Date.now() + 12000;
+
+  const SUBJECT_KEYS = ["subject", "title", "normalizedsubject", "name"];
+  const START_KEYS = ["start", "starttime", "startdate", "originalstart",
+                      "startdatetime", "starttimeutc", "begin"];
+  const looksLikeMeeting = (v) => {
+    if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+    let hasSubject = false, hasStart = false;
+    for (const k of Object.keys(v)) {
+      const lk = k.toLowerCase();
+      if (!hasSubject && SUBJECT_KEYS.includes(lk)
+          && typeof v[k] === "string" && v[k].trim()) hasSubject = true;
+      if (!hasStart && START_KEYS.includes(lk) && v[k]) hasStart = true;
+      if (hasSubject && hasStart) return true;
+    }
+    return false;
+  };
+
+  const collectFrom = (value, depth) => {
+    if (Date.now() > DEADLINE || out.records.length >= MAX_KEEP) return;
+    if (!value || typeof value !== "object" || depth > 6) return;
+    if (Array.isArray(value)) {
+      for (const x of value.slice(0, 200)) collectFrom(x, depth + 1);
+      return;
+    }
+    if (looksLikeMeeting(value)) {
+      out.meetingLike++;
+      out.records.push(value);
+      return;              // the whole record goes; no need to descend
+    }
+    for (const k of Object.keys(value)) collectFrom(value[k], depth + 1);
+  };
+
+  const readStore = (db, storeName) => new Promise((resolve) => {
+    let tx;
+    try {
+      tx = db.transaction(storeName, "readonly");
+    } catch (_) { resolve(); return; }
+    let settled = false;
+    const done = () => { if (!settled) { settled = true; resolve(); } };
+    try {
+      const req = tx.objectStore(storeName).openCursor();
+      let n = 0;
+      req.onsuccess = (e) => {
+        const cur = e.target.result;
+        if (!cur || ++n > 200 || Date.now() > DEADLINE
+            || out.scanned >= MAX_RECORDS
+            || out.records.length >= MAX_KEEP) { done(); return; }
+        out.scanned++;
+        try {
+          let v = cur.value;
+          // Outlook stores some records as JSON strings.
+          if (typeof v === "string" && v.length < 200000
+              && (v[0] === "{" || v[0] === "[")) {
+            try { v = JSON.parse(v); } catch (_) { /* keep as string */ }
+          }
+          collectFrom(v, 0);
+        } catch (_) { /* one bad record must not stop the scan */ }
+        try { cur.continue(); } catch (_) { done(); }
+      };
+      req.onerror = done;
+      tx.onerror = done;
+      tx.onabort = done;
+      tx.oncomplete = done;
+    } catch (_) { done(); }
+    setTimeout(done, 4000);
+  });
+
+  try {
+    if (!self.indexedDB || typeof indexedDB.databases !== "function") {
+      out.supported = false;
+      return out;
+    }
+    const dbs = await indexedDB.databases();
+    for (const info of (dbs || []).slice(0, MAX_DBS)) {
+      if (Date.now() > DEADLINE || out.records.length >= MAX_KEEP) break;
+      const name = info && info.name;
+      if (!name) continue;
+      out.databases++;
+      let db = null;
+      try {
+        db = await new Promise((resolve) => {
+          const r = indexedDB.open(name);
+          r.onsuccess = () => resolve(r.result);
+          r.onerror = () => resolve(null);
+          // Never create or upgrade a database Outlook owns.
+          r.onupgradeneeded = () => { try { r.transaction.abort(); } catch (_) {} resolve(null); };
+          setTimeout(() => resolve(null), 3000);
+        });
+      } catch (_) { db = null; }
+      if (!db) continue;
+      try {
+        const names = Array.from(db.objectStoreNames || []).slice(0, MAX_STORES);
+        for (const sn of names) {
+          if (Date.now() > DEADLINE || out.records.length >= MAX_KEEP) break;
+          out.stores++;
+          await readStore(db, sn);
+        }
+      } catch (_) { /* skip this db */ }
+      try { db.close(); } catch (_) { /* ignore */ }
+    }
+  } catch (e) {
+    out.error = (e && e.message) || String(e);
+  }
+  return out;
+}
+
 async function captureCalendarTab() {
   // Registered BEFORE the tab exists. Outlook's calendar request is in
   // flight within a second of navigation, and a recorder installed
@@ -3662,6 +3806,32 @@ async function captureCalendarTab() {
       // of page text.
       diag.calendarUnreadable =
         week1.candidates.length === 0 && (week1.text || "").length < 200;
+
+      // THE PWA'S OWN CACHE. Runs once, after week 1 has rendered
+      // (so Outlook has populated it) and BEFORE the click pass, so
+      // anything it answers spares a click. Same extractor as the
+      // network responses — these are just records from a different
+      // place. Failure here is reported, never fatal: the scrape
+      // paths below still run.
+      try {
+        const idbRes = await chrome.scripting.executeScript({
+          target: { tabId }, world: "MAIN", func: _harvestIndexedDbFunc,
+        });
+        const idb = (idbRes && idbRes[0] && idbRes[0].result) || null;
+        if (idb) {
+          diag.idbSupported = idb.supported !== false;
+          diag.idbDatabases = idb.databases || 0;
+          diag.idbStores = idb.stores || 0;
+          diag.idbScanned = idb.scanned || 0;
+          diag.idbMeetingLike = idb.meetingLike || 0;
+          if (idb.records && idb.records.length) {
+            capturedBodies.push(...idb.records);
+          }
+        }
+      } catch (e) {
+        diag.idbError = true;
+        console.warn("[ext] IndexedDB harvest failed:", e);
+      }
       diag.weeksScanned += 1;
       if (!week1.stabilized) diag.anyWeekUnstable = true;
       await harvest("week1");
