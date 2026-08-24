@@ -9,6 +9,8 @@ async function load() {
     backendUrl: "",
     token: "",
     autoCapture: false,
+    debuggerCapture: true,
+    calendarRefreshMinutes: 240,
     captureTimes: DEFAULT_CAPTURE_TIMES,
     lastCaptureAt: 0,
     lastResult: null,
@@ -18,6 +20,8 @@ async function load() {
   $("backendUrl").value = cfg.backendUrl;
   $("token").value = cfg.token;
   $("autoCapture").checked = !!cfg.autoCapture;
+  $("debuggerCapture").checked = cfg.debuggerCapture !== false;
+  $("calendarRefreshMinutes").value = String(cfg.calendarRefreshMinutes ?? 240);
   const times = cfg.captureTimes || DEFAULT_CAPTURE_TIMES;
   $("time1").value = times[0] || "08:00";
   $("time2").value = times[1] || "12:00";
@@ -115,6 +119,9 @@ $("saveBtn").addEventListener("click", async () => {
   const backendUrl = normalizeUrl($("backendUrl").value);
   const token = $("token").value.trim();
   const autoCapture = $("autoCapture").checked;
+  const debuggerCapture = $("debuggerCapture").checked;
+  const calendarRefreshMinutes = Math.max(
+    0, Math.min(1440, Number($("calendarRefreshMinutes").value) || 0));
   const captureTimes = readTimes();
   if (!backendUrl) { showStatus("error", "Backend URL is required."); return; }
   if (!token) { showStatus("error", "Auth token is required."); return; }
@@ -122,7 +129,7 @@ $("saveBtn").addEventListener("click", async () => {
     showStatus("error", "Auto-capture is on but no valid times set.");
     return;
   }
-  await chrome.storage.local.set({ backendUrl, token, autoCapture, captureTimes });
+  await chrome.storage.local.set({ backendUrl, token, autoCapture, captureTimes, debuggerCapture, calendarRefreshMinutes });
   $("backendUrl").value = backendUrl;
   showStatus("ok", autoCapture
     ? `Saved. Scheduled at ${captureTimes.join(", ")} daily.`
