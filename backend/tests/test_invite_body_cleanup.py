@@ -141,3 +141,31 @@ def test_the_series_label_line_is_dropped():
     body = "Series\nTurning this to Daily 15min for the rest of the month."
     assert clean_invite_body(body) == (
         "Turning this to Daily 15min for the rest of the month.")
+
+
+def test_a_join_link_inside_a_stored_body_is_recovered_at_read_time():
+    """A meeting whose body carries the link but whose join_url is
+    empty must still offer the link — without waiting for a
+    re-capture. Same principle as the v2.52 attendee scrub: fix what
+    the app already holds."""
+    from services.extension_calendar_service import ExtensionCalendarService
+
+    ev = ExtensionCalendarService._deserialize({
+        "subject": "Pulse", "start": "2026-08-25T09:30:00",
+        "end": "2026-08-25T09:45:00", "join_url": "",
+        "body": "Join the meeting now https://teams.microsoft.com/l/meetup-join/19%3aX/0",
+    })
+    assert ev["join_url"].startswith(
+        "https://teams.microsoft.com/l/meetup-join/")
+
+
+def test_an_explicit_join_url_is_never_overridden_by_the_body():
+    from services.extension_calendar_service import ExtensionCalendarService
+
+    ev = ExtensionCalendarService._deserialize({
+        "subject": "Pulse", "start": "2026-08-25T09:30:00",
+        "end": "2026-08-25T09:45:00",
+        "join_url": "https://acme.webex.com/meet/real",
+        "body": "stale https://zoom.us/j/999 forwarded from another invite",
+    })
+    assert ev["join_url"] == "https://acme.webex.com/meet/real"
