@@ -2884,6 +2884,7 @@ function _harvestCalendarResponses() {
     const out = {
       bodies: s.bodies, seen: s.seen, matched: s.matched,
       dropped: s.dropped, notMeetingShaped: s.notMeetingShaped || 0,
+      declinedKeyNames: s.declinedKeyNames || [],
       installed: true,
     };
     s.bodies = [];
@@ -3135,6 +3136,10 @@ function detailsFromResponses(bodies, diag) {
   // between us and it; if false, the responses genuinely lack it and
   // the next move is different.
   if (diag && found.size === 0 && (bodies || []).length) {
+    // Per CALL: this batch of bodies yielded nothing. Union into any
+    // census already recorded — bodies arrive across several harvests
+    // (pre-click, post-click, per week), and the useful artifact is
+    // the vocabulary of everything that failed to parse.
     const names = new Set();
     let census = 0;
     const walkNames = (v, depth) => {
@@ -3152,7 +3157,13 @@ function detailsFromResponses(bodies, diag) {
       }
     };
     for (const b of bodies) walkNames(b, 0);
-    diag.responseKeyNames = Array.from(names);
+    const merged = new Set(Array.isArray(diag.responseKeyNames)
+      ? diag.responseKeyNames : []);
+    for (const n of names) {
+      if (merged.size >= 64) break;
+      merged.add(n);
+    }
+    diag.responseKeyNames = Array.from(merged);
 
     let joinShaped = false;
     for (const b of bodies) {
@@ -3160,7 +3171,8 @@ function detailsFromResponses(bodies, diag) {
       try { text = JSON.stringify(b).slice(0, 400000); } catch (_) { text = ""; }
       if (_joinUrlFromHtml(text)) { joinShaped = true; break; }
     }
-    diag.responsesContainJoinShapedUrl = joinShaped;
+    diag.responsesContainJoinShapedUrl =
+      Boolean(diag.responsesContainJoinShapedUrl) || joinShaped;
   }
   return found;
 }
@@ -3439,7 +3451,12 @@ async function collectWeekDetail(tabId, candidates, capturedBodies, diag, into,
       const before = capturedBodies.length;
       await harvest("post-click");
       if (capturedBodies.length > before) {
-        const fresh = detailsFromResponses(capturedBodies.slice(before));
+        // WITH the diag. Field runs 2026-08-23: the bodies arrive
+        // with the clicks (postClickBodies 13), and this was the one
+        // call site without the diag — so the census, the key-group
+        // flags and joinFromResponseBody all silently died on the
+        // richest payloads in the pipeline.
+        const fresh = detailsFromResponses(capturedBodies.slice(before), diag);
         diag.postClickBodies += capturedBodies.length - before;
         for (const [k, v] of fresh) {
           const prev = into.get(k) || { attendees: [], body: "", joinUrl: "" };
@@ -3555,6 +3572,21 @@ async function captureCalendarTab() {
       diag.responsesDropped += got.dropped || 0;
       diag.responsesNotMeetingShaped += got.notMeetingShaped || 0;
       capturedBodies.push(...(got.bodies || []));
+      // Key names from responses the recorder's vocabulary gate
+      // declined — unioned into the same census the parser feeds, so
+      // one list answers "what did the traffic we could not use look
+      // like", whichever side declined it.
+      if (Array.isArray(got.declinedKeyNames) && got.declinedKeyNames.length) {
+        const merged = new Set(Array.isArray(diag.responseKeyNames)
+          ? diag.responseKeyNames : []);
+        for (const n of got.declinedKeyNames) {
+          if (merged.size >= 64) break;
+          if (typeof n === "string" && /^[a-z0-9_.$-]{1,40}$/.test(n)) {
+            merged.add(n);
+          }
+        }
+        diag.responseKeyNames = Array.from(merged);
+      }
     } catch (e) {
       console.warn(`[ext] calendar ${label}: harvest failed:`, e);
     }

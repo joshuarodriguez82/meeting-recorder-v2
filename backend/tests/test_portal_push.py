@@ -492,3 +492,58 @@ def test_an_empty_register_reports_zero_sent_rather_than_looking_healthy(
 
     assert out["sent"]["total"] == 0
     assert out["sent"]["session_count"] == 0
+
+
+# ── bindings roam between machines; tokens do not ────────────────────
+#
+# FIELD REQUIREMENT 2026-08-23: bind on the PC, see the same binding on
+# the Mac. The bindings FILE already travels — it lives in the
+# recordings dir, which both machines can point at the same synced
+# folder. The edit token cannot travel: it lives in each machine's OS
+# keychain, and writing it to any synced file is exactly what the
+# integration spec forbids.
+#
+# Which exposed a poisoning bug: a machine WITHOUT the token marked the
+# binding broken in the SHARED file — and that flag synced back and
+# stopped pushes on the machine that had the token all along. A
+# missing token is a PER-MACHINE state, not a property of the binding.
+
+
+def test_a_missing_token_does_not_poison_the_shared_binding(
+        tmp_path, fake_secrets, monkeypatch):
+    svc, _ = _bound(tmp_path, fake_secrets)
+    # Simulate the OTHER machine: same bindings file, empty keychain.
+    fake_secrets.store.clear()
+
+    with pytest.raises(Exception):
+        svc.push("acme", "genesys migration")
+
+    b = svc.binding_for("acme", "genesys migration")
+    assert b["broken"] is False, (
+        "a token-less machine marked the SHARED binding broken — that "
+        "flag syncs back and stops pushes on the machine that has the "
+        "token")
+
+
+def test_should_push_is_false_without_a_local_token(tmp_path, fake_secrets):
+    svc, _ = _bound(tmp_path, fake_secrets)
+    assert svc.should_push("acme", "genesys migration") is True
+    fake_secrets.store.clear()
+    # No local token: this machine quietly does not push. The binding
+    # stays healthy for the machine that can.
+    assert svc.should_push("acme", "genesys migration") is False
+
+
+def test_bindings_report_local_token_presence_without_writing_it(
+        tmp_path, fake_secrets):
+    svc, _ = _bound(tmp_path, fake_secrets)
+    enriched = svc.bindings_with_token_state()
+    scope = pps.scope_key("acme", "genesys migration")
+    assert enriched[scope]["token_present"] is True
+
+    fake_secrets.store.clear()
+    enriched = svc.bindings_with_token_state()
+    assert enriched[scope]["token_present"] is False
+    # Presence is computed, never persisted: the file knows nothing.
+    blob = (tmp_path / pps.BINDINGS_FILENAME).read_text(encoding="utf-8")
+    assert "token_present" not in blob
