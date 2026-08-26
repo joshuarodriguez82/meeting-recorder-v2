@@ -101,6 +101,16 @@ class Session:
         # the summarizer as visual context and reused later like any
         # other artifact.
         self.screenshots: List[str] = []
+        # Fingerprint of the inputs the last successful extraction ran
+        # on: transcript + notes + template + the extractor prompt
+        # version. Reprocessing a session whose fingerprint is unchanged
+        # would re-spend five LLM calls to produce byte-identical
+        # output. The August 2026 token export made the cost concrete —
+        # the reprocessing days ran 4-8x a normal day's spend, almost
+        # all of it re-extracting sessions nothing had changed about.
+        # Empty on every session recorded before this existed, which
+        # correctly reads as "unknown, so run it".
+        self.extraction_fingerprint: str = ""
         # Saved Live Co-Pilot ticks. Each entry is the dict the tick
         # endpoint returned — `generated_at`, `segment_count`,
         # `clarifying_questions`, `risks`, `follow_ups`. Kept with the
@@ -297,6 +307,7 @@ class Session:
                 if self.finalize_started_at else None
             ),
             "finalize_error": self.finalize_error,
+            "extraction_fingerprint": self.extraction_fingerprint,
         }
 
     @classmethod
@@ -304,6 +315,8 @@ class Session:
         """Reconstruct a Session from its JSON dict."""
         session = cls(session_id=data.get("session_id", ""))
         session.display_name = data.get("display_name", "") or ""
+        session.extraction_fingerprint = str(
+            data.get("extraction_fingerprint") or "")
         started = data.get("started_at")
         ended = data.get("ended_at")
         if started:
