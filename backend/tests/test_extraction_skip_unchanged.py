@@ -54,7 +54,9 @@ def _install(monkeypatch, *, transcript="hello there", notes="",
     times each extractor actually ran, which is the only honest way to
     tell a skip from a re-run that happened to produce the same text."""
     settings = SimpleNamespace(
-        is_configured=True, anthropic_api_key="sk-x", hf_token="hf_x")
+        is_configured=True,
+        anthropic_api_key="sk-EXAMPLE",  # nosec B106 - synthetic fixture
+        hf_token="hf-EXAMPLE")  # nosec B106 - synthetic fixture
 
     def fake_load_settings():
         server.svc.settings = settings

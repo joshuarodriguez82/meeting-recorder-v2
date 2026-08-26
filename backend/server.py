@@ -6594,8 +6594,11 @@ async def process_full(session_id: str, req: ProcessFullRequest):
                     "write=%d uncached=%d (~%d%% of uncached input cost)",
                     cs["calls"], cs["read"], cs["write"], cs["uncached"],
                     round(billed / full * 100) if full else 100)
-        except Exception:  # noqa: BLE001 — accounting must never fail a run
-            pass
+        except Exception as e:  # noqa: BLE001 — must never fail a run
+            # Swallowed on purpose, but not silently: a bare `pass` here
+            # would hide the accounting breaking, and the whole point of
+            # this block is that a broken cache must not be invisible.
+            logger.debug("process_full: cache accounting failed: %s", e)
 
         # Single write with every successful field applied.
         await asyncio.to_thread(svc.session_svc.save, session)
