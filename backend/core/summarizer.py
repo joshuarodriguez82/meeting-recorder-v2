@@ -184,6 +184,54 @@ def _inline_markdown(text: str) -> str:
 DEFAULT_MODEL = "claude-haiku-4-5"
 
 
+# Prompt version + fingerprint live in a stdlib-only module so a
+# request path can import them without pulling in the Anthropic
+# SDK. Re-exported here because this is where the prompts live.
+from core.prompt_version import (  # noqa: E402,F401
+    EXTRACTOR_PROMPT_VERSION, extraction_fingerprint)
+
+
+def _split_for_cache(instruction: str, transcript: str,
+                     notes: str = "") -> tuple:
+    """Split a prompt into (cacheable_prefix, volatile_tail).
+
+    WHY THE ORDER CHANGED. Prompt caching is a PREFIX match: the cached
+    span runs from the start of the request to the breakpoint, and any
+    byte differing before it invalidates the whole thing. Every
+    extractor here sends the same transcript with a different
+    instruction, and `_with_user_notes` put the INSTRUCTION FIRST — so
+    the shared prefix ended at character zero and nothing could ever
+    cache. Field data, August 2026: 5,545,790 input tokens billed,
+    cache_read_input_tokens 0 across the entire month.
+
+    A session is analysed by five extractors (summary, structured,
+    action items, decisions, requirements), each re-sending the whole
+    transcript at full price — roughly 85K input tokens for a meeting
+    whose transcript is 17K.
+
+    Transcript and user notes are per-SESSION and identical across all
+    five calls, so they are the prefix. The instruction is
+    per-EXTRACTOR and goes after the breakpoint. Same information, and
+    the same order the model wants anyway (long context first, question
+    last):
+
+        without caching   5 x T
+        with caching      1.25 x T (write) + 4 x 0.1 x T (read) = 1.65 x T
+
+    Prefixes under ~1024 tokens are not cacheable; those calls behave
+    exactly as before, which is why this is safe for short transcripts.
+    """
+    notes = (notes or "").strip()
+    parts = []
+    if notes:
+        parts.append(
+            "=== USER NOTES (important context from the recorder — "
+            "treat these as fact, they know things the transcript "
+            f"doesn't capture) ===\n{notes}")
+    parts.append(f"=== MEETING TRANSCRIPT ===\n{transcript}")
+    return "\n\n".join(parts), instruction
+
+
 def _with_user_notes(instruction: str, transcript: str, notes: str = "") -> str:
     """
     Compose the final prompt by prepending the user's own session notes —
@@ -391,6 +439,10 @@ class Summarizer:
                 For Ollama any non-empty string works.
         """
         self._provider = (provider or "anthropic").strip().lower()
+        # Prompt-cache accounting, per Summarizer instance. Reportable
+        # so "is caching actually working" is a number, not a belief.
+        self.cache_stats = {"read": 0, "write": 0, "uncached": 0,
+                            "output": 0, "calls": 0}
         from config.settings import _normalize_model
         requested = model or DEFAULT_MODEL
         self._model = _normalize_model(requested)
@@ -439,10 +491,36 @@ class Summarizer:
         """
         return base if self._provider == "anthropic" else int(base * 1.5)
 
+    def _record_cache_usage(self, usage) -> None:
+        """Accumulate cache hit/miss token counts.
+
+        A cache that is silently NOT hitting is indistinguishable from
+        no cache at all — the exact defect class this project has paid
+        for repeatedly. So the numbers are recorded and reportable
+        rather than assumed: `cache_read_input_tokens` staying at zero
+        across a session's five extractors means a silent invalidator
+        broke the prefix, and that must be visible.
+        """
+        if usage is None:
+            return
+        try:
+            self.cache_stats["read"] += int(
+                getattr(usage, "cache_read_input_tokens", 0) or 0)
+            self.cache_stats["write"] += int(
+                getattr(usage, "cache_creation_input_tokens", 0) or 0)
+            self.cache_stats["uncached"] += int(
+                getattr(usage, "input_tokens", 0) or 0)
+            self.cache_stats["output"] += int(
+                getattr(usage, "output_tokens", 0) or 0)
+            self.cache_stats["calls"] += 1
+        except Exception:  # noqa: BLE001 - bookkeeping must never fail a call
+            return
+
     async def _chat(self, prompt: str, max_tokens: int = 1024,
                     timeout: float = 60.0,
                     image_paths: Optional[List[str]] = None,
-                    json_mode: bool = False) -> str:
+                    json_mode: bool = False,
+                    cache_prefix: str = "") -> str:
         """
         Provider-agnostic "one-shot user prompt → assistant text" helper.
 
@@ -462,8 +540,19 @@ class Summarizer:
                 if image_paths and _model_supports_vision(self._model)
                 else []
             )
-            if imgs:
-                content: object = [*imgs, {"type": "text", "text": prompt}]
+            if cache_prefix:
+                # The breakpoint sits at the END of the transcript block,
+                # so everything before it — images included — is one
+                # cached prefix shared by all five extractors of this
+                # session. See _split_for_cache for the arithmetic.
+                content: object = [
+                    *imgs,
+                    {"type": "text", "text": cache_prefix,
+                     "cache_control": {"type": "ephemeral"}},
+                    {"type": "text", "text": prompt},
+                ]
+            elif imgs:
+                content = [*imgs, {"type": "text", "text": prompt}]
             else:
                 content = prompt
             msg = await asyncio.wait_for(
@@ -474,6 +563,7 @@ class Summarizer:
                 ),
                 timeout=timeout,
             )
+            self._record_cache_usage(getattr(msg, "usage", None))
             return _flag_truncation(
                 msg.content[0].text,
                 getattr(msg, "stop_reason", None) == "max_tokens",
@@ -492,10 +582,14 @@ class Summarizer:
         # (10 min) for local providers so a real generation isn't killed
         # mid-flight; still bounded so a genuine hang eventually fails.
         local_timeout = max(timeout, 600.0)
+        # No prompt caching on the OpenAI-compat providers (local models,
+        # OpenRouter): recombine into the single string they expect, in
+        # the same order the Anthropic path sends it.
+        combined = f"{cache_prefix}\n\n{prompt}" if cache_prefix else prompt
         kwargs = dict(
             model=self._model,
             max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": combined}],
         )
         # JSON mode: Gemini's OpenAI-compat endpoint (and most modern
         # servers) honor response_format to force a clean JSON object.
@@ -685,8 +779,10 @@ class Summarizer:
                 f"{copilot_observations.strip()}\n"
             )
         try:
+            _cache_prefix, _tail = _split_for_cache(
+                instruction, transcript, notes)
             summary = await self._chat(
-                _with_user_notes(instruction, transcript, notes),
+                _tail, cache_prefix=_cache_prefix,
                 max_tokens=self._budget(8192), timeout=180.0,
                 image_paths=image_paths,
             )
@@ -969,8 +1065,10 @@ class Summarizer:
             + _grounding_rules(meeting_date)
         )
         try:
+            _cache_prefix, _tail = _split_for_cache(
+                instruction, transcript, notes)
             result = await self._chat(
-                _with_user_notes(instruction, transcript, notes),
+                _tail, cache_prefix=_cache_prefix,
                 max_tokens=self._budget(8192), timeout=120.0,
                 image_paths=image_paths,
             )
@@ -1039,8 +1137,10 @@ class Summarizer:
             + _grounding_rules(meeting_date)
         )
         try:
+            _cache_prefix, _tail = _split_for_cache(
+                instruction, transcript, notes)
             result = await self._chat(
-                _with_user_notes(instruction, transcript, notes),
+                _tail, cache_prefix=_cache_prefix,
                 max_tokens=self._budget(8192), timeout=120.0,
                 image_paths=image_paths,
             )
@@ -1109,10 +1209,11 @@ class Summarizer:
             # because the anchor was).
             + _json_timing_note("due")
         )
-        prompt = _with_user_notes(instruction, transcript, notes)
+        _cache_prefix, prompt = _split_for_cache(instruction, transcript, notes)
         try:
             raw = await self._chat(
-                prompt, max_tokens=self._budget(4096), timeout=120.0,
+                prompt, cache_prefix=_cache_prefix,
+                max_tokens=self._budget(4096), timeout=120.0,
                 image_paths=image_paths,
             )
             parsed = _coerce_json(raw)
@@ -1442,8 +1543,10 @@ class Summarizer:
             + _grounding_rules(meeting_date)
         )
         try:
+            _cache_prefix, _tail = _split_for_cache(
+                instruction, transcript, notes)
             result = await self._chat(
-                _with_user_notes(instruction, transcript, notes),
+                _tail, cache_prefix=_cache_prefix,
                 max_tokens=self._budget(8192), timeout=120.0,
                 image_paths=image_paths,
             )

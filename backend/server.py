@@ -6375,6 +6375,10 @@ async def engagement_export(client: str, project: str = ""):
 class ProcessFullRequest(BaseModel):
     template: str = "General"
     follow_up_drafts: bool = False
+    # Re-run every extractor even when the inputs are unchanged. The
+    # skip is the default because it is almost always right; this is
+    # the escape hatch for "I want it regenerated anyway".
+    force: bool = False
 
 
 @app.post("/sessions/{session_id}/process_full")
@@ -6496,8 +6500,45 @@ async def process_full(session_id: str, req: ProcessFullRequest):
             created_at = session.started_at.isoformat() if session.started_at else ""
             return stamp_records(parsed, session.session_id, created_at)
 
-        summary_r, ai_r, dec_r, req_r, struct_r = await asyncio.gather(
-            _do_summary(),
+        # NOTHING CHANGED SINCE THE LAST RUN -> DON'T PAY FOR IT AGAIN.
+        #
+        # Reprocessing re-ran all five extractors on every session
+        # regardless of whether their inputs had moved. The August 2026
+        # token export showed what that costs: the reprocessing days ran
+        # 4-8x a normal day, nearly all of it regenerating byte-identical
+        # text. The fingerprint covers transcript + notes + template +
+        # EXTRACTOR_PROMPT_VERSION, so a prompt edit still forces a real
+        # re-run — it just stops being the default for everything.
+        from core.prompt_version import extraction_fingerprint
+
+        fingerprint = extraction_fingerprint(transcript, notes, req.template)
+        already = (getattr(session, "extraction_fingerprint", "") or "")
+        if (already and already == fingerprint and not req.force
+                and session.summary):
+            stages["extract"] = "skipped (inputs unchanged since last run)"
+            logger.info(
+                "process_full: %s inputs unchanged — skipped 5 LLM calls",
+                session_id)
+            return {"ok": True, "stages": stages, "skipped": True}
+
+        # THE FIRST CALL WARMS THE CACHE; THE REST READ IT.
+        #
+        # These five used to run in one gather. Prompt caching writes on
+        # the first request and is only readable once that write lands,
+        # so five concurrent calls all raced it and every one paid the
+        # full input price — the cache would have reported 0 reads and
+        # looked exactly like the bug it was meant to fix. Summary goes
+        # first, alone; the other four then share its cached transcript.
+        try:
+            summary_r = await _do_summary()
+        except Exception as e:  # noqa: BLE001
+            # Every extraction here is best-effort: one failing must not
+            # cancel the rest (see this function's docstring). Moving
+            # summary out of the gather to warm the cache silently
+            # dropped that guarantee, because a bare await propagates.
+            # Captured to match exactly what return_exceptions=True did.
+            summary_r = e
+        ai_r, dec_r, req_r, struct_r = await asyncio.gather(
             _do_markdown("extract_action_items"),
             _do_markdown("extract_decisions"),
             _do_markdown("extract_requirements"),
@@ -6526,6 +6567,38 @@ async def process_full(session_id: str, req: ProcessFullRequest):
             for key, (_cls, attr) in STRUCTURED_FIELDS.items():
                 setattr(session, attr, struct_r.get(key, []))
             stages["structured"] = "ok"
+
+        # Stamp the fingerprint only when the run genuinely succeeded.
+        # A partial run (one extractor rate-limited, the rest fine) must
+        # NOT record "these inputs are done" — that would make the next
+        # reprocess skip the very session that still needs finishing,
+        # and the skip would be indistinguishable from success.
+        if all(not isinstance(r, Exception)
+               for r in (summary_r, ai_r, dec_r, req_r, struct_r)):
+            session.extraction_fingerprint = fingerprint
+        else:
+            session.extraction_fingerprint = ""
+
+        # A cache that silently isn't hitting looks exactly like no cache
+        # at all — the August export's `cache_read = 0` was the only sign
+        # anything was wrong, and nothing in the app was reporting it.
+        # One line per run so the answer is in the log, not in a rebuild.
+        try:
+            cs = getattr(svc.summarizer, "cache_stats", None)
+            if cs and cs.get("calls"):
+                billed = (cs["write"] * 1.25 + cs["read"] * 0.1
+                          + cs["uncached"])
+                full = cs["read"] + cs["write"] + cs["uncached"]
+                logger.info(
+                    "process_full: prompt cache — %d calls, read=%d "
+                    "write=%d uncached=%d (~%d%% of uncached input cost)",
+                    cs["calls"], cs["read"], cs["write"], cs["uncached"],
+                    round(billed / full * 100) if full else 100)
+        except Exception as e:  # noqa: BLE001 — must never fail a run
+            # Swallowed on purpose, but not silently: a bare `pass` here
+            # would hide the accounting breaking, and the whole point of
+            # this block is that a broken cache must not be invisible.
+            logger.debug("process_full: cache accounting failed: %s", e)
 
         # Single write with every successful field applied.
         await asyncio.to_thread(svc.session_svc.save, session)
