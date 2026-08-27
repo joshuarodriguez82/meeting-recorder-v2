@@ -749,6 +749,20 @@ fn requirements_filename() -> &'static str {
     { "requirements-cpu.txt" }
 }
 
+/// The platform's constraints file: the full transitive pin set that a
+/// CI runner actually resolved (freeze-deps.yml). Passed to pip via
+/// `-c` so a user's install reproduces a tested resolution instead of
+/// whatever PyPI resolves to on install day — the failure mode behind
+/// the v2.10.6 tokenizers backtrack and the pip<25 cap.
+fn constraints_filename() -> &'static str {
+    #[cfg(target_os = "macos")]
+    { "constraints-mac.txt" }
+    #[cfg(target_os = "linux")]
+    { "constraints-mac.txt" }
+    #[cfg(windows)]
+    { "constraints-cpu.txt" }
+}
+
 /// Create the app venv and pip install requirements into it. Blocks for
 /// several minutes on first launch while wheels download (~1.5 GB). All
 /// pip output goes to <data_root>/bootstrap.log so the user can tail it.
@@ -764,6 +778,16 @@ fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBu
     let current_reqs = std::fs::read_to_string(&reqs).map_err(|e| {
         format!("read {} failed: {}", reqs.display(), e)
     })?;
+    // Optional but expected: the CI-resolved transitive pin set. Missing
+    // (older bundle, stripped file) degrades to the old floating-resolve
+    // behavior rather than refusing to bootstrap.
+    let constraints = runtime_dir.join(constraints_filename());
+    let current_constraints = std::fs::read_to_string(&constraints)
+        .unwrap_or_default();
+    // The marker covers requirements AND constraints: a pin refresh with
+    // unchanged requirements must still re-run the install, or users
+    // keep yesterday's resolution while the repo claims today's.
+    let current_reqs = format!("{}{}", current_reqs, current_constraints);
     // Marker file lets us detect when the bundled requirements changed
     // between app versions (e.g. an upgrade adds sentence-transformers
     // for semantic search). Without it, an existing venv from v2.0.x
@@ -895,7 +919,15 @@ fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBu
     // pops up its own console windows that no_window() can't suppress on
     // grandchildren. With the flag, pip fails fast with a readable
     // "no matching distribution found" message that we can act on.
-    c.args(["-m", "pip", "install", "--only-binary=:all:", "-r"]).arg(&reqs)
+    c.args(["-m", "pip", "install", "--only-binary=:all:", "-r"]).arg(&reqs);
+    if constraints.exists() {
+        c.arg("-c").arg(&constraints);
+    } else {
+        rlog(&format!(
+            "Bootstrap: {} not in bundle — installing unpinned",
+            constraints_filename()));
+    }
+    c
         // Belt-and-suspenders for the 3.13 fallback: if we did land on
         // 3.13 and pip has to compile a pyo3 extension (tokenizers),
         // let it build against 3.13's stable ABI instead of hard-erroring.
