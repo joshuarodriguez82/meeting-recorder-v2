@@ -88,6 +88,13 @@ const FINALIZING_BUTTON_TOOLTIP =
   "This recording's audio is still finalizing (or queued behind another " +
   "finalize job) — try again once it's done.";
 
+// Same shape as above, one window earlier: a session that hasn't been
+// stopped yet has no WAV at all. Says "stop it first" rather than
+// "try again", because waiting alone will never make this one work.
+const LIVE_RECORDING_BUTTON_TOOLTIP =
+  "This session is still recording — stop it first, then its audio can " +
+  "be played and processed.";
+
 export function SessionDetailDialog({
   sessionId, open, onOpenChange, onChanged,
   initialTab = "overview", existingClients = [], projectsByClient = {},
@@ -139,6 +146,43 @@ export function SessionDetailDialog({
     const id = setInterval(tick, 1000);
     return () => { cancelled = true; clearInterval(id); };
   }, [processing]);
+
+  // Is THIS session the one being recorded right now? `audio_path` is
+  // stamped at start_recording, before a single byte exists, and
+  // `finalize_status` stays null until stop — so neither field can tell
+  // "still recording" apart from "finished, and the audio really is
+  // gone". Only /recording/status knows the difference.
+  //
+  // Field repro 2026-08-25: without this the <audio> below renders
+  // against a URL that 404s (the player shows a bare "Error") and the AI
+  // actions stay enabled, so Process fails with the generic "audio file
+  // is missing — moved, deleted, or not yet synced down from the cloud"
+  // message. During a meeting that is recording perfectly, that reads as
+  // data loss, and the natural next move — stop and restart — is exactly
+  // the one that would lose the meeting.
+  const [isLiveRecording, setIsLiveRecording] = useState(false);
+  useEffect(() => {
+    if (!open || !sessionId) {
+      setIsLiveRecording(false);
+      return;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const s = await api.recordingStatus();
+        if (!cancelled) {
+          setIsLiveRecording(!!s.is_recording && s.session_id === sessionId);
+        }
+      } catch {
+        // Backend unreachable — don't assert a live recording we can't
+        // confirm; fall back to the pre-existing behavior.
+        if (!cancelled) setIsLiveRecording(false);
+      }
+    };
+    tick();
+    const id = setInterval(tick, 2000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [open, sessionId]);
 
   // Editable state
   const [displayName, setDisplayName] = useState("");
@@ -243,6 +287,13 @@ export function SessionDetailDialog({
   const isFinalizing =
     session?.finalize_status === "finalizing" || isQueued;
   const finalizeFailed = session?.finalize_status === "failed";
+  // "The audio isn't ready yet" covers two distinct windows: finalize
+  // running (post-stop) and the recording still being in progress.
+  // Buttons treat them identically; only the tooltip differs.
+  const actionsBlocked = isFinalizing || isLiveRecording;
+  const blockedTooltip = isLiveRecording
+    ? LIVE_RECORDING_BUTTON_TOOLTIP
+    : FINALIZING_BUTTON_TOOLTIP;
   const finalizeElapsedLabel = (() => {
     if (!isFinalizing || !session?.finalize_started_at) return null;
     const startedMs = new Date(session.finalize_started_at).getTime();
@@ -592,6 +643,20 @@ export function SessionDetailDialog({
                       </span>
                     </div>
                   )}
+                  {isLiveRecording && (
+                    <div
+                      className="flex items-start gap-2 rounded-md border border-blue-500/30 bg-blue-500/10 text-blue-800 dark:text-blue-300 text-xs px-3 py-2.5"
+                      role="status"
+                    >
+                      <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0 mt-0.5" />
+                      <span>
+                        This session is still recording. Its audio is written
+                        to disk when you stop it, so there&apos;s nothing to
+                        play or process yet — nothing is missing. Stop the
+                        recording to get the transcript and summary.
+                      </span>
+                    </div>
+                  )}
                   {/* Only attempt playback once finalize is neither
                       running nor known to have failed — audio_path is
                       stamped at start_recording (before any bytes exist)
@@ -599,7 +664,8 @@ export function SessionDetailDialog({
                       actually there yet. A 0:00/0:00 player reads as an
                       empty recording; showing the banners above instead
                       is the honest version of that state. */}
-                  {session.audio_path && baseUrl && !isFinalizing && !finalizeFailed && (
+                  {session.audio_path && baseUrl && !isFinalizing && !finalizeFailed
+                    && !isLiveRecording && (
                     <div className="space-y-2">
                       <Label className="text-xs uppercase tracking-wider text-muted-foreground">Recording</Label>
                       <audio
@@ -712,8 +778,8 @@ export function SessionDetailDialog({
                         variant={hasTranscript ? "outline" : "default"}
                         size="sm"
                         onClick={runProcess}
-                        disabled={processing !== null || isFinalizing}
-                        title={isFinalizing ? FINALIZING_BUTTON_TOOLTIP : undefined}
+                        disabled={processing !== null || actionsBlocked}
+                        title={actionsBlocked ? blockedTooltip : undefined}
                       >
                         {processing === "process" ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <Cog className="h-3.5 w-3.5 mr-2" />}
                         {hasTranscript ? "Re-process" : "Process"}
@@ -721,8 +787,8 @@ export function SessionDetailDialog({
                       <Button
                         variant="outline" size="sm"
                         onClick={runSummarize}
-                        disabled={!hasTranscript || processing !== null || isFinalizing}
-                        title={isFinalizing ? FINALIZING_BUTTON_TOOLTIP : undefined}
+                        disabled={!hasTranscript || processing !== null || actionsBlocked}
+                        title={actionsBlocked ? blockedTooltip : undefined}
                       >
                         {processing === "summarize" ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <Sparkles className="h-3.5 w-3.5 mr-2" />}
                         Summarize
@@ -730,8 +796,8 @@ export function SessionDetailDialog({
                       <Button
                         variant="outline" size="sm"
                         onClick={() => runExtract("action_items", "Action items", "actions")}
-                        disabled={!hasTranscript || processing !== null || isFinalizing}
-                        title={isFinalizing ? FINALIZING_BUTTON_TOOLTIP : undefined}
+                        disabled={!hasTranscript || processing !== null || actionsBlocked}
+                        title={actionsBlocked ? blockedTooltip : undefined}
                       >
                         {processing === "action_items" ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <ClipboardList className="h-3.5 w-3.5 mr-2" />}
                         Action Items
@@ -739,8 +805,8 @@ export function SessionDetailDialog({
                       <Button
                         variant="outline" size="sm"
                         onClick={() => runExtract("decisions", "Decisions", "decisions")}
-                        disabled={!hasTranscript || processing !== null || isFinalizing}
-                        title={isFinalizing ? FINALIZING_BUTTON_TOOLTIP : undefined}
+                        disabled={!hasTranscript || processing !== null || actionsBlocked}
+                        title={actionsBlocked ? blockedTooltip : undefined}
                       >
                         {processing === "decisions" ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <Target className="h-3.5 w-3.5 mr-2" />}
                         Decisions
@@ -748,8 +814,8 @@ export function SessionDetailDialog({
                       <Button
                         variant="outline" size="sm"
                         onClick={() => runExtract("requirements", "Requirements", "requirements")}
-                        disabled={!hasTranscript || processing !== null || isFinalizing}
-                        title={isFinalizing ? FINALIZING_BUTTON_TOOLTIP : undefined}
+                        disabled={!hasTranscript || processing !== null || actionsBlocked}
+                        title={actionsBlocked ? blockedTooltip : undefined}
                       >
                         {processing === "requirements" ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <FileText className="h-3.5 w-3.5 mr-2" />}
                         Requirements
@@ -757,9 +823,9 @@ export function SessionDetailDialog({
                       <Button
                         variant="outline" size="sm"
                         onClick={runFollowUpDrafts}
-                        disabled={!hasTranscript || processing !== null || isFinalizing}
-                        title={isFinalizing
-                          ? FINALIZING_BUTTON_TOOLTIP
+                        disabled={!hasTranscript || processing !== null || actionsBlocked}
+                        title={actionsBlocked
+                          ? blockedTooltip
                           : hasTranscript
                             // Deliberately does not promise an Outlook
                             // draft: under calendar_source "extension"

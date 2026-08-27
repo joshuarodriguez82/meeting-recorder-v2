@@ -5847,6 +5847,30 @@ async def process_session(session_id: str):
         # the truth about which, instead of letting the "audio file
         # missing" RuntimeError further down claim it was moved/deleted/
         # not synced. See _finalize_status_detail's module comment.
+        # Still recording: the WAV is being streamed to the temp capture
+        # dir and is only merged to session.audio_path on stop, so the
+        # file genuinely isn't there yet. Without this guard we fall
+        # through to _ensure_audio_available / copy_audio_to_local_for_
+        # processing, whose "missing — moved, deleted, or not yet synced
+        # down from the cloud" RuntimeError names three causes that all
+        # imply the recording is lost, and omits the real one: not
+        # written yet. Same reasoning as _raise_if_finalizing directly
+        # below, one window earlier. Field repro 2026-08-25.
+        _rec = svc.recording_svc
+        if (
+            _rec is not None
+            and _rec.is_recording
+            and _rec.current_session is not None
+            and _rec.current_session.session_id == session_id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This session is still recording. Stop the recording "
+                    "first — its audio is written to disk on stop, and "
+                    "then it can be processed."
+                ),
+            )
         _raise_if_finalizing(session)
         # Serialize the shared-state transcribe/diarize stage — see
         # _PROCESSING_LOCK. Without this, a manual re-process here racing a
