@@ -927,7 +927,7 @@ fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBu
     // packages. It is pure Python: the sdist "build" is seconds, no
     // compiler, none of the console-window risk the flag exists for.
     c.args(["-m", "pip", "install", "--only-binary=:all:",
-            "--no-binary", "antlr4-python3-runtime", "-r"]).arg(&reqs);
+            "--no-binary", "antlr4-python3-runtime,docopt", "-r"]).arg(&reqs);
     if constraints.exists() {
         c.arg("-c").arg(&constraints);
     } else {
