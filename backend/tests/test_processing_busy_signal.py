@@ -104,7 +104,8 @@ def _install_process_session_stubs(monkeypatch, *, raise_error=None):
 
     monkeypatch.setattr(
         server.svc, "recording_svc",
-        SimpleNamespace(process_session=fake_process_session),
+        SimpleNamespace(process_session=fake_process_session,
+                        is_recording=False, current_session=None),
     )
 
     async def fake_auto_identify(*_a, **_k):
@@ -218,6 +219,9 @@ def test_overlapping_process_session_and_stop_dont_clear_indicator_early(monkeyp
         SimpleNamespace(
             process_session=fake_process_session_blocking,
             stop_recording=lambda: SimpleNamespace(session_id="S2"),
+            # /process's still-recording guard (the 409) reads these
+            # before the pipeline call; the stub models the interface.
+            is_recording=False, current_session=None,
         ),
     )
 
