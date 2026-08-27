@@ -1,0 +1,61 @@
+# Resolve each platform's requirements file on the OS it actually
+# targets and emit the full transitive pin set (`pip freeze`) as both a
+# job-log block and an artifact.
+#
+# Why this exists: the bootstrap pip-installs on USER machines, so every
+# floating requirement (`anthropic`, `faster-whisper`, and the entire
+# transitive tree) can resolve differently from what was tested the day
+# before — the "cap pip<25" incident was this failure mode. The output
+# of this workflow gets committed as backend/constraints-{cpu,mac}.txt
+# and passed via `-c` at install time, making user installs reproduce a
+# resolution that CI actually performed.
+#
+# Refreshing the pins is a deliberate act: dispatch this workflow, copy
+# the two blocks into the constraints files, land it as a normal PR.
+name: Freeze Dependencies
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  freeze:
+    name: Resolve (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: cpu
+            reqs: backend/requirements-cpu.txt
+          - os: macos-14
+            label: mac
+            reqs: backend/requirements-mac.txt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # The same interpreter the bootstrap insists on for users.
+          python-version: '3.12'
+      - name: Install exactly as the bootstrap does
+        shell: bash
+        # Mirrors lib.rs::bootstrap_app_venv: binary wheels only, same
+        # pip version range enforcement as the bootstrap's step 2.
+        run: |
+          python -m pip install --disable-pip-version-check "pip<25"
+          python -m pip install --only-binary=:all: -r "${{ matrix.reqs }}"
+      - name: Emit the resolved pin set
+        shell: bash
+        run: |
+          echo "===CONSTRAINTS-${{ matrix.label }}-BEGIN==="
+          python -m pip freeze --exclude pip --exclude setuptools --exclude wheel
+          echo "===CONSTRAINTS-${{ matrix.label }}-END==="
+          python -m pip freeze --exclude pip --exclude setuptools --exclude wheel \
+            > "constraints-${{ matrix.label }}.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: constraints-${{ matrix.label }}
+          path: constraints-${{ matrix.label }}.txt

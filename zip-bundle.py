@@ -23,7 +23,12 @@ VERSION_SOURCE = ROOT / "src-tauri" / "tauri.conf.json"
 INCLUDE_DIRS = ["config", "core", "meeting_recorder", "models", "scripts", "services", "utils"]
 # Both requirements files ship in the bundle so the Rust shell can pick the
 # right one for the host platform at first-launch venv bootstrap time.
-INCLUDE_FILES = ["server.py", "requirements-cpu.txt", "requirements-mac.txt"]
+INCLUDE_FILES = ["server.py", "requirements-cpu.txt", "requirements-mac.txt",
+                 # CI-resolved transitive pin sets (freeze-deps.yml). The
+                 # bootstrap passes them to pip via -c; absence degrades
+                 # to floating resolution (and the existing exists()
+                 # check below already tolerates it).
+                 "constraints-cpu.txt", "constraints-mac.txt"]
 # Directories rooted at the REPO ROOT (not backend/) that still need to
 # ship inside the runtime bundle, written into the zip under their own
 # name so they land as a SIBLING of server.py once extracted (see

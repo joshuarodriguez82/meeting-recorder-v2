@@ -253,6 +253,14 @@ def _verify_and_repair_dependencies() -> None:
         "--disable-pip-version-check",
         "-r", str(req_path),
     ]
+    # Same pin set the bootstrap installs against (freeze-deps.yml →
+    # constraints-{cpu,mac}.txt). A repair that resolves fresh could
+    # otherwise pull versions the tested resolution never saw. Missing
+    # file degrades to the old floating behavior.
+    constraints_path = req_path.with_name(
+        req_path.name.replace("requirements", "constraints"))
+    if constraints_path.exists():
+        cmd += ["-c", str(constraints_path)]
     creationflags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
     try:
         result = subprocess.run(
@@ -5597,6 +5605,33 @@ class OpenFolderRequest(BaseModel):
     path: Optional[str] = None
 
 
+def _resolve_within_client_export_folders(raw_path: str) -> Optional[Path]:
+    """Resolve `raw_path` if it sits under a configured client export
+    folder. Client folders live outside the scan roots (they're
+    per-client Drive folders), but they are still app-configured
+    destinations — a path inside one is a path the app itself wrote to.
+    Returns None on any failure or non-containment."""
+    try:
+        resolved = Path(raw_path).expanduser().resolve()
+    except OSError:
+        return None
+    try:
+        configs = (svc.client_cfg_svc.get_all() or {}).values() \
+            if svc.client_cfg_svc else []
+    except Exception:  # noqa: BLE001 — an unreadable config store must
+        return None    # fail closed, not open
+    for cfg in configs:
+        folder = getattr(cfg, "export_folder", "") or ""
+        if not folder:
+            continue
+        try:
+            resolved.relative_to(Path(folder).expanduser().resolve())
+            return resolved
+        except (ValueError, OSError):
+            continue
+    return None
+
+
 @app.post("/system/open-folder")
 async def open_folder(req: OpenFolderRequest):
     """
@@ -5622,7 +5657,34 @@ async def open_folder(req: OpenFolderRequest):
     if not target:
         raise HTTPException(status_code=400, detail="path required")
     p = Path(target)
-    if not p.exists():
+    if req.kind == "path":
+        # An arbitrary caller-supplied path used to be opened as-is —
+        # and CREATED if missing, an "open folder" call that wrote to
+        # any location the request named. os.startfile is ShellExecute:
+        # pointed at a file, it runs the handler. The only real caller
+        # (the "show in folder" button for a backend-produced export)
+        # only ever needs paths inside the app's own roots, so contain
+        # to those plus configured client export folders — the same
+        # posture as the audio/screenshot endpoints.
+        resolved = _resolve_within_scan_roots(target)
+        if resolved is None:
+            resolved = _resolve_within_client_export_folders(target)
+        if resolved is None:
+            logger.warning(
+                "open-folder: refusing path outside recordings/archive/"
+                "client-export roots: %r", target)
+            raise HTTPException(
+                status_code=400,
+                detail="Path is outside the app's folders")
+        if not resolved.exists():
+            # Opening must never create. A missing-but-contained path
+            # means the export it came from is gone — say so.
+            raise HTTPException(status_code=404,
+                                detail="Folder no longer exists")
+        p = resolved
+    elif not p.exists():
+        # recordings/client dirs are app-owned; creating them on first
+        # open is the fresh-install behavior the UI depends on.
         try:
             p.mkdir(parents=True, exist_ok=True)
         except OSError as e:
