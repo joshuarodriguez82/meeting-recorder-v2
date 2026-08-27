@@ -919,7 +919,15 @@ fn bootstrap_app_venv(runtime_dir: &std::path::Path) -> Result<std::path::PathBu
     // pops up its own console windows that no_window() can't suppress on
     // grandchildren. With the flag, pip fails fast with a readable
     // "no matching distribution found" message that we can act on.
-    c.args(["-m", "pip", "install", "--only-binary=:all:", "-r"]).arg(&reqs);
+    // One exemption to --only-binary: antlr4-python3-runtime (via
+    // pyannote.audio -> omegaconf) has NEVER shipped a wheel, so
+    // :all: makes a FRESH venv unresolvable on every pip version —
+    // reproduced on both CI runners and locally, 2026-08-27. Existing
+    // venvs never noticed because pip skips already-installed
+    // packages. It is pure Python: the sdist "build" is seconds, no
+    // compiler, none of the console-window risk the flag exists for.
+    c.args(["-m", "pip", "install", "--only-binary=:all:",
+            "--no-binary", "antlr4-python3-runtime", "-r"]).arg(&reqs);
     if constraints.exists() {
         c.arg("-c").arg(&constraints);
     } else {
