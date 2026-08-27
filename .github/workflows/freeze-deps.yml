@@ -72,7 +72,9 @@ jobs:
         with:
           pattern: constraints-*
           merge-multiple: true
-          path: pins
+          # Runner temp, NOT the working tree: a scratch dir inside the
+          # checkout gets swept into the commit.
+          path: ${{ runner.temp }}/pins
       - name: Place the files with a provenance header
         shell: bash
         # The header names the run that produced the pins, so a future
@@ -80,7 +82,7 @@ jobs:
         run: |
           set -eu
           for label in cpu mac; do
-            src="pins/constraints-${label}.txt"
+            src="${RUNNER_TEMP}/pins/constraints-${label}.txt"
             dest="backend/constraints-${label}.txt"
             test -s "$src" || { echo "::error::$src missing or empty"; exit 1; }
             {
@@ -97,7 +99,9 @@ jobs:
               echo "# Source run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
               echo "# Requirements: backend/requirements-${label}.txt"
               echo ""
-              cat "$src"
+              # Windows pip freeze emits CRLF; normalize so both
+              # files read identically on every platform.
+              tr -d '\r' < "$src"
             } > "$dest"
             echo "wrote $dest ($(grep -c '==' "$dest") pins)"
           done
