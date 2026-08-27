@@ -163,7 +163,8 @@ def test_process_session_still_reports_genuinely_missing_audio(monkeypatch):
 
     monkeypatch.setattr(
         server.svc, "recording_svc",
-        SimpleNamespace(process_session=fake_process_session))
+        SimpleNamespace(process_session=fake_process_session,
+                        is_recording=False, current_session=None))
 
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(server.process_session("S1"))
@@ -188,7 +189,8 @@ def test_process_session_proceeds_normally_when_not_finalizing(monkeypatch):
 
     monkeypatch.setattr(
         server.svc, "recording_svc",
-        SimpleNamespace(process_session=fake_process_session))
+        SimpleNamespace(process_session=fake_process_session,
+                        is_recording=False, current_session=None))
 
     async def fake_auto_identify(*_a, **_k):
         return None
