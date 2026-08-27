@@ -52,6 +52,16 @@ huggingface_hub>=0.23,<1.0
 torch==2.6.0
 torchaudio==2.6.0
 pyannote.audio==3.3.2
+# pyannote.metrics 4.x requires numpy>=2.2.2, which contradicts the
+# numpy==2.1.3 pin above (torch 2.6 compat) — and pyannote.audio 3.3.2
+# leaves it unpinned, so a FRESH resolve floats into 4.x and the whole
+# install becomes unsatisfiable. 3.2.1 is the last release compatible
+# with this numpy. It pulls `docopt`, which is sdist-only, so the
+# bootstrap exempts docopt from --only-binary alongside
+# antlr4-python3-runtime (see lib.rs). Revisit when pyannote.audio
+# ships a release that moves off the numpy 2.1 era.
+pyannote.metrics<4
+
 speechbrain==1.0.3
 pytorch-lightning==2.6.1
 lightning==2.6.1
