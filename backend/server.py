@@ -10155,4 +10155,11 @@ if __name__ == "__main__":
             f"Invalid MEETING_RECORDER_PORT={_port_env!r}; falling back to 17645")
         _port = 17645
     logger.info(f"Backend listening on 127.0.0.1:{_port}")
+    # The ?token= query channel (EventSource/<audio>/<img> can't set
+    # headers) would otherwise print the persisted auth token into every
+    # access line — and backend.log's tail ships in diagnostics bundles.
+    # Logger-level filters survive uvicorn's own logging setup, so
+    # installing before run() is sufficient.
+    from utils.access_log_redaction import install_access_log_redaction
+    install_access_log_redaction()
     uvicorn.run(app, host="127.0.0.1", port=_port, log_level="info")

@@ -93,6 +93,114 @@ DEFAULT_TEMPLATES: Dict[str, str] = {
         "6) Next steps and timeline updates."
         + _VISUALS_DIRECTIVE
     ),
+    # ── Delivery-phase set ──────────────────────────────────────────
+    # The five above grew out of pre-sales SA work. The six below cover
+    # the post-SOW lifecycle — the delivery engineers who build, test,
+    # cut over, and stabilize what pre-sales scoped. Ordering here is
+    # roughly the order the meetings happen in a real engagement.
+    "Delivery Kickoff": (
+        "This is a delivery kickoff / pre-sales-to-delivery handoff "
+        "meeting. Summarize with focus on: "
+        "1) Scope as confirmed against the SOW — call out anything the "
+        "team flagged as differing from what was sold, "
+        "2) Explicitly out-of-scope items mentioned (these prevent scope "
+        "creep disputes later), "
+        "3) Assumptions from pre-sales that delivery must validate, with "
+        "who owns validating each, "
+        "4) Environment, credential, and access requests raised and who "
+        "is providing them, "
+        "5) Roles and responsibilities agreed (customer side and "
+        "delivery side), "
+        "6) Key dates committed: phase boundaries, environment "
+        "availability, go-live target, "
+        "7) Risks raised in the handoff and open questions for pre-sales."
+        + _VISUALS_DIRECTIVE
+    ),
+    "Technical Working Session": (
+        "This is a technical working/build session between engineers. "
+        "Summarize with focus on: "
+        "1) Integration points discussed — systems, endpoints, "
+        "authentication methods, and data formats agreed, "
+        "2) Configuration decisions made with their exact agreed values "
+        "where stated (names, IDs, limits, timeouts), "
+        "3) Data mappings or transformations agreed, "
+        "4) Technical blockers raised, who owns unblocking each, and by "
+        "when, "
+        "5) Access or credential requests made in the session, "
+        "6) Items parked for a spike, follow-up session, or "
+        "architecture decision, "
+        "7) Anything agreed verbally that must be written into design "
+        "documentation."
+        + _VISUALS_DIRECTIVE
+    ),
+    "UAT & Defect Triage": (
+        "This is a UAT or defect triage meeting. Summarize with focus "
+        "on: "
+        "1) Defects reviewed — for each: identifier (if stated), a "
+        "one-line description, severity/priority as agreed in the "
+        "meeting, the owner, and the expected fix or retest date, "
+        "2) Defects disputed as out of scope, working as designed, or "
+        "actually change requests — and how each dispute was resolved, "
+        "3) New defects raised during the session, "
+        "4) Retest criteria and who performs the retest, "
+        "5) Overall UAT progress: pass/fail counts or completion "
+        "percentages if mentioned, "
+        "6) Anything blocking test execution itself (environment, data, "
+        "access), "
+        "7) Exit-criteria implications: does anything discussed move the "
+        "UAT completion date?"
+        + _VISUALS_DIRECTIVE
+    ),
+    "Go-Live Readiness": (
+        "This is a go-live readiness / cutover planning meeting. "
+        "Summarize with focus on: "
+        "1) Go/no-go criteria reviewed and the current status of each, "
+        "2) The go/no-go decision itself if one was made, who made it, "
+        "and any conditions attached, "
+        "3) Cutover runbook items discussed: sequence, owners, timing, "
+        "and dependencies (including carrier/port dates or third-party "
+        "cutovers), "
+        "4) Rollback plan: triggers, procedure, and who has authority to "
+        "invoke it, "
+        "5) Freeze windows and communication plans agreed, "
+        "6) Open readiness gaps with owners and dates, "
+        "7) Sign-offs given, pending, or refused — and by whom."
+        + _VISUALS_DIRECTIVE
+    ),
+    "Hypercare Review": (
+        "This is a hypercare / post-launch stabilization review. "
+        "Summarize with focus on: "
+        "1) Issues reported since launch, grouped by severity, with "
+        "status and owner for each, "
+        "2) Trends: is issue volume rising, falling, or flat — and any "
+        "recurring root causes, "
+        "3) Progress against hypercare exit criteria and the expected "
+        "exit date, "
+        "4) Items being handed to the ongoing support/operations team, "
+        "including knowledge gaps or documentation still owed, "
+        "5) Fixes deployed during hypercare and their verification "
+        "status, "
+        "6) Escalations made or threatened by the customer, "
+        "7) Actions with owners and dates."
+        + _VISUALS_DIRECTIVE
+    ),
+    "Change Request Scoping": (
+        "This is a change request scoping discussion. Summarize with "
+        "focus on: "
+        "1) The change being requested and the business reason given "
+        "for it, "
+        "2) The case for why it is in scope or out of scope of the "
+        "current SOW, as argued by each side, "
+        "3) The effort discussed: sizing, level-of-effort estimates, or "
+        "resource impacts mentioned, "
+        "4) Schedule impact if the change is accepted, "
+        "5) Alternatives or phasing options proposed, "
+        "6) What was actually agreed: proceed, decline, defer, or "
+        "estimate formally — and who approves next, "
+        "7) Anything the delivery team committed to investigate before "
+        "the next conversation."
+        + _VISUALS_DIRECTIVE
+    ),
 }
 
 
