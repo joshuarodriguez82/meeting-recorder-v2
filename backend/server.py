@@ -5605,6 +5605,31 @@ class OpenFolderRequest(BaseModel):
     path: Optional[str] = None
 
 
+def _resolve_within_app_data_dir(raw_path: str) -> Optional[Path]:
+    """Resolve `raw_path` if it sits under the app's own data directory.
+
+    Diagnostics zips, logs and config live here — everything the app
+    writes for itself, as opposed to the user's recordings. The v2.70.0
+    containment allowed only the session scan roots and client export
+    folders, so "Show" beside a freshly written diagnostics zip was
+    refused by the app's own guard (field report, 2026-08-27). A
+    directory the app writes into is a directory it may reveal.
+
+    Read through the module global rather than captured at import so a
+    test (and a future relocation) can point it elsewhere.
+    """
+    try:
+        resolved = Path(raw_path).expanduser().resolve()
+        root = Path(USER_DATA_DIR).expanduser().resolve()
+    except OSError:
+        return None
+    try:
+        resolved.relative_to(root)
+        return resolved
+    except ValueError:
+        return None
+
+
 def _resolve_within_client_export_folders(raw_path: str) -> Optional[Path]:
     """Resolve `raw_path` if it sits under a configured client export
     folder. Client folders live outside the scan roots (they're
@@ -5668,11 +5693,13 @@ async def open_folder(req: OpenFolderRequest):
         # posture as the audio/screenshot endpoints.
         resolved = _resolve_within_scan_roots(target)
         if resolved is None:
+            resolved = _resolve_within_app_data_dir(target)
+        if resolved is None:
             resolved = _resolve_within_client_export_folders(target)
         if resolved is None:
             logger.warning(
                 "open-folder: refusing path outside recordings/archive/"
-                "client-export roots: %r", target)
+                "app-data/client-export roots: %r", target)
             raise HTTPException(
                 status_code=400,
                 detail="Path is outside the app's folders")
