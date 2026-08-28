@@ -21,7 +21,7 @@ backend-bundle.zip.
 
 from __future__ import annotations
 
-import subprocess
+import subprocess  # nosec B404 - fixed argv, runs this repo's own build script
 import sys
 import zipfile
 from pathlib import Path
@@ -38,7 +38,7 @@ ZIP_SCRIPT = REPO_ROOT / "zip-bundle.py"
 def bundle(tmp_path_factory) -> Path:
     """Build the real bundle once for this module."""
     out = tmp_path_factory.mktemp("bundle") / "backend-bundle.zip"
-    proc = subprocess.run(
+    proc = subprocess.run(  # nosec B603 - fixed argv, no shell, no external input
         [sys.executable, str(ZIP_SCRIPT), str(out)],
         cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=900,
     )
