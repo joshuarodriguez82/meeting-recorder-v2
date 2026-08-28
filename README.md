@@ -144,8 +144,9 @@ for copy-paste config.
   server works with Claude Desktop, Claude Code, Cursor, VS Code
   (Cline / Continue), Zed, Windsurf and any other MCP client. Tools:
   semantic search across transcripts and Knowledge Folder documents,
-  cited Q&A, outstanding commitments (overdue first), client and session
-  listings, and single-meeting fetch.
+  cited Q&A, outstanding commitments (overdue first), client and meeting
+  listings, single-meeting fetch, and the SA Tools Portal binding for a
+  client.
 - **HTTP + OpenAPI** — the backend serves a full OpenAPI 3 spec at
   `/openapi.json`, for anything that doesn't speak MCP.
 

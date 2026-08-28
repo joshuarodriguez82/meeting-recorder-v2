@@ -156,11 +156,48 @@ def resolve_token() -> tuple[str, str]:
     raise TokenNotFound(searched)
 
 
+PORT_FILENAME = "backend-port"
+
+
+def read_port_file() -> Optional[int]:
+    """The live backend port, written by the Tauri shell at startup.
+
+    `pick_free_port()` prefers 17645 and falls back to an ephemeral port
+    when it is taken; the shell persists whichever it got, next to the
+    auth token. Without this an external client silently assumes 17645
+    and reports "the app isn't running" while it is.
+
+    Anything unreadable, malformed or out of range returns None so the
+    caller falls back — a truncated file must not make the tools
+    unavailable, and the eventual connection error explains itself
+    better than a startup refusal would.
+    """
+    for directory in candidate_data_dirs():
+        try:
+            raw = (directory / PORT_FILENAME).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        try:
+            port = int(raw.strip())
+        except ValueError:
+            continue
+        if 1 <= port <= 65535:
+            return port
+    return None
+
+
 def resolve_base_url() -> str:
     """Base URL of the backend.
 
-    MEETING_RECORDER_URL (full URL) beats MEETING_RECORDER_PORT /
-    MEETING_RECORDER_HOST, which beat the pinned 127.0.0.1:17645.
+    Precedence, most specific first:
+
+        MEETING_RECORDER_URL  >  MEETING_RECORDER_PORT  >  the port file
+        >  the pinned 17645
+
+    An explicit override outranks the file deliberately: someone
+    tunnelling, or testing against a stand-in backend, must not be
+    overruled by whatever the last local app run happened to write. The
+    file only replaces the guess.
     """
     url = (os.environ.get("MEETING_RECORDER_URL") or "").strip()
     if url:
@@ -177,6 +214,8 @@ def resolve_base_url() -> str:
             # rather than refusing to start. A typo'd port shouldn't make
             # the tool list unavailable; the connection error will say so.
             port = DEFAULT_PORT
+    else:
+        port = read_port_file() or DEFAULT_PORT
     return f"http://{host}:{port}"
 
 

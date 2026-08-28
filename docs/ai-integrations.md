@@ -23,10 +23,20 @@ a cloud service, and nothing here can modify your data.
 
 Two values that are NOT fixed constants — read them, don't hardcode them.
 
-**Port.** The app prefers `17645` but falls back to an OS-assigned port
-if something else already holds it. Check the app's Settings → Data &
-Diagnostics, or read the log line `Backend listening on 127.0.0.1:<port>`
-in `backend.log`.
+**Port.** The app prefers `17645` and falls back to an OS-assigned port
+if something else already holds it. It writes whichever it got to a
+`backend-port` file **beside the token** (same folder as the table
+below), so you rarely need to look it up:
+
+- **The MCP server reads that file automatically.** Nothing to configure.
+- **Anything else** can read the same file, or take the port from the
+  app's Settings → Templates & Integrations → AI assistant access.
+
+Precedence if you want to override: `MEETING_RECORDER_URL` beats
+`MEETING_RECORDER_PORT`, which beats the port file, which beats the
+pinned `17645`. An explicit override always wins, so a tunnel or a
+stand-in backend is never overruled by whatever the last local run
+wrote.
 
 **Token.** A 64-character hex string the app generates on first launch
 and reuses afterwards. It lives in a file named `extension-token`:
@@ -106,9 +116,17 @@ backslashes in JSON.
 | `search_meetings` | "what did we say about the cutover window?" — semantic search across every transcript **and** client Knowledge Folder document |
 | `ask_knowledge_base` | a cited answer rather than a list of hits |
 | `list_open_commitments` | "what do I still owe?" — outstanding commitments, **overdue first**, with owner, due date, client and the session to cite |
-| `list_clients` | your clients and their indexed document counts |
-| `list_sessions` | recent meetings, filterable by client/project |
-| `get_session` | one meeting's transcript / summary / actions / decisions / requirements |
+| `list_clients` | your clients, their indexed document counts, and the portal opportunity each is bound to |
+| `list_meetings` | recent meetings, filterable by client/project |
+| `get_meeting` | one meeting's transcript / summary / actions / decisions / requirements |
+| `get_portal_binding` | "which SA Tools Portal opportunity is this client bound to?" — the `customerId` to cross systems by, plus a warning if the binding points at a parent company rather than an engagement |
+
+> **Renamed in v2.72.0:** `list_sessions` → `list_meetings` and
+> `get_session` → `get_meeting`. "Session" also means a Claude Code
+> session, and an ambiguous tool name is one an assistant gets right
+> only *sometimes*. The id parameter is still `session_id` — that is the
+> backend's key, in every stored file and export. If you had a saved
+> prompt naming the old tools, update it.
 
 All are read-only: no tool can delete a session, change a setting, or
 start a reindex.
