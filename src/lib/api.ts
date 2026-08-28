@@ -1006,6 +1006,25 @@ export interface SessionsDiagnostics {
   visible_in_app: number;
 }
 
+// Whether this machine can launch the MCP server, and with exactly
+// which two strings. See backend/services/mcp_bundle_service.py.
+export interface McpStatus {
+  // Does this build carry mcp-server/? False in a dev checkout that
+  // was never run through zip-bundle.py.
+  bundled: boolean;
+  // Is the `mcp` SDK importable by the app's venv Python? Installed on
+  // demand, never at first launch — a resolution failure during the
+  // bootstrap install bricks the app before it starts.
+  installed: boolean;
+  ready: boolean;
+  mcp_dir: string | null;
+  // Absolute path to run_mcp_server.py, or null when not bundled.
+  launcher: string | null;
+  // The app's venv Python — the one interpreter guaranteed to have both
+  // the SDK and its dependencies.
+  python: string;
+}
+
 export const api = {
   // ── SA Tools Portal (engagement-register push) ────────────────────
   portalBindings: (): Promise<Record<string, PortalBinding>> =>
@@ -1882,6 +1901,21 @@ export const api = {
   installExtensionFiles: () =>
     request<{ ok: boolean; path: string; files: string[]; file_count: number }>(
       "/extension/install",
+      { method: "POST" }
+    ),
+
+  // AI assistant access (MCP). `bundled` and `installed` are separate
+  // because they fail for different reasons: "this build carries no
+  // mcp-server/" is not something a user can click their way out of,
+  // "the SDK isn't installed yet" is one button. `python` + `launcher`
+  // are the two absolute paths an MCP client config needs — resolved
+  // here so the user never has to know where their install lives.
+  getMcpStatus: () => request<McpStatus>("/integrations/mcp/status"),
+  // Installs the MCP SDK into the app's own venv. Reports pip's own
+  // output on failure; the reason lives in those lines and nowhere else.
+  installMcpSdk: () =>
+    request<{ ok: boolean; output: string; status: McpStatus }>(
+      "/integrations/mcp/install",
       { method: "POST" }
     ),
 

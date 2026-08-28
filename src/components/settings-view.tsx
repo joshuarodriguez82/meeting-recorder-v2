@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, formatBytes, type ArchiveStatus, type Settings, type TemplateEntry, type CoPilotPromptEntry } from "@/lib/api";
+import { api, formatBytes, type ArchiveStatus, type McpStatus, type Settings, type TemplateEntry, type CoPilotPromptEntry } from "@/lib/api";
 import { estimateCopilotCost, formatUsd } from "@/lib/copilot-cost";
 import { confirmDialog } from "@/lib/confirm";
 import { toast } from "sonner";
@@ -1268,18 +1268,69 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
  * lists them rather than implying this is a Claude-only feature.
  */
 function AiAccessCard() {
+  // Where each client keeps its MCP config, so the snippet has somewhere
+  // to go. Claude Code is the odd one out: it writes its own config from
+  // a command, so it gets a command instead of JSON.
   const MCP_CLIENTS = [
-    { id: "claude-code", label: "Claude Code", kind: "cli" as const },
-    { id: "claude-desktop", label: "Claude Desktop", kind: "json" as const },
-    { id: "cursor", label: "Cursor", kind: "json" as const },
-    { id: "vscode", label: "VS Code (Cline / Continue)", kind: "json" as const },
-    { id: "other", label: "Other MCP client", kind: "json" as const },
+    {
+      id: "claude-code",
+      label: "Claude Code",
+      kind: "cli" as const,
+      where: "Run it in any terminal. --scope user makes it available in every project.",
+    },
+    {
+      id: "claude-desktop",
+      label: "Claude Desktop",
+      kind: "json" as const,
+      where: "Settings → Developer → Edit Config (claude_desktop_config.json), then restart Claude Desktop.",
+    },
+    {
+      id: "cursor",
+      label: "Cursor",
+      kind: "json" as const,
+      where: "Settings → MCP → Add new global MCP server (~/.cursor/mcp.json).",
+    },
+    {
+      id: "vscode",
+      label: "VS Code (Cline / Continue)",
+      kind: "json" as const,
+      where: "Your extension's MCP settings — Cline: “MCP Servers → Configure”; Continue: the mcpServers block in config.json.",
+    },
+    {
+      id: "other",
+      label: "Other MCP client",
+      kind: "json" as const,
+      where: "Any client that speaks MCP over stdio takes this shape; some nest it under a different top-level key.",
+    },
   ];
   const [client, setClient] = useState("claude-code");
   const [backendUrl, setBackendUrl] = useState("http://127.0.0.1:17645");
   const [token, setToken] = useState("");
   const [tokenVisible, setTokenVisible] = useState(false);
   const [copyMsg, setCopyMsg] = useState("");
+
+  // null = still loading OR the backend couldn't be reached; `mcpLoading`
+  // separates those, because "we don't know yet" and "we asked and the
+  // answer is no" must not render the same.
+  const [mcp, setMcp] = useState<McpStatus | null>(null);
+  const [mcpLoading, setMcpLoading] = useState(true);
+  const [installing, setInstalling] = useState(false);
+  const [installErr, setInstallErr] = useState("");
+
+  const loadMcp = useCallback(async () => {
+    setMcpLoading(true);
+    try {
+      setMcp(await api.getMcpStatus());
+    } catch {
+      setMcp(null);
+    } finally {
+      setMcpLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadMcp();
+  }, [loadMcp]);
 
   useEffect(() => {
     (async () => {
@@ -1308,15 +1359,40 @@ function AiAccessCard() {
     }
   };
 
-  // The venv Python path is the one thing we cannot know for the user:
-  // it depends on where they cloned the repo. Left as a placeholder
-  // rather than guessed, because a wrong absolute path fails with no
-  // useful error in every client.
-  const PY = "/absolute/path/to/mcp-server/.venv/bin/python";
+  const turnOn = async () => {
+    setInstalling(true);
+    setInstallErr("");
+    try {
+      const res = await api.installMcpSdk();
+      setMcp(res.status);
+      if (res.ok) {
+        toast.success("AI assistant access is on. Copy the config below into your AI tool.");
+      } else {
+        // pip's own last lines say more than any message this component
+        // could invent — offline, blocked index, version conflict.
+        setInstallErr(res.output || "pip failed with no output.");
+      }
+    } catch (e) {
+      setInstallErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  // The two paths a client needs. Resolved by the backend from the
+  // interpreter it is itself running on, so they are correct for THIS
+  // machine — before v2.72 this card printed a placeholder that could
+  // not exist on a machine that installed the app rather than cloning
+  // the repo, and there was no way for the user to work out the real one.
+  const PY = mcp?.python ?? "";
+  const LAUNCHER = mcp?.launcher ?? "";
+  // Quoted because macOS puts the app's data under
+  // ~/Library/Application Support/… — a space in the middle of an
+  // unquoted shell argument silently splits it in two.
   const cliSnippet =
-    `claude mcp add meeting-recorder --scope user \\\n  -- ${PY} -m meeting_recorder_mcp`;
+    `claude mcp add meeting-recorder --scope user \\\n  -- "${PY}" "${LAUNCHER}"`;
   const jsonSnippet = JSON.stringify(
-    { mcpServers: { "meeting-recorder": { command: PY, args: ["-m", "meeting_recorder_mcp"] } } },
+    { mcpServers: { "meeting-recorder": { command: PY, args: [LAUNCHER] } } },
     null, 2);
   const active = MCP_CLIENTS.find((c) => c.id === client) || MCP_CLIENTS[0];
   const snippet = active.kind === "cli" ? cliSnippet : jsonSnippet;
@@ -1334,6 +1410,74 @@ function AiAccessCard() {
           protocol, so this is not limited to any one vendor.
         </p>
 
+        {mcpLoading ? (
+          <p className="text-sm text-muted-foreground">
+            <Loader2 className="mr-1 inline h-3 w-3 animate-spin" />
+            Checking…
+          </p>
+        ) : !mcp ? (
+          <p className="text-sm text-muted-foreground">
+            Couldn&apos;t reach the backend to check. Reopen Settings once the
+            app has finished starting.
+          </p>
+        ) : !mcp.bundled ? (
+          // A dev checkout that was never run through zip-bundle.py, or a
+          // partial extraction. Nothing to click — say what the state is
+          // rather than offering a button that cannot help.
+          <div className="space-y-2 rounded-md border border-dashed p-3">
+            <p className="text-sm">
+              This build doesn&apos;t carry the MCP server files.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Expected in a checkout run straight from source. Set it up by
+              hand from <code>mcp-server/</code> — see{" "}
+              <code>docs/ai-integrations.md</code>. Installed builds ship the
+              files and turn this on with one click.
+            </p>
+          </div>
+        ) : !mcp.installed ? (
+          <div className="space-y-2 rounded-md border p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-medium">Not turned on yet</p>
+                <p className="text-xs text-muted-foreground">
+                  One click installs the MCP protocol library into the
+                  app&apos;s own Python. Nothing else to download, no separate
+                  virtualenv, and the app keeps working either way.
+                </p>
+              </div>
+              <Button type="button" size="sm" onClick={turnOn} disabled={installing}>
+                {installing ? (
+                  <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Turning on…</>
+                ) : (
+                  "Turn on"
+                )}
+              </Button>
+            </div>
+            {installing && (
+              <p className="text-xs text-muted-foreground">
+                Downloading — usually under a minute on a normal connection.
+              </p>
+            )}
+            {installErr && (
+              <div className="space-y-1">
+                <p className="text-xs text-destructive">
+                  <AlertTriangle className="mr-1 inline h-3 w-3" />
+                  Couldn&apos;t turn it on. The installer said:
+                </p>
+                <Textarea readOnly value={installErr} rows={6}
+                          className="font-mono text-xs" />
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="text-sm">
+            <CheckCircle2 className="mr-1 inline h-4 w-4 text-green-600" />
+            Ready. Paste the config below into your AI tool.
+          </p>
+        )}
+
+        {mcp?.ready && (<>
         <div className="space-y-2">
           <Label>Your AI tool</Label>
           <div className="flex flex-wrap gap-2">
@@ -1364,13 +1508,17 @@ function AiAccessCard() {
           <Textarea readOnly value={snippet} rows={active.kind === "cli" ? 3 : 8}
                     className="font-mono text-xs" />
           <p className="text-xs text-muted-foreground">
-            Replace the path with your own checkout, and use the venv&apos;s
-            Python specifically — clients launch the server with a minimal
-            environment and will not activate a virtualenv for you.
-            Full setup, including every client&apos;s config location:{" "}
+            {active.where}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            The paths are already filled in for this machine — paste it
+            as-is. Your assistant finds the app&apos;s address and access
+            token by itself, so there is nothing secret to copy here.
+            Full details, including every client&apos;s config location:{" "}
             <code>docs/ai-integrations.md</code>.
           </p>
         </div>
+        </>)}
 
         <div className="space-y-2 border-t pt-4">
           <Label>For tools that don&apos;t speak MCP</Label>

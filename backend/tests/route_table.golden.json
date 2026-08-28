@@ -326,6 +326,18 @@
   ]
  ],
  [
+  "/integrations/mcp/install",
+  [
+   "POST"
+  ]
+ ],
+ [
+  "/integrations/mcp/status",
+  [
+   "GET"
+  ]
+ ],
+ [
   "/item-status",
   [
    "GET"
