@@ -99,10 +99,20 @@ Open **Settings → Templates & Integrations → AI assistant access**.
 3. Click **Set up <tool>**. The app writes that tool's config file for
    you — merging into whatever is already there, keeping your other
    servers and settings, and backing the file up first.
-4. **Quit that tool completely and reopen it.** On Windows that means
-   the system-tray icon too, not just the window.
+4. **Quit that tool completely and reopen it.** This is the step that
+   goes wrong. Closing the window is not quitting — Claude Desktop runs
+   a dozen processes and keeps one in the system tray. Right-click the
+   tray icon and choose Quit, or end it in Task Manager. A client that
+   was already running is still holding the config from before you
+   pressed the button, and no number of window closes will change that.
 
 Repeat steps 2–4 for each tool you use.
+
+**How to know it worked**, without guessing: the card reports when an AI
+assistant last called the app. Ask your tool a question — *"what do I
+still owe anyone?"* — and that line updates. If it still says nothing
+has used it, the tool never launched the server, and the restart is the
+first thing to suspect.
 
 **Claude Desktop and Cursor** are written for you. **Claude Code** keeps
 its one-line command, because it owns its own config file and has a

@@ -57,6 +57,11 @@ def _problem_detail(response: httpx.Response) -> str:
     return str(payload)[:500]
 
 
+#: Reported in the User-Agent. Kept local rather than imported
+#: from server.py, which imports this module.
+CLIENT_VERSION = "0.1.0"
+
+
 class MeetingRecorderClient:
     """Thin, synchronous-shaped async client over the backend API."""
 
@@ -87,6 +92,14 @@ class MeetingRecorderClient:
             headers={
                 "Authorization": f"Bearer {self.location.token}",
                 "Accept": "application/json",
+                # Lets the app report "last used by an AI assistant N
+                # minutes ago" instead of asking the user to guess
+                # whether their client restart took — which is what one
+                # user spent an evening on. The backend matches this
+                # prefix exactly; the `-mcp` part distinguishes us from
+                # the app's own UI and the Chrome extension, which call
+                # the same endpoints with the same token.
+                "User-Agent": f"meeting-recorder-mcp/{CLIENT_VERSION}",
             },
             timeout=timeout or self._timeout,
             transport=self._transport,
