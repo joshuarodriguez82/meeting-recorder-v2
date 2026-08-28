@@ -422,7 +422,11 @@ def _render_metadata(session: Dict[str, Any]) -> str:
         f"ended: {fmt_date(session.get('ended_at') or '')}",
         f"template: {session.get('template') or '(none)'}",
         f"transcript segments: {seg_count}",
-        f"speakers: {', '.join(sorted(names.values())) or '(none identified)'}",
+        # Ordered by speaker id, not alphabetically: SPEAKER_00 is the
+        # label the transcript uses and roughly who spoke first, so
+        # this list lines up with the transcript a model may also be
+        # reading. Alphabetical order carried no meaning.
+        f"speakers: {', '.join(v for _, v in sorted(names.items())) or '(none identified)'}",
         f"attendees: "
         f"{', '.join(attendees) if isinstance(attendees, list) and attendees else '(none recorded)'}",
         f"populated parts: {', '.join(available) if available else '(none — session is unprocessed)'}",
@@ -441,3 +445,80 @@ def _render_metadata(session: Dict[str, Any]) -> str:
 
 def bullet_list(items: Iterable[str]) -> str:
     return "\n".join(f"  - {i}" for i in items)
+
+
+def render_open_commitments(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    client: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+    total_before_limit: int = 0,
+) -> str:
+    """Render the open-commitment list as a TRIAGE view.
+
+    Ordering and the header both exist for the same reason: a model
+    handed N items in arbitrary order summarises them, while a model
+    told "14 overdue, oldest first" helps clear them. Overdue rises to
+    the top, oldest due date first; everything else follows.
+
+    Each row carries owner, due date, client and session_id because
+    those are exactly what an assistant needs to draft the chase — who
+    to address, what to reference, and which meeting to cite.
+    """
+    scope = []
+    if client:
+        scope.append(f"client={client}")
+    if status:
+        scope.append(f"status={status}")
+    scope_note = f" ({', '.join(scope)})" if scope else ""
+
+    if not rows:
+        return (
+            f"No open commitments{scope_note}. Nothing is outstanding for "
+            f"this filter — this is an empty result, not a failure to read "
+            f"the archive."
+        )
+
+    def _overdue(r: Dict[str, Any]) -> bool:
+        return bool(r.get("is_overdue")) or (r.get("status") or "") == "overdue"
+
+    def _sort_key(r: Dict[str, Any]):
+        # Overdue first; within each group, soonest/oldest due first, and
+        # rows with no due date last so a dateless item can never
+        # displace a dated one at the top of a triage list.
+        due = str(r.get("due_date_iso") or "")
+        return (not _overdue(r), due == "", due)
+
+    ordered = sorted(rows, key=_sort_key)
+    overdue_n = sum(1 for r in ordered if _overdue(r))
+    shown = ordered[:limit]
+
+    total = total_before_limit or len(rows)
+    head = f"{total} open commitment(s){scope_note}"
+    if overdue_n:
+        head += f" — {overdue_n} OVERDUE"
+    if len(shown) < total:
+        head += f". Showing {len(shown)} of {total}"
+    head += "."
+
+    lines = [head, ""]
+    for i, r in enumerate(shown, 1):
+        flag = "OVERDUE" if _overdue(r) else "open"
+        text = truncate(str(r.get("text") or r.get("commitment") or ""), 300)
+        lines.append(f"[{i}] {flag} — {text}")
+        owner = str(r.get("owner") or "").strip() or "(unassigned)"
+        due = str(r.get("due_date_iso") or "").strip() or "(no due date)"
+        lines.append(f"    owner: {owner}    due: {due}")
+        where = " / ".join(
+            p for p in (str(r.get("client") or ""), str(r.get("project") or ""))
+            if p)
+        if where:
+            lines.append(f"    client/project: {where}")
+        sid = str(r.get("session_id") or "").strip()
+        if sid:
+            lines.append(
+                f"    session_id: {sid}"
+                f"{'  — ' + str(r.get('session_display_name')) if r.get('session_display_name') else ''}")
+        lines.append("")
+    return "\n".join(lines).rstrip()

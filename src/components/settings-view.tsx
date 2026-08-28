@@ -693,6 +693,12 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
       {/* Summary Templates */}
       <SummaryTemplatesCard />
 
+      {/* AI assistant access — MCP + REST/OpenAPI. Lives here rather
+          than under Data & Diagnostics because it is an integration,
+          and because the Chrome extension card (its closest sibling in
+          kind) is on this tab too. */}
+      <AiAccessCard />
+
       {/* SA Tools Portal */}
       <Card>
         <CardHeader>
@@ -1247,6 +1253,166 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
 // frontend already knows both via api.ts's getBaseUrl + auth helpers,
 // so this card just surfaces them with Copy buttons and links to
 // installation instructions.
+/**
+ * AI assistant access — the front door for the MCP server and the
+ * REST/OpenAPI surface.
+ *
+ * Both existed and worked long before this card did; neither was
+ * mentioned anywhere in the app, the root README, or docs/. The owner
+ * of the project did not know the MCP server was there. A capability
+ * nobody can find is worth roughly nothing, so this card exists to be
+ * the place you look.
+ *
+ * Deliberately vendor-neutral: MCP is an open protocol and the same
+ * server serves Cursor, VS Code, Zed and others, so the client picker
+ * lists them rather than implying this is a Claude-only feature.
+ */
+function AiAccessCard() {
+  const MCP_CLIENTS = [
+    { id: "claude-code", label: "Claude Code", kind: "cli" as const },
+    { id: "claude-desktop", label: "Claude Desktop", kind: "json" as const },
+    { id: "cursor", label: "Cursor", kind: "json" as const },
+    { id: "vscode", label: "VS Code (Cline / Continue)", kind: "json" as const },
+    { id: "other", label: "Other MCP client", kind: "json" as const },
+  ];
+  const [client, setClient] = useState("claude-code");
+  const [backendUrl, setBackendUrl] = useState("http://127.0.0.1:17645");
+  const [token, setToken] = useState("");
+  const [tokenVisible, setTokenVisible] = useState(false);
+  const [copyMsg, setCopyMsg] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        try {
+          const port = await invoke<number>("get_backend_port");
+          setBackendUrl(`http://127.0.0.1:${port}`);
+        } catch { /* keep the default port */ }
+        try {
+          setToken((await invoke<string>("get_backend_token")) || "");
+        } catch { setToken(""); }
+      } catch {
+        setToken("(no token — dev mode)");
+      }
+    })();
+  }, []);
+
+  const copy = async (label: string, val: string) => {
+    try {
+      await navigator.clipboard.writeText(val);
+      setCopyMsg(`${label} copied.`);
+      setTimeout(() => setCopyMsg(""), 2000);
+    } catch {
+      setCopyMsg(`Copy failed — select the ${label} text and copy manually.`);
+    }
+  };
+
+  // The venv Python path is the one thing we cannot know for the user:
+  // it depends on where they cloned the repo. Left as a placeholder
+  // rather than guessed, because a wrong absolute path fails with no
+  // useful error in every client.
+  const PY = "/absolute/path/to/mcp-server/.venv/bin/python";
+  const cliSnippet =
+    `claude mcp add meeting-recorder --scope user \\\n  -- ${PY} -m meeting_recorder_mcp`;
+  const jsonSnippet = JSON.stringify(
+    { mcpServers: { "meeting-recorder": { command: PY, args: ["-m", "meeting_recorder_mcp"] } } },
+    null, 2);
+  const active = MCP_CLIENTS.find((c) => c.id === client) || MCP_CLIENTS[0];
+  const snippet = active.kind === "cli" ? cliSnippet : jsonSnippet;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>AI assistant access</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <p className="text-sm text-muted-foreground">
+          Let an AI assistant search your meetings, answer questions from
+          your Knowledge Folders, and list what you still owe — read-only,
+          on this machine, while the app is running. MCP is an open
+          protocol, so this is not limited to any one vendor.
+        </p>
+
+        <div className="space-y-2">
+          <Label>Your AI tool</Label>
+          <div className="flex flex-wrap gap-2">
+            {MCP_CLIENTS.map((c) => (
+              <Button
+                key={c.id}
+                type="button"
+                size="sm"
+                variant={c.id === client ? "default" : "outline"}
+                onClick={() => setClient(c.id)}
+              >
+                {c.label}
+              </Button>
+            ))}
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <Label>
+              {active.kind === "cli" ? "Run this once" : "Add this to the client's MCP config"}
+            </Label>
+            <Button type="button" size="sm" variant="outline"
+                    onClick={() => copy("Config", snippet)}>
+              <Copy className="mr-1 h-3 w-3" /> Copy
+            </Button>
+          </div>
+          <Textarea readOnly value={snippet} rows={active.kind === "cli" ? 3 : 8}
+                    className="font-mono text-xs" />
+          <p className="text-xs text-muted-foreground">
+            Replace the path with your own checkout, and use the venv&apos;s
+            Python specifically — clients launch the server with a minimal
+            environment and will not activate a virtualenv for you.
+            Full setup, including every client&apos;s config location:{" "}
+            <code>docs/ai-integrations.md</code>.
+          </p>
+        </div>
+
+        <div className="space-y-2 border-t pt-4">
+          <Label>For tools that don&apos;t speak MCP</Label>
+          <p className="text-xs text-muted-foreground">
+            The backend is a REST API with an OpenAPI spec — usable by any
+            assistant that can call HTTP.
+          </p>
+          <div className="flex items-center gap-2">
+            <Input readOnly value={`${backendUrl}/openapi.json`}
+                   className="font-mono text-xs" />
+            <Button type="button" size="sm" variant="outline"
+                    onClick={() => copy("Spec URL", `${backendUrl}/openapi.json`)}>
+              <Copy className="h-3 w-3" />
+            </Button>
+          </div>
+          <div className="flex items-center gap-2">
+            <Input readOnly type={tokenVisible ? "text" : "password"}
+                   value={token} className="font-mono text-xs" />
+            <Button type="button" size="sm" variant="outline"
+                    onClick={() => setTokenVisible((v) => !v)}>
+              {tokenVisible ? "Hide" : "Show"}
+            </Button>
+            <Button type="button" size="sm" variant="outline"
+                    onClick={() => copy("Token", token)}>
+              <Copy className="h-3 w-3" />
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            <AlertTriangle className="mr-1 inline h-3 w-3" />
+            This token reads every transcript and document in your archive.
+            Treat it like a password — don&apos;t paste it into a shared doc
+            or a cloud tool other people can read. The API is localhost-only,
+            so a cloud-hosted assistant cannot reach it without a tunnel.
+          </p>
+        </div>
+
+        {copyMsg && <p className="text-xs text-muted-foreground">{copyMsg}</p>}
+      </CardContent>
+    </Card>
+  );
+}
+
 function ChromeExtensionCard() {
   const [backendUrl, setBackendUrl] = useState<string>("");
   const [token, setToken] = useState<string>("");

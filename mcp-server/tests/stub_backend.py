@@ -184,6 +184,34 @@ QA_ANSWER_FRAGMENTS = [
 ]
 
 
+
+# Three commitments: two overdue (one older), one merely open, spread
+# across two clients so the filter tests have something to narrow.
+COMMITMENTS = [
+    {"id": "c1",
+     "text": "Provide current state documentation and call volumes",
+     "owner": "Jordan Poe", "due_date_iso": "2026-08-15",
+     "status": "overdue", "is_overdue": True,
+     "client": "Globex", "project": "Genesys Migration",
+     "session_id": "session_20260813_093000",
+     "session_display_name": "Globex Discovery Call"},
+    {"id": "c2",
+     "text": "Feed the finalised migration numbers into portfolio planning",
+     "owner": "Robin Roe", "due_date_iso": "2026-08-21",
+     "status": "overdue", "is_overdue": True,
+     "client": "Initech", "project": "Connect Rollout",
+     "session_id": "session_20260814_140000",
+     "session_display_name": "Initech Planning Sync"},
+    {"id": "c3",
+     "text": "Send the revised architecture diagram to the customer",
+     "owner": "Sam Doe", "due_date_iso": "2026-09-30",
+     "status": "awaiting", "is_overdue": False,
+     "client": "Globex", "project": "Genesys Migration",
+     "session_id": "session_20260820_101500",
+     "session_display_name": "Globex Design Review"},
+]
+
+
 def _problem(status: int, title: str, detail: str, path: str) -> httpx.Response:
     return httpx.Response(
         status,
@@ -241,6 +269,23 @@ def make_transport(
             return httpx.Response(200, json={
                 "results": hits[: body.get("top_k", 10)],
                 "query": body.get("query", "")})
+
+        if path == "/commitments":
+            q = request.url.params
+            rows = list(COMMITMENTS)
+            if q.get("client"):
+                rows = [r for r in rows if r["client"] == q.get("client")]
+            if q.get("project"):
+                rows = [r for r in rows if r["project"] == q.get("project")]
+            if q.get("owner"):
+                rows = [r for r in rows if r["owner"] == q.get("owner")]
+            status = q.get("status")
+            if status:
+                wanted = {s.strip() for s in status.split(",") if s.strip()}
+                if "active" in wanted:
+                    wanted |= {"awaiting", "overdue"}
+                rows = [r for r in rows if r["status"] in wanted]
+            return httpx.Response(200, json={"commitments": rows})
 
         if path == "/clients/config":
             return httpx.Response(200, json=CLIENT_CONFIGS)

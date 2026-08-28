@@ -96,6 +96,15 @@ jobs:
         run: pip install numpy scipy soundfile pytest fastapi httpx olefile
       - name: Run backend tests
         run: python -m pytest backend/tests -q
+      # The MCP server is a standalone package (its own pyproject, no
+      # imports from backend/) and its suite was running NOWHERE — a
+      # genuinely failing test sat green-by-absence on main until
+      # 2026-08-28. It is the integration surface every AI client uses,
+      # so it gets the same gate as the backend.
+      - name: Install MCP server
+        run: pip install -e mcp-server
+      - name: Run MCP server tests
+        run: python -m pytest mcp-server/tests -q
 
   rust:
     name: Rust (${{ matrix.platform }})

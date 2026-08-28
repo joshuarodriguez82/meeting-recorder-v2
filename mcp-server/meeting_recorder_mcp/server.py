@@ -34,6 +34,7 @@ from .formatting import (
     SESSION_PARTS,
     render_answer,
     render_clients,
+    render_open_commitments,
     render_search_results,
     render_session_list,
     render_session_part,
@@ -270,6 +271,48 @@ async def list_sessions(
         return render_session_list(
             rows[:limit], client=client, project=project,
             limit=limit, total_before_limit=total)
+    except Exception as exc:  # noqa: BLE001
+        return _error(exc)
+
+
+@server.tool(
+    name="list_open_commitments",
+    title="What I still owe",
+    annotations=READ_ONLY,
+    description=(
+        "List commitments made in recorded meetings that are still "
+        "outstanding, OVERDUE FIRST. Use this to answer 'what do I owe?', "
+        "to draft chase-ups, or to prepare for a status call. Each row "
+        "carries the owner, due date, client/project and the session_id it "
+        "came from, so a follow-up can cite the meeting. status defaults to "
+        "'active' (awaiting + overdue); pass 'overdue' for only the late "
+        "ones. This is the same list the app's Insights panel shows."
+    ),
+)
+async def list_open_commitments(
+    client: Optional[str] = None,
+    project: Optional[str] = None,
+    status: str = "active",
+    owner: Optional[str] = None,
+    limit: int = 50,
+) -> str:
+    """Args:
+    client: Optional exact client name filter.
+    project: Optional exact project name filter.
+    status: "active" (default, = awaiting + overdue), "overdue",
+        "awaiting", "delivered", "dismissed", or a comma-separated mix.
+    owner: Optional owner filter; the backend resolves aliases.
+    limit: Maximum rows to render (1-200, default 50).
+    """
+    try:
+        limit = max(1, min(200, int(limit)))
+        api = _client_factory()
+        rows = await api.list_commitments(
+            client=client, project=project,
+            status=(status or "active"), owner=owner)
+        return render_open_commitments(
+            rows, client=client, status=status, limit=limit,
+            total_before_limit=len(rows))
     except Exception as exc:  # noqa: BLE001
         return _error(exc)
 

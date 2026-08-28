@@ -200,6 +200,37 @@ class MeetingRecorderClient:
         payload = await self._request("GET", "/sessions")
         return payload if isinstance(payload, list) else []
 
+    async def list_commitments(
+        self,
+        *,
+        client: Optional[str] = None,
+        project: Optional[str] = None,
+        status: Optional[str] = None,
+        owner: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Commitments across every session, filtered server-side.
+
+        `status` is passed through verbatim because /commitments already
+        understands the synthetic values "active" (awaiting + overdue)
+        and "overdue" (awaiting, past due). Re-deriving those here would
+        mean fetching everything and duplicating a rule that already has
+        one home.
+        """
+        params: Dict[str, Any] = {}
+        if client:
+            params["client"] = client
+        if project:
+            params["project"] = project
+        if status:
+            params["status"] = status
+        if owner:
+            params["owner"] = owner
+        payload = await self._request("GET", "/commitments", params=params or None)
+        if isinstance(payload, dict):
+            rows = payload.get("commitments")
+            return rows if isinstance(rows, list) else []
+        return payload if isinstance(payload, list) else []
+
     async def get_session(self, session_id: str) -> Dict[str, Any]:
         try:
             payload = await self._request(
