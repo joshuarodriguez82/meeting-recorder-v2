@@ -511,13 +511,32 @@ def render_open_commitments(
     lines = [head, ""]
     for i, r in enumerate(shown, 1):
         flag = "OVERDUE" if _overdue(r) else "open"
-        text = truncate(str(r.get("text") or r.get("commitment") or ""), 300)
+        # `description` is the backend's field — Commitment.to_dict() in
+        # backend/services/commitments_service.py. This read "text" for
+        # its whole life, which no real row has ever carried, so every
+        # row came back with an owner, a due date and no commitment at
+        # all. `quote` (the verbatim line) is the fallback when the
+        # paraphrase is empty; the last two names are legacy tolerance
+        # and cost nothing.
+        text = truncate(str(
+            r.get("description") or r.get("quote")
+            or r.get("text") or r.get("commitment") or ""), 300)
+        if not text:
+            # Never render a bare "[3] OVERDUE —" with nothing after it.
+            # An item we cannot describe still has to be visibly an item,
+            # and the session_id below is enough to go and look.
+            text = "(no description recorded — open the session to see it)"
         lines.append(f"[{i}] {flag} — {text}")
         owner = str(r.get("owner") or "").strip() or "(unassigned)"
         due = str(r.get("due_date_iso") or "").strip() or "(no due date)"
         lines.append(f"    owner: {owner}    due: {due}")
+        # Same story: the service attaches the owning session's client
+        # and project as `session_client` / `session_project`. A
+        # Commitment itself carries neither, so reading "client" here
+        # dropped the line entirely on every real row.
         where = " / ".join(
-            p for p in (str(r.get("client") or ""), str(r.get("project") or ""))
+            p for p in (str(r.get("session_client") or r.get("client") or ""),
+                        str(r.get("session_project") or r.get("project") or ""))
             if p)
         if where:
             lines.append(f"    client/project: {where}")

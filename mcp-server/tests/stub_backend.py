@@ -187,26 +187,43 @@ QA_ANSWER_FRAGMENTS = [
 
 # Three commitments: two overdue (one older), one merely open, spread
 # across two clients so the filter tests have something to narrow.
+#
+# THE SHAPE IS THE REAL ONE, and it did not used to be. These rows
+# carried "text", "client" and "project" — three keys the backend has
+# never emitted. `CommitmentsService.list_all` returns
+# `{**Commitment.to_dict(), is_overdue, session_display_name,
+# session_started_at, session_client, session_project}`, and
+# Commitment's own field is `description` (with `quote` for the
+# verbatim line). So the formatter read three keys that were only ever
+# present in this file, the tests passed, and the first real user got
+# rows with an owner and a due date and no text at all.
+#
+# When adding to this file, copy from a real response — that is what the
+# module docstring above asks for, and this is what it costs when it
+# doesn't happen.
 COMMITMENTS = [
-    {"id": "c1",
-     "text": "Provide current state documentation and call volumes",
-     "owner": "Jordan Poe", "due_date_iso": "2026-08-15",
+    {"commitment_id": "c1",
+     "description": "Provide current state documentation and call volumes",
+     "quote": "We'll get you the current state docs and the call volumes.",
+     "owner": "Jordan Poe", "side": "customer", "due_date_iso": "2026-08-15",
      "status": "overdue", "is_overdue": True,
-     "client": "Globex", "project": "Genesys Migration",
+     "session_client": "Globex", "session_project": "Genesys Migration",
      "session_id": "session_20260813_093000",
      "session_display_name": "Globex Discovery Call"},
-    {"id": "c2",
-     "text": "Feed the finalised migration numbers into portfolio planning",
-     "owner": "Robin Roe", "due_date_iso": "2026-08-21",
+    {"commitment_id": "c2",
+     "description": "Feed the finalised migration numbers into portfolio planning",
+     "quote": "I'll feed those numbers into portfolio planning.",
+     "owner": "Robin Roe", "side": "internal", "due_date_iso": "2026-08-21",
      "status": "overdue", "is_overdue": True,
-     "client": "Initech", "project": "Connect Rollout",
+     "session_client": "Initech", "session_project": "Connect Rollout",
      "session_id": "session_20260814_140000",
      "session_display_name": "Initech Planning Sync"},
-    {"id": "c3",
-     "text": "Send the revised architecture diagram to the customer",
-     "owner": "Sam Doe", "due_date_iso": "2026-09-30",
+    {"commitment_id": "c3",
+     "description": "Send the revised architecture diagram to the customer",
+     "quote": "",
+     "owner": "Sam Doe", "side": "internal", "due_date_iso": "2026-09-30",
      "status": "awaiting", "is_overdue": False,
-     "client": "Globex", "project": "Genesys Migration",
+     "session_client": "Globex", "session_project": "Genesys Migration",
      "session_id": "session_20260820_101500",
      "session_display_name": "Globex Design Review"},
 ]
@@ -306,10 +323,15 @@ def make_transport(
         if path == "/commitments":
             q = request.url.params
             rows = list(COMMITMENTS)
+            # Filters on the session-derived keys, matching what
+            # CommitmentsService.list_all actually filters on — a
+            # Commitment carries no client/project of its own.
             if q.get("client"):
-                rows = [r for r in rows if r["client"] == q.get("client")]
+                rows = [r for r in rows
+                        if r["session_client"] == q.get("client")]
             if q.get("project"):
-                rows = [r for r in rows if r["project"] == q.get("project")]
+                rows = [r for r in rows
+                        if r["session_project"] == q.get("project")]
             if q.get("owner"):
                 rows = [r for r in rows if r["owner"] == q.get("owner")]
             status = q.get("status")
