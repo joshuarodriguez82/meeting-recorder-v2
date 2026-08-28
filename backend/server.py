@@ -566,6 +566,11 @@ def _request_presents_token(request: Request) -> bool:
 
 @app.middleware("http")
 async def require_backend_token(request: Request, call_next):
+    # Note MCP traffic before the auth decision — an unauthorized call
+    # still proves an assistant reached us, which is exactly what the
+    # Settings card needs to distinguish "never connected" from
+    # "connected but rejected". Never raises; see ClientActivity.record.
+    mcp_bundle_service.activity.record(request.headers.get("user-agent"))
     if _AUTH_DISABLED or request.method == "OPTIONS" \
             or request.url.path in _AUTH_EXEMPT_PATHS \
             or (_AUTH_TOKEN and _request_presents_token(request)):

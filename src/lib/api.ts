@@ -1023,6 +1023,11 @@ export interface McpStatus {
   // The app's venv Python — the one interpreter guaranteed to have both
   // the SDK and its dependencies.
   python: string;
+  // When an AI assistant last called the backend, or null if none has
+  // since the app started. This is the app answering "did my restart
+  // take?" with a fact instead of the user guessing — the question that
+  // cost one user an evening.
+  last_client_seen_at?: string | null;
 }
 
 // Whether one AI tool is set up, and where its config lives.

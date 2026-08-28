@@ -47,6 +47,8 @@ with exactly which two strings?".
 from __future__ import annotations
 
 import importlib.util
+import time
+from datetime import datetime
 import subprocess  # nosec B404 - fixed argv pip invocation, no shell
 import sys
 from pathlib import Path
@@ -73,6 +75,72 @@ SDK_REQUIREMENTS = ("mcp>=2.0.0,<3", "httpx>=0.27")
 #: install surfaces as a reportable failure instead of a spinner that
 #: never resolves.
 INSTALL_TIMEOUT_S = 600
+
+
+# ── "has an assistant actually called us?" ───────────────────────────
+#
+# A user set up Claude Desktop, restarted it repeatedly, and saw
+# nothing. The config had been correct the whole time — Desktop was
+# running from before the file was written, holding a stale copy — and
+# nothing in the app could tell them which state they were in. The MCP
+# server did not even identify itself in its requests, so the backend
+# had no way to know it had never been called.
+#
+# It says so now. The card can report "last used by an AI assistant
+# 3 minutes ago", which is the answer to the question the user is
+# actually asking, instead of telling them to restart a fifth time.
+
+#: Sent by the MCP server on every backend call (see mcp-server's
+#: client.py). The `-mcp` suffix is load-bearing: "meeting-recorder"
+#: alone is the app itself.
+MCP_USER_AGENT_PREFIX = "meeting-recorder-mcp/"
+
+
+def is_mcp_user_agent(user_agent: Optional[str]) -> bool:
+    """Whether this request came from our MCP server.
+
+    Deliberately narrow. The Chrome extension and the app's own UI call
+    the same backend with the same token; a looser match would report
+    "your assistant is connected" the moment someone opened Outlook Web
+    — a confident wrong answer to the exact question being asked.
+    """
+    if not isinstance(user_agent, str) or not user_agent:
+        return False
+    return user_agent.strip().lower().startswith(MCP_USER_AGENT_PREFIX)
+
+
+class ClientActivity:
+    """When an MCP client last called, held in memory.
+
+    In memory rather than on disk on purpose: this answers "is it
+    working right now", the backend and the app share a lifetime, and
+    writing a file on every request to answer a cosmetic question is a
+    bad trade. The UI says "since the app started" so an empty value
+    after a restart is not read as "it stopped working".
+    """
+
+    def __init__(self) -> None:
+        self._last: Optional[float] = None
+        self._clock = time.time
+
+    def record(self, user_agent: Optional[str]) -> None:
+        """Note a call. Never raises — this runs inside request
+        handling, where an exception would turn a cosmetic feature into
+        a failed API call."""
+        try:
+            if is_mcp_user_agent(user_agent):
+                self._last = self._clock()
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Ignoring MCP activity record failure: {e}")
+
+    def last_seen_iso(self) -> Optional[str]:
+        if self._last is None:
+            return None
+        return datetime.fromtimestamp(self._last).isoformat(timespec="seconds")
+
+
+#: Process-wide recorder, read by /integrations/mcp/status.
+activity = ClientActivity()
 
 
 def _default_backend_dir() -> Path:
@@ -190,6 +258,10 @@ def status(backend_dir: Optional[Path] = None) -> Dict[str, object]:
         "mcp_dir": str(mcp_dir) if mcp_dir else None,
         "launcher": str(mcp_dir / LAUNCHER_FILENAME) if mcp_dir else None,
         "python": str(client_interpreter()),
+        # None until an assistant actually calls. The card
+        # renders this instead of asking the user to guess
+        # whether their restart took.
+        "last_client_seen_at": activity.last_seen_iso(),
     }
 
 

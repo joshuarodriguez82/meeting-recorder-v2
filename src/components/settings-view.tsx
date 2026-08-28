@@ -1485,10 +1485,20 @@ function AiAccessCard() {
             )}
           </div>
         ) : (
-          <p className="text-sm">
-            <CheckCircle2 className="mr-1 inline h-4 w-4 text-green-600" />
-            Ready. Paste the config below into your AI tool.
-          </p>
+          <div className="space-y-1">
+            <p className="text-sm">
+              <CheckCircle2 className="mr-1 inline h-4 w-4 text-green-600" />
+              Ready. Set up the tools you use below.
+            </p>
+            {/* The one fact that settles "did it work?". Without it the
+                only feedback loop was restart-and-hope, which is
+                exactly how an evening gets lost. */}
+            <p className="text-xs text-muted-foreground">
+              {mcp.last_client_seen_at
+                ? `An AI assistant last used this at ${new Date(mcp.last_client_seen_at).toLocaleTimeString()}.`
+                : "No AI assistant has used this since the app started — that is expected until you set one up and restart it."}
+            </p>
+          </div>
         )}
 
         {mcp?.ready && (<>
@@ -1569,8 +1579,23 @@ function AiAccessCard() {
             <p className="text-xs text-muted-foreground">
               {clientState(client) === "stale"
                 ? "It points at paths that have moved, so its tools will fail. Updating rewrites them."
-                : "Writes the config for you — your other servers and settings are kept, and the file is backed up first. Quit the app fully and reopen it afterwards."}
+                : "Writes the config for you — your other servers and settings are kept, and the file is backed up first."}
             </p>
+            {/* The restart is where this actually goes wrong. A user
+                spent an evening here: the config was correct, but the
+                client had been running since before it was written, so
+                it was holding a stale copy. Closing the window is not
+                enough — Claude Desktop runs a dozen processes and keeps
+                one in the tray. */}
+            {clientState(client) !== "absent" && (
+              <p className="text-xs text-muted-foreground">
+                <strong>Then restart {active.label} completely.</strong>{" "}
+                Closing the window is not enough — quit it from the
+                system tray (right-click the icon → Quit), or end it in
+                Task Manager. A client that was already running is still
+                holding the old config.
+              </p>
+            )}
             {setupMsg && (
               <p className={`text-xs ${setupOk ? "text-muted-foreground" : "text-destructive"}`}>
                 {!setupOk && <AlertTriangle className="mr-1 inline h-3 w-3" />}
