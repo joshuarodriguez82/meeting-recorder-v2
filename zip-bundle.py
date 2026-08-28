@@ -8,7 +8,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 BACKEND = ROOT / "backend"
-OUT = ROOT / "backend-bundle.zip"
+# Optional output path so a test can build the real bundle without
+# clobbering the one a developer or the release workflow just produced
+# (backend/tests/test_bundle_contents.py). No argument = the name every
+# build step already expects.
+OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "backend-bundle.zip"
 
 # Written into the zip (never onto disk) as a sibling of server.py so the
 # backend can name its own build. A release build runs the backend out of
