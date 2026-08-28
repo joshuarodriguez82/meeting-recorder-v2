@@ -103,9 +103,19 @@ no `mcp` installed and fails with no obvious reason.
 
 #### Claude Code
 
+One line. A trailing `\` is POSIX line continuation and means nothing to
+`cmd.exe`, which registers a server whose command is literally `\` and
+silently drops the rest — so this is written unbroken on purpose, and
+should be pasted the same way.
+
 ```sh
-claude mcp add meeting-recorder --scope user \
-  -- /absolute/path/to/mcp-server/.venv/bin/python -m meeting_recorder_mcp
+claude mcp add meeting-recorder --scope user -- /absolute/path/to/mcp-server/.venv/bin/python -m meeting_recorder_mcp
+```
+
+On Windows, quote both paths:
+
+```
+claude mcp add meeting-recorder --scope user -- "C:\path\to\mcp-server\.venv\Scripts\python.exe" -m meeting_recorder_mcp
 ```
 
 #### Claude Desktop, Cursor, Windsurf, Zed, Cline, Continue

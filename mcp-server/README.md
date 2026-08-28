@@ -143,9 +143,12 @@ appear under the tools icon in the composer.
 
 ## Configure Claude Code
 
+Keep it on one line — a trailing `\` is POSIX line continuation and means
+nothing to `cmd.exe`, which takes the `\` as the whole command and drops
+the rest.
+
 ```sh
-claude mcp add meeting-recorder \
-  -- /absolute/path/to/mcp-server/.venv/bin/python -m meeting_recorder_mcp
+claude mcp add meeting-recorder -- /absolute/path/to/mcp-server/.venv/bin/python -m meeting_recorder_mcp
 ```
 
 Add `--scope user` to make it available in every project rather than just

@@ -1276,7 +1276,7 @@ function AiAccessCard() {
       id: "claude-code",
       label: "Claude Code",
       kind: "cli" as const,
-      where: "Run it in any terminal. --scope user makes it available in every project.",
+      where: "Run it in any terminal — it is one line, so paste it whole. --scope user makes it available in every project.",
     },
     {
       id: "claude-desktop",
@@ -1386,11 +1386,18 @@ function AiAccessCard() {
   // the repo, and there was no way for the user to work out the real one.
   const PY = mcp?.python ?? "";
   const LAUNCHER = mcp?.launcher ?? "";
+  // ONE LINE, deliberately. A trailing backslash is POSIX line
+  // continuation and means nothing to cmd.exe: pasting a two-line
+  // version into a Windows prompt registers a server whose command is
+  // literally "\\" and silently drops the rest, which is exactly what
+  // happened to the first person who tried it. A single long line is
+  // correct in cmd, PowerShell, bash and zsh alike.
+  //
   // Quoted because macOS puts the app's data under
   // ~/Library/Application Support/… — a space in the middle of an
   // unquoted shell argument silently splits it in two.
   const cliSnippet =
-    `claude mcp add meeting-recorder --scope user \\\n  -- "${PY}" "${LAUNCHER}"`;
+    `claude mcp add meeting-recorder --scope user -- "${PY}" "${LAUNCHER}"`;
   const jsonSnippet = JSON.stringify(
     { mcpServers: { "meeting-recorder": { command: PY, args: [LAUNCHER] } } },
     null, 2);
