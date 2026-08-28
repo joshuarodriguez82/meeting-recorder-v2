@@ -17,6 +17,7 @@ model knows it is looking at part of a document and can ask for more.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
@@ -25,7 +26,7 @@ from .models import DocumentHit, SearchHit, SessionHit, UnknownHit
 #: Per-hit snippet cap. Chunks out of the index run ~1-2k chars; this
 #: keeps a 10-hit search well under ~10k chars of context.
 SNIPPET_CHARS = 900
-#: Transcript cap for get_session(part="transcript"). A full transcript
+#: Transcript cap for get_meeting(part="transcript"). A full transcript
 #: can be 36 KB+; the brief calls that out explicitly.
 TRANSCRIPT_CHARS = 12_000
 #: Cap for the shorter derived parts (summary / action items / ...).
@@ -123,7 +124,7 @@ def _render_hit(index: int, hit: SearchHit) -> str:
             f"    excerpt: {truncate(hit.text, SNIPPET_CHARS)}\n"
             f"    (cite as: \"{hit.display_name or 'meeting'}\", "
             f"{fmt_date(hit.started_at)}; full text via "
-            f"get_session('{hit.session_id}'))"
+            f"get_meeting('{hit.session_id}'))"
         )
     if isinstance(hit, DocumentHit):
         return (
@@ -133,7 +134,7 @@ def _render_hit(index: int, hit: SearchHit) -> str:
             f"    path: {hit.doc_path or '(unknown)'}\n"
             f"    excerpt: {truncate(hit.text, SNIPPET_CHARS)}\n"
             f"    (this is a Knowledge Folder document, NOT a meeting — it "
-            f"has no session_id and cannot be passed to get_session; cite it "
+            f"has no session_id and cannot be passed to get_meeting; cite it "
             f"by filename)"
         )
     return (
@@ -216,6 +217,11 @@ def render_clients(rows: Sequence[Dict[str, Any]], index: Dict[str, Any]) -> str
         display = row.get("display_name") or name
         title = f"{display}" + (f"  [key: {name}]" if display != name else "")
         lines.append(f"- {title}")
+        # Portal identity first: it is what lets an assistant holding
+        # the portal's tools too act on this row rather than just read
+        # it. See docs/mcp-tool-spec.md §3.
+        if "portal" in row:
+            lines.append(f"    {portal_id_line(row['portal'], display)}")
         lines.append(
             f"    designated (export) folder: "
             f"{row.get('export_folder') or '(not set)'}")
@@ -294,7 +300,7 @@ def _render_session_row(row: Dict[str, Any]) -> str:
     """One session summary. Keys come from
     backend/services/session_service.py::_build_summary."""
     duration = row.get("duration_s") or 0
-    # Which parts get_session can actually return for this session.
+    # Which parts get_meeting can actually return for this session.
     # Saying so up front stops the model burning a call on an
     # extraction that was never run.
     have = [
@@ -324,7 +330,7 @@ def _render_session_row(row: Dict[str, Any]) -> str:
     )
 
 
-#: get_session parts -> (session JSON key, human label).
+#: get_meeting parts -> (session JSON key, human label).
 SESSION_PARTS: Dict[str, str] = {
     "transcript": "Transcript",
     "summary": "Summary",
@@ -422,7 +428,11 @@ def _render_metadata(session: Dict[str, Any]) -> str:
         f"ended: {fmt_date(session.get('ended_at') or '')}",
         f"template: {session.get('template') or '(none)'}",
         f"transcript segments: {seg_count}",
-        f"speakers: {', '.join(sorted(names.values())) or '(none identified)'}",
+        # Ordered by speaker id, not alphabetically: SPEAKER_00 is the
+        # label the transcript uses and roughly who spoke first, so
+        # this list lines up with the transcript a model may also be
+        # reading. Alphabetical order carried no meaning.
+        f"speakers: {', '.join(v for _, v in sorted(names.items())) or '(none identified)'}",
         f"attendees: "
         f"{', '.join(attendees) if isinstance(attendees, list) and attendees else '(none recorded)'}",
         f"populated parts: {', '.join(available) if available else '(none — session is unprocessed)'}",
@@ -441,3 +451,235 @@ def _render_metadata(session: Dict[str, Any]) -> str:
 
 def bullet_list(items: Iterable[str]) -> str:
     return "\n".join(f"  - {i}" for i in items)
+
+
+def render_open_commitments(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    client: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+    total_before_limit: int = 0,
+) -> str:
+    """Render the open-commitment list as a TRIAGE view.
+
+    Ordering and the header both exist for the same reason: a model
+    handed N items in arbitrary order summarises them, while a model
+    told "14 overdue, oldest first" helps clear them. Overdue rises to
+    the top, oldest due date first; everything else follows.
+
+    Each row carries owner, due date, client and session_id because
+    those are exactly what an assistant needs to draft the chase — who
+    to address, what to reference, and which meeting to cite.
+    """
+    scope = []
+    if client:
+        scope.append(f"client={client}")
+    if status:
+        scope.append(f"status={status}")
+    scope_note = f" ({', '.join(scope)})" if scope else ""
+
+    if not rows:
+        return (
+            f"No open commitments{scope_note}. Nothing is outstanding for "
+            f"this filter — this is an empty result, not a failure to read "
+            f"the archive."
+        )
+
+    def _overdue(r: Dict[str, Any]) -> bool:
+        return bool(r.get("is_overdue")) or (r.get("status") or "") == "overdue"
+
+    def _sort_key(r: Dict[str, Any]):
+        # Overdue first; within each group, soonest/oldest due first, and
+        # rows with no due date last so a dateless item can never
+        # displace a dated one at the top of a triage list.
+        due = str(r.get("due_date_iso") or "")
+        return (not _overdue(r), due == "", due)
+
+    ordered = sorted(rows, key=_sort_key)
+    overdue_n = sum(1 for r in ordered if _overdue(r))
+    shown = ordered[:limit]
+
+    total = total_before_limit or len(rows)
+    head = f"{total} open commitment(s){scope_note}"
+    if overdue_n:
+        head += f" — {overdue_n} OVERDUE"
+    if len(shown) < total:
+        head += f". Showing {len(shown)} of {total}"
+    head += "."
+
+    lines = [head, ""]
+    for i, r in enumerate(shown, 1):
+        flag = "OVERDUE" if _overdue(r) else "open"
+        text = truncate(str(r.get("text") or r.get("commitment") or ""), 300)
+        lines.append(f"[{i}] {flag} — {text}")
+        owner = str(r.get("owner") or "").strip() or "(unassigned)"
+        due = str(r.get("due_date_iso") or "").strip() or "(no due date)"
+        lines.append(f"    owner: {owner}    due: {due}")
+        where = " / ".join(
+            p for p in (str(r.get("client") or ""), str(r.get("project") or ""))
+            if p)
+        if where:
+            lines.append(f"    client/project: {where}")
+        sid = str(r.get("session_id") or "").strip()
+        if sid:
+            lines.append(
+                f"    session_id: {sid}"
+                f"{'  — ' + str(r.get('session_display_name')) if r.get('session_display_name') else ''}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+# ── portal identity (see docs/mcp-tool-spec.md §3) ───────────────────
+
+def _slug(text: str) -> str:
+    """The recorder's binding scope slug: lowercased, non-alphanumerics
+    collapsed to underscores. Mirrors scope_key() in
+    backend/services/portal_push_service.py — the two must agree or a
+    binding silently never matches its meetings."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", (text or "").strip().lower())
+
+
+def portal_ids_for(bindings: Dict[str, Any], client: str,
+                   project: str = "") -> Dict[str, Any]:
+    """Resolve the portal identity for a client (+ optional project).
+
+    `customerId` is the PORTAL'S PER-OPPORTUNITY PRIMARY KEY — a UUID
+    minted per opportunity record and used as the DynamoDB partition
+    key. It is not a company identifier. The company level is
+    `parentCustomerId`, which the recorder's connection block does not
+    currently carry at all (see docs/mcp-tool-spec.md §3).
+
+    Consequences that shape this function:
+
+    - With a project, the scope is exact and there is exactly one
+      customerId. This is the case that matters.
+    - Without one, a client normally spans SEVERAL bound projects, and
+      their customerIds legitimately differ because each names a
+      different opportunity. That is the ordinary shape, not a fault —
+      so this reports the set rather than treating disagreement as an
+      error, and never collapses it to one value.
+
+    `opportunityName` is a display label from the connection block. It
+    is NEVER a key: portal opportunity names are neither unique nor
+    stable, and the portal's own `opportunityId` is unrelated user-typed
+    CRM text. Do not join on either.
+    """
+    empty = {"customerId": None, "opportunityName": None, "bound": []}
+    if not bindings:
+        return empty
+    c = _slug(client)
+    if project:
+        entry = bindings.get(f"{c}__{_slug(project)}") or {}
+        return {
+            "customerId": entry.get("customer_id") or entry.get("customerId"),
+            "opportunityName": (entry.get("opportunity_name")
+                                or entry.get("opportunityName")),
+            "bound": [],
+        }
+    bound = []
+    for key, e in sorted(bindings.items()):
+        if not isinstance(e, dict):
+            continue
+        if key != c and not key.startswith(f"{c}__"):
+            continue
+        cid = e.get("customer_id") or e.get("customerId")
+        if not cid:
+            continue
+        bound.append({
+            "project": key[len(c) + 2:] if key.startswith(f"{c}__") else "",
+            "customerId": cid,
+            "opportunityName": (e.get("opportunity_name")
+                                or e.get("opportunityName")),
+        })
+    if len(bound) == 1:
+        return {"customerId": bound[0]["customerId"],
+                "opportunityName": bound[0]["opportunityName"],
+                "bound": bound}
+    return {"customerId": None, "opportunityName": None, "bound": bound}
+
+
+def portal_id_line(ids: Dict[str, Any], client: str) -> str:
+    """One line naming the client AND the portal's identity for it, so a
+    model holding both servers' tools does not have to infer that a
+    recorder `client` and a portal `customer` are the same company.
+
+    Emits `customerId` (the portal's key) and, where there is one,
+    `opportunityName` explicitly marked as a label so nothing joins on
+    it.
+    """
+    bound = ids.get("bound") or []
+    cid = ids.get("customerId")
+    if cid:
+        bits = [f"customerId: {cid}"]
+        name = ids.get("opportunityName")
+        if name:
+            bits.append(f"opportunityName: {name!r} (label, not a key)")
+        return f"client/customer: {client} ({', '.join(bits)})"
+    if bound:
+        # The ordinary multi-opportunity client. Each bound project is a
+        # different portal record with its own customerId, so there is no
+        # single right answer — list them and say how to pick one, rather
+        # than choosing for the caller.
+        listed = "; ".join(
+            f"{b['project'] or '(no project)'} -> {b['customerId']}"
+            for b in bound[:6])
+        more = f"; +{len(bound) - 6} more" if len(bound) > 6 else ""
+        return (f"client/customer: {client} ({len(bound)} bound opportunities "
+                f"— pass a project to resolve one: {listed}{more})")
+    return (f"client/customer: {client} "
+            f"(customerId: null — not bound to the portal)")
+
+
+def render_portal_binding(bindings: Dict[str, Any], client: str,
+                          project: str = "") -> str:
+    """The portal identity the recorder holds for a scope.
+
+    Exists so an assistant holding both servers' tools can cross the
+    boundary on an ID instead of guessing from a name. Portal
+    opportunity names are neither unique nor stable, and a wrong guess
+    files work against the wrong opportunity — which has happened.
+    """
+    c = _slug(client)
+    scopes = {k: e for k, e in sorted(bindings.items())
+              if isinstance(e, dict)
+              and (k == c or k.startswith(f"{c}__"))}
+    if project:
+        key = f"{c}__{_slug(project)}"
+        scopes = {key: scopes[key]} if key in scopes else {}
+
+    if not scopes:
+        where = f"{client} / {project}" if project else client
+        return (f"{where} is NOT BOUND to a portal opportunity. This is an "
+                f"empty result, not a failure to read: bind it from the "
+                f"Clients tab by pasting the portal's connection block.")
+
+    lines = [f"Portal binding(s) for {client}"
+             + (f" / {project}" if project else "") + ":", ""]
+    for key, e in scopes.items():
+        proj = key[len(c) + 2:] if key.startswith(f"{c}__") else "(no project)"
+        cid = e.get("customer_id") or e.get("customerId") or "(none)"
+        name = e.get("opportunity_name") or e.get("opportunityName") or ""
+        parent = e.get("parent_customer_id") or e.get("parentCustomerId")
+        is_parent = bool(e.get("is_parent_company") or e.get("isParentCompany"))
+        lines.append(f"- project: {proj}")
+        lines.append(f"    customerId: {cid}")
+        if name:
+            lines.append(f"    opportunityName: {name!r}  (display label, never a key)")
+        if parent:
+            lines.append(f"    parentCustomerId: {parent}")
+        if is_parent:
+            # The mis-paste this field exists to expose. Say what it
+            # means for the caller, not just that the flag is set.
+            lines.append(
+                "    WARNING: this binding is a PARENT COMPANY record, not an "
+                "opportunity. Anything filed against this customerId reaches "
+                "the account rather than the engagement — re-bind with the "
+                "opportunity's own connection block.")
+        lines.append(
+            f"    tokenPresent: {bool(e.get('token_present'))}"
+            "  (whether the edit token is on THIS machine — bindings roam "
+            "between your computers, keychains do not, so false on a roamed "
+            "binding is normal, not broken)")
+        lines.append("")
+    return "\n".join(lines).rstrip()

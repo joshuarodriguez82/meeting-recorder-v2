@@ -184,6 +184,64 @@ QA_ANSWER_FRAGMENTS = [
 ]
 
 
+
+# Three commitments: two overdue (one older), one merely open, spread
+# across two clients so the filter tests have something to narrow.
+COMMITMENTS = [
+    {"id": "c1",
+     "text": "Provide current state documentation and call volumes",
+     "owner": "Jordan Poe", "due_date_iso": "2026-08-15",
+     "status": "overdue", "is_overdue": True,
+     "client": "Globex", "project": "Genesys Migration",
+     "session_id": "session_20260813_093000",
+     "session_display_name": "Globex Discovery Call"},
+    {"id": "c2",
+     "text": "Feed the finalised migration numbers into portfolio planning",
+     "owner": "Robin Roe", "due_date_iso": "2026-08-21",
+     "status": "overdue", "is_overdue": True,
+     "client": "Initech", "project": "Connect Rollout",
+     "session_id": "session_20260814_140000",
+     "session_display_name": "Initech Planning Sync"},
+    {"id": "c3",
+     "text": "Send the revised architecture diagram to the customer",
+     "owner": "Sam Doe", "due_date_iso": "2026-09-30",
+     "status": "awaiting", "is_overdue": False,
+     "client": "Globex", "project": "Genesys Migration",
+     "session_id": "session_20260820_101500",
+     "session_display_name": "Globex Design Review"},
+]
+
+
+
+# Bindings keyed by the recorder's scope slug (client__project). ACME
+# has ONE customer across two projects; "Oddity" deliberately has two
+# DIFFERENT customers so the ambiguity path is exercised.
+PORTAL_BINDINGS = {
+    # customerId is the portal's PER-OPPORTUNITY primary key (a UUID per
+    # opportunity record), so ACME's two bound projects carry DIFFERENT
+    # customerIds. That is the ordinary shape of a multi-opportunity
+    # client, not a conflict.
+    "acme__ccaas_migration": {
+        "customer_id": "cus_acme_ccaas",
+        "opportunity_name": "ACME CCaaS Migration", "token_present": True},
+    "acme__support_retainer": {
+        "customer_id": "cus_acme_retainer",
+        "opportunity_name": "ACME Support Retainer", "token_present": False},
+    # Single bound project -> resolves to one customerId.
+    # A PARENT-company block pasted into a per-project binding — the
+    # mis-paste the portal's isParentCompany field exists to expose.
+    "umbrella__rollout": {
+        "customer_id": "cus_umbrella_parent",
+        "opportunity_name": "Umbrella Corp",
+        "is_parent_company": True,
+        "parent_customer_id": "cus_umbrella_parent",
+        "token_present": True},
+    "initech__rollout": {
+        "customer_id": "cus_initech_rollout",
+        "opportunity_name": "Initech Rollout", "token_present": True},
+}
+
+
 def _problem(status: int, title: str, detail: str, path: str) -> httpx.Response:
     return httpx.Response(
         status,
@@ -241,6 +299,26 @@ def make_transport(
             return httpx.Response(200, json={
                 "results": hits[: body.get("top_k", 10)],
                 "query": body.get("query", "")})
+
+        if path == "/portal/bindings":
+            return httpx.Response(200, json=PORTAL_BINDINGS)
+
+        if path == "/commitments":
+            q = request.url.params
+            rows = list(COMMITMENTS)
+            if q.get("client"):
+                rows = [r for r in rows if r["client"] == q.get("client")]
+            if q.get("project"):
+                rows = [r for r in rows if r["project"] == q.get("project")]
+            if q.get("owner"):
+                rows = [r for r in rows if r["owner"] == q.get("owner")]
+            status = q.get("status")
+            if status:
+                wanted = {s.strip() for s in status.split(",") if s.strip()}
+                if "active" in wanted:
+                    wanted |= {"awaiting", "overdue"}
+                rows = [r for r in rows if r["status"] in wanted]
+            return httpx.Response(200, json={"commitments": rows})
 
         if path == "/clients/config":
             return httpx.Response(200, json=CLIENT_CONFIGS)

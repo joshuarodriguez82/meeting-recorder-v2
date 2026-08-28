@@ -34,6 +34,10 @@ from .formatting import (
     SESSION_PARTS,
     render_answer,
     render_clients,
+    render_open_commitments,
+    portal_id_line,
+    render_portal_binding,
+    portal_ids_for,
     render_search_results,
     render_session_list,
     render_session_part,
@@ -52,7 +56,7 @@ the app's own semantic index.
 Two kinds of material live in that index and they are NOT
 interchangeable:
   * MEETINGS — recorded sessions. They have a session_id, a date, and
-    timestamps. Only these can be passed to get_session.
+    timestamps. Only these can be passed to get_meeting.
   * DOCUMENTS — files from a client's Knowledge Folder (SOWs,
     estimates, RFPs, notes). They have a filename and a path, no
     session_id. Cite them by filename.
@@ -203,6 +207,9 @@ async def list_clients() -> str:
     try:
         api = _client_factory()
         configs = await api.client_configs()
+        # Portal identity, per docs/mcp-tool-spec.md §3. Fetched once
+        # for the whole listing rather than per client.
+        bindings = await _portal_bindings_safe(api)
         rows: List[Dict[str, Any]] = []
         for name, cfg in sorted((configs or {}).items()):
             cfg = cfg if isinstance(cfg, dict) else {}
@@ -222,6 +229,7 @@ async def list_clients() -> str:
                     row["knowledge_error"] = exc.message
             row["double_indexing_risk"] = _same_folder(
                 row["export_folder"], row["knowledge_folder"])
+            row["portal"] = portal_ids_for(bindings, name)
             rows.append(row)
 
         try:
@@ -234,18 +242,18 @@ async def list_clients() -> str:
 
 
 @server.tool(
-    name="list_sessions",
+    name="list_meetings",
     title="List recent meetings",
     annotations=READ_ONLY,
     description=(
         "List recorded meetings, newest first, with their session_id, date, "
         "duration, client/project and which parts (transcript, summary, "
         "action items, decisions, requirements) actually exist. Use it to "
-        "find a session_id for get_session, or to see what was recorded in "
+        "find a session_id for get_meeting, or to see what was recorded in "
         "a period. Filters match client/project names exactly."
     ),
 )
-async def list_sessions(
+async def list_meetings(
     client: Optional[str] = None,
     project: Optional[str] = None,
     limit: int = 20,
@@ -275,7 +283,77 @@ async def list_sessions(
 
 
 @server.tool(
-    name="get_session",
+    name="list_open_commitments",
+    title="What I still owe",
+    annotations=READ_ONLY,
+    description=(
+        "List commitments made in recorded meetings that are still "
+        "outstanding, OVERDUE FIRST. Use this to answer 'what do I owe?', "
+        "to draft chase-ups, or to prepare for a status call. Each row "
+        "carries the owner, due date, client/project and the session_id it "
+        "came from, so a follow-up can cite the meeting. status defaults to "
+        "'active' (awaiting + overdue); pass 'overdue' for only the late "
+        "ones. This is the same list the app's Insights panel shows."
+    ),
+)
+async def list_open_commitments(
+    client: Optional[str] = None,
+    project: Optional[str] = None,
+    status: str = "active",
+    owner: Optional[str] = None,
+    limit: int = 50,
+) -> str:
+    """Args:
+    client: Optional exact client name filter.
+    project: Optional exact project name filter.
+    status: "active" (default, = awaiting + overdue), "overdue",
+        "awaiting", "delivered", "dismissed", or a comma-separated mix.
+    owner: Optional owner filter; the backend resolves aliases.
+    limit: Maximum rows to render (1-200, default 50).
+    """
+    try:
+        limit = max(1, min(200, int(limit)))
+        api = _client_factory()
+        rows = await api.list_commitments(
+            client=client, project=project,
+            status=(status or "active"), owner=owner)
+        return render_open_commitments(
+            rows, client=client, status=status, limit=limit,
+            total_before_limit=len(rows))
+    except Exception as exc:  # noqa: BLE001
+        return _error(exc)
+
+
+@server.tool(
+    name="get_portal_binding",
+    title="Which portal opportunity is this client bound to",
+    annotations=READ_ONLY,
+    description=(
+        "Return the SA Tools Portal identity bound to a recorder client "
+        "(and optionally one project): the opportunity's customerId, its "
+        "display name, the parent account where known, and whether the "
+        "edit token is on this machine. Use this to cross between the two "
+        "systems by ID instead of guessing from a company name — portal "
+        "opportunity names are neither unique nor stable. A client with "
+        "several bound projects returns all of them; pass a project to "
+        "get one."
+    ),
+)
+async def get_portal_binding(client: str, project: Optional[str] = None) -> str:
+    """Args:
+    client: The recorder client name, exactly as list_clients reports it.
+    project: Optional project name to resolve a single opportunity.
+    """
+    try:
+        api = _client_factory()
+        bindings = await api.portal_bindings()
+        return render_portal_binding(bindings, client, project or "")
+    except Exception as exc:  # noqa: BLE001
+        return _error(exc)
+
+
+@server.tool(
+    name="get_meeting",
     title="Get one meeting's content",
     annotations=READ_ONLY,
     description=(
@@ -283,12 +361,12 @@ async def list_sessions(
         "'transcript', 'summary', 'action_items', 'decisions', "
         "'requirements', or 'metadata'. Long transcripts are truncated and "
         "the truncation is stated inline. Only meetings have a session_id — "
-        "a DOCUMENT hit from search_meetings cannot be fetched here."
+        "a DOCUMENT hit from search_meetings cannot be fetched here. The id parameter is still called session_id: it is the key the backend and every stored file use."
     ),
 )
-async def get_session(session_id: str, part: str = "summary") -> str:
+async def get_meeting(session_id: str, part: str = "summary") -> str:
     """Args:
-    session_id: The meeting's id, from list_sessions or a MEETING hit.
+    session_id: The meeting's id, from list_meetings or a MEETING hit.
     part: One of transcript, summary, action_items, decisions,
         requirements, metadata. Defaults to summary.
     """
@@ -304,6 +382,20 @@ async def get_session(session_id: str, part: str = "summary") -> str:
         return render_session_part(session, part)
     except Exception as exc:  # noqa: BLE001
         return _error(exc)
+
+
+async def _portal_bindings_safe(api) -> dict:
+    """Bindings, or {} if the portal layer isn't there.
+
+    Portal binding is an optional feature — an unbound user is the
+    normal case, not an error. A failure here must degrade the identity
+    line to "not bound", never fail the tool the user actually asked
+    for.
+    """
+    try:
+        return await api.portal_bindings()
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 # ── helpers ─────────────────────────────────────────────────────────

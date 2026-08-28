@@ -133,6 +133,25 @@ Mac feature parity vs. Windows:
 └────────────────────────────────────────────────────────┘
 ```
 
+## Use it from your AI assistant
+
+The archive is reachable from AI tools through two read-only, local
+doors — see **[docs/ai-integrations.md](docs/ai-integrations.md)**, or
+**Settings → Templates & Integrations → AI assistant access** in the app
+for copy-paste config.
+
+- **MCP server** (`mcp-server/`) — MCP is an open protocol, so the same
+  server works with Claude Desktop, Claude Code, Cursor, VS Code
+  (Cline / Continue), Zed, Windsurf and any other MCP client. Tools:
+  semantic search across transcripts and Knowledge Folder documents,
+  cited Q&A, outstanding commitments (overdue first), client and session
+  listings, and single-meeting fetch.
+- **HTTP + OpenAPI** — the backend serves a full OpenAPI 3 spec at
+  `/openapi.json`, for anything that doesn't speak MCP.
+
+Both require the desktop app to be running and authenticate with the
+local backend token. Neither can modify your data.
+
 ## Features
 
 ### Recording

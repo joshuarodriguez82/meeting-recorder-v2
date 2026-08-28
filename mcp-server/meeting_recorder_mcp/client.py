@@ -200,6 +200,50 @@ class MeetingRecorderClient:
         payload = await self._request("GET", "/sessions")
         return payload if isinstance(payload, list) else []
 
+    async def portal_bindings(self) -> Dict[str, Any]:
+        """Every (client, project) -> portal binding, keyed by scope slug.
+
+        Tokenless by construction: edit tokens live in the OS keychain
+        and never enter the bindings JSON, so nothing here needs
+        redacting before it reaches a model. `token_present` on an entry
+        is computed per machine and means "the token is on THIS device",
+        not "the binding is healthy" — the bindings file roams between
+        the user's laptops, the keychain does not.
+        """
+        payload = await self._request("GET", "/portal/bindings")
+        return payload if isinstance(payload, dict) else {}
+
+    async def list_commitments(
+        self,
+        *,
+        client: Optional[str] = None,
+        project: Optional[str] = None,
+        status: Optional[str] = None,
+        owner: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Commitments across every session, filtered server-side.
+
+        `status` is passed through verbatim because /commitments already
+        understands the synthetic values "active" (awaiting + overdue)
+        and "overdue" (awaiting, past due). Re-deriving those here would
+        mean fetching everything and duplicating a rule that already has
+        one home.
+        """
+        params: Dict[str, Any] = {}
+        if client:
+            params["client"] = client
+        if project:
+            params["project"] = project
+        if status:
+            params["status"] = status
+        if owner:
+            params["owner"] = owner
+        payload = await self._request("GET", "/commitments", params=params or None)
+        if isinstance(payload, dict):
+            rows = payload.get("commitments")
+            return rows if isinstance(rows, list) else []
+        return payload if isinstance(payload, list) else []
+
     async def get_session(self, session_id: str) -> Dict[str, Any]:
         try:
             payload = await self._request(
