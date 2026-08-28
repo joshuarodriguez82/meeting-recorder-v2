@@ -102,9 +102,17 @@ jobs:
       # 2026-08-28. It is the integration surface every AI client uses,
       # so it gets the same gate as the backend.
       - name: Install MCP server
-        run: pip install -e mcp-server
+        # [dev] brings pytest-asyncio; the suite is async throughout and
+        # without it every test errors with "async def functions are not
+        # natively supported" rather than failing usefully.
+        run: pip install -e "mcp-server[dev]"
       - name: Run MCP server tests
-        run: python -m pytest mcp-server/tests -q
+        # MUST run from inside mcp-server: `asyncio_mode = "auto"` lives
+        # in ITS pyproject.toml, and pytest only reads the ini options of
+        # the rootdir it resolves. Invoked from the repo root the config
+        # is silently ignored and all 89 tests error.
+        working-directory: mcp-server
+        run: python -m pytest tests -q
 
   rust:
     name: Rust (${{ matrix.platform }})
