@@ -38,6 +38,10 @@ logger = get_logger(__name__)
 # drop out of the "open" counts (but stay in the list, annotated, so
 # the history isn't lost).
 _RESOLVED = {"met", "dropped", "done", "answered"}
+# Defects get their own terminal set, imported so the vocabulary has one
+# home. `fixed` and `retest` are deliberately absent: a fix awaiting
+# verification is still open work.
+from models.extraction import DEFECT_CLOSED_STATUSES as _DEFECT_CLOSED  # noqa: E402
 
 
 def _norm(text: str) -> str:
@@ -200,6 +204,52 @@ class EngagementService:
                         entry["status"] = st
             return list(agg.values())
 
+        def rollup_latest_wins(items_by_session, key_of, base_of, fields):
+            """Like rollup, but the LAST occurrence supplies `fields`.
+
+            Defects are not monotonic the way requirements are: fixed →
+            retest → failed → open is an ordinary life, and severity gets
+            re-triaged. Terminal-wins would report a reopened defect as
+            "fixed" in the very meeting the register exists to support,
+            so the newest occurrence — `loaded` is oldest-session-first —
+            is the one that speaks for the current state.
+            """
+            agg: Dict[str, dict] = {}
+            for meta, recs in items_by_session:
+                for rec in recs:
+                    k = key_of(rec)
+                    if not k:
+                        continue
+                    if k not in agg:
+                        entry = base_of(rec)
+                        entry["occurrences"] = []
+                        agg[k] = entry
+                    entry = agg[k]
+                    entry["occurrences"].append(provenance(meta, rec))
+                    for f in fields:
+                        val = getattr(rec, f, None)
+                        # An empty later value must not erase a populated
+                        # earlier one — a triage call that skips the owner
+                        # isn't saying the defect has no owner.
+                        if val not in (None, ""):
+                            entry[f] = val
+            return list(agg.values())
+
+        # Customer's defect ID is the key where stated; wording varies
+        # call to call, the ID does not.
+        defects = rollup_latest_wins(
+            [(m, getattr(s, "defects_struct", []) or []) for m, s in loaded],
+            key_of=lambda d: (d.ref or "").strip().lower() or _norm(d.title),
+            base_of=lambda d: {
+                "id": d.id, "title": d.title, "ref": d.ref,
+                "severity": d.severity, "status": d.status,
+                "owner": d.owner, "due": d.due,
+                "disposition": d.disposition, "source": d.source,
+            },
+            fields=("title", "severity", "status", "owner", "due",
+                    "disposition"),
+        )
+
         reqs = rollup(
             [(m, s.requirements_struct) for m, s in loaded],
             key_of=lambda r: _norm(r.text),
@@ -246,17 +296,33 @@ class EngagementService:
 
         reqs, acts, qs = open_first(reqs), open_first(acts), open_first(qs)
         is_open = lambda r: r.get("status", "open") not in _RESOLVED
+
+        # Defects have their own terminal set: `retest` is NOT resolved —
+        # something awaiting retest is still the delivery team's work,
+        # and counting it as done is how a UAT exit date slips quietly.
+        def defect_is_open(d: dict) -> bool:
+            return (d.get("status", "open") or "open") not in _DEFECT_CLOSED
+
+        defects.sort(key=lambda d: not defect_is_open(d))
+        open_defects = [d for d in defects if defect_is_open(d)]
         return {
             "counts": {
                 "open_requirements": sum(1 for r in reqs if is_open(r)),
                 "decisions": len(decs),
                 "open_action_items": sum(1 for a in acts if is_open(a)),
                 "open_questions": sum(1 for q in qs if is_open(q)),
+                "open_defects": len(open_defects),
+                # The number a delivery lead is asked for in every status
+                # call, and the one that gates go-live.
+                "open_critical_high_defects": sum(
+                    1 for d in open_defects
+                    if d.get("severity") in ("critical", "high")),
             },
             "requirements": reqs,
             "decisions": decs,
             "action_items": acts,
             "open_questions": qs,
+            "defects": defects,
         }
 
     # ---- helpers ----------------------------------------------------

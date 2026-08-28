@@ -1075,6 +1075,7 @@ class RecordingService:
                         mic_gap = expected_s - mic_secs
                         mic_ovf = capture_stats.get("mic_overflows", 0)
                         lb_ovf = capture_stats.get("loopback_overflows", 0)
+                        lb_drops = capture_stats.get("loopback_drops", 0)
                         offset = loopback_start_offset_s or 0.0
                         drift = (abs(mic_secs - (lb_secs + offset))
                                  if lb_secs is not None else None)
@@ -1085,6 +1086,7 @@ class RecordingService:
                             f"window={expected_s:.1f}s mic_gap={mic_gap:.1f}s "
                             f"drift={('%.1fs' % drift) if drift is not None else 'n/a'} "
                             f"overflows(mic/lb)={mic_ovf}/{lb_ovf} "
+                            f"lb_drops={lb_drops} "
                             f"finalize_s={finalize_elapsed_s:.1f}")
                         bits = []
                         if mic_gap > max(2.0, expected_s * 0.02):
@@ -1384,6 +1386,9 @@ class RecordingService:
                 loopback_sample_rate=lsr or None,
                 mic_overflows=int(stats.get("mic_overflows") or 0),
                 loopback_overflows=int(stats.get("loopback_overflows") or 0),
+                # Blocks that reached no file at all — distinct from an
+                # overflow, which keeps the newest audio.
+                loopback_drops=int(stats.get("loopback_drops") or 0),
                 mic_gap_s=((expected_s - mic_secs)
                            if mic_secs is not None else None),
                 drift_s=drift,

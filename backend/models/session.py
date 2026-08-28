@@ -8,6 +8,7 @@ from models.extraction import (
     Decision,
     ActionItem,
     OpenQuestion,
+    Defect,
 )
 
 
@@ -86,6 +87,10 @@ class Session:
         self.decisions_struct: List[Decision] = []
         self.action_items_struct: List[ActionItem] = []
         self.open_questions: List[OpenQuestion] = []
+        # Defect register rows from UAT / triage calls. Separate from
+        # action items: a defect carries severity, a customer ref and a
+        # non-monotonic status (it can reopen after a failed retest).
+        self.defects_struct: List[Defect] = []
         # Free-form notes the user adds to the session — personal reminders,
         # off-audio context, follow-ups they want to remember. Fed into the
         # summarizer prompt so AI extractions reflect the user's own
@@ -288,6 +293,7 @@ class Session:
             "decisions_struct": [d.to_dict() for d in self.decisions_struct],
             "action_items_struct": [a.to_dict() for a in self.action_items_struct],
             "open_questions": [q.to_dict() for q in self.open_questions],
+            "defects_struct": [d.to_dict() for d in self.defects_struct],
             "notes": self.notes,
             "exported_audio_paths": list(self.exported_audio_paths),
             "screenshots": list(self.screenshots),
@@ -357,6 +363,9 @@ class Session:
         ]
         session.action_items_struct = [
             ActionItem.from_dict(x) for x in (data.get("action_items_struct") or [])
+        ]
+        session.defects_struct = [
+            Defect.from_dict(x) for x in (data.get("defects_struct") or [])
         ]
         session.open_questions = [
             OpenQuestion.from_dict(x) for x in (data.get("open_questions") or [])
