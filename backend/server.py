@@ -395,6 +395,7 @@ from services.extension_bundle_service import (
     bundled_extension_version, export_dir as extension_export_dir,
     export_extension_files, extension_version_status,
 )
+from services import mcp_bundle_service
 from services.outlook_web_scraper import (
     OutlookAuthExpired, OutlookScraperError, OutlookScraperUnavailable,
     format_for_briefing_parser, open_signin_window,
@@ -8980,6 +8981,41 @@ async def install_extension_files():
         "files": written,
         "file_count": len(written),
     }
+
+
+@app.get("/integrations/mcp/status")
+async def mcp_status():
+    """Can this machine launch the MCP server, and with which two paths?
+
+    The Settings "AI assistant access" card renders entirely from this.
+    Every field is answerable without the user knowing anything about
+    their install, which is the point: before v2.72 the card asked them
+    to paste `/absolute/path/to/mcp-server/.venv/bin/python`, a file
+    that does not exist on a machine that installed the app instead of
+    cloning the repo.
+
+    Never 500s. `bundled: false` (this build carries no mcp-server/) is
+    a state to report, not an error.
+    """
+    return await asyncio.to_thread(mcp_bundle_service.status)
+
+
+@app.post("/integrations/mcp/install")
+async def mcp_install():
+    """Install the MCP SDK into the app's own venv, on demand.
+
+    On demand rather than at first launch deliberately — see
+    mcp_bundle_service's module docstring: the bootstrap install is the
+    one place where a resolution failure bricks the app before it
+    starts, and this repo has shipped that bug. Here the worst case is
+    a card that says pip failed, on a working app.
+
+    A pip failure is reported as ok=false WITH pip's own output rather
+    than raised as a 500: the reason (offline, blocked index, conflict)
+    is in those lines and nowhere else.
+    """
+    result = await asyncio.to_thread(mcp_bundle_service.install_sdk)
+    return {**result, "status": mcp_bundle_service.status()}
 
 
 @app.get("/briefing/today")

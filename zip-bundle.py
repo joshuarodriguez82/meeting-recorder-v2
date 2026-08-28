@@ -8,7 +8,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 BACKEND = ROOT / "backend"
-OUT = ROOT / "backend-bundle.zip"
+# Optional output path so a test can build the real bundle without
+# clobbering the one a developer or the release workflow just produced
+# (backend/tests/test_bundle_contents.py). No argument = the name every
+# build step already expects.
+OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "backend-bundle.zip"
 
 # Written into the zip (never onto disk) as a sibling of server.py so the
 # backend can name its own build. A release build runs the backend out of
@@ -37,10 +41,23 @@ INCLUDE_FILES = ["server.py", "requirements-cpu.txt", "requirements-mac.txt",
 # so the app can write it out to a stable folder on demand instead of the
 # user hunting the release page for a separate zip every time it changes
 # — see services/extension_bundle_service.py.
-EXTRA_ROOT_DIRS = ["chrome-extension"]
+# mcp-server/ ships for the same reason: an AI assistant reaches the
+# archive by launching mcp-server/run_mcp_server.py with the app's own
+# venv Python, and someone who INSTALLED the app has no checkout to
+# launch it from. Settings' "AI assistant access" card resolves both
+# absolute paths from the running backend — see
+# services/mcp_bundle_service.py.
+EXTRA_ROOT_DIRS = ["chrome-extension", "mcp-server"]
+# Subdirectories of an EXTRA_ROOT_DIRS entry that must not ship. The MCP
+# server's tests/ is excluded for a reason beyond size: run_mcp_server.py
+# puts its own directory on sys.path, so a shipped tests/__init__.py
+# would become an importable top-level package named `tests` in the
+# client's process.
+EXTRA_ROOT_SKIP = {"mcp-server": {"tests", "scripts"}}
 # Skip __pycache__ dirs (they contain compiled bytecode for .py files
-# which Python regenerates on first import — no need to ship them).
-SKIP_PATTERNS = ("__pycache__",)
+# which Python regenerates on first import — no need to ship them), and
+# the tool caches that accumulate next to a dev checkout's sources.
+SKIP_PATTERNS = ("__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache")
 
 def should_skip(path: Path) -> bool:
     return any(p in str(path) for p in SKIP_PATTERNS)
@@ -92,8 +109,11 @@ with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         if not src_dir.exists():
             print(f"WARN: {src_dir} does not exist, skipping")
             continue
+        skip_top = EXTRA_ROOT_SKIP.get(d, set())
         for root, dirs, files in os.walk(src_dir):
             dirs[:] = [x for x in dirs if not should_skip(Path(root) / x)]
+            if Path(root) == src_dir:
+                dirs[:] = [x for x in dirs if x not in skip_top]
             for f in files:
                 full = Path(root) / f
                 if should_skip(full):

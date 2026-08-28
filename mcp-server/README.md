@@ -14,7 +14,10 @@ Google Drive.
 - **Scope:** read-only. It cannot delete a session, change a setting, or
   start a reindex.
 - **Isolation:** this directory is standalone. It adds nothing to
-  `backend/requirements.txt` and imports nothing from `backend/`.
+  `backend/requirements-*.txt` and imports nothing from `backend/` — it
+  talks to the app over HTTP like any other client. It *ships* inside the
+  app's runtime bundle (`zip-bundle.py`) so an installed build can turn it
+  on without a checkout, but that is packaging, not coupling.
 
 ---
 
@@ -26,6 +29,23 @@ Google Drive.
   message when it isn't.
 
 ## Install
+
+**Most people should not do any of this.** An installed build of the app
+ships this whole directory inside its runtime bundle and turns it on from
+**Settings → Templates & Integrations → AI assistant access** — one button,
+then a config snippet with both absolute paths already filled in for that
+machine. See `docs/ai-integrations.md`.
+
+What that button does, so it isn't a black box: it pip-installs `mcp` into
+the app's own venv (with the same constraints file the app was
+bootstrapped with, so it cannot move a pinned backend dependency), then
+hands the client `<app python> <runtime>/mcp-server/run_mcp_server.py`.
+`run_mcp_server.py` puts its own directory on `sys.path`, which is why no
+install of *this package* is needed there. The wiring lives in
+`backend/services/mcp_bundle_service.py`.
+
+The rest of this section is the **developer** path — a source checkout,
+where you want an editable install and the test suite.
 
 ```sh
 cd mcp-server

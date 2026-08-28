@@ -36,10 +36,13 @@ class BackendUnreachable(MeetingRecorderError):
         super().__init__(
             f"Meeting Recorder isn't running — nothing is listening on "
             f"{base_url}{suffix}. Start the Meeting Recorder app and try "
-            f"again. If the app IS running, it may have fallen back to a "
-            f"different port (this happens when 17645 was already taken); "
-            f"check Settings -> Chrome Extension for the real URL and set "
-            f"MEETING_RECORDER_URL in this MCP server's config to match."
+            f"again. If the app IS running, quit and reopen it: it writes "
+            f"whichever port it got to a 'backend-port' file beside the "
+            f"token, and this server reads that by itself — a stale file "
+            f"from a previous run is the usual cause. Only if that still "
+            f"fails, set MEETING_RECORDER_URL in this server's config to "
+            f"the URL shown in the app under Settings -> Templates & "
+            f"Integrations -> AI assistant access."
         )
 
 

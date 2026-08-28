@@ -61,7 +61,32 @@ HTTP door.
 
 ## Door 1 — MCP
 
-Install once:
+### The one-click path (installed builds)
+
+Open **Settings → Templates & Integrations → AI assistant access**.
+
+1. Click **Turn on**. That installs the MCP protocol library into the
+   app's own Python — nothing else to download, no virtualenv of your
+   own, and the app keeps working whether or not it succeeds.
+2. Pick your AI tool from the row of buttons.
+3. Click **Copy** and paste what you get into that tool's MCP config
+   (the card names the exact place for each one), then restart it.
+
+The snippet already has the two absolute paths filled in **for your
+machine** — the app's Python and the launcher inside its own runtime
+folder. Paste it as-is; there is nothing to substitute and no token to
+copy, because the server finds the app's address and token by itself.
+
+Why the paths cannot be guessed: they live under your per-user app data
+directory, which differs by OS and by user. That is exactly why the card
+resolves them from the running backend instead of printing a
+placeholder.
+
+> **"This build doesn't carry the MCP server files."** You are running
+> from a source checkout that was never packaged with `zip-bundle.py`.
+> Use the manual path below.
+
+### The manual path (source checkouts)
 
 ```sh
 cd mcp-server
@@ -76,14 +101,14 @@ Clients launch the server with a minimal environment and do not activate
 virtualenvs, so a bare `python` usually resolves to an interpreter with
 no `mcp` installed and fails with no obvious reason.
 
-### Claude Code
+#### Claude Code
 
 ```sh
 claude mcp add meeting-recorder --scope user \
   -- /absolute/path/to/mcp-server/.venv/bin/python -m meeting_recorder_mcp
 ```
 
-### Claude Desktop, Cursor, Windsurf, Zed, Cline, Continue
+#### Claude Desktop, Cursor, Windsurf, Zed, Cline, Continue
 
 All of these use the same JSON shape; only the file differs.
 
@@ -108,6 +133,23 @@ All of these use the same JSON shape; only the file differs.
 
 On Windows use the full path to `.venv\Scripts\python.exe` and escape
 backslashes in JSON.
+
+### Checking it works
+
+Either path, run the launcher's doctor by hand — it never speaks MCP, so
+it is safe to run in a terminal:
+
+```sh
+# installed build — both paths are on the Settings card
+"<the app's python>" "<the launcher>" --doctor
+
+# source checkout
+python -m meeting_recorder_mcp --doctor
+```
+
+It prints the base URL it resolved, where it found the token, and
+whether an authenticated call succeeded. That is the fastest way to tell
+"the app isn't running" apart from "the client's config is wrong".
 
 ### What it gives the assistant
 
@@ -183,6 +225,10 @@ things to get right:
 Run the doctor first — it distinguishes the three failure modes:
 
 ```sh
+# installed build (both paths come from the Settings card)
+"<the app's python>" "<the launcher>" --doctor
+
+# source checkout
 python -m meeting_recorder_mcp --doctor
 ```
 
@@ -200,7 +246,16 @@ python scripts/e2e_stub_check.py    # every tool against a stub backend
 ```
 
 **"The tools don't appear."** Restart the client fully (quit, don't just
-close the window). Confirm you used the absolute venv Python path.
+close the window). Confirm you used the absolute Python path from the
+Settings card (or your venv's, on a source checkout) — a bare `python`
+resolves to an interpreter that has no `mcp` installed.
+
+**"The Turn on button failed."** The card shows pip's own output, and
+the reason is in those lines: no network, a proxy that intercepts the
+package index, or a version conflict. Nothing was changed — the app is
+unaffected and you can click it again. The install is deliberately not
+part of first launch, because a failure there would stop the app from
+starting at all.
 
 **"It says the app isn't running."** It isn't, or it's on a different
 port. The backend only exists while the desktop app is open.
