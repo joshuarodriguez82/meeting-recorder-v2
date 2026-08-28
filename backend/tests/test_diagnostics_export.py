@@ -609,3 +609,37 @@ def test_capture_diag_stores_scalars_only(tmp_path):
     assert "sneakyUrl" not in got
     assert "nested" not in got
     assert "list" not in got
+
+
+# ── /health's version: the same lie, in a place users read ───────────
+#
+# `GET /health` hardcoded "2.0.0" from the day it was written. It is the
+# ONE endpoint that needs no token, so it is what every external client
+# probes first — and with v2.72.0 it acquired a reader: the MCP server's
+# --doctor prints it. A user on 2.72.0 was told "backend reports version
+# 2.0.0" the first time they connected an AI assistant.
+#
+# It shares app_version()'s sources, so it is right in a packaged build
+# and in a dev checkout alike, and says "unknown" rather than inventing
+# one when neither is readable.
+
+
+def test_health_payload_reports_the_real_build(monkeypatch):
+    monkeypatch.setenv("MEETING_RECORDER_APP_VERSION", "2.72.0")
+    assert db.health_payload() == {"status": "ok", "version": "2.72.0"}
+
+
+def test_health_payload_says_unknown_rather_than_inventing_a_version(
+        tmp_path, monkeypatch):
+    """Same rule as versions.json: a wrong version is worse than an
+    absent one. 'unknown' is a statement; '2.0.0' was a fabrication."""
+    monkeypatch.delenv("MEETING_RECORDER_APP_VERSION", raising=False)
+    monkeypatch.setattr(db, "_backend_dir", lambda: tmp_path / "nowhere")
+    assert db.health_payload() == {"status": "ok", "version": "unknown"}
+
+
+def test_health_payload_keeps_the_status_key_the_watchdog_contract_needs():
+    """The Rust watchdog only reads the HTTP status line, but every
+    other caller reads `status`. Changing the version must not disturb
+    the shape around it."""
+    assert db.health_payload()["status"] == "ok"

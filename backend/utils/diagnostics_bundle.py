@@ -326,6 +326,32 @@ def app_version() -> Optional[str]:
     return None
 
 
+#: Returned by ``app_version()``'s consumers when no source could name
+#: the build. A statement, not a guess — see ``health_payload``.
+UNKNOWN_VERSION = "unknown"
+
+
+def health_payload() -> dict:
+    """The body of ``GET /health``.
+
+    Lives here rather than inline in server.py so it can be tested
+    without importing the whole app, and so it shares ``app_version()``'s
+    resolution order instead of restating it.
+
+    It hardcoded ``"2.0.0"`` from the day it was written. That was
+    harmless while nothing read it and became a real defect in v2.72.0,
+    which gave it a reader: ``/health`` is the only endpoint that needs
+    no token, so it is what every external client probes first, and the
+    MCP server's ``--doctor`` prints what it says. A user on 2.72.0 was
+    told "backend reports version 2.0.0" the first time they connected
+    an AI assistant.
+
+    ``unknown`` rather than a fabricated number when no source is
+    readable — the same rule versions.json follows, for the same reason.
+    """
+    return {"status": "ok", "version": app_version() or UNKNOWN_VERSION}
+
+
 #: What ``extension_last_seen_version`` says when the extension HAS
 #: posted but the build that posted predates version reporting
 #: (background.js only started sending

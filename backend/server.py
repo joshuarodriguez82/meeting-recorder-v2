@@ -460,7 +460,12 @@ Summarizer = None  # type: ignore
 
 logger = get_logger(__name__)
 
-app = FastAPI(title="Meeting Recorder Backend", version="2.0.0")
+# The version here is what /openapi.json advertises, which is what a
+# non-MCP assistant reads to know which build it is talking to. It
+# said "2.0.0" for 70 releases; see diagnostics_bundle.health_payload.
+app = FastAPI(title="Meeting Recorder Backend",
+              version=diagnostics_bundle.app_version()
+              or diagnostics_bundle.UNKNOWN_VERSION)
 
 # Only the Tauri WebView (and the Next dev server during `npm run dev`)
 # are legitimate browsers for this API. The old `allow_origins=["*"]`
@@ -1399,7 +1404,14 @@ class RecordingStatus(BaseModel):
 # ── Health ───────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "2.0.0"}
+    """Liveness, and which build is answering.
+
+    The only endpoint that needs no token, so it is what every external
+    client probes first — including the MCP server's --doctor. The
+    version it reports is the real one; see health_payload's docstring
+    for why it wasn't.
+    """
+    return diagnostics_bundle.health_payload()
 
 
 # Free-model roster is fetched live from OpenRouter's public catalog so
