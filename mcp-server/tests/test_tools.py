@@ -40,7 +40,7 @@ async def test_search_labels_meetings_and_documents_separately():
     assert "client/project: ACME / CCaaS Migration" in out
     assert "at 06:52-07:28" in out
     # And an explicit warning that a document is not a session.
-    assert "cannot be passed to get_session" in out
+    assert "cannot be passed to get_meeting" in out
 
 
 async def test_search_empty_is_clearly_empty_not_failed():
@@ -121,10 +121,10 @@ async def test_list_clients_when_one_clients_knowledge_lookup_fails():
     assert "knowledge status: UNAVAILABLE" in out
 
 
-# ── list_sessions ───────────────────────────────────────────────────
+# ── list_meetings ───────────────────────────────────────────────────
 
-async def test_list_sessions_shows_ids_dates_and_available_parts():
-    out = await srv.list_sessions()
+async def test_list_meetings_shows_ids_dates_and_available_parts():
+    out = await srv.list_meetings()
     assert "3 session(s), newest first." in out
     assert "session_id: session_20260714_101500" in out
     assert "available parts: transcript, summary, action_items, decisions" in out
@@ -132,49 +132,49 @@ async def test_list_sessions_shows_ids_dates_and_available_parts():
     assert "WARNING — audio integrity" in out
 
 
-async def test_list_sessions_filter_and_limit():
-    out = await srv.list_sessions(client="ACME")
+async def test_list_meetings_filter_and_limit():
+    out = await srv.list_meetings(client="ACME")
     assert "2 session(s) (filtered: client=ACME)" in out
     assert "Globex" not in out
 
-    out = await srv.list_sessions(limit=1)
+    out = await srv.list_meetings(limit=1)
     assert "showing 1 of 3; limit=1" in out
 
 
-async def test_list_sessions_no_match_is_empty_not_error():
-    out = await srv.list_sessions(client="Nonexistent")
+async def test_list_meetings_no_match_is_empty_not_error():
+    out = await srv.list_meetings(client="Nonexistent")
     assert "No sessions matched (filtered: client=Nonexistent)" in out
     assert "empty result, not an error" in out
     assert "MEETING RECORDER ERROR" not in out
 
 
-# ── get_session ─────────────────────────────────────────────────────
+# ── get_meeting ─────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("part", ["transcript", "summary", "action_items",
                                   "decisions", "metadata"])
-async def test_get_session_parts(part):
-    out = await srv.get_session("session_20260714_101500", part=part)
+async def test_get_meeting_parts(part):
+    out = await srv.get_meeting("session_20260714_101500", part=part)
     assert "session_id: session_20260714_101500" in out
     assert f"part: {part}" in out
     assert "MEETING RECORDER ERROR" not in out
 
 
 async def test_transcript_uses_speaker_names_and_timestamps():
-    out = await srv.get_session("session_20260714_101500", part="transcript")
+    out = await srv.get_meeting("session_20260714_101500", part="transcript")
     assert "[00:00 -> 00:06] Sam Doe:" in out
     assert "[06:52 -> 07:28] Sam Doe:" in out
     assert "Priya Raman:" in out
 
 
 async def test_absent_extraction_is_empty_not_failed():
-    out = await srv.get_session("session_20260714_101500", part="requirements")
+    out = await srv.get_meeting("session_20260714_101500", part="requirements")
     assert "has no Requirements content" in out
     assert "empty field, not a failed call" in out
     assert "MEETING RECORDER ERROR" not in out
 
 
 async def test_metadata_flags_populated_parts_and_notes():
-    out = await srv.get_session("session_20260714_101500", part="metadata")
+    out = await srv.get_meeting("session_20260714_101500", part="metadata")
     assert "transcript segments: 3" in out
     assert "speakers: Sam Doe, Priya Raman" in out
     assert "populated parts: Transcript, Summary, Action items, Decisions" in out
@@ -182,13 +182,13 @@ async def test_metadata_flags_populated_parts_and_notes():
 
 
 async def test_unknown_part_is_rejected_with_the_valid_list():
-    out = await srv.get_session("session_20260714_101500", part="vibes")
+    out = await srv.get_meeting("session_20260714_101500", part="vibes")
     assert out.startswith("MEETING RECORDER ERROR —")
     assert "action_items" in out and "transcript" in out
 
 
 async def test_unknown_session_id():
-    out = await srv.get_session("session_nope")
+    out = await srv.get_meeting("session_nope")
     assert out.startswith("MEETING RECORDER ERROR —")
     assert "No session with id 'session_nope'" in out
 
@@ -208,7 +208,7 @@ async def test_long_transcript_is_truncated_with_a_count():
         return stub_backend.make_transport().handler(request)
 
     _use(httpx.MockTransport(handler))
-    out = await srv.get_session("session_20260714_101500", part="transcript")
+    out = await srv.get_meeting("session_20260714_101500", part="transcript")
     assert "[TRUNCATED by the MCP server: showing the first 12,000 of" in out
 
 

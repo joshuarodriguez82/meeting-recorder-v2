@@ -35,6 +35,8 @@ from .formatting import (
     render_answer,
     render_clients,
     render_open_commitments,
+    portal_id_line,
+    portal_ids_for,
     render_search_results,
     render_session_list,
     render_session_part,
@@ -53,7 +55,7 @@ the app's own semantic index.
 Two kinds of material live in that index and they are NOT
 interchangeable:
   * MEETINGS — recorded sessions. They have a session_id, a date, and
-    timestamps. Only these can be passed to get_session.
+    timestamps. Only these can be passed to get_meeting.
   * DOCUMENTS — files from a client's Knowledge Folder (SOWs,
     estimates, RFPs, notes). They have a filename and a path, no
     session_id. Cite them by filename.
@@ -204,6 +206,9 @@ async def list_clients() -> str:
     try:
         api = _client_factory()
         configs = await api.client_configs()
+        # Portal identity, per docs/mcp-tool-spec.md §3. Fetched once
+        # for the whole listing rather than per client.
+        bindings = await _portal_bindings_safe(api)
         rows: List[Dict[str, Any]] = []
         for name, cfg in sorted((configs or {}).items()):
             cfg = cfg if isinstance(cfg, dict) else {}
@@ -223,6 +228,7 @@ async def list_clients() -> str:
                     row["knowledge_error"] = exc.message
             row["double_indexing_risk"] = _same_folder(
                 row["export_folder"], row["knowledge_folder"])
+            row["portal"] = portal_ids_for(bindings, name)
             rows.append(row)
 
         try:
@@ -235,18 +241,18 @@ async def list_clients() -> str:
 
 
 @server.tool(
-    name="list_sessions",
+    name="list_meetings",
     title="List recent meetings",
     annotations=READ_ONLY,
     description=(
         "List recorded meetings, newest first, with their session_id, date, "
         "duration, client/project and which parts (transcript, summary, "
         "action items, decisions, requirements) actually exist. Use it to "
-        "find a session_id for get_session, or to see what was recorded in "
+        "find a session_id for get_meeting, or to see what was recorded in "
         "a period. Filters match client/project names exactly."
     ),
 )
-async def list_sessions(
+async def list_meetings(
     client: Optional[str] = None,
     project: Optional[str] = None,
     limit: int = 20,
@@ -318,7 +324,7 @@ async def list_open_commitments(
 
 
 @server.tool(
-    name="get_session",
+    name="get_meeting",
     title="Get one meeting's content",
     annotations=READ_ONLY,
     description=(
@@ -326,12 +332,12 @@ async def list_open_commitments(
         "'transcript', 'summary', 'action_items', 'decisions', "
         "'requirements', or 'metadata'. Long transcripts are truncated and "
         "the truncation is stated inline. Only meetings have a session_id — "
-        "a DOCUMENT hit from search_meetings cannot be fetched here."
+        "a DOCUMENT hit from search_meetings cannot be fetched here. The id parameter is still called session_id: it is the key the backend and every stored file use."
     ),
 )
-async def get_session(session_id: str, part: str = "summary") -> str:
+async def get_meeting(session_id: str, part: str = "summary") -> str:
     """Args:
-    session_id: The meeting's id, from list_sessions or a MEETING hit.
+    session_id: The meeting's id, from list_meetings or a MEETING hit.
     part: One of transcript, summary, action_items, decisions,
         requirements, metadata. Defaults to summary.
     """
@@ -347,6 +353,20 @@ async def get_session(session_id: str, part: str = "summary") -> str:
         return render_session_part(session, part)
     except Exception as exc:  # noqa: BLE001
         return _error(exc)
+
+
+async def _portal_bindings_safe(api) -> dict:
+    """Bindings, or {} if the portal layer isn't there.
+
+    Portal binding is an optional feature — an unbound user is the
+    normal case, not an error. A failure here must degrade the identity
+    line to "not bound", never fail the tool the user actually asked
+    for.
+    """
+    try:
+        return await api.portal_bindings()
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 # ── helpers ─────────────────────────────────────────────────────────

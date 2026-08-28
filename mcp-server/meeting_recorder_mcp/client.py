@@ -200,6 +200,19 @@ class MeetingRecorderClient:
         payload = await self._request("GET", "/sessions")
         return payload if isinstance(payload, list) else []
 
+    async def portal_bindings(self) -> Dict[str, Any]:
+        """Every (client, project) -> portal binding, keyed by scope slug.
+
+        Tokenless by construction: edit tokens live in the OS keychain
+        and never enter the bindings JSON, so nothing here needs
+        redacting before it reaches a model. `token_present` on an entry
+        is computed per machine and means "the token is on THIS device",
+        not "the binding is healthy" — the bindings file roams between
+        the user's laptops, the keychain does not.
+        """
+        payload = await self._request("GET", "/portal/bindings")
+        return payload if isinstance(payload, dict) else {}
+
     async def list_commitments(
         self,
         *,

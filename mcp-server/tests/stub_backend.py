@@ -212,6 +212,28 @@ COMMITMENTS = [
 ]
 
 
+
+# Bindings keyed by the recorder's scope slug (client__project). ACME
+# has ONE customer across two projects; "Oddity" deliberately has two
+# DIFFERENT customers so the ambiguity path is exercised.
+PORTAL_BINDINGS = {
+    # customerId is the portal's PER-OPPORTUNITY primary key (a UUID per
+    # opportunity record), so ACME's two bound projects carry DIFFERENT
+    # customerIds. That is the ordinary shape of a multi-opportunity
+    # client, not a conflict.
+    "acme__ccaas_migration": {
+        "customer_id": "cus_acme_ccaas",
+        "opportunity_name": "ACME CCaaS Migration", "token_present": True},
+    "acme__support_retainer": {
+        "customer_id": "cus_acme_retainer",
+        "opportunity_name": "ACME Support Retainer", "token_present": False},
+    # Single bound project -> resolves to one customerId.
+    "initech__rollout": {
+        "customer_id": "cus_initech_rollout",
+        "opportunity_name": "Initech Rollout", "token_present": True},
+}
+
+
 def _problem(status: int, title: str, detail: str, path: str) -> httpx.Response:
     return httpx.Response(
         status,
@@ -269,6 +291,9 @@ def make_transport(
             return httpx.Response(200, json={
                 "results": hits[: body.get("top_k", 10)],
                 "query": body.get("query", "")})
+
+        if path == "/portal/bindings":
+            return httpx.Response(200, json=PORTAL_BINDINGS)
 
         if path == "/commitments":
             q = request.url.params

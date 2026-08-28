@@ -102,7 +102,7 @@ class BackendError(MeetingRecorderError):
 class SessionNotFound(MeetingRecorderError):
     def __init__(self, session_id: str) -> None:
         super().__init__(
-            f"No session with id '{session_id}'. Use list_sessions or "
+            f"No session with id '{session_id}'. Use list_meetings or "
             f"search_meetings to get a valid session_id — document hits from "
             f"search_meetings have no session_id and can't be passed here."
         )
