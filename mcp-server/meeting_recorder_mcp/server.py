@@ -432,7 +432,40 @@ def _same_folder(export_folder: str, knowledge_folder: str) -> bool:
     return knw.startswith(exp.rstrip("/\\") + os.sep)
 
 
-def main() -> None:
+def _run_http(host: str, port: int) -> None:
+    """Serve over HTTP so a hosted assistant can reach the archive.
+
+    Loopback by default with a tunnel expected in front — see
+    remote.py's module docstring for why that is the deployment and not
+    an incidental detail. Refuses to start without a token rather than
+    coming up open, because "no token configured" and "no auth" must
+    never be the same state on a listening socket.
+    """
+    import uvicorn
+
+    from . import remote
+
+    token = remote.resolve_token()
+    if not token:
+        print(
+            "Refusing to start: no remote access token. Turn remote access "
+            "on in Meeting Recorder (Settings -> AI assistant access), or "
+            f"set {remote.TOKEN_ENV}.",
+            file=sys.stderr)
+        raise SystemExit(2)
+
+    app = remote.build_app(server, token)
+    if host != remote.DEFAULT_HOST:
+        print(
+            f"WARNING: binding {host}, not loopback. Anything that can reach "
+            "this address can try the token. The supported setup is loopback "
+            "plus a tunnel.", file=sys.stderr)
+    print(f"Meeting Recorder MCP listening on http://{host}:{port}",
+          file=sys.stderr)
+    uvicorn.run(app, host=host, port=port, log_level=_log_level().lower())
+
+
+def main(argv: Optional[List[str]] = None) -> None:
     # stdout is the MCP wire — anything printed there corrupts the
     # JSON-RPC framing. basicConfig's default handler writes to stderr,
     # which is what we want; never add a stdout handler here.
@@ -441,7 +474,34 @@ def main() -> None:
         stream=sys.stderr,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    server.run(transport="stdio")
+    args = list(sys.argv[1:] if argv is None else argv)
+    if "--http" not in args:
+        server.run(transport="stdio")
+        return
+
+    from . import remote
+
+    host = remote.bind_host(_flag_value(args, "--host"))
+    port_raw = _flag_value(args, "--port")
+    try:
+        port = int(port_raw) if port_raw else remote.DEFAULT_PORT
+    except ValueError:
+        print(f"--port must be a number, got {port_raw!r}", file=sys.stderr)
+        raise SystemExit(2)
+    _run_http(host, port)
+
+
+def _flag_value(args: List[str], flag: str) -> Optional[str]:
+    """`--flag value` or `--flag=value`. A tiny parser rather than
+    argparse because this entry point is also the MCP wire: argparse
+    exits and prints to stdout on a bad argument, which corrupts the
+    framing for a client that passed something unexpected."""
+    for i, a in enumerate(args):
+        if a == flag:
+            return args[i + 1] if i + 1 < len(args) else None
+        if a.startswith(flag + "="):
+            return a.split("=", 1)[1]
+    return None
 
 
 if __name__ == "__main__":
