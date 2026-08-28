@@ -455,7 +455,7 @@ function StaleCommitmentsBlock({
             <button
               key={c.commitment_id}
               type="button"
-              onClick={() => onOpenSession(c.session_id, "commitments")}
+              onClick={() => onOpenSession(c.session_id, "actions")}
               className="w-full text-left p-3 hover:bg-muted/50 flex items-start gap-3"
             >
               <div className="flex-1 min-w-0">
@@ -542,7 +542,7 @@ function UncheckedActionsBlock({
             <button
               key={`${a.session_id}-${a.item_hash}`}
               type="button"
-              onClick={() => onOpenSession(a.session_id, "follow_ups")}
+              onClick={() => onOpenSession(a.session_id, "actions")}
               className="w-full text-left p-3 hover:bg-muted/50 flex items-start gap-3"
             >
               <div className="flex-1 min-w-0">
