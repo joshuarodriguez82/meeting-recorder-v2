@@ -36,6 +36,7 @@ from .formatting import (
     render_clients,
     render_open_commitments,
     portal_id_line,
+    render_portal_binding,
     portal_ids_for,
     render_search_results,
     render_session_list,
@@ -319,6 +320,34 @@ async def list_open_commitments(
         return render_open_commitments(
             rows, client=client, status=status, limit=limit,
             total_before_limit=len(rows))
+    except Exception as exc:  # noqa: BLE001
+        return _error(exc)
+
+
+@server.tool(
+    name="get_portal_binding",
+    title="Which portal opportunity is this client bound to",
+    annotations=READ_ONLY,
+    description=(
+        "Return the SA Tools Portal identity bound to a recorder client "
+        "(and optionally one project): the opportunity's customerId, its "
+        "display name, the parent account where known, and whether the "
+        "edit token is on this machine. Use this to cross between the two "
+        "systems by ID instead of guessing from a company name — portal "
+        "opportunity names are neither unique nor stable. A client with "
+        "several bound projects returns all of them; pass a project to "
+        "get one."
+    ),
+)
+async def get_portal_binding(client: str, project: Optional[str] = None) -> str:
+    """Args:
+    client: The recorder client name, exactly as list_clients reports it.
+    project: Optional project name to resolve a single opportunity.
+    """
+    try:
+        api = _client_factory()
+        bindings = await api.portal_bindings()
+        return render_portal_binding(bindings, client, project or "")
     except Exception as exc:  # noqa: BLE001
         return _error(exc)
 

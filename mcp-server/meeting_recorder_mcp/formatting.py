@@ -629,3 +629,57 @@ def portal_id_line(ids: Dict[str, Any], client: str) -> str:
                 f"— pass a project to resolve one: {listed}{more})")
     return (f"client/customer: {client} "
             f"(customerId: null — not bound to the portal)")
+
+
+def render_portal_binding(bindings: Dict[str, Any], client: str,
+                          project: str = "") -> str:
+    """The portal identity the recorder holds for a scope.
+
+    Exists so an assistant holding both servers' tools can cross the
+    boundary on an ID instead of guessing from a name. Portal
+    opportunity names are neither unique nor stable, and a wrong guess
+    files work against the wrong opportunity — which has happened.
+    """
+    c = _slug(client)
+    scopes = {k: e for k, e in sorted(bindings.items())
+              if isinstance(e, dict)
+              and (k == c or k.startswith(f"{c}__"))}
+    if project:
+        key = f"{c}__{_slug(project)}"
+        scopes = {key: scopes[key]} if key in scopes else {}
+
+    if not scopes:
+        where = f"{client} / {project}" if project else client
+        return (f"{where} is NOT BOUND to a portal opportunity. This is an "
+                f"empty result, not a failure to read: bind it from the "
+                f"Clients tab by pasting the portal's connection block.")
+
+    lines = [f"Portal binding(s) for {client}"
+             + (f" / {project}" if project else "") + ":", ""]
+    for key, e in scopes.items():
+        proj = key[len(c) + 2:] if key.startswith(f"{c}__") else "(no project)"
+        cid = e.get("customer_id") or e.get("customerId") or "(none)"
+        name = e.get("opportunity_name") or e.get("opportunityName") or ""
+        parent = e.get("parent_customer_id") or e.get("parentCustomerId")
+        is_parent = bool(e.get("is_parent_company") or e.get("isParentCompany"))
+        lines.append(f"- project: {proj}")
+        lines.append(f"    customerId: {cid}")
+        if name:
+            lines.append(f"    opportunityName: {name!r}  (display label, never a key)")
+        if parent:
+            lines.append(f"    parentCustomerId: {parent}")
+        if is_parent:
+            # The mis-paste this field exists to expose. Say what it
+            # means for the caller, not just that the flag is set.
+            lines.append(
+                "    WARNING: this binding is a PARENT COMPANY record, not an "
+                "opportunity. Anything filed against this customerId reaches "
+                "the account rather than the engagement — re-bind with the "
+                "opportunity's own connection block.")
+        lines.append(
+            f"    tokenPresent: {bool(e.get('token_present'))}"
+            "  (whether the edit token is on THIS machine — bindings roam "
+            "between your computers, keychains do not, so false on a roamed "
+            "binding is normal, not broken)")
+        lines.append("")
+    return "\n".join(lines).rstrip()

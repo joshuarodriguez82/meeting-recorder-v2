@@ -110,9 +110,14 @@ def test_the_join_identifiers_are_named_in_the_spec():
         "the spec must record that the company level is parentCustomerId, "
         "not customerId — getting this backwards is the error that cost a "
         "round trip with the portal session")
-    assert "Never emit a field named `opportunity`" in text, (
+    assert "No MCP *tool* emits a field named `opportunity`" in text, (
         "the spec must keep the `opportunity` vs `opportunityId` collision "
         "warning — both read as synonyms and are not")
+    assert "connection block is a different contract" in text, (
+        "the spec must keep wire format and tool surface separate: the "
+        "block's `opportunity` key is frozen by deployment, the tool "
+        "surface is free to be correct. Conflating them either breaks "
+        "installed bindings or re-imports the collision")
     assert "session_id" in text, (
         "the spec must keep stating that the identifier parameter stays "
         "session_id even though the tool is get_meeting")

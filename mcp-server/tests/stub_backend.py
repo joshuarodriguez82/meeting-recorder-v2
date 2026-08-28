@@ -228,6 +228,14 @@ PORTAL_BINDINGS = {
         "customer_id": "cus_acme_retainer",
         "opportunity_name": "ACME Support Retainer", "token_present": False},
     # Single bound project -> resolves to one customerId.
+    # A PARENT-company block pasted into a per-project binding — the
+    # mis-paste the portal's isParentCompany field exists to expose.
+    "umbrella__rollout": {
+        "customer_id": "cus_umbrella_parent",
+        "opportunity_name": "Umbrella Corp",
+        "is_parent_company": True,
+        "parent_customer_id": "cus_umbrella_parent",
+        "token_present": True},
     "initech__rollout": {
         "customer_id": "cus_initech_rollout",
         "opportunity_name": "Initech Rollout", "token_present": True},

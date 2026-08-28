@@ -56,12 +56,26 @@ Rules:
 
 1. **`customerId` is the only cross-reference.** Both sides store and
    echo it verbatim; neither invents an identifier.
-2. **Never emit a field named `opportunity`.** The portal already has
-   `opportunityId`, which is user-typed CRM free text — optional, often
-   blank, not unique, not validated, not a key to anything
+2. **No MCP *tool* emits a field named `opportunity`.** The portal
+   already has `opportunityId`, user-typed CRM free text — optional,
+   often blank, not unique, not validated, not a key to anything
    (`index.js:2746`). `opportunity` and `opportunityId` read as
    synonyms and are not, which makes the collision worse than
    `client`/`customer`.
+
+   **The connection block is a different contract and keeps its
+   `opportunity` key, frozen.** It is deployed wire format that
+   installed recorders already parse (`tools/engagement/index.html:370`,
+   `connectionPayload()`); renaming it would break every existing
+   binding for a cosmetic win. Its value is `STATE.customerName` — a
+   display name, nothing derived, not unique. New blocks additionally
+   carry `opportunityName` with the same value; the recorder prefers
+   `opportunityName` when present and falls back to `opportunity`, and
+   if both appear and disagree it takes `opportunityName` without
+   erroring, since both are labels either way.
+
+   Wire format and tool surface are separate contracts. Do not conflate
+   them: one is frozen by deployment, the other is free to be correct.
 3. **`opportunityName` is a label, never a key.** Portal opportunity
    names are neither unique nor stable. Where a return carries one it is
    marked as a label inline.
@@ -75,19 +89,38 @@ Rules:
    project resolves; none is an explicit `null`, because "not bound" is
    information.
 
-### Known gap: the recorder cannot tell a parent from an opportunity
+### Parent vs opportunity, and `get_portal_binding`
 
-The connection block carries `{portal, api, opportunity, customerId,
-editToken}` — no `isParentCompany` and no `parentCustomerId`. The
-recorder stores a `parentName` **label** but no parent ID. So if an SA
-pastes a parent-company block, its ID lands in the `customerId` slot and
-nothing on the recorder side can detect it.
+The connection block originally carried `{portal, api, opportunity,
+customerId, editToken}` — no `isParentCompany`, no `parentCustomerId`.
+The recorder stored a `parentName` **label** and no parent ID, so a
+parent-company block pasted into a per-project binding put a
+`parentCustomerId` in the `customerId` slot and nothing on the recorder
+side could detect it.
 
-Closing this needs the portal to add `isParentCompany` (and
-`parentCustomerId` where applicable) to the connection block; the
-recorder can then record it, and refuse or warn at bind time. Until
-then, treat a recorder-supplied `customerId` as *probably* an
-opportunity, and validate portal-side before writing anything against it.
+**Agreed fix (portal side): the block gains `isParentCompany` and
+`parentCustomerId`.** Both already exist on the record and in the list
+projection (`index.js:1364`), so this adds fields to a payload rather
+than changing a schema.
+
+With those present the recorder can, at bind time, tell a parent block
+from an opportunity block and refuse or warn rather than storing a
+mislabelled identifier — and `get_portal_binding` can answer both
+levels.
+
+**`get_portal_binding(client, project=None)`** — recorder side. Returns
+the portal identity the recorder holds for a scope:
+
+| Field | Meaning |
+| --- | --- |
+| `customerId` | the bound opportunity's key, verbatim |
+| `opportunityName` | display label; never a key |
+| `parentCustomerId` | the account behind it, when the block carried one |
+| `isParentCompany` | true when the SA bound a parent block (a warning sign for a per-project binding) |
+| `tokenPresent` | whether the edit token is on **this machine** — bindings roam, keychains do not |
+
+Without `project`, a client with several bound projects returns the set
+rather than one value, per rule 5.
 
 ## 4. Tool naming
 
@@ -103,6 +136,7 @@ opportunity, and validate portal-side before writing anything against it.
 | `list_clients` | yes — set-valued per §3.5 (a client may hold several) |
 | `list_meetings` | yes — exact |
 | `get_meeting` | yes — exact |
+| `get_portal_binding` | yes — the tool whose whole purpose is the identity |
 
 The identifier *parameter* remains `session_id`, not `meeting_id`: it is
 the key in `/sessions/{id}`, in every stored session JSON, and in the
@@ -152,3 +186,10 @@ Each repo has a test asserting **its own half** of this file:
 - portal: the equivalent on its side.
 
 Neither test asserts the other repo's half — neither can see it.
+
+The two repos **gate differently on purpose**, and that is not an
+inconsistency: the recorder's job runs in `pr-checks`, which gates pull
+requests, so a failing MCP test must block a merge. The portal's runs in
+the same workflow as a *deploy*, so it runs on every push but does not
+gate — a red Python suite should not stop a portal deploy for a tool
+that workflow does not ship.
