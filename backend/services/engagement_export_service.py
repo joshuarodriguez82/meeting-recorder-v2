@@ -72,6 +72,17 @@ SHEETS: List[dict] = [
         ("Question", lambda r: r.get("text", "")),
         ("Source", lambda r: r.get("source", "")),
     ]},
+    # Defect register. Ref leads because that is what triage calls the
+    # row by, and the sheet is read in the meeting it came from.
+    {"key": "defects", "title": "Defects", "cols": [
+        ("Defect", lambda r: r.get("title", "")),
+        ("Ref", lambda r: r.get("ref", "")),
+        ("Severity", lambda r: r.get("severity", "")),
+        ("Owner", lambda r: r.get("owner", "")),
+        ("Due", lambda r: r.get("due") or ""),
+        ("Disposition", lambda r: r.get("disposition", "")),
+        ("Source", lambda r: r.get("source", "")),
+    ]},
 ]
 
 

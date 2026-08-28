@@ -20,6 +20,9 @@ PipeWire (loopback exposed as a normal capture source).
 
 import contextlib
 import os
+import queue as _queue   # `queue.Empty` in the writer loop; the
+                         # local `import queue` inside the putter
+                         # shadows the name at function scope.
 import sys
 import threading
 import time
@@ -178,8 +181,11 @@ def _get_wasapi_host_api_index() -> Optional[int]:
         for i, api in enumerate(sd.query_hostapis()):
             if "WASAPI" in api.get("name", ""):
                 return i
-    except Exception:
-        pass
+    except Exception as e:
+        # Returning None silently disables WASAPI device dedup, so the
+        # device list gets duplicates and the user picks a phantom.
+        # Say why rather than leaving that unexplained.
+        logger.debug("WASAPI host-api lookup failed: %s", e)
     return None
 
 
@@ -306,8 +312,11 @@ def invalidate_device_cache():
     try:
         from core.audio_format_inspector import invalidate_mix_format_cache
         invalidate_mix_format_cache()
-    except Exception:
-        pass
+    except Exception as e:
+        # Windows-only dependency, so absence is normal and not worth a
+        # warning — but a FAILURE here leaves a stale mix-format cache,
+        # which shows up later as an open at the wrong sample rate.
+        logger.debug("mix-format cache not invalidated: %s", e)
 
 
 def _find_device_alternatives(primary_idx: int) -> List[int]:
@@ -494,6 +503,10 @@ class AudioCapture:
         self._loopback_samples: int = 0
         self._mic_overflows: int = 0
         self._loopback_overflows: int = 0
+        # Loopback blocks LOST outright: the queue was full and the
+        # drop-oldest retry also failed. Distinct from an overflow (which
+        # keeps the newest audio) — this is audio that reached no file.
+        self._loopback_drops: int = 0
 
     def get_capture_stats(self) -> dict:
         """Per-stream sample counts + overflow counts + sample rates.
@@ -504,6 +517,7 @@ class AudioCapture:
             "loopback_samples": self._loopback_samples,
             "mic_overflows": self._mic_overflows,
             "loopback_overflows": self._loopback_overflows,
+            "loopback_drops": getattr(self, "_loopback_drops", 0),
             "mic_sr": int(getattr(self, "actual_sr", SAMPLE_RATE) or SAMPLE_RATE),
             "loopback_sr": int(self._loopback_sr or SAMPLE_RATE),
             "mic_start_monotonic": self.mic_start_monotonic,
@@ -596,8 +610,14 @@ class AudioCapture:
                             if candidate is not None:
                                 try:
                                     candidate.close()
-                                except Exception:
-                                    pass
+                                except Exception as ce:
+                                    # The attempt's own failure is already
+                                    # logged above; this is cleanup of a
+                                    # half-open handle. Debug only — but a
+                                    # handle that won't close is why the
+                                    # NEXT attempt sees a busy device.
+                                    logger.debug(
+                                        "  closing failed candidate: %s", ce)
                             continue
                     if mic_started:
                         break
@@ -724,8 +744,11 @@ class AudioCapture:
             if self._loopback_sd_stream is not None:
                 try:
                     self._loopback_sd_stream.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Falling back to mic-only is already logged; this is
+                    # releasing the device we just gave up on. If it
+                    # sticks, the next recording finds it busy.
+                    logger.debug("closing loopback stream on fallback: %s", e)
                 self._loopback_sd_stream = None
 
     def stop(self) -> None:
@@ -767,8 +790,11 @@ class AudioCapture:
         # Wake the loopback writer thread out of its queue wait (Mac path).
         try:
             self._loopback_q_putter(None)
-        except Exception:
-            pass
+        except Exception as e:
+            # The sentinel is how the writer thread learns to exit. If it
+            # never lands the thread lingers holding the WAV open, which
+            # later reads as a truncated file rather than as this.
+            logger.warning("could not signal loopback writer to stop: %s", e)
 
         # Windows loopback shutdown order matters.
         #
@@ -961,8 +987,19 @@ class AudioCapture:
             try:
                 _ = self._loopback_queue.get_nowait()
                 self._loopback_queue.put_nowait(item)
-            except Exception:
-                pass
+            except Exception as e:
+                # The block is gone. Never raise — this runs on the audio
+                # callback and an exception here kills the stream
+                # mid-meeting, which is far worse than losing a block. But
+                # it must not vanish either: count it so the stop-time
+                # sync-integrity report can say audio was lost, instead of
+                # a clean-looking recording with a hole in it.
+                self._loopback_drops = getattr(self, "_loopback_drops", 0) + 1
+                if self._loopback_drops in (1, 10, 100) or \
+                        self._loopback_drops % 500 == 0:
+                    logger.warning(
+                        "Loopback block dropped (total=%d): %s",
+                        self._loopback_drops, e)
 
     def _loopback_writer_sd(self):
         """Drain the loopback queue and write frames to a WAV on disk."""
@@ -982,7 +1019,11 @@ class AudioCapture:
             while self._running:
                 try:
                     block = self._loopback_queue.get(timeout=0.5)
-                except Exception:
+                except _queue.Empty:
+                    # Genuinely routine: fires every 0.5s whenever audio
+                    # is quiet, so logging it would bury the log. Narrowed
+                    # from `except Exception` — that also swallowed real
+                    # queue failures and spun this loop forever.
                     continue
                 if block is None:
                     break
@@ -1002,8 +1043,13 @@ class AudioCapture:
         finally:
             try:
                 writer.close()
-            except Exception:
-                pass
+            except Exception as e:
+                # A close that fails can leave the WAV header unfinalized,
+                # i.e. an unreadable recording. The user must not discover
+                # that at playback with nothing in the log to explain it.
+                logger.error("Loopback WAV failed to close cleanly (%s) — "
+                             "the file may be truncated: %s",
+                             self._loopback_wav_path, e)
             logger.info(f"Loopback WAV closed: {self._loopback_wav_path}")
 
     def _safe_invoke(self, chunk: np.ndarray) -> None:

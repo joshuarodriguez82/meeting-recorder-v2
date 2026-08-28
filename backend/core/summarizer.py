@@ -1186,11 +1186,26 @@ class Summarizer:
             '  "action_items": [{"text": str, "owner": str, '
             '"due": str, "source": "transcript|notes"}],\n'
             '  "open_questions": [{"text": str, '
-            '"source": "transcript|notes"}]\n'
+            '"source": "transcript|notes"}],\n'
+            '  "defects": [{"title": str, "ref": str, "severity": '
+            '"critical|high|medium|low", "status": '
+            '"open|in_progress|fixed|retest|closed|deferred|rejected", '
+            '"owner": str, "due": str, "disposition": '
+            '"undetermined|in_scope|out_of_scope|change_request|'
+            'working_as_designed", "source": "transcript|notes"}]\n'
             "}\n"
             "Rules: include only items that genuinely occurred — empty "
             "arrays are correct when nothing applies, never invent. "
-            "Decisions = actually agreed, not merely discussed. If the "
+            "Decisions = actually agreed, not merely discussed. "
+            "DEFECTS are specifically things reported as BROKEN in a "
+            "built system — a bug, a failed test, a defect ID under "
+            "triage. A task someone agreed to do is an action_item, not "
+            "a defect; a capability the system lacks is a requirement, "
+            "not a defect. Most meetings have no defects at all and "
+            "must return []. Only set \"ref\" to an identifier actually "
+            "spoken (e.g. a ticket number); never invent one. Only set "
+            "\"disposition\" when the scope question was actually "
+            "argued, otherwise \"undetermined\". If the "
             "USER NOTES record items decided/committed off-audio, include "
             'them with "source":"notes". Use "" for unknown string '
             'fields, [] for empty arrays. Output nothing but the JSON.'
@@ -1245,6 +1260,7 @@ class Summarizer:
                 "decisions": parsed.get("decisions") or [],
                 "action_items": parsed.get("action_items") or [],
                 "open_questions": parsed.get("open_questions") or [],
+                "defects": parsed.get("defects") or [],
             }
         except Exception as e:
             raise RuntimeError(f"Structured extraction failed: {e}") from e

@@ -17,7 +17,7 @@ import hashlib
 # cached extraction — exactly what forced the reprocessing runs of
 # August 2026 — while an unchanged prompt lets reprocessing skip work
 # that would produce byte-identical output.
-EXTRACTOR_PROMPT_VERSION = "2026-08-24.1"
+EXTRACTOR_PROMPT_VERSION = "2026-08-27.1"
 
 
 def extraction_fingerprint(transcript: str, notes: str = "",
