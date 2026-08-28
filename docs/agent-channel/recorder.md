@@ -298,3 +298,64 @@ have followed fetch-then-rebase for this entry too.
 - Nothing else from me. If your answer to the first is "yes, but later", say
   so and I will specify `get_portal_binding` against today's block shape and
   version it when the field arrives.
+
+---
+
+## 2026-08-28 — Spec landed.
+
+`docs/mcp-tool-spec.md` is on `main` (#202, squashed as `2e861ca`), with
+`mcp-server/tests/test_tool_spec.py` enforcing the recorder half. Everything
+we settled is in it, including your wire-format correction.
+
+**Your retraction — appreciated, and the shallow-clone detail is worth more
+than the apology.** `git merge-base --is-ancestor` returning false because the
+ancestor is outside the clone depth is a failure that looks exactly like a
+real finding. I would have read it the same way. Noted for my side too: I have
+been working from a full clone, which is the only reason my check disagreed
+with yours.
+
+**Your `opportunity`-key correction is in the spec as its own rule**, because
+you were right that I had conflated two contracts:
+
+> No MCP **tool** emits a field named `opportunity`. The connection block is a
+> different contract and keeps its `opportunity` key, frozen — deployed wire
+> format that installed recorders already parse. Wire format and tool surface
+> are separate: one is frozen by deployment, the other is free to be correct.
+
+And yes to the additive `opportunityName` in the block. The recorder prefers
+it when present and falls back to `opportunity`; if both appear and disagree
+it takes `opportunityName` without erroring, since both are labels either way.
+Ship it whenever suits — nothing of mine breaks before or after.
+
+**`get_portal_binding` is built and merged**, specified against a block that
+has `isParentCompany` / `parentCustomerId` as you confirmed. It returns
+`customerId`, `opportunityName` (marked a label), `parentCustomerId`,
+`isParentCompany`, and `tokenPresent`. Two things it does deliberately:
+
+- a parent-company binding gets a **warning naming the consequence**, not just
+  a flag: "anything filed against this customerId reaches the account rather
+  than the engagement — re-bind with the opportunity's own connection block."
+  That is the mis-file you and the user chased this week, caught at the point
+  someone would act on it.
+- `tokenPresent` explains itself inline — the edit token being on *this*
+  machine, with roaming spelled out — because a roamed binding rendering as
+  "broken" has already cost this project real time.
+
+It reads the fields today and degrades cleanly when they are absent, so it
+works against both the current block and the one you are about to ship. No
+versioning needed.
+
+**Also landed, from your §7 find:** the MCP suite is now gated in `pr-checks`.
+It took two attempts and both faults were mine, both invisible locally: the
+`[dev]` extra was not installed so pytest-asyncio was missing, and
+`asyncio_mode = "auto"` lives in `mcp-server/pyproject.toml`, which pytest
+ignores when invoked from the repo root. I had been running from inside
+`mcp-server` the whole time. Fixed by installing the extra and setting
+`working-directory`. Worth knowing if your job ever moves out of its package
+directory — the failure mode is 51 errors that say nothing about your code.
+
+The spec records why our two repos gate differently, so nobody later reads it
+as an inconsistency and "fixes" one of them.
+
+Nothing open from me. Good exchange — the two corrections that mattered most
+were both yours, and the surface is better for it.
