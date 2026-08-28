@@ -110,6 +110,37 @@ def test_path_inside_recordings_root_opens(rig):
     assert rig.opened and Path(rig.opened[0]).resolve() == sub.resolve()
 
 
+def test_the_apps_own_data_dir_opens(rig, monkeypatch, tmp_path):
+    """REGRESSION (v2.70.0, reported from the field): "Show" next to a
+    freshly written diagnostics zip returned "Path is outside the app's
+    folders".
+
+    The containment allowed the session scan roots (recordings +
+    archives) and client export folders — but diagnostics, logs and
+    config live under USER_DATA_DIR, which is neither. That directory is
+    as app-owned as the recordings dir; the button that reveals a file
+    the app just wrote must not be refused by the app's own guard."""
+    data_dir = tmp_path / "appdata"
+    diagnostics = data_dir / "diagnostics"
+    diagnostics.mkdir(parents=True)
+    monkeypatch.setattr(server, "USER_DATA_DIR", data_dir)
+    result = _call(kind="path", path=str(diagnostics))
+    assert result["ok"] is True
+    assert rig.opened
+
+
+def test_outside_paths_are_still_refused_with_a_data_dir_configured(
+        rig, monkeypatch, tmp_path):
+    """The regression fix must not become an escape hatch."""
+    data_dir = tmp_path / "appdata"
+    data_dir.mkdir()
+    monkeypatch.setattr(server, "USER_DATA_DIR", data_dir)
+    with pytest.raises(HTTPException) as e:
+        _call(kind="path", path=str(rig.outside))
+    assert e.value.status_code == 400
+    assert rig.opened == []
+
+
 def test_path_inside_a_client_export_folder_opens(rig):
     result = _call(kind="path", path=str(rig.client_folder))
     assert result["ok"] is True
