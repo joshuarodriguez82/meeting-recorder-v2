@@ -1025,6 +1025,20 @@ export interface McpStatus {
   python: string;
 }
 
+// Whether one AI tool is set up, and where its config lives.
+export interface McpClientState {
+  client: string;
+  // False for tools we deliberately don't write for — Claude Code owns
+  // its own config file and has a CLI for this; VS Code's location
+  // depends on which extension is installed. Both keep the snippet.
+  writable: boolean;
+  path: string | null;
+  // "manual" | "absent" | "current" | "stale" | "unreadable".
+  // `stale` is configured-but-pointing-at-moved-paths, which produces a
+  // client that lists the server and fails every call.
+  state: string;
+}
+
 export const api = {
   // ── SA Tools Portal (engagement-register push) ────────────────────
   portalBindings: (): Promise<Record<string, PortalBinding>> =>
@@ -1918,6 +1932,21 @@ export const api = {
   // are the two absolute paths an MCP client config needs — resolved
   // here so the user never has to know where their install lives.
   getMcpStatus: () => request<McpStatus>("/integrations/mcp/status"),
+  // Per-client setup state. Each AI tool keeps its own config in its
+  // own file; v2.72's card implied otherwise and a user who ran the
+  // Claude Code command found Claude Desktop still blind.
+  getMcpClients: () =>
+    request<{ ready: boolean; clients: McpClientState[] }>(
+      "/integrations/mcp/clients"
+    ),
+  // Writes our entry into one client's config — merges, backs up, and
+  // refuses on a config it can't parse rather than clobbering it.
+  setUpMcpClient: (clientId: string) =>
+    request<{
+      ok: boolean; client: string; path: string | null;
+      backup?: string | null; created?: boolean; error?: string;
+    }>(`/integrations/mcp/clients/${encodeURIComponent(clientId)}`,
+       { method: "POST" }),
   // Installs the MCP SDK into the app's own venv. Reports pip's own
   // output on failure; the reason lives in those lines and nowhere else.
   installMcpSdk: () =>

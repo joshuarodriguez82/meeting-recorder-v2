@@ -326,6 +326,18 @@
   ]
  ],
  [
+  "/integrations/mcp/clients",
+  [
+   "GET"
+  ]
+ ],
+ [
+  "/integrations/mcp/clients/{client_id}",
+  [
+   "POST"
+  ]
+ ],
+ [
   "/integrations/mcp/install",
   [
    "POST"

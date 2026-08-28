@@ -396,6 +396,7 @@ from services.extension_bundle_service import (
     export_extension_files, extension_version_status,
 )
 from services import mcp_bundle_service
+from services import mcp_client_setup
 from services.outlook_web_scraper import (
     OutlookAuthExpired, OutlookScraperError, OutlookScraperUnavailable,
     format_for_briefing_parser, open_signin_window,
@@ -9027,6 +9028,58 @@ async def mcp_install():
     """
     result = await asyncio.to_thread(mcp_bundle_service.install_sdk)
     return {**result, "status": mcp_bundle_service.status()}
+
+
+@app.get("/integrations/mcp/clients")
+async def mcp_clients():
+    """Per-client setup state for the Settings card.
+
+    Each AI tool keeps its own config in its own file. v2.72's card
+    showed a Claude Code command and a Claude Desktop JSON block side by
+    side without saying so, and a user who ran the command found Desktop
+    still blind — `claude mcp add` writes ~/.claude.json, Desktop reads
+    claude_desktop_config.json. This endpoint reports each client
+    separately so the card can never imply that setting up one sets up
+    another.
+
+    `state` per client: manual (we don't write for it), absent, current,
+    stale (configured, but pointing at paths that have moved), or
+    unreadable.
+    """
+    status = await asyncio.to_thread(mcp_bundle_service.status)
+    python, launcher = status.get("python") or "", status.get("launcher") or ""
+    if not launcher:
+        # Nothing to write yet — the MCP server isn't set up on this
+        # machine. Say that rather than reporting every client "absent",
+        # which reads as "press the button" for a button that can't work.
+        return {"ready": False, "clients": []}
+    clients = [
+        await asyncio.to_thread(mcp_client_setup.client_status, cid, python, launcher)
+        for cid in ("claude-desktop", "cursor", "claude-code", "vscode")
+    ]
+    return {"ready": True, "clients": clients}
+
+
+@app.post("/integrations/mcp/clients/{client_id}")
+async def mcp_client_install(client_id: str):
+    """Write our entry into one client's MCP config.
+
+    Merges rather than replaces, backs the file up first, writes
+    atomically, and refuses outright on a config it cannot parse — see
+    mcp_client_setup's module docstring. Returns ok=false with a
+    readable reason rather than raising, because every realistic failure
+    here is something the user has to act on.
+    """
+    status = await asyncio.to_thread(mcp_bundle_service.status)
+    if not status.get("ready"):
+        raise HTTPException(
+            status_code=409,
+            detail="Turn on AI assistant access first — there is no server "
+                   "to point the client at yet.")
+    result = await asyncio.to_thread(
+        mcp_client_setup.install, client_id,
+        status.get("python") or "", status.get("launcher") or "")
+    return result
 
 
 @app.get("/briefing/today")
