@@ -257,3 +257,113 @@ def is_datetime(value: Any) -> bool:
     skip a meeting whose timestamps never coerced rather than crash its
     sort on a mixed-type list."""
     return isinstance(value, _dt.datetime)
+
+
+# ── Is a calendar connected at all? ──────────────────────────────────
+#
+# Reported three times from the field, always the same shape: the
+# calendar works on macOS and not on Windows, same account, same build.
+# Every earlier look went hunting in the Chrome extension's detail-pass
+# budget. The asymmetry was here.
+#
+# `/calendar/upcoming` has merged two sources since v2.22.2, and
+# `_merged` above is that merge. `/calendar/available` did not: in
+# `auto` mode it probed the LOCAL calendar only. EventKit answers on
+# macOS, so the chip read "Connected"; Outlook COM often doesn't on
+# Windows, so the same account read "Not connected" while the extension
+# was feeding the panel events on both machines.
+#
+# Windows is also where the local source fails most often now. The
+# "new" Outlook exposes no COM automation surface at all, so every user
+# Microsoft migrates loses it with no warning. `_calendar_outlook.
+# _get_outlook` has always known this — it logs "If using New Outlook,
+# switch to Classic or meetings won't load" — but it told the log while
+# the UI told the user to go "connect a calendar in Settings", which
+# they already had.
+#
+# So: report on every source the mode actually merges, name the one
+# that answered, and when none did, say why in words that fit the
+# platform. A macOS user must not be told to switch to classic Outlook.
+
+#: Modes in which extension events count toward "connected". `outlook`
+#: is excluded deliberately — choosing it means excluding the
+#: extension, so its events must not make the calendar look connected.
+_EXTENSION_COUNTS_IN = ("auto", "extension")
+
+#: Modes that consult the local calendar at all.
+_LOCAL_COUNTS_IN = ("auto", "outlook")
+
+
+def _local_unavailable_reason(platform: str) -> str:
+    if platform.startswith("win"):
+        return (
+            "Windows can only read your calendar from classic Outlook. The "
+            "new Outlook doesn't offer that connection at all, so if you've "
+            "been moved to it there is nothing for the app to read — switch "
+            "back to classic Outlook, or use the Chrome extension instead "
+            "(Settings -> Calendar)."
+        )
+    if platform == "darwin":
+        return (
+            "macOS hasn't granted calendar permission to Meeting Recorder, "
+            "or the Calendar app has no account set up. Check System "
+            "Settings -> Privacy & Security -> Calendars."
+        )
+    return "No local calendar is reachable on this platform."
+
+
+def calendar_availability(
+    source: str,
+    *,
+    local_available: bool,
+    extension: dict,
+    platform: str,
+) -> dict:
+    """Whether a calendar is connected, which source answered, and why not.
+
+    Pure: every input is passed in, so it is testable without importing
+    server.py (whose 9,000-line import needs the full dependency set —
+    the reason `/health` reported the wrong version for 70 releases).
+
+    ``extension`` is an ``ExtensionCalendarService.capture_status``
+    dict. ``platform`` is ``sys.platform``.
+
+    ``reason`` is always present and is empty when the calendar IS
+    available, so the UI can render it unconditionally rather than
+    branching on its existence.
+    """
+    ext_count = int(extension.get("event_count") or 0)
+    ext_answers = source in _EXTENSION_COUNTS_IN and ext_count > 0
+    local_answers = source in _LOCAL_COUNTS_IN and bool(local_available)
+
+    answering = []
+    if local_answers:
+        answering.append("local")
+    if ext_answers:
+        answering.append("extension")
+
+    if source == "off":
+        reason = ("The calendar is turned off in Settings, so no meetings "
+                  "are loaded and auto-record has nothing to trigger from.")
+    elif answering:
+        reason = ""
+    elif source == "extension":
+        reason = ("The Chrome extension hasn't sent any meetings yet. Open "
+                  "Outlook Web in Chrome with the extension installed, or "
+                  "switch Settings -> Calendar to use the local calendar.")
+    elif source == "outlook":
+        reason = _local_unavailable_reason(platform)
+    else:  # auto — both were tried, say so about both
+        reason = (
+            _local_unavailable_reason(platform)
+            + " The Chrome extension hasn't sent any meetings either."
+        )
+
+    return {
+        "available": bool(answering),
+        "source": source,
+        "local_available": local_answers,
+        "sources_answering": answering,
+        "reason": reason,
+        "event_count": ext_count,
+    }
