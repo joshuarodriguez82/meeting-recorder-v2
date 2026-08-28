@@ -460,7 +460,12 @@ Summarizer = None  # type: ignore
 
 logger = get_logger(__name__)
 
-app = FastAPI(title="Meeting Recorder Backend", version="2.0.0")
+# The version here is what /openapi.json advertises, which is what a
+# non-MCP assistant reads to know which build it is talking to. It
+# said "2.0.0" for 70 releases; see diagnostics_bundle.health_payload.
+app = FastAPI(title="Meeting Recorder Backend",
+              version=diagnostics_bundle.app_version()
+              or diagnostics_bundle.UNKNOWN_VERSION)
 
 # Only the Tauri WebView (and the Next dev server during `npm run dev`)
 # are legitimate browsers for this API. The old `allow_origins=["*"]`
@@ -1399,7 +1404,14 @@ class RecordingStatus(BaseModel):
 # ── Health ───────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "2.0.0"}
+    """Liveness, and which build is answering.
+
+    The only endpoint that needs no token, so it is what every external
+    client probes first — including the MCP server's --doctor. The
+    version it reports is the real one; see health_payload's docstring
+    for why it wasn't.
+    """
+    return diagnostics_bundle.health_payload()
 
 
 # Free-model roster is fetched live from OpenRouter's public catalog so
@@ -2446,65 +2458,64 @@ async def get_calendar_upcoming(hours: int = 168, refresh: bool = False):
 
 @app.get("/calendar/available")
 async def calendar_available():
-    """Whether the Record tab's Upcoming Meetings panel has a usable
-    calendar source right now.
+    """Whether the Record tab has a usable calendar source right now,
+    which source is answering, and — when none is — why not.
 
-    calendar_source-aware:
-      - "off" is always unavailable — no calendar source is in use.
-      - "extension" reports availability based on whether the Chrome
-        extension has ever synced events, NOT on Outlook — probing
-        Outlook here would defeat the entire point of this mode (never
-        touching Outlook COM / EventKit; see config/settings.py's
-        calendar_source docstring). Also includes `last_capture_at` and
-        `event_count` (from ExtensionCalendarService.capture_status) so
-        the Record tab's empty state can say plainly "no meetings from
-        the extension, last checked at X" instead of rendering
-        identically to a genuinely free calendar (field report
-        2026-08-13 — that ambiguity is how a whole day of meetings
-        went missing without the user realizing the mode was at fault).
-      - "auto" / "outlook" preserve the original behavior: probe the
-        local calendar backend.
+    The decision lives in calendar_feed.calendar_availability so it can
+    be tested without importing this module; see its comment for the
+    three-times-reported field bug it fixes (`auto` merges two sources
+    but this endpoint used to probe only one, so the same account read
+    "Connected" on macOS and "Not connected" on Windows).
+
+    Never probes Outlook in "extension"/"off" mode — that is the whole
+    point of those modes, and `is_outlook_available` enforces it again
+    underneath. The extension status is read in every mode because it
+    is a cheap local file read; `calendar_availability` decides whether
+    it counts.
     """
     svc.load_settings()
     source = _calendar_source()
-    if source == "off":
-        return {"available": False, "source": source}
-    if source == "extension":
-        status = {
-            "updated_at": None, "event_count": 0, "future_event_count": 0,
-            "last_import_path": None, "last_import_raw": None,
-            "last_import_kept": None, "last_import_dropped": None,
-            "last_import_fallback_reason": None, "last_import_at": None,
-        }
-        if svc.extension_calendar_svc:
-            try:
-                status = await asyncio.to_thread(
-                    svc.extension_calendar_svc.capture_status)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"Extension calendar status unavailable: {e}")
-        return {
-            "available": status["event_count"] > 0,
-            "source": source,
-            "last_capture_at": status["updated_at"],
-            "event_count": status["event_count"],
-            "future_event_count": status["future_event_count"],
-            # Which calendar-parse path produced the currently-retained
-            # events, and its raw/kept/dropped counts — see
-            # ExtensionCalendarService.replace_all's `import_meta` and
-            # the server's "Extension calendar: path=..." log line.
-            # Lets the Record tab say "2 meetings from the extension's
-            # structured capture" vs. "1 meeting recovered from text"
-            # instead of rendering identically regardless of which path
-            # ran (field report chain culminating 2026-08-14).
-            "last_import_path": status.get("last_import_path"),
-            "last_import_raw": status.get("last_import_raw"),
-            "last_import_kept": status.get("last_import_kept"),
-            "last_import_dropped": status.get("last_import_dropped"),
-            "last_import_fallback_reason": status.get("last_import_fallback_reason"),
-            "last_import_at": status.get("last_import_at"),
-        }
-    available = await asyncio.to_thread(is_outlook_available)
-    return {"available": bool(available), "source": source}
+
+    status = {
+        "updated_at": None, "event_count": 0, "future_event_count": 0,
+        "last_import_path": None, "last_import_raw": None,
+        "last_import_kept": None, "last_import_dropped": None,
+        "last_import_fallback_reason": None, "last_import_at": None,
+    }
+    if svc.extension_calendar_svc:
+        try:
+            status = await asyncio.to_thread(
+                svc.extension_calendar_svc.capture_status)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Extension calendar status unavailable: {e}")
+
+    # Only pay for the COM/EventKit probe in the modes that use it.
+    local_available = False
+    if source in ("auto", "outlook"):
+        local_available = bool(await asyncio.to_thread(is_outlook_available))
+
+    result = calendar_feed.calendar_availability(
+        source,
+        local_available=local_available,
+        extension=status,
+        platform=sys.platform,
+    )
+    # Extension capture detail the Record tab's empty state renders so
+    # an empty or stale capture never looks identical to a genuinely
+    # free calendar (field reports 2026-08-13 / 2026-08-14). Carried in
+    # every mode now, not just "extension": in "auto" the panel shows
+    # extension events too, so it needs the same counts to explain them.
+    result.update({
+        "last_capture_at": status["updated_at"],
+        "future_event_count": status["future_event_count"],
+        "last_import_path": status.get("last_import_path"),
+        "last_import_raw": status.get("last_import_raw"),
+        "last_import_kept": status.get("last_import_kept"),
+        "last_import_dropped": status.get("last_import_dropped"),
+        "last_import_fallback_reason": status.get("last_import_fallback_reason"),
+        "last_import_at": status.get("last_import_at"),
+    })
+    return result
 
 
 @app.get("/calendar/meeting-detail")

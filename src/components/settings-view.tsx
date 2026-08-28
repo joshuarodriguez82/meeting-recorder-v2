@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, formatBytes, type ArchiveStatus, type McpStatus, type Settings, type TemplateEntry, type CoPilotPromptEntry } from "@/lib/api";
+import { MCP_CLIENTS, mcpClient, mcpConfigSnippet } from "@/lib/mcp-config";
 import { estimateCopilotCost, formatUsd } from "@/lib/copilot-cost";
 import { confirmDialog } from "@/lib/confirm";
 import { toast } from "sonner";
@@ -1268,41 +1269,10 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
  * lists them rather than implying this is a Claude-only feature.
  */
 function AiAccessCard() {
-  // Where each client keeps its MCP config, so the snippet has somewhere
-  // to go. Claude Code is the odd one out: it writes its own config from
-  // a command, so it gets a command instead of JSON.
-  const MCP_CLIENTS = [
-    {
-      id: "claude-code",
-      label: "Claude Code",
-      kind: "cli" as const,
-      where: "Run it in any terminal. --scope user makes it available in every project.",
-    },
-    {
-      id: "claude-desktop",
-      label: "Claude Desktop",
-      kind: "json" as const,
-      where: "Settings → Developer → Edit Config (claude_desktop_config.json), then restart Claude Desktop.",
-    },
-    {
-      id: "cursor",
-      label: "Cursor",
-      kind: "json" as const,
-      where: "Settings → MCP → Add new global MCP server (~/.cursor/mcp.json).",
-    },
-    {
-      id: "vscode",
-      label: "VS Code (Cline / Continue)",
-      kind: "json" as const,
-      where: "Your extension's MCP settings — Cline: “MCP Servers → Configure”; Continue: the mcpServers block in config.json.",
-    },
-    {
-      id: "other",
-      label: "Other MCP client",
-      kind: "json" as const,
-      where: "Any client that speaks MCP over stdio takes this shape; some nest it under a different top-level key.",
-    },
-  ];
+  // Client list and snippet construction live in @/lib/mcp-config so
+  // the string the user pastes can be tested without rendering this
+  // screen. v2.72.0 built it inline and shipped a POSIX line
+  // continuation that broke every Windows paste; see its tests.
   const [client, setClient] = useState("claude-code");
   const [backendUrl, setBackendUrl] = useState("http://127.0.0.1:17645");
   const [token, setToken] = useState("");
@@ -1386,16 +1356,8 @@ function AiAccessCard() {
   // the repo, and there was no way for the user to work out the real one.
   const PY = mcp?.python ?? "";
   const LAUNCHER = mcp?.launcher ?? "";
-  // Quoted because macOS puts the app's data under
-  // ~/Library/Application Support/… — a space in the middle of an
-  // unquoted shell argument silently splits it in two.
-  const cliSnippet =
-    `claude mcp add meeting-recorder --scope user \\\n  -- "${PY}" "${LAUNCHER}"`;
-  const jsonSnippet = JSON.stringify(
-    { mcpServers: { "meeting-recorder": { command: PY, args: [LAUNCHER] } } },
-    null, 2);
-  const active = MCP_CLIENTS.find((c) => c.id === client) || MCP_CLIENTS[0];
-  const snippet = active.kind === "cli" ? cliSnippet : jsonSnippet;
+  const active = mcpClient(client);
+  const snippet = mcpConfigSnippet(client, PY, LAUNCHER);
 
   return (
     <Card>

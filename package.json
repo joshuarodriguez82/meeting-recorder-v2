@@ -9,7 +9,9 @@
     "lint": "eslint",
     "tauri": "tauri",
     "zip-bundle": "node scripts/run-python.js zip-bundle.py",
-    "tauri-prebuild": "next build && node scripts/run-python.js zip-bundle.py"
+    "tauri-prebuild": "next build && node scripts/run-python.js zip-bundle.py",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.0",
@@ -38,6 +40,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.4",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^3.2.7"
   }
 }

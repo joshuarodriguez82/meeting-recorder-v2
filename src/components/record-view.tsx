@@ -355,6 +355,15 @@ export function RecordView({
   const [calendarStatus, setCalendarStatus] = useState<{
     available?: boolean;
     source?: string;
+    // Which sources actually answered — "local", "extension", or both.
+    // `auto` merges two sources but availability used to be decided by
+    // the local one alone, which is why the same account reported
+    // "Connected" on macOS and "Not connected" on Windows.
+    sources_answering?: string[];
+    local_available?: boolean;
+    // Why the calendar ISN'T working, in words that fit the platform.
+    // Empty string when it is, so this renders unconditionally.
+    reason?: string;
     last_capture_at?: string | null;
     event_count?: number;
     future_event_count?: number;
@@ -1688,14 +1697,31 @@ export function RecordView({
                 <ReadinessRow
                   status={calendarAvailable ? "pass" : "info"}
                   title="Calendar"
+                  // Names the source that actually answered. A bare
+                  // "Connected" hides the case that took three field
+                  // reports to find: Outlook silently stopped working
+                  // and the extension has been carrying the panel
+                  // alone ever since, with nothing on screen saying so.
                   detail={
                     calendarAvailable === null
                       ? "Checking…"
-                      : calendarAvailable
-                        ? "Connected"
-                        : "Not connected"
+                      : !calendarAvailable
+                        ? "Not connected"
+                        : calendarStatus?.sources_answering?.length === 1
+                          ? calendarStatus.sources_answering[0] === "extension"
+                            ? "Connected (Chrome extension)"
+                            : "Connected (local calendar)"
+                          : "Connected"
                   }
-                  hint="Optional — connect a calendar in Settings for upcoming meetings and auto-record. Recording works fine without it."
+                  // The backend's reason is platform-specific and names
+                  // the actual cause; the old hint told people to
+                  // "connect a calendar in Settings" when they already
+                  // had one connected and something else was wrong.
+                  hint={
+                    calendarAvailable === false && calendarStatus?.reason
+                      ? `${calendarStatus.reason} Recording works fine without a calendar.`
+                      : "Optional — a calendar gives you upcoming meetings and auto-record. Recording works fine without it."
+                  }
                 />
               </div>
               )}

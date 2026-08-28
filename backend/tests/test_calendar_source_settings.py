@@ -331,11 +331,40 @@ def test_meeting_detail_never_calls_outlook_fetch_when_gated(source, monkeypatch
     assert result == {"attendees": [], "body": "", "join_url": None}
 
 
+#: Extension-capture fields the response carries in EVERY mode since
+#: v2.73 — `auto` shows extension events in the panel too, so it needs
+#: the same counts to explain them. All-empty when no extension store
+#: has ever been written.
+_NO_EXTENSION_CAPTURE = {
+    "event_count": 0, "last_capture_at": None, "future_event_count": 0,
+    "last_import_path": None, "last_import_raw": None,
+    "last_import_kept": None, "last_import_dropped": None,
+    "last_import_fallback_reason": None, "last_import_at": None,
+}
+
+
+def _split_reason(result: dict) -> tuple:
+    """Pull `reason` out so the rest can be compared exactly.
+
+    The dict comparisons below are deliberately exact — that is what
+    caught v2.73's added keys — but `reason` is user-facing prose whose
+    wording is allowed to improve without a test edit. Its CONTENT is
+    asserted separately, by keyword.
+    """
+    result = dict(result)
+    return result.pop("reason"), result
+
+
 def test_available_never_calls_outlook_fetch_when_off(monkeypatch):
     _wire(monkeypatch, calendar_source="off")
     monkeypatch.setattr(server, "is_outlook_available", _failing_spy("is_outlook_available"))
-    result = asyncio.run(server.calendar_available())
-    assert result == {"available": False, "source": "off"}
+    reason, result = _split_reason(asyncio.run(server.calendar_available()))
+    assert "off" in reason.lower(), reason
+    assert result == {
+        "available": False, "source": "off",
+        "local_available": False, "sources_answering": [],
+        **_NO_EXTENSION_CAPTURE,
+    }
 
 
 def test_available_reports_extension_data_not_outlook(monkeypatch):
@@ -351,9 +380,11 @@ def test_available_reports_extension_data_not_outlook(monkeypatch):
             "future_event_count": 2,
         }))
     monkeypatch.setattr(server, "is_outlook_available", _failing_spy("is_outlook_available"))
-    result = asyncio.run(server.calendar_available())
+    reason, result = _split_reason(asyncio.run(server.calendar_available()))
+    assert reason == "", "an available calendar has nothing to explain"
     assert result == {
         "available": True, "source": "extension",
+        "local_available": False, "sources_answering": ["extension"],
         "last_capture_at": "2026-08-13T13:00:00",
         "event_count": 3, "future_event_count": 2,
         "last_import_path": None, "last_import_raw": None,
@@ -366,21 +397,66 @@ def test_available_reports_extension_data_not_outlook(monkeypatch):
             "updated_at": None, "event_count": 0, "future_event_count": 0,
         }))
     monkeypatch.setattr(server, "is_outlook_available", _failing_spy("is_outlook_available"))
-    result = asyncio.run(server.calendar_available())
+    reason, result = _split_reason(asyncio.run(server.calendar_available()))
+    assert "extension" in reason.lower(), reason
     assert result == {
         "available": False, "source": "extension",
-        "last_capture_at": None, "event_count": 0, "future_event_count": 0,
-        "last_import_path": None, "last_import_raw": None,
-        "last_import_kept": None, "last_import_dropped": None,
-        "last_import_fallback_reason": None, "last_import_at": None,
+        "local_available": False, "sources_answering": [],
+        **_NO_EXTENSION_CAPTURE,
     }
 
 
 def test_available_uses_outlook_when_auto(monkeypatch):
     _wire(monkeypatch, calendar_source="auto")
     monkeypatch.setattr(server, "is_outlook_available", lambda: True)
-    result = asyncio.run(server.calendar_available())
-    assert result == {"available": True, "source": "auto"}
+    reason, result = _split_reason(asyncio.run(server.calendar_available()))
+    assert reason == ""
+    assert result == {
+        "available": True, "source": "auto",
+        "local_available": True, "sources_answering": ["local"],
+        **_NO_EXTENSION_CAPTURE,
+    }
+
+
+def test_auto_is_available_on_the_extension_alone(monkeypatch):
+    """THE FIELD BUG, at the endpoint.
+
+    `auto` merges the local calendar and the extension — /calendar/
+    upcoming has done so since v2.22.2 — but this endpoint used to
+    decide availability from the local source alone. EventKit answers on
+    macOS, so the Record tab's chip read "Connected"; Outlook COM often
+    does not on Windows (the new Outlook exposes no COM automation at
+    all), so the SAME ACCOUNT read "Not connected" while the extension
+    fed the panel on both machines. Reported three times before anyone
+    looked here.
+    """
+    _wire(monkeypatch, calendar_source="auto", extension_svc=SimpleNamespace(
+        capture_status=lambda: {
+            "updated_at": "2026-08-28T08:00:00", "event_count": 54,
+            "future_event_count": 41,
+        }))
+    monkeypatch.setattr(server, "is_outlook_available", lambda: False)
+    reason, result = _split_reason(asyncio.run(server.calendar_available()))
+    assert result["available"] is True
+    assert result["sources_answering"] == ["extension"]
+    assert result["local_available"] is False
+    assert result["event_count"] == 54
+    assert reason == "", "a working calendar must not carry a failure reason"
+
+
+def test_auto_with_nothing_answering_explains_both_halves(monkeypatch):
+    """And when neither answers, the user is told why — for the platform
+    they are on. The backend has always known that the new Outlook has
+    no automation surface (_get_outlook logs it); it told the log while
+    the UI told the user to go connect a calendar they already had."""
+    _wire(monkeypatch, calendar_source="auto")
+    monkeypatch.setattr(server, "is_outlook_available", lambda: False)
+    monkeypatch.setattr(server.sys, "platform", "win32")
+    reason, result = _split_reason(asyncio.run(server.calendar_available()))
+    assert result["available"] is False
+    assert result["sources_answering"] == []
+    assert "classic" in reason.lower(), reason
+    assert "extension" in reason.lower(), reason
 
 
 def test_off_consults_neither_source_and_returns_empty_without_error(monkeypatch):

@@ -1835,16 +1835,23 @@ export const api = {
       `/calendar/meeting-detail?subject=${encodeURIComponent(subject)}`
       + `&start=${encodeURIComponent(start)}`
     ),
-  // `source`/`last_capture_at`/`event_count`/`future_event_count` are
-  // only meaningfully populated when calendar_source is "extension" —
-  // see backend/server.py's calendar_available docstring. The Record
-  // tab's empty state uses these so an empty/stale extension capture
-  // never renders identically to a genuinely free calendar (field
-  // report 2026-08-13).
+  // Populated in EVERY mode since v2.73: `auto` merges the local
+  // calendar and the extension, so the panel needs the extension's
+  // counts to explain what it is showing there too. Availability used
+  // to be decided by the local source alone even in `auto`, which is
+  // why the same account reported "Connected" on macOS and "Not
+  // connected" on Windows — see calendar_feed.calendar_availability.
   isCalendarAvailable: () =>
     request<{
       available: boolean;
       source?: string;
+      // "local", "extension", or both. Empty when nothing answered.
+      sources_answering?: string[];
+      local_available?: boolean;
+      // Why it ISN'T working, phrased for this platform. Always
+      // present; empty string when the calendar is available, so the
+      // UI can render it without branching on existence.
+      reason?: string;
       last_capture_at?: string | null;
       event_count?: number;
       future_event_count?: number;
