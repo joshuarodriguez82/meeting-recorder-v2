@@ -58,6 +58,12 @@ jobs:
       # blocking lint gate here would red-flag every PR for debt it
       # didn't introduce. `next build` is what actually ships and it
       # typechecks against the strict tsconfig — that's the real gate.
+      # Runs before the build: it is seconds, and a failure here is a
+      # more precise message than a build error. Added with the harness
+      # itself — v2.72.0 shipped a Windows-hostile config snippet that
+      # nothing could have caught, because the frontend had no suite.
+      - name: Frontend tests
+        run: npm test
       - name: Build (typechecks via strict tsconfig)
         run: npm run build
         env:
