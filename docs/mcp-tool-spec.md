@@ -151,6 +151,17 @@ Known at time of writing: `portal_list_opportunities`,
 `portal_get_opportunity`, `portal_list_artifacts`, `portal_get_customer`,
 `list_assumptions` (renamed from `assumptions` to satisfy verb_noun).
 
+## 4a. Reaching the backend
+
+Recorder side only, recorded here because it is the other half of "can
+an external tool actually use this". The Tauri shell writes the live
+port to `<data_root>/backend-port` beside `extension-token`, because
+`pick_free_port()` falls back to an ephemeral port when 17645 is taken
+and the IPC that knows it only serves the webview. Precedence:
+`MEETING_RECORDER_URL` > `MEETING_RECORDER_PORT` > the port file >
+17645. An explicit override outranks the file so a tunnel is never
+overruled by a stale local write.
+
 ## 5. Read-only
 
 Every tool on both surfaces is annotated read-only. Write tools are

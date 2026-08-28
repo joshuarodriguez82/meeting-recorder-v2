@@ -62,7 +62,39 @@ fn pick_free_port() -> u16 {
 }
 
 fn backend_port() -> u16 {
-    *BACKEND_PORT.get_or_init(pick_free_port)
+    *BACKEND_PORT.get_or_init(|| {
+        let port = pick_free_port();
+        // Persist it next to the auth token so anything OUTSIDE this
+        // process tree can find the backend.
+        //
+        // pick_free_port() falls back to an OS-assigned ephemeral port
+        // whenever 17645 is already held, and until now that number was
+        // written nowhere. The Tauri IPC `get_backend_port` only serves
+        // the webview, so every external client — the MCP server, a
+        // script, any AI tool driving the OpenAPI surface — assumed
+        // 17645 and silently pointed at a dead port. The failure reads
+        // as "the app isn't running" while the app is plainly running,
+        // which is the worst version of it.
+        //
+        // Best-effort by design: a write failure (read-only FS, AV
+        // interference) degrades to exactly the previous behaviour —
+        // clients fall back to 17645 — so this can never stop the app
+        // from starting.
+        let _ = write_port_file(port);
+        port
+    })
+}
+
+fn port_file_path() -> std::path::PathBuf {
+    data_root_dir().join("backend-port")
+}
+
+fn write_port_file(port: u16) -> std::io::Result<()> {
+    let path = port_file_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, port.to_string())
 }
 
 /// Per-launch shared secret between the three trusted parties: this
