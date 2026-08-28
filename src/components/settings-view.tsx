@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, formatBytes, type ArchiveStatus, type McpStatus, type Settings, type TemplateEntry, type CoPilotPromptEntry } from "@/lib/api";
+import { api, formatBytes, type ArchiveStatus, type McpClientState, type McpStatus, type Settings, type TemplateEntry, type CoPilotPromptEntry } from "@/lib/api";
 import { MCP_CLIENTS, mcpClient, mcpConfigSnippet } from "@/lib/mcp-config";
 import { estimateCopilotCost, formatUsd } from "@/lib/copilot-cost";
 import { confirmDialog } from "@/lib/confirm";
@@ -1287,6 +1287,25 @@ function AiAccessCard() {
   const [installing, setInstalling] = useState(false);
   const [installErr, setInstallErr] = useState("");
 
+  // Per-client setup state, keyed by client id.
+  const [clients, setClients] = useState<McpClientState[]>([]);
+  const [clientsLoading, setClientsLoading] = useState(false);
+  const [settingUp, setSettingUp] = useState(false);
+  const [setupMsg, setSetupMsg] = useState("");
+  const [setupOk, setSetupOk] = useState(true);
+
+  const loadClients = useCallback(async () => {
+    setClientsLoading(true);
+    try {
+      const res = await api.getMcpClients();
+      setClients(res.clients || []);
+    } catch {
+      setClients([]);
+    } finally {
+      setClientsLoading(false);
+    }
+  }, []);
+
   const loadMcp = useCallback(async () => {
     setMcpLoading(true);
     try {
@@ -1301,6 +1320,10 @@ function AiAccessCard() {
   useEffect(() => {
     loadMcp();
   }, [loadMcp]);
+
+  useEffect(() => {
+    if (mcp?.ready) loadClients();
+  }, [mcp?.ready, loadClients]);
 
   useEffect(() => {
     (async () => {
@@ -1349,6 +1372,34 @@ function AiAccessCard() {
     }
   };
 
+  const clientState = (id: string) =>
+    clients.find((c) => c.client === id)?.state ?? "absent";
+
+  const setUpClient = async (id: string) => {
+    setSettingUp(true);
+    setSetupMsg("");
+    try {
+      const res = await api.setUpMcpClient(id);
+      setSetupOk(res.ok);
+      if (res.ok) {
+        setSetupMsg(
+          `Written to ${res.path}. Quit ${mcpClient(id).label} completely and reopen it.`);
+        toast.success(`${mcpClient(id).label} is set up.`);
+        await loadClients();
+      } else {
+        // The backend's message names the actual problem — an
+        // unparseable config it deliberately did NOT overwrite, or a
+        // permission error.
+        setSetupMsg(res.error || "Couldn't write the config.");
+      }
+    } catch (e) {
+      setSetupOk(false);
+      setSetupMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSettingUp(false);
+    }
+  };
+
   // The two paths a client needs. Resolved by the backend from the
   // interpreter it is itself running on, so they are correct for THIS
   // machine — before v2.72 this card printed a placeholder that could
@@ -1357,6 +1408,7 @@ function AiAccessCard() {
   const PY = mcp?.python ?? "";
   const LAUNCHER = mcp?.launcher ?? "";
   const active = mcpClient(client);
+  const activeClient = clients.find((c) => c.client === client);
   const snippet = mcpConfigSnippet(client, PY, LAUNCHER);
 
   return (
@@ -1441,26 +1493,106 @@ function AiAccessCard() {
 
         {mcp?.ready && (<>
         <div className="space-y-2">
-          <Label>Your AI tool</Label>
-          <div className="flex flex-wrap gap-2">
-            {MCP_CLIENTS.map((c) => (
-              <Button
-                key={c.id}
-                type="button"
-                size="sm"
-                variant={c.id === client ? "default" : "outline"}
-                onClick={() => setClient(c.id)}
-              >
-                {c.label}
-              </Button>
-            ))}
+          <div className="flex items-center justify-between">
+            <Label>Your AI tool</Label>
+            {clientsLoading && (
+              <span className="text-xs text-muted-foreground">
+                <Loader2 className="mr-1 inline h-3 w-3 animate-spin" />
+                checking
+              </span>
+            )}
           </div>
+          {/* Each tool carries ITS OWN state. v2.72 showed one command
+              and one JSON block side by side and never said that
+              setting up one does not set up another — a user ran the
+              Claude Code command, restarted everything, and found
+              Claude Desktop still blind. */}
+          <div className="flex flex-wrap gap-2">
+            {MCP_CLIENTS.map((c) => {
+              const st = clientState(c.id);
+              return (
+                <Button
+                  key={c.id}
+                  type="button"
+                  size="sm"
+                  variant={c.id === client ? "default" : "outline"}
+                  onClick={() => setClient(c.id)}
+                >
+                  {st === "current" && (
+                    <CheckCircle2 className="mr-1 h-3 w-3 text-green-600" />
+                  )}
+                  {st === "stale" && (
+                    <AlertTriangle className="mr-1 h-3 w-3 text-amber-600" />
+                  )}
+                  {c.label}
+                </Button>
+              );
+            })}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Every tool is configured separately — setting up one does not
+            set up the others.
+          </p>
         </div>
+
+        {activeClient?.writable ? (
+          <div className="space-y-2 rounded-md border p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-medium">
+                  {clientState(client) === "current"
+                    ? `${active.label} is set up`
+                    : clientState(client) === "stale"
+                      ? `${active.label} is set up, but pointing somewhere else`
+                      : clientState(client) === "unreadable"
+                        ? `${active.label}'s config can't be read`
+                        : `${active.label} isn't set up yet`}
+                </p>
+                <p className="break-all text-xs text-muted-foreground">
+                  {activeClient.path}
+                </p>
+              </div>
+              <Button type="button" size="sm" disabled={settingUp}
+                      variant={clientState(client) === "current" ? "outline" : "default"}
+                      onClick={() => setUpClient(client)}>
+                {settingUp ? (
+                  <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Writing…</>
+                ) : clientState(client) === "current" ? (
+                  "Rewrite"
+                ) : clientState(client) === "stale" ? (
+                  "Update paths"
+                ) : (
+                  `Set up ${active.label}`
+                )}
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {clientState(client) === "stale"
+                ? "It points at paths that have moved, so its tools will fail. Updating rewrites them."
+                : "Writes the config for you — your other servers and settings are kept, and the file is backed up first. Quit the app fully and reopen it afterwards."}
+            </p>
+            {setupMsg && (
+              <p className={`text-xs ${setupOk ? "text-muted-foreground" : "text-destructive"}`}>
+                {!setupOk && <AlertTriangle className="mr-1 inline h-3 w-3" />}
+                {setupMsg}
+              </p>
+            )}
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            {active.label} has to be set up by hand — it keeps its config
+            somewhere the app shouldn&apos;t write to. Use the snippet below.
+          </p>
+        )}
 
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <Label>
-              {active.kind === "cli" ? "Run this once" : "Add this to the client's MCP config"}
+              {activeClient?.writable
+                ? "Or do it by hand"
+                : active.kind === "cli"
+                  ? "Run this once"
+                  : "Add this to the client's MCP config"}
             </Label>
             <Button type="button" size="sm" variant="outline"
                     onClick={() => copy("Config", snippet)}>

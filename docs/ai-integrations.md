@@ -61,21 +61,59 @@ HTTP door.
 
 ## Door 1 — MCP
 
+### Read this first: every tool is set up separately
+
+This is the thing that costs people an evening. **Configuring one AI
+tool does not configure the others.** They do not share settings:
+
+| Tool | Reads |
+| --- | --- |
+| Claude Code | `~/.claude.json` (Windows: `C:\Users\<you>\.claude.json`) |
+| Claude Desktop | `claude_desktop_config.json`, a different file |
+| Cursor | `~/.cursor/mcp.json` |
+| VS Code (Cline / Continue) | the extension's own settings |
+
+Running `claude mcp add` sets up **Claude Code only**. Claude Desktop
+will still see nothing, because nothing wrote its file.
+
+And one more that catches everyone: **a Claude session running in the
+cloud can never see this.** claude.ai in a browser, Claude on your
+phone, and a remote Claude Code session all run on Anthropic's machines,
+and this server is a program on your disk talking to `127.0.0.1`. It
+works in tools running **on the same computer as the app** — that is not
+a bug to work around, it is why your transcripts never leave your
+machine. Check which kind you are in by asking the session to run `pwd`:
+a path on your own disk means local.
+
 ### The one-click path (installed builds)
 
 Open **Settings → Templates & Integrations → AI assistant access**.
 
-1. Click **Turn on**. That installs the MCP protocol library into the
-   app's own Python — nothing else to download, no virtualenv of your
-   own, and the app keeps working whether or not it succeeds.
-2. Pick your AI tool from the row of buttons.
-3. Click **Copy** and paste what you get into that tool's MCP config
-   (the card names the exact place for each one), then restart it.
+1. Click **Turn on** — once, ever. That installs the MCP protocol
+   library into the app's own Python. Nothing else to download, no
+   virtualenv of your own, and the app keeps working whether or not it
+   succeeds.
+2. Pick your AI tool. Each button shows that tool's own state: a green
+   tick means it is set up, an amber warning means it is set up but
+   pointing at paths that have moved.
+3. Click **Set up <tool>**. The app writes that tool's config file for
+   you — merging into whatever is already there, keeping your other
+   servers and settings, and backing the file up first.
+4. **Quit that tool completely and reopen it.** On Windows that means
+   the system-tray icon too, not just the window.
 
-The snippet already has the two absolute paths filled in **for your
-machine** — the app's Python and the launcher inside its own runtime
-folder. Paste it as-is; there is nothing to substitute and no token to
-copy, because the server finds the app's address and token by itself.
+Repeat steps 2–4 for each tool you use.
+
+**Claude Desktop and Cursor** are written for you. **Claude Code** keeps
+its one-line command, because it owns its own config file and has a
+supported CLI for this. **VS Code** stays manual, because the location
+depends on which extension you have installed and guessing wrong writes
+a file nothing reads.
+
+Whatever the app writes, the equivalent snippet is on the card too, with
+the two absolute paths already filled in for your machine. There is
+nothing to substitute and no token to copy — the server finds the app's
+address and token by itself.
 
 Why the paths cannot be guessed: they live under your per-user app data
 directory, which differs by OS and by user. That is exactly why the card
@@ -255,10 +293,21 @@ python scripts/handshake_check.py   # real stdio client: initialize + list_tools
 python scripts/e2e_stub_check.py    # every tool against a stub backend
 ```
 
-**"The tools don't appear."** Restart the client fully (quit, don't just
-close the window). Confirm you used the absolute Python path from the
-Settings card (or your venv's, on a source checkout) — a bare `python`
-resolves to an interpreter that has no `mcp` installed.
+**"The tools don't appear."** In order:
+
+1. **Is it that tool that you set up?** Setting up Claude Code does not
+   set up Claude Desktop. The card shows a tick against each tool it has
+   written for; check the one you are actually using.
+2. **Is the session running on this computer?** A cloud session — the
+   browser, your phone, a remote Claude Code session — cannot reach a
+   server on your disk, ever. Ask it to run `pwd`.
+3. **Did the tool restart fully?** Quit it, including any system-tray
+   icon, and reopen.
+4. **Is Meeting Recorder running?** The backend only exists while the
+   app is open.
+5. On a source checkout, confirm you used the venv's absolute Python
+   path — a bare `python` resolves to an interpreter with no `mcp`
+   installed.
 
 **"The Turn on button failed."** The card shows pip's own output, and
 the reason is in those lines: no network, a proxy that intercepts the
