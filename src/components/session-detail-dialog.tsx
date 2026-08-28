@@ -95,6 +95,29 @@ const LIVE_RECORDING_BUTTON_TOOLTIP =
   "This session is still recording — stop it first, then its audio can " +
   "be played and processed.";
 
+// Every tab this dialog actually renders a panel for. A caller deep-
+// linking to a tab outside this set used to leave Radix with an active
+// value matching no `TabsContent`, which renders NOTHING: a dialog with
+// a fully populated tab strip and a blank body, and no error anywhere.
+//
+// Field report 2026-08-27: Insights → Open Loops asked for
+// "commitments" and "follow_ups", neither of which exists here, so two
+// of its three sections opened an empty dialog while the third (which
+// happened to pass "decisions") worked — the confusing part of the
+// report, and the reason this normalises rather than trusting callers.
+// backend/tests/test_session_dialog_tab_targets.py cross-checks every
+// call site against this list so a wrong name fails CI, not the user.
+const VALID_TABS = [
+  "overview", "notes", "transcript", "speakers", "screenshots",
+  "copilot", "summary", "actions", "decisions", "requirements",
+] as const;
+
+function normalizeTab(name: string | undefined): string {
+  return (VALID_TABS as readonly string[]).includes(name || "")
+    ? (name as string)
+    : "overview";
+}
+
 export function SessionDetailDialog({
   sessionId, open, onOpenChange, onChanged,
   initialTab = "overview", existingClients = [], projectsByClient = {},
@@ -110,7 +133,7 @@ export function SessionDetailDialog({
   const [loading, setLoading] = useState(false);
   const [processing, setProcessing] = useState<string | null>(null);
   const [processingStatus, setProcessingStatus] = useState("");
-  const [tab, setTab] = useState(initialTab);
+  const [tab, setTab] = useState(() => normalizeTab(initialTab));
   // Resolved backend origin for direct media URLs (audio player,
   // screenshots). MUST come from getBaseUrl() — the backend port is
   // OS-picked at app startup, so any hardcoded 127.0.0.1:17645 points
@@ -260,7 +283,7 @@ export function SessionDetailDialog({
 
   useEffect(() => {
     // Sync tab selection when caller changes initialTab while dialog is open
-    if (open) setTab(initialTab);
+    if (open) setTab(normalizeTab(initialTab));
   }, [initialTab, open]);
 
   const reload = async () => {
