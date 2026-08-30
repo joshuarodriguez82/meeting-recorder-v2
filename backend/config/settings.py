@@ -211,6 +211,14 @@ class Settings:
     retention_enabled: bool
     retention_processed_days: int
     retention_unprocessed_days: int
+    # Sweep client Knowledge Folders on a timer so documents added after
+    # the folder was configured become searchable without anyone
+    # remembering to click Reindex. On by default: the embedding model
+    # is local (no API spend) and index_folder skips unchanged files by
+    # mtime, so a settled folder costs stat calls. The interval has a
+    # floor — see services/knowledge_index_schedule.py, constraint 3.
+    auto_index_knowledge: bool
+    auto_index_interval_minutes: int
     # Whether to run the streaming live-transcription pipeline during
     # recording. When False the recording itself is unaffected — we just
     # don't spin up the LiveTranscriber thread or its 16 kHz resample,
@@ -526,6 +534,9 @@ class Settings:
             retention_enabled=_get_bool("RETENTION_ENABLED", False),
             retention_processed_days=_get_int("RETENTION_PROCESSED_DAYS", 7),
             retention_unprocessed_days=_get_int("RETENTION_UNPROCESSED_DAYS", 30),
+            auto_index_knowledge=_get_bool("AUTO_INDEX_KNOWLEDGE", True),
+            auto_index_interval_minutes=_get_int(
+                "AUTO_INDEX_INTERVAL_MINUTES", 15),
             ai_provider=_get("AI_PROVIDER", "anthropic"),
             openai_api_key=_get("OPENAI_API_KEY", ""),
             openai_base_url=_get("OPENAI_BASE_URL", ""),
@@ -635,6 +646,8 @@ class Settings:
         retention_enabled: bool = False,
         retention_processed_days: int = 7,
         retention_unprocessed_days: int = 30,
+        auto_index_knowledge: bool = True,
+        auto_index_interval_minutes: int = 15,
         ai_provider: str = "anthropic",
         openai_api_key: str = "",
         openai_base_url: str = "",
@@ -741,6 +754,8 @@ class Settings:
             f"RETENTION_ENABLED={'true' if retention_enabled else 'false'}\n"
             f"RETENTION_PROCESSED_DAYS={retention_processed_days}\n"
             f"RETENTION_UNPROCESSED_DAYS={retention_unprocessed_days}\n"
+            f"AUTO_INDEX_KNOWLEDGE={auto_index_knowledge}\n"
+            f"AUTO_INDEX_INTERVAL_MINUTES={auto_index_interval_minutes}\n"
             f"AI_PROVIDER={ai_provider}\n"
             f"OPENAI_API_KEY={env_openai}\n"
             f"OPENAI_BASE_URL={openai_base_url}\n"

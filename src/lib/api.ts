@@ -166,6 +166,15 @@ export interface Settings {
   launch_on_startup: boolean;
   auto_follow_up_email: boolean;
   retention_enabled: boolean;
+  // Sweep client Knowledge Folders on a timer so documents added after
+  // the folder was configured become searchable without anyone
+  // remembering to click Reindex. On by default — the embedding model
+  // is local (no API spend) and unchanged files are skipped by mtime.
+  auto_index_knowledge: boolean;
+  // Floored at 5 minutes server-side: a stat() against a Google Drive
+  // path is a network round-trip, so a tighter loop is a stat storm
+  // with no gain.
+  auto_index_interval_minutes: number;
   retention_processed_days: number;
   retention_unprocessed_days: number;
   is_configured: boolean;
