@@ -395,6 +395,7 @@ from services.extension_bundle_service import (
     bundled_extension_version, export_dir as extension_export_dir,
     export_extension_files, extension_version_status,
 )
+from services import knowledge_index_schedule
 from services import mcp_bundle_service
 from services import mcp_client_setup
 from services.outlook_web_scraper import (
@@ -1164,6 +1165,8 @@ class SettingsDTO(BaseModel):
     launch_on_startup: bool
     auto_follow_up_email: bool
     retention_enabled: bool
+    auto_index_knowledge: bool = True
+    auto_index_interval_minutes: int = 15
     retention_processed_days: int
     retention_unprocessed_days: int
     is_configured: bool
@@ -1748,6 +1751,8 @@ async def get_settings():
         launch_on_startup=s.launch_on_startup,
         auto_follow_up_email=s.auto_follow_up_email,
         retention_enabled=s.retention_enabled,
+        auto_index_knowledge=s.auto_index_knowledge,
+        auto_index_interval_minutes=s.auto_index_interval_minutes,
         retention_processed_days=s.retention_processed_days,
         retention_unprocessed_days=s.retention_unprocessed_days,
         is_configured=s.is_configured,
@@ -1864,6 +1869,8 @@ async def save_settings(payload: SettingsDTO):
         launch_on_startup=payload.launch_on_startup,
         auto_follow_up_email=payload.auto_follow_up_email,
         retention_enabled=payload.retention_enabled,
+        auto_index_knowledge=payload.auto_index_knowledge,
+        auto_index_interval_minutes=payload.auto_index_interval_minutes,
         retention_processed_days=payload.retention_processed_days,
         retention_unprocessed_days=payload.retention_unprocessed_days,
         ai_provider=payload.ai_provider or "anthropic",
@@ -3549,6 +3556,8 @@ async def set_live_copilot_enabled(payload: dict):
         launch_on_startup=s.launch_on_startup,
         auto_follow_up_email=s.auto_follow_up_email,
         retention_enabled=s.retention_enabled,
+        auto_index_knowledge=s.auto_index_knowledge,
+        auto_index_interval_minutes=s.auto_index_interval_minutes,
         retention_processed_days=s.retention_processed_days,
         retention_unprocessed_days=s.retention_unprocessed_days,
         ai_provider=s.ai_provider,
@@ -8382,6 +8391,8 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         launch_on_startup=s.launch_on_startup,
         auto_follow_up_email=s.auto_follow_up_email,
         retention_enabled=s.retention_enabled,
+        auto_index_knowledge=s.auto_index_knowledge,
+        auto_index_interval_minutes=s.auto_index_interval_minutes,
         retention_processed_days=s.retention_processed_days,
         retention_unprocessed_days=s.retention_unprocessed_days,
         ai_provider=s.ai_provider,
@@ -9741,6 +9752,123 @@ async def _watchdog_loop():
 # view being open) per the lesson from the auto-process bug. The brief is
 # cached; the frontend polls /prep-brief/auto/pending to fire the native
 # "ready" notification.
+#: Poll cadence for the auto-index loop. The loop itself decides
+#: whether a sweep is due (knowledge_index_schedule.should_run); this is
+#: just how often it asks, so changing the interval setting takes effect
+#: without an app restart.
+_AUTO_INDEX_TICK_S = 60
+
+#: Last successful sweep per client, epoch seconds. In memory: it drives
+#: rotation within a run, and a restart simply starts the rotation over,
+#: which costs stat calls because index_folder skips unchanged files.
+_auto_index_last: Dict[str, float] = {}
+_auto_index_last_pass: Optional[float] = None
+
+
+def _auto_index_busy() -> bool:
+    """Recording or processing. Extraction and embedding compete with
+    transcription and diarization for CPU, and this app already carries
+    a setting that exists because those two contending made recordings
+    vanish. A background indexer must never be the thing that does that
+    again."""
+    try:
+        if svc.recording_svc is not None and svc.recording_svc.is_recording():
+            return True
+    except Exception as e:  # noqa: BLE001
+        # Unable to tell => assume busy. The safe direction is to skip a
+        # sweep, never to run one during a recording.
+        logger.debug(f"Auto-index busy check failed, assuming busy: {e}")
+        return True
+    return _PROCESSING_LOCK.locked()
+
+
+async def _auto_index_loop():
+    """Sweep client Knowledge Folders so documents added after the
+    folder was configured become searchable on their own.
+
+    Indexing used to run only when a folder was SET. An install went
+    months with 20 clients reporting 0 indexed documents while their
+    folders held SOWs — v2.76 made that visible, this makes it stop
+    happening.
+
+    One client per pass, least recently indexed first: twenty folders on
+    a network drive is a long sweep, and doing them all in one tick
+    makes the work unbounded and starves whichever client sorts last.
+    Settings are read fresh each tick so toggling the feature or
+    changing the interval takes effect without a restart.
+    """
+    global _auto_index_last_pass
+    await asyncio.sleep(90)  # let startup prewarm settle first
+    try:
+        while True:
+            try:
+                s = Settings.from_env()
+                if knowledge_index_schedule.should_run(
+                        enabled=bool(s.auto_index_knowledge),
+                        busy=_auto_index_busy(),
+                        last_run_epoch=_auto_index_last_pass,
+                        interval_minutes=s.auto_index_interval_minutes,
+                        now_epoch=time.time()):
+                    await _auto_index_one_client()
+            except Exception as e:  # noqa: BLE001
+                # A failing sweep must never kill the loop — the next
+                # tick should try again, and the reason belongs in the
+                # log rather than in a silent death.
+                logger.warning(f"Auto-index pass failed: {e}")
+            await asyncio.sleep(_AUTO_INDEX_TICK_S)
+    except asyncio.CancelledError:
+        raise
+
+
+async def _auto_index_one_client() -> None:
+    """Index the least-recently-swept client that has a reachable
+    knowledge folder. Records the attempt either way, so one
+    permanently-broken folder cannot monopolise the rotation."""
+    global _auto_index_last_pass
+    svc.load_settings()
+    if not svc.client_cfg_svc or not svc.session_svc:
+        return
+
+    configs = await asyncio.to_thread(svc.client_cfg_svc.all)
+    names = [
+        name for name, cfg in (configs or {}).items()
+        if (getattr(cfg, "knowledge_folder", "") or "")
+    ]
+    target = knowledge_index_schedule.next_client(names, _auto_index_last)
+    if not target:
+        return
+
+    cfg = svc.client_cfg_svc.get(target)
+    folder = (cfg.knowledge_folder if cfg else "") or ""
+    # Mark the attempt BEFORE doing the work: an unreachable folder or a
+    # mid-sweep failure must still advance the rotation, or one broken
+    # client blocks every other one forever.
+    _auto_index_last[target] = time.time()
+    _auto_index_last_pass = time.time()
+
+    if not Path(folder).expanduser().is_dir():
+        logger.debug(f"Auto-index: {target}'s folder is unreachable, skipping")
+        return
+
+    embed_fn = _knowledge_embed_fn()
+    if embed_fn is None:
+        logger.debug("Auto-index: embeddings unavailable, skipping this pass")
+        return
+
+    def _do():
+        return document_service.index_folder(
+            folder, target, embed_fn, svc.session_svc.recordings_dir)
+
+    report = await asyncio.to_thread(_do)
+    indexed = int(report.get("indexed", 0) or 0)
+    if indexed:
+        logger.info(
+            f"Auto-index: {target} — {indexed} document(s) newly indexed, "
+            f"{report.get('unchanged', 0)} unchanged")
+        if svc.search_svc:
+            await asyncio.to_thread(svc.search_svc.invalidate)
+
+
 async def _auto_prep_brief_loop():
     # First tick after a short delay so the app finishes booting.
     await asyncio.sleep(20.0)
@@ -10086,6 +10214,9 @@ async def startup():
     # No-ops while the setting is off.
     try:
         asyncio.create_task(_auto_prep_brief_loop())
+        # Keeps Knowledge Folders indexed without anyone
+        # remembering to click Reindex — see _auto_index_loop.
+        asyncio.create_task(_auto_index_loop())
     except Exception as e:
         logger.warning(f"Auto prep-brief bootstrap failed: {e}")
 

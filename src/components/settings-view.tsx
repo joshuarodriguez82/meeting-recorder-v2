@@ -1126,6 +1126,48 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
       {/* Semantic search index (cross-session vector retrieval) */}
       <SemanticIndexSection />
 
+      {/* Documents used to be indexed only when a client's Knowledge
+          Folder was SET, and never again — an install ran for months
+          with 20 clients reporting 0 indexed documents while their
+          folders held SOWs. v2.76 made that visible; this stops it
+          happening. */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Knowledge Folder indexing</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <Toggle
+            label="Keep client Knowledge Folders indexed automatically"
+            description="Sweeps one client at a time in the background so documents you add later become searchable on their own. Never runs while you're recording or processing. Costs nothing per document — the embedding model runs on this machine — and unchanged files are skipped."
+            checked={settings.auto_index_knowledge}
+            onChange={(v) => update("auto_index_knowledge", v)}
+          />
+          <div className="space-y-1">
+            <Label htmlFor="auto-index-interval">Check every (minutes)</Label>
+            <Input
+              id="auto-index-interval"
+              type="number"
+              min={5}
+              max={1440}
+              className="w-32"
+              value={settings.auto_index_interval_minutes}
+              onChange={(e) =>
+                update("auto_index_interval_minutes", parseInt(e.target.value) || 15)
+              }
+              disabled={!settings.auto_index_knowledge}
+            />
+            <p className="text-xs text-muted-foreground">
+              Minimum 5. Checking a folder means asking the filesystem
+              for each file&apos;s timestamp — on a Google Drive path
+              that is a network round-trip, not a local read, so a
+              tighter loop is steady traffic against Drive for no gain.
+              A document you add in the morning is not found sooner by
+              polling every ten seconds.
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Retention */}
       <Card>
         <CardHeader>
