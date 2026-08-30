@@ -20,7 +20,7 @@ import {
 import { Button } from "@/components/ui/button";
 import {
   Mic, KeyRound, Users, Sparkles, CheckCircle2, ArrowRight, ArrowLeft,
-  ExternalLink, Rocket,
+  ExternalLink, Rocket, FileText, MessageSquare,
 } from "lucide-react";
 
 const ONBOARDING_FLAG = "mr_onboarding_dismissed_v1";
@@ -187,6 +187,100 @@ export function OnboardingTour({ open, onClose, onNavigate }: Props) {
           </p>
         </>
       ),
+    },
+    {
+      icon: FileText,
+      title: "Step 5 — Pick the template that matches the meeting",
+      body: (
+        <>
+          <p>
+            Before you record — or any time afterwards — set the{" "}
+            <strong>Template</strong>. It decides what the summary keeps.
+            Run a pricing call through a technical template and you get a
+            faithful record of the architecture and no trace of the
+            discount that was offered out loud.
+          </p>
+          <p className="mt-2">
+            Eighteen ship with the app, grouped by the job you do:
+          </p>
+          <ul className="list-disc pl-5 mt-2 space-y-1">
+            <li><strong>Pre-sales</strong> — Requirements Gathering, Design
+              Review, Stakeholder Update…</li>
+            <li><strong>Delivery</strong> — Delivery Kickoff, UAT &amp; Defect
+              Triage, Go-Live Readiness, Hypercare Review…</li>
+            <li><strong>Account management</strong> — Qualification Call,
+              Pricing &amp; Commercial, Account Review / QBR,
+              Sales-to-Delivery Handoff…</li>
+          </ul>
+          <p className="mt-2 text-muted-foreground">
+            Picked the wrong one? Change it on the session and re-run
+            Summarize. Nothing is lost.
+          </p>
+        </>
+      ),
+      cta: { label: "See the templates", nav: "settings" },
+    },
+    {
+      icon: Users,
+      title: "Step 6 — Tag the client, so it adds up",
+      body: (
+        <>
+          <p>
+            Set <strong>Client</strong> (and Project) on each session. It
+            takes a second and it is what turns a pile of recordings into
+            an account history.
+          </p>
+          <p className="mt-2">Once meetings are tagged you get:</p>
+          <ul className="list-disc pl-5 mt-2 space-y-1">
+            <li><strong>Engagements</strong> — one register per client of
+              commitments, decisions, requirements and defects, rolled up
+              across every meeting.</li>
+            <li><strong>Insights</strong> — what is overdue, what was
+              promised and never followed up.</li>
+            <li><strong>Search that knows who you mean</strong> — ask about
+              one client and get only their meetings.</li>
+          </ul>
+          <p className="mt-2 text-muted-foreground">
+            Spell it the same way every time. A client name spelled two
+            ways is two clients, and half your history goes to the one you
+            are not looking at.
+          </p>
+        </>
+      ),
+    },
+    {
+      icon: MessageSquare,
+      title: "Step 7 — Ask your AI assistant about it all",
+      body: (
+        <>
+          <p>
+            <strong>Settings → Templates &amp; Integrations → AI assistant
+            access.</strong> Turn it on, pick your tool, click Set up. The
+            app writes that tool&apos;s config for you.
+          </p>
+          <p className="mt-2">
+            Then ask Claude Desktop, Claude Code, Cursor or VS Code things
+            like <em>&quot;what do I still owe anyone?&quot;</em> or{" "}
+            <em>&quot;what did we promise this client that we haven&apos;t
+            delivered?&quot;</em> — answered from every meeting you have
+            recorded, read-only.
+          </p>
+          <p className="mt-2">
+            Two things that trip people up:{" "}
+            <strong>each tool is set up separately</strong>, and after
+            setting one up you must <strong>quit it completely</strong> and
+            reopen — closing the window is not enough on Windows. The card
+            tells you when an assistant last used the app, so you can see
+            whether it worked instead of guessing.
+          </p>
+          <p className="mt-2 text-muted-foreground">
+            Only works in tools running on this computer. claude.ai in a
+            browser and Claude on your phone cannot reach it — your
+            meetings never leave this machine.
+          </p>
+        </>
+      ),
+      cta: { label: "Set it up", nav: "settings" },
     },
     {
       icon: Sparkles,
