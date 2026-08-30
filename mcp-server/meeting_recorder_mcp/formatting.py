@@ -235,9 +235,29 @@ def render_clients(rows: Sequence[Dict[str, Any]], index: Dict[str, Any]) -> str
                          else "NO — the path is missing or on a "
                               "disconnected/unsynced drive")
             lines.append(f"    folder reachable: {reachable}")
+            indexed = row.get("indexed_documents", 0)
             lines.append(
-                f"    indexed documents: {row.get('indexed_documents', 0)}"
+                f"    indexed documents: {indexed}"
                 f"    chunks: {row.get('total_chunks', 0)}")
+            # "0 indexed" and "the folder is empty" are different facts,
+            # and reporting them identically is what let an assistant
+            # tell a user their clients had no documents while the
+            # folders held months of SOWs. Indexing runs when the folder
+            # is set and never again, so this gap is the normal state
+            # rather than an exception.
+            present = row.get("files_indexable")
+            unindexed = row.get("unindexed_documents") or 0
+            if present is not None and present > 0 and indexed == 0:
+                lines.append(
+                    f"    NOT INDEXED: {present} readable document(s) are in "
+                    "this folder and none of them are indexed. They cannot "
+                    "be searched or cited until the user reindexes this "
+                    "client from the app's Clients tab. Say so rather than "
+                    "reporting that the client has no documents.")
+            elif unindexed > 0:
+                lines.append(
+                    f"    {unindexed} document(s) added since the last index "
+                    "are not searchable yet.")
             if row.get("double_indexing_risk"):
                 lines.append(
                     "    WARNING: this client's knowledge folder is the same "

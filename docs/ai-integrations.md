@@ -221,6 +221,11 @@ whether an authenticated call succeeded. That is the fastest way to tell
 | `get_meeting` | one meeting's transcript / summary / actions / decisions / requirements |
 | `get_portal_binding` | "which SA Tools Portal opportunity is this client bound to?" — the `customerId` to cross systems by, plus a warning if the binding points at a parent company rather than an engagement |
 
+**Role guides:** account managers have a companion page at
+[account-managers.md](account-managers.md) — which summary template to
+pick per meeting, which live co-pilot lens to run, and the questions
+worth asking once the archive is connected.
+
 > **Renamed in v2.72.0:** `list_sessions` → `list_meetings` and
 > `get_session` → `get_meeting`. "Session" also means a Claude Code
 > session, and an ambiguous tool name is one an assistant gets right

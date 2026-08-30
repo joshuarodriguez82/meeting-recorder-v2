@@ -136,9 +136,17 @@ Mac feature parity vs. Windows:
 ## Use it from your AI assistant
 
 The archive is reachable from AI tools through two read-only, local
-doors — see **[docs/ai-integrations.md](docs/ai-integrations.md)**, or
-**Settings → Templates & Integrations → AI assistant access** in the app
-for copy-paste config.
+doors. In the app: **Settings → Templates & Integrations → AI assistant
+access** — turn it on once, pick your tool, and the app writes that
+tool's config for you. Full detail in
+**[docs/ai-integrations.md](docs/ai-integrations.md)**.
+
+**Every tool is configured separately, and it only works in tools
+running on this machine.** Setting up Claude Code does not set up Claude
+Desktop. claude.ai in a browser and Claude on a phone cannot reach it at
+all — they run on someone else's computers, and this is a program on
+your disk talking to `127.0.0.1`, which is the same property that keeps
+your transcripts off the internet.
 
 - **MCP server** (`mcp-server/`) — MCP is an open protocol, so the same
   server works with Claude Desktop, Claude Code, Cursor, VS Code
@@ -152,6 +160,14 @@ for copy-paste config.
 
 Both require the desktop app to be running and authenticate with the
 local backend token. Neither can modify your data.
+
+The card reports when an AI assistant last called the app, so "did my
+setup work?" is answerable without guessing.
+
+**Role guides:** account managers have one at
+**[docs/account-managers.md](docs/account-managers.md)** — which
+template protects what, which live co-pilot lens to use, and the
+questions worth asking the assistant afterwards.
 
 ## Features
 
@@ -167,7 +183,7 @@ local backend token. Neither can modify your data.
 
 ### AI extraction
 - **Multi-provider** — native Anthropic SDK (default) or any OpenAI-compatible endpoint (OpenRouter, Ollama, LM Studio, vLLM). Switch in Settings; same prompts on either side.
-- **Summary** — template-aware (General, Requirements Gathering, Design Review, Sprint Planning, Stakeholder Update, plus your own custom templates)
+- **Summary** — template-aware. Eighteen built-ins across three audiences: **pre-sales** (General, Requirements Gathering, Design Review, Sprint Planning, Stakeholder Update), **delivery** (Delivery Kickoff, Technical Working Session, UAT & Defect Triage, Go-Live Readiness, Hypercare Review, Change Request Scoping) and **account management** (Qualification Call, Executive Briefing, Solution Demo, Pricing & Commercial, Account Review / QBR, Competitive Displacement, Sales-to-Delivery Handoff). Every one is editable, hideable and restorable, and your own templates sit alongside them
 - **Action Items** — owner, task, due date, decisions, open questions
 - **Requirements** — FR/NFR tables with priority and owner
 - **Decisions** — auto-generated ADR log (Decided, Rationale, Alternatives, Owner, Impact)

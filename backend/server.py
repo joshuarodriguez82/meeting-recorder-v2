@@ -5578,12 +5578,32 @@ async def get_client_knowledge_status(client_name: str):
                         continue
                     indexed_docs += 1
                     total_chunks += len(payload.get("chunks") or [])
+        present = bool(folder) and Path(folder).expanduser().is_dir()
+        # What is ACTUALLY in the folder, not just what the index knows
+        # about. Without this, "nothing is indexed" and "the folder is
+        # empty" are the same answer — which is how an install ran for
+        # months with 20 clients reporting 0 documents while their
+        # folders were full. See document_service.scan_folder.
+        scan = document_service.scan_folder(folder) if present else {
+            "indexable": 0, "unsupported": 0, "capped": False,
+            "unreadable": True,
+        }
+        indexable = int(scan["indexable"])
         return {
             "client": client_name,
             "knowledge_folder": folder,
-            "folder_present": bool(folder) and Path(folder).expanduser().is_dir(),
+            "folder_present": present,
             "indexed_documents": indexed_docs,
             "total_chunks": total_chunks,
+            # Files sitting in the folder right now.
+            "files_indexable": indexable,
+            "files_unsupported": int(scan["unsupported"]),
+            "scan_capped": bool(scan["capped"]),
+            # The number that matters: indexable files the index has
+            # never seen. Indexing only runs when the folder is SET, so
+            # anything added afterwards sits here until someone
+            # reindexes — and nothing used to say so.
+            "unindexed_documents": max(0, indexable - indexed_docs),
         }
 
     return await asyncio.to_thread(_do)

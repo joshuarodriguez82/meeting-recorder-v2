@@ -246,8 +246,8 @@ const SECTIONS: Section[] = [
             under that client, so you can&apos;t accidentally cross-tag. Changing the Client clears
             the Project field.</li>
           <li>Pick a Template (see <strong>Summary Templates</strong> section — defaults include
-            General, Requirements Gathering, Design Review, Sprint Planning, Stakeholder Update,
-            plus any custom templates you&apos;ve added).</li>
+            eighteen built-ins across pre-sales, delivery and account management, plus any
+            custom templates you&apos;ve added — see the Summary Templates section).</li>
           <li>Select your mic + System Audio loopback device.</li>
           <li>Click <strong>Start Recording</strong> (bottom of the Audio Devices card).</li>
           <li>When done, <strong>Stop</strong>. A &quot;Just Recorded&quot; card appears with an <strong>Open Session</strong> button.</li>
@@ -1092,6 +1092,63 @@ const SECTIONS: Section[] = [
     ),
   },
   {
+    id: "ai-assistant",
+    title: "Ask an AI assistant about your meetings",
+    content: (
+      <>
+        <p>
+          <strong>Settings → Templates &amp; Integrations → AI assistant access.</strong>
+          Connect Claude Desktop, Claude Code, Cursor or VS Code to this app and ask
+          questions across every meeting you have recorded — and every document in your
+          clients&apos; Knowledge Folders — in plain English.
+        </p>
+        <p>Set up, once per tool:</p>
+        <ol className="list-decimal pl-5 space-y-1">
+          <li><strong>Turn on</strong> — first time only. Installs the connection library
+            into the app&apos;s own Python.</li>
+          <li>Pick your tool, then click <strong>Set up</strong>. The app writes that
+            tool&apos;s config for you — your other settings are kept and the file is backed
+            up first.</li>
+          <li><strong>Quit that tool completely and reopen it.</strong> Closing the window is
+            not quitting: on Windows, right-click its system-tray icon and choose Quit, or
+            end it in Task Manager. A tool that was already running is still holding the
+            config from before you pressed the button.</li>
+        </ol>
+        <Tip>
+          <strong>Every tool is configured separately.</strong> Setting up Claude Code does
+          not set up Claude Desktop. Each button on the card shows that tool&apos;s own state —
+          a tick when it is set up, an amber warning when it is set up but pointing at paths
+          that have moved.
+        </Tip>
+        <Tip>
+          <strong>Did it work?</strong> The card reports when an AI assistant last called the
+          app. Ask your tool a question and that line updates. If it still says nothing has
+          used it, the tool did not restart properly — that is the first thing to check, not
+          the config.
+        </Tip>
+        <p>
+          <strong>Where it works:</strong> any AI tool running on the <em>same computer</em>
+          as this app. <strong>Not</strong> claude.ai in a browser, and not Claude on your
+          phone — those run on someone else&apos;s machines, and this is a program on your
+          disk. That is the same property that keeps your transcripts off the internet.
+        </p>
+        <p>Worth asking:</p>
+        <ul className="list-disc pl-5 space-y-1">
+          <li><em>What do I still owe anyone?</em> — outstanding commitments, overdue first,
+            with the meeting to cite.</li>
+          <li><em>What did we agree with [client] about pricing, and when?</em></li>
+          <li><em>What did we promise [client] that we haven&apos;t delivered?</em></li>
+          <li><em>What did we never get an answer to from [client]?</em> — the most useful
+            question here, and the one nobody thinks to ask.</li>
+        </ul>
+        <Tip>
+          Everything it can do is <strong>read-only</strong>. Nothing an assistant reaches
+          can delete a recording, edit a session, or change a setting.
+        </Tip>
+      </>
+    ),
+  },
+  {
     id: "templates",
     title: "Summary Templates",
     content: (
@@ -1099,10 +1156,37 @@ const SECTIONS: Section[] = [
         <p>
           <strong>Settings → Summary Templates</strong> is the prompt library that powers the
           Summarize action. Each template is a named prompt Claude (or your chosen provider)
-          follows when you click Summarize on a session. Five ship by default — General,
-          Requirements Gathering, Design Review, Sprint Planning, Stakeholder Update — and
-          every one of them is editable.
+          follows when you click Summarize on a session. <strong>Eighteen ship by default</strong>,
+          grouped by who runs the meeting, and every one of them is editable.
         </p>
+        <p>
+          <strong>Pick the one that matches the meeting, not the client.</strong> The template
+          decides what survives: run a pricing call through a technical template and you get a
+          faithful record of the architecture and no trace of the discount that was offered
+          out loud.
+        </p>
+        <ul className="list-disc pl-5 space-y-1">
+          <li><strong>Pre-sales / solutioning</strong> — General, Requirements Gathering,
+            Design Review, Sprint Planning, Stakeholder Update.</li>
+          <li><strong>Delivery</strong> — Delivery Kickoff, Technical Working Session,
+            UAT &amp; Defect Triage, Go-Live Readiness, Hypercare Review, Change Request
+            Scoping. UAT &amp; Defect Triage is the one that populates the defect register.</li>
+          <li><strong>Account management</strong> — Qualification Call, Executive Briefing,
+            Solution Demo, Pricing &amp; Commercial, Account Review / QBR, Competitive
+            Displacement, Sales-to-Delivery Handoff.</li>
+        </ul>
+        <Tip>
+          <strong>Qualification Call is not Requirements Gathering.</strong> The second is about
+          what a system must do; the first is about whether there is a deal — budget authority,
+          compelling event, who else is being looked at. They are deliberately separate, and
+          picking the wrong one loses whichever half you needed.
+        </Tip>
+        <Tip>
+          <strong>Sales-to-Delivery Handoff earns its keep on its own.</strong> Its job is to
+          surface the gap between what was promised verbally during the sale and what the signed
+          scope actually covers. That gap is where delivery escalations come from, and it is
+          invisible to everyone except the person who sat in both rooms.
+        </Tip>
         <ul className="list-disc pl-5 space-y-1">
           <li><strong>Edit a template</strong> — click the row. Change the prompt to match how
             your meetings actually go (e.g. extend Requirements Gathering to also ask about

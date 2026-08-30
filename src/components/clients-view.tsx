@@ -1653,10 +1653,27 @@ function KnowledgeFolderCard({
                   Folder not reachable right now — nothing can be indexed
                   until it&apos;s back.
                 </span>
+              ) : status.indexed_documents === 0 &&
+                   (status.files_indexable ?? 0) > 0 ? (
+                // The state that hid for months: the folder is full and
+                // the index is empty. Saying "not indexed yet" without
+                // the count reads as "there is nothing here".
+                <span className="text-amber-600 dark:text-amber-500">
+                  {status.files_indexable} document
+                  {status.files_indexable === 1 ? "" : "s"} in this folder,
+                  none indexed — they are invisible to search and to your
+                  AI assistant until you click Reindex.
+                </span>
               ) : status.indexed_documents === 0 ? (
                 <span className="text-muted-foreground">
-                  Not indexed yet. Click Reindex to make these documents
-                  searchable.
+                  Nothing to index — no readable documents found in this
+                  folder
+                  {(status.files_unsupported ?? 0) > 0
+                    ? ` (${status.files_unsupported} file${
+                        status.files_unsupported === 1 ? "" : "s"
+                      } of unsupported types were skipped)`
+                    : ""}
+                  .
                 </span>
               ) : (
                 <span className="text-muted-foreground">
@@ -1664,6 +1681,16 @@ function KnowledgeFolderCard({
                   {status.indexed_documents === 1 ? "" : "s"} indexed ·{" "}
                   {status.total_chunks} chunk
                   {status.total_chunks === 1 ? "" : "s"}
+                  {(status.unindexed_documents ?? 0) > 0 && (
+                    <>
+                      {" · "}
+                      <span className="text-amber-600 dark:text-amber-500">
+                        {status.unindexed_documents} newer document
+                        {status.unindexed_documents === 1 ? "" : "s"} not
+                        indexed yet
+                      </span>
+                    </>
+                  )}
                 </span>
               )}
             </div>

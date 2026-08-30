@@ -37,10 +37,24 @@ Frontend + shell: `npm install && npm run tauri dev`.
 
 ```sh
 python -m pytest backend/tests -q          # backend (fast, no ML deps needed)
+cd mcp-server && python -m pytest tests -q # MCP server (run from INSIDE it)
+npm test                                   # frontend (vitest)
 node --test chrome-extension/tests/background.test.js
 npm run build                              # typechecks via strict tsconfig
 cargo test --lib --manifest-path src-tauri/Cargo.toml
 ```
+
+Two traps in that list, both of which have cost a red PR:
+
+- **The backend suite needs Python 3.12+.** `config/settings.py` uses an
+  f-string form 3.11 rejects, so on an older interpreter every test that
+  imports the app fails to *collect* — and a run of only the files that
+  don't import it looks green.
+- **The MCP suite must run from inside `mcp-server/`.** Its
+  `asyncio_mode = "auto"` lives in that directory's `pyproject.toml`,
+  and pytest only reads the ini options of the rootdir it resolves.
+  Invoked from the repo root the config is silently ignored and every
+  async test errors.
 
 CI runs all of the above plus the security scans on every PR — 13 checks.
 A PR is mergeable when all 13 are green.
@@ -51,6 +65,12 @@ House rules that will save you a review round-trip:
   the pre-fix code. Test names state the property they pin, and module
   docstrings say why the test exists ("the field report that caused
   this"), not what the code does.
+- **Test fixtures are copied from real payloads, never invented.** The
+  MCP server's stub carried three keys the backend has never emitted, so
+  124 tests passed while every commitment rendered blank for the first
+  real user. If you are writing a fixture, paste a real response into
+  it; if you are fixing a bug that tests didn't catch, fix the fixture
+  *first* and watch the tests go red.
 - **A result you couldn't read must never render as a result that isn't
   there.** This defect class recurs in this codebase — an unreadable
   capture, a failed parse, a missing file must surface as an explicit

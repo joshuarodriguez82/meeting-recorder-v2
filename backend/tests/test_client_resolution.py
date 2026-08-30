@@ -51,6 +51,7 @@ Initech / Umbrella / Zorg / Northwind), never a real customer.
 from __future__ import annotations
 
 import asyncio
+import time
 import sys
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -516,11 +517,23 @@ def test_auto_prep_brief_receives_a_resolved_client(monkeypatch):
     monkeypatch.setattr(server.asyncio, "sleep", fast_sleep)
 
     async def _drive():
+        # A DEADLINE, not a yield budget. This used to spin
+        # `for _ in range(500): await sleep(0)` — 500 event-loop turns,
+        # which is generous on an idle machine and a coin flip on a
+        # loaded CI runner, where the scheduler interleaves differently
+        # and the loop under test may not have got far enough. Verified
+        # by reproduction: 10/10 passes idle, 2 failures in 6 runs under
+        # CPU contention, with the code under test untouched.
+        #
+        # Wall-clock is the right bound because what is being asserted
+        # is "the loop eventually produces a brief", not "it produces
+        # one within N scheduler turns". asyncio.sleep is monkeypatched
+        # to a no-op above, so this cannot actually take 5s unless
+        # something is genuinely wrong.
         task = asyncio.create_task(server._auto_prep_brief_loop())
-        for _ in range(500):
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not captured:
             await real_sleep(0)
-            if captured:
-                break
         task.cancel()
         try:
             await task

@@ -124,6 +124,78 @@ DEFAULT_MEETING_TYPES: Dict[str, str] = {
         "without anyone pricing it, action items being volunteered "
         "without realistic capacity."
     ),
+
+    # ── Account-management lenses ───────────────────────────────────
+    #
+    # The LIVE half of the sales summary templates. A template records
+    # what happened; a lens is trying to change what happens next, so
+    # these are written as things to probe and risks to flag, not as
+    # sections to produce.
+    #
+    # "Qualification" rather than "Discovery" on purpose — Discovery
+    # above is an SA lens about the system, this one is about the deal.
+    # See tests/test_sales_copilot_types.py.
+    "Qualification": (
+        "This is a qualification conversation. The goal is to find out "
+        "whether there is a deal here, who can buy it, and what would "
+        "make it move — not to solution.\n\n"
+        "Probe the dimensions being left unexamined: what the problem "
+        "costs them in money or time, who has budget authority as "
+        "opposed to interest, what the compelling event is and whether "
+        "it is real, what happens if they do nothing, who else is being "
+        "looked at, what their buying process actually requires.\n\n"
+        "Flag risks like: a qualifying question asked and never "
+        "answered, enthusiasm from someone with no authority, a "
+        "timeline with no event behind it, budget assumed rather than "
+        "confirmed, the room drifting into a demo before the problem is "
+        "understood, our side talking more than the customer."
+    ),
+    "Pricing / Negotiation": (
+        "The room is discussing money. A number said out loud here can "
+        "end up in a contract, so precision and restraint matter more "
+        "than rapport.\n\n"
+        "Probe: what the figure actually covers and what it excludes, "
+        "whether an anchor has been set and by whom, what the customer "
+        "is comparing the price to, what their approval path requires, "
+        "which concession is being asked for and what we would get in "
+        "return, whether the person asking has authority to close.\n\n"
+        "Flag risks like: a concession offered without a condition "
+        "attached, a number given as indicative being repeated back as "
+        "firm, discounting before value is established, agreeing to a "
+        "date or a scope change in passing, negotiating against "
+        "ourselves when the customer has not countered, a commitment "
+        "made by someone who cannot approve it."
+    ),
+    "Executive Briefing": (
+        "The audience is senior and their time is short. The subject is "
+        "business outcomes; architecture is only relevant if an "
+        "executive raises it.\n\n"
+        "Probe: which outcome this executive is measured on, where this "
+        "sits against their other priorities, who the real sponsor is, "
+        "what would make them personally look good or bad, what they "
+        "believe the risk of acting is versus not acting.\n\n"
+        "Flag risks like: jargon or product detail creeping in, "
+        "answering a business question with a technical answer, the "
+        "sponsor going quiet, a sceptic's objection being talked over "
+        "rather than addressed, the meeting ending without a decision "
+        "or a named next step, spending the executive's time on "
+        "material they did not ask for."
+    ),
+    "Renewal / Account Review": (
+        "This is an existing customer reviewing the relationship. "
+        "Retention is decided in rooms like this one, usually before "
+        "anyone says the word renewal.\n\n"
+        "Probe: what they are actually using versus what they bought, "
+        "which promised outcomes have and have not landed, who the "
+        "sponsor is now and whether that has changed, what has "
+        "frustrated them that they have not raised, what else is "
+        "happening in their organisation that could affect budget.\n\n"
+        "Flag risks like: a complaint mentioned once and moved past, "
+        "the sponsor being replaced or reorganised, adoption lower than "
+        "expected, an evaluation of alternatives hinted at, an "
+        "expansion signal going unexplored, the renewal date "
+        "approaching without anyone naming it."
+    ),
 }
 
 

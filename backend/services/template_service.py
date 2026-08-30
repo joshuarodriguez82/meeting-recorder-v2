@@ -201,6 +201,164 @@ DEFAULT_TEMPLATES: Dict[str, str] = {
         "the next conversation."
         + _VISUALS_DIRECTIVE
     ),
+
+    # ── Account management ──────────────────────────────────────────
+    #
+    # Third wave. The SA templates specify a system; the delivery ones
+    # build it; these sell it. An account manager's meetings turn on
+    # commercial facts — who signs, what the budget cycle is, which
+    # competitor is incumbent, what was conceded — and an SA-shaped
+    # summary of a pricing call faithfully records the architecture and
+    # loses the discount that was verbally offered.
+    #
+    # NAMING, deliberately: this set has no "Discovery". That name is
+    # taken by an SA meeting about requirements, and an AM's first call
+    # is about qualification. Same word, different meeting; merging them
+    # would lose whichever half wasn't being written that week. See
+    # tests/test_sales_templates.py.
+    "Qualification Call": (
+        "This is a qualification call with a prospective or existing "
+        "customer. Summarize with focus on: "
+        "1) The problem in the customer's own words, and what it is "
+        "costing them — quote figures, volumes or deadlines they gave, "
+        "2) Their current environment and vendors, including anything "
+        "said about how it was bought or when it renews, "
+        "3) The decision process: who has authority to sign, who "
+        "influences, what steps a purchase has to pass through, "
+        "4) Budget signals: whether money is allocated, which cycle it "
+        "sits in, any number stated or deflected, "
+        "5) Timeline and what is driving it — a compelling event, a "
+        "contract end, an audit, a board commitment, "
+        "6) Any competitor or incumbent named, and how the customer "
+        "spoke about them, "
+        "7) Objections or hesitations raised, verbatim where possible, "
+        "8) What we committed to send or do next, and by when. "
+        "Where the customer was asked a qualifying question and did not "
+        "answer it, say so explicitly rather than leaving it out — an "
+        "unanswered question is the most useful thing in this summary."
+        + _VISUALS_DIRECTIVE
+    ),
+    "Executive Briefing": (
+        "This is an executive briefing. The audience is senior and the "
+        "content is business outcomes, not architecture. Summarize with "
+        "focus on: "
+        "1) The business outcome the executives said they care about, "
+        "in their language, "
+        "2) Their stated priorities for the year or quarter, and where "
+        "this initiative sits among them, "
+        "3) Who in the room is the sponsor, who is the sceptic, and "
+        "what each of them pushed on, "
+        "4) Concerns raised about risk, disruption, timing or cost, "
+        "5) Any commitment, direction or preference an executive stated "
+        "— these carry more weight than anything else in the meeting, "
+        "6) Questions asked that we could not answer in the room, "
+        "7) The agreed next step and who owns it on the customer side. "
+        "Keep technical detail out unless an executive raised it "
+        "themselves."
+        + _VISUALS_DIRECTIVE
+    ),
+    "Solution Demo": (
+        "This is a solution demonstration. What matters is the "
+        "customer's reaction, not the walkthrough. Summarize with focus "
+        "on: "
+        "1) What was actually shown, briefly, "
+        "2) Reaction by capability: what drew interest, what drew "
+        "silence, what drew a visible objection — attribute reactions "
+        "to people where the transcript makes it clear, "
+        "3) Objections raised, verbatim where possible, and how they "
+        "were handled in the room, "
+        "4) Any gap identified between what was shown and what the "
+        "customer needs, and whether it was acknowledged as a gap, "
+        "5) Comparisons the customer drew to another product or their "
+        "current tooling, "
+        "6) Feature requests or 'can it do X' questions, flagged as "
+        "answered or unanswered, "
+        "7) What we agreed to follow up with, including anything we "
+        "promised to prove."
+        + _VISUALS_DIRECTIVE
+    ),
+    "Pricing & Commercial": (
+        "This is a pricing or commercial discussion. Precision matters "
+        "more here than anywhere else — a number said out loud in this "
+        "meeting can end up in a contract. Summarize with focus on: "
+        "1) Every figure discussed, with what it covers and whether it "
+        "was presented as firm, indicative or a placeholder, "
+        "2) The commercial model discussed: fixed price, T&M, "
+        "subscription, per-seat, phased, "
+        "3) Any concession, discount or extra scope offered — by whom, "
+        "under what condition, and whether it was accepted, deferred or "
+        "refused, "
+        "4) Procurement path: the approval steps named, who signs, what "
+        "paperwork or vendor process is required, "
+        "5) Budget cycle and funding constraints mentioned, "
+        "6) Contractual points raised — terms, liability, payment "
+        "milestones, termination, "
+        "7) What each side committed to produce, and by when. "
+        "Quote figures exactly as stated. Where a number was implied but "
+        "not stated, say that it was implied rather than recording it as "
+        "agreed."
+        + _VISUALS_DIRECTIVE
+    ),
+    "Account Review / QBR": (
+        "This is an account review or quarterly business review with an "
+        "existing customer. Summarize with focus on: "
+        "1) How the customer characterised the relationship and the "
+        "work delivered so far — praise and complaints both, quoted, "
+        "2) Adoption: what is actually being used, by whom, and any "
+        "usage or volume figures given, "
+        "3) Outstanding issues, escalations or unmet expectations, and "
+        "their current state, "
+        "4) Risk signals: budget pressure, reorganisation, sponsor "
+        "change, dissatisfaction, evaluation of alternatives — say "
+        "plainly if none appeared, "
+        "5) Expansion signals: new initiatives, adjacent teams, "
+        "problems mentioned in passing that we could address, "
+        "6) Renewal or contract dates mentioned, "
+        "7) Commitments made on both sides before the next review."
+        + _VISUALS_DIRECTIVE
+    ),
+    "Competitive Displacement": (
+        "This meeting concerns replacing an incumbent vendor or winning "
+        "against a named competitor. Summarize with focus on: "
+        "1) The incumbent or competitor named, and precisely what the "
+        "customer said about them — strengths as well as frustrations, "
+        "2) What is driving the customer to look, and how urgent it is, "
+        "3) Switching costs and barriers discussed: integrations, "
+        "retraining, data migration, sunk investment, internal "
+        "champions of the incumbent, "
+        "4) Contract end date, renewal window or notice period, if "
+        "mentioned — capture the exact date given, "
+        "5) Where we were compared directly, and on which criteria we "
+        "were said to be ahead or behind, "
+        "6) Any claim made about the competitor that we should verify "
+        "before repeating it, "
+        "7) What the customer needs to see in order to move, and what "
+        "we committed to."
+        + _VISUALS_DIRECTIVE
+    ),
+    "Sales-to-Delivery Handoff": (
+        "This meeting hands a sold engagement to the delivery team. Its "
+        "purpose is to transfer what was PROMISED during the sale, "
+        "which is the one thing the delivery team cannot reconstruct "
+        "from the SOW. Summarize with focus on: "
+        "1) Every commitment made to the customer during the sales "
+        "cycle — dates, capabilities, outcomes, people — and whether "
+        "each is written into the contract or was verbal, "
+        "2) What is in scope and, explicitly, what was excluded and "
+        "why, "
+        "3) Assumptions the estimate depends on, and who on the "
+        "customer side has accepted them, "
+        "4) Customer stakeholders: sponsor, day-to-day contact, "
+        "sceptics, and anything about how they prefer to work, "
+        "5) Known risks, sensitivities and history the delivery team "
+        "would otherwise walk into blind, "
+        "6) Environment and access facts already established, "
+        "7) Open items the delivery team is inheriting, with owners. "
+        "Flag any gap between what was promised verbally and what the "
+        "signed scope covers — that gap is the single most valuable "
+        "output of this meeting."
+        + _VISUALS_DIRECTIVE
+    ),
 }
 
 
