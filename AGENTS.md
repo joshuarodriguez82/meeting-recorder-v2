@@ -69,6 +69,55 @@ Include BOTH paths so users can pick:
 
 Update the version number in the ZIP filename (`Meeting.Recorder_X.Y.Z_universal.zip`) for each release. Mention Windows users can ignore Gatekeeper guidance and just download the `.msi`/`.exe`. Keep this block until the app is signed and notarized — at that point this whole instruction can come out.
 
+# Test fixtures are copied from real payloads, never invented
+
+A stub that invents field names is worse than no stub: it makes the
+suite green while the product is broken, and it does so confidently.
+
+August 2026: `mcp-server/tests/stub_backend.py` gave commitment rows a
+`text`, `client` and `project` key. The backend has never emitted any
+of the three — its `Commitment` carries `description` and `quote`, and
+the service attaches `session_client` / `session_project`. 124 tests
+passed. The first real user asked their assistant what they owed and
+got 89 rows with an owner, a due date, and no commitment text at all.
+
+The file's own docstring already said its shapes were "copied from the
+real thing, not invented". For that one endpoint it wasn't, and nothing
+could tell.
+
+So:
+
+- **Paste a real response into a fixture.** Capture it from the running
+  app, scrub it per the rule above, and keep the shape exactly.
+- **When a bug escaped the tests, fix the fixture FIRST** and watch the
+  suite go red. If it stays green, you have not reproduced the bug and
+  you are about to "fix" something else. A formatter change alone would
+  have left this suite validating a fiction.
+- **Prefer asserting against the producer.** Where a test can reach the
+  real dataclass or the real endpoint cheaply, do that instead of
+  restating its shape by hand.
+
+# Run the suites the way CI runs them
+
+Two environment traps in this repo, each of which has produced a red PR
+that looked green locally:
+
+- **Python 3.12+ for the backend suite.** `config/settings.py` uses an
+  f-string form 3.11 rejects, so on 3.11 every test that imports the app
+  fails to COLLECT. Running only the files that don't import it looks
+  like a pass.
+- **The MCP suite runs from inside `mcp-server/`.** Its
+  `asyncio_mode = "auto"` is in that directory's `pyproject.toml`, and
+  pytest reads only the ini options of the rootdir it resolves. From the
+  repo root the config is ignored and every async test errors.
+
+And the same class of mistake outside Python: check the **Node version
+CI pins** before adding a frontend dependency. jsdom 30 needs Node 22;
+every workflow here — including the one that builds releases — pins Node
+20, so a dependency that works locally can fail in CI and, worse, tempt
+you into changing the Node that produces shipping artifacts as a side
+effect of adding a test.
+
 # Diagnose with data, not guesses
 
 When ANY release / CI / build / deploy issue is reported, the FIRST step is to read the actual logs and source-of-truth state — not to speculate about the user's local environment. Specifically:
