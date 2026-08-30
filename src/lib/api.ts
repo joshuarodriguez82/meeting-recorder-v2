@@ -928,6 +928,16 @@ export interface ClientKnowledgeStatus {
   folder_present: boolean;
   indexed_documents: number;
   total_chunks: number;
+  // What is actually SITTING in the folder right now, which the index
+  // count alone cannot tell you. Indexing runs when the folder is set
+  // and never again, so documents added afterwards are invisible until
+  // someone reindexes — and until v2.76 nothing said so, which is how
+  // an install ran for months with every client reporting 0 documents
+  // while the folders were full.
+  files_indexable?: number;
+  files_unsupported?: number;
+  scan_capped?: boolean;
+  unindexed_documents?: number;
 }
 
 // Session Archive: roaming-library status. Mirrors ClientExportStatus's

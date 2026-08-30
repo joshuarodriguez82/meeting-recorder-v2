@@ -879,6 +879,69 @@ _EXTRACTORS: Dict[str, Callable[[Path], Tuple[str, Optional[str]]]] = {
 SUPPORTED_EXTENSIONS = _PLAIN_TEXT_EXTENSIONS | set(_EXTRACTORS)
 
 
+#: Office writes `~$name.docx` beside a document that is open. They are
+#: not documents; counting them reports work to do that does not exist,
+#: and a shared Drive folder can carry a lot of them.
+_LOCK_FILE_PREFIX = "~$"
+
+#: Bound on scan_folder's walk. It runs on a status call against what is
+#: often a network drive, so an unbounded rglob turns opening the
+#: Clients tab into a stall. Generous enough that a real knowledge
+#: folder is never capped in practice; the flag says so when it is.
+SCAN_FILE_CAP = 5000
+
+
+def scan_folder(folder, *, max_files: int = SCAN_FILE_CAP) -> Dict[str, object]:
+    """What is actually sitting in a knowledge folder, without reading a
+    byte of any file.
+
+    Exists because "nothing is indexed" and "the folder is empty" were
+    the same answer everywhere — the status endpoint reported only what
+    the index contained, so an install with 20 clients showed 0
+    documents on every one of them for months while their folders were
+    full. See tests/test_knowledge_folder_scan.py.
+
+    Returns ``{indexable, unsupported, capped, unreadable}``. Cheap:
+    stats and extension checks only, no extraction, no embedding.
+
+    Never raises. An unmounted Drive folder is an ordinary state, not an
+    error, and the caller already reports reachability separately.
+    """
+    result: Dict[str, object] = {
+        "indexable": 0, "unsupported": 0, "capped": False, "unreadable": False,
+    }
+    try:
+        root = Path(folder).expanduser()
+        if not str(folder).strip() or not root.is_dir():
+            result["unreadable"] = True
+            return result
+    except (OSError, ValueError, TypeError):
+        result["unreadable"] = True
+        return result
+
+    seen = 0
+    try:
+        # Same walk the indexer uses, so a file counted here is a file
+        # the reindex would actually consider — the two must not drift.
+        for path in _iter_candidate_files(root):
+            if path.name.startswith(_LOCK_FILE_PREFIX):
+                continue
+            if seen >= max_files:
+                result["capped"] = True
+                break
+            seen += 1
+            if path.suffix.lower() in SUPPORTED_EXTENSIONS:
+                result["indexable"] = int(result["indexable"]) + 1
+            else:
+                result["unsupported"] = int(result["unsupported"]) + 1
+    except OSError as e:
+        # A Drive folder can vanish mid-walk. Report what was counted so
+        # far rather than losing the whole answer to one unreadable
+        # subdirectory.
+        logger.debug(f"scan_folder stopped early on {folder}: {e}")
+    return result
+
+
 # ── Chunking ─────────────────────────────────────────────────────────
 
 def chunk_text(

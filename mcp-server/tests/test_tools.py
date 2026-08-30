@@ -225,3 +225,58 @@ async def test_long_transcript_is_truncated_with_a_count():
 ])
 def test_same_folder_detection(export, knowledge, expected):
     assert srv._same_folder(export, knowledge) is expected
+
+
+# ── "0 documents" when the folder is full ────────────────────────────
+#
+# An install with 20 clients reported 0 indexed documents on every one
+# of them, for months, while their knowledge folders held SOWs and
+# proposals. Indexing runs when a folder is SET and never again, so
+# anything added afterwards is invisible — and list_clients said only
+# "indexed documents: 0", which an assistant correctly relayed as "this
+# client has no documents".
+#
+# The fix is not to index automatically. It is to stop reporting an
+# unindexed folder and an empty folder identically.
+
+def test_list_clients_says_a_full_folder_is_unindexed():
+    from meeting_recorder_mcp.formatting import render_clients
+    rows = [{
+        "client": "Initech",
+        "knowledge_folder": "/Users/sampleuser/Knowledge/Initech",
+        "folder_present": True,
+        "indexed_documents": 0,
+        "total_chunks": 0,
+        "files_indexable": 47,
+        "unindexed_documents": 47,
+    }]
+    out = render_clients(rows, {})
+    assert "47" in out
+    assert "NOT INDEXED" in out
+    # And it must tell the model what to DO with that, or the model
+    # reports "0 documents" anyway.
+    assert "reindex" in out.lower()
+
+
+def test_list_clients_flags_documents_added_since_the_last_index():
+    from meeting_recorder_mcp.formatting import render_clients
+    rows = [{
+        "client": "ACME", "knowledge_folder": "/k/ACME",
+        "folder_present": True, "indexed_documents": 12, "total_chunks": 341,
+        "files_indexable": 20, "unindexed_documents": 8,
+    }]
+    out = render_clients(rows, {})
+    assert "8" in out and "not searchable yet" in out
+
+
+def test_an_empty_folder_is_not_reported_as_unindexed():
+    """The inverse must stay quiet — warning about a genuinely empty
+    folder is the same defect pointed the other way."""
+    from meeting_recorder_mcp.formatting import render_clients
+    rows = [{
+        "client": "Zorg", "knowledge_folder": "/k/Zorg",
+        "folder_present": True, "indexed_documents": 0, "total_chunks": 0,
+        "files_indexable": 0, "unindexed_documents": 0,
+    }]
+    out = render_clients(rows, {})
+    assert "NOT INDEXED" not in out

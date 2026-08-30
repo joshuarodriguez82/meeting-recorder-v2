@@ -72,6 +72,13 @@ CLIENT_CONFIGS = {
     },
 }
 
+# Shapes match get_client_knowledge_status, INCLUDING the file-scan
+# fields added in v2.76. Those exist because "0 indexed" and "the folder
+# is empty" used to be the same answer, and a real install ran for
+# months with every client reporting 0 documents while the folders were
+# full. Initech below is that state deliberately — a full folder with an
+# empty index — so the renderer's warning is exercised rather than
+# assumed.
 KNOWLEDGE = {
     "ACME": {
         "client": "ACME",
@@ -79,6 +86,10 @@ KNOWLEDGE = {
         "folder_present": True,
         "indexed_documents": 12,
         "total_chunks": 341,
+        "files_indexable": 12,
+        "files_unsupported": 3,
+        "scan_capped": False,
+        "unindexed_documents": 0,
     },
     "Globex": {
         "client": "Globex",
@@ -86,6 +97,23 @@ KNOWLEDGE = {
         "folder_present": False,
         "indexed_documents": 88,
         "total_chunks": 1904,
+        "files_indexable": 0,
+        "files_unsupported": 0,
+        "scan_capped": False,
+        "unindexed_documents": 0,
+    },
+    # The field bug, in fixture form: 47 readable documents, none of
+    # them indexed.
+    "Initech": {
+        "client": "Initech",
+        "knowledge_folder": "/Users/sampleuser/Knowledge/Initech",
+        "folder_present": True,
+        "indexed_documents": 0,
+        "total_chunks": 0,
+        "files_indexable": 47,
+        "files_unsupported": 2,
+        "scan_capped": False,
+        "unindexed_documents": 47,
     },
 }
 
