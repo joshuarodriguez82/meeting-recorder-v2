@@ -395,6 +395,7 @@ from services.extension_bundle_service import (
     bundled_extension_version, export_dir as extension_export_dir,
     export_extension_files, extension_version_status,
 )
+from services import client_admin
 from services import knowledge_index_schedule
 from services import mcp_bundle_service
 from services import mcp_client_setup
@@ -5465,6 +5466,194 @@ async def put_client_config(client_name: str, payload: ClientConfigDTO):
     }
 
 
+def _client_cfg_to_dict(cfg) -> Dict[str, Any]:
+    """ClientConfig -> plain dict for client_admin.merge_config.
+
+    Only the fields ClientConfig actually carries. `customer_id` is
+    deliberately absent: the portal binding is stored separately (see
+    portal_push_service), so a client merge must not pretend to move it
+    — that would silently claim work it did not do.
+    """
+    return {
+        "export_folder": getattr(cfg, "export_folder", "") or "",
+        "knowledge_folder": getattr(cfg, "knowledge_folder", "") or "",
+        "display_name": getattr(cfg, "display_name", "") or "",
+    }
+
+
+def _client_cfg_from_dict(data: Dict[str, Any], display_name: str = ""):
+    return ClientConfig(
+        export_folder=data.get("export_folder", "") or "",
+        knowledge_folder=data.get("knowledge_folder", "") or "",
+        display_name=display_name or data.get("display_name", "") or "",
+    )
+
+
+class ClientRenameRequest(BaseModel):
+    new_name: str
+
+
+class ClientDeleteRequest(BaseModel):
+    # False removes only the configuration and leaves every meeting's
+    # tag intact, so re-creating the client later restores the
+    # association. True clears the tag as well. Neither deletes a
+    # recording — see services/client_admin.py.
+    untag_sessions: bool = False
+
+
+class ProjectRenameRequest(BaseModel):
+    old_name: str
+    new_name: str
+
+
+def _all_session_tags() -> List[Dict[str, Any]]:
+    """session_id / client / project for every session, which is all the
+    planning functions need."""
+    return [
+        {"session_id": s.get("session_id"),
+         "client": s.get("client") or "",
+         "project": s.get("project") or ""}
+        for s in (svc.session_svc.list_sessions() or [])
+    ]
+
+
+def _retag_sessions(session_ids: List[str], *, client=None, project=None) -> int:
+    """Apply a tag change to specific sessions. Loads and saves each one
+    through session_svc so every side effect a manual edit would trigger
+    still happens. Returns how many were actually written."""
+    done = 0
+    for sid in session_ids:
+        session = svc.session_svc.load_full(sid)
+        if not session:
+            continue
+        if client is not None:
+            session.client = client
+            # Same reasoning as patch_session: the user decided, so any
+            # auto-tagging provenance is now a lie about a value they
+            # corrected.
+            session.client_source = None
+            session.client_source_detail = None
+        if project is not None:
+            session.project = project
+        svc.session_svc.save(session)
+        done += 1
+    return done
+
+
+@app.post("/clients/{client_name}/rename")
+async def rename_client(client_name: str, req: ClientRenameRequest):
+    """Rename a client, or MERGE it into an existing one.
+
+    Merging is the operation that repairs the real failure this was
+    built for: a client configured twice under a misspelling, with the
+    meetings stranded on the typo. Renaming the config alone would have
+    left them there, so this moves the session tags and the indexed
+    documents too.
+
+    Never deletes a recording.
+    """
+    svc.load_settings()
+    if not svc.client_cfg_svc or not svc.session_svc:
+        raise HTTPException(status_code=503, detail="Client store unavailable")
+
+    configs = svc.client_cfg_svc.get_all() or {}
+    try:
+        plan = client_admin.plan_rename(
+            client_name, req.new_name,
+            existing_clients=list(configs.keys()),
+            sessions=_all_session_tags())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if plan.is_noop:
+        return {"ok": True, "merged": False, "sessions_retagged": 0,
+                "documents_rekeyed": 0, "noop": True}
+
+    def _do():
+        source = svc.client_cfg_svc.get(plan.old)
+        target = svc.client_cfg_svc.get(plan.new) if plan.is_merge else None
+        if source is not None:
+            merged = client_admin.merge_config(
+                source=_client_cfg_to_dict(source),
+                target=_client_cfg_to_dict(target) if target else None)
+            svc.client_cfg_svc.set(
+                plan.new, _client_cfg_from_dict(merged, plan.new))
+            svc.client_cfg_svc.delete(plan.old)
+        moved = _retag_sessions(plan.session_ids, client=plan.new)
+        rekeyed = client_admin.rekey_documents(
+            svc.session_svc.recordings_dir, plan.old, plan.new)
+        return moved, rekeyed
+
+    moved, rekeyed = await asyncio.to_thread(_do)
+    if svc.search_svc:
+        await asyncio.to_thread(svc.search_svc.invalidate)
+    logger.info(
+        f"Client {'merge' if plan.is_merge else 'rename'}: "
+        f"{plan.old!r} -> {plan.new!r}, {moved} session(s), "
+        f"{rekeyed} document(s)")
+    return {"ok": True, "merged": plan.is_merge, "sessions_retagged": moved,
+            "documents_rekeyed": rekeyed, "noop": False}
+
+
+@app.delete("/clients/{client_name}")
+async def delete_client(client_name: str, untag_sessions: bool = False):
+    """Remove a client's configuration, and optionally its meetings' tag.
+
+    NEVER deletes a recording, in either mode. A client is a tag and
+    some folder settings; the meetings are the user's data.
+    """
+    svc.load_settings()
+    if not svc.client_cfg_svc or not svc.session_svc:
+        raise HTTPException(status_code=503, detail="Client store unavailable")
+
+    plan = client_admin.plan_delete(
+        client_name, sessions=_all_session_tags(),
+        untag_sessions=untag_sessions)
+
+    def _do():
+        svc.client_cfg_svc.delete(client_name)
+        return _retag_sessions(plan.session_ids, client="")
+
+    untagged = await asyncio.to_thread(_do)
+    if svc.search_svc:
+        await asyncio.to_thread(svc.search_svc.invalidate)
+    logger.info(f"Client deleted: {client_name!r}, {untagged} session(s) untagged")
+    return {"ok": True, "sessions_untagged": untagged,
+            "recordings_deleted": 0}
+
+
+@app.post("/clients/{client_name}/projects/rename")
+async def rename_project(client_name: str, req: ProjectRenameRequest):
+    """Rename a project within one client. Projects have no store of
+    their own — they exist only as tags on sessions — so this is a
+    retag and nothing else."""
+    svc.load_settings()
+    if not svc.session_svc:
+        raise HTTPException(status_code=503, detail="Sessions unavailable")
+    try:
+        ids = client_admin.plan_project_rename(
+            client_name, req.old_name, req.new_name,
+            sessions=_all_session_tags())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    moved = await asyncio.to_thread(
+        _retag_sessions, ids, None, req.new_name.strip())
+    return {"ok": True, "sessions_retagged": moved}
+
+
+@app.delete("/clients/{client_name}/projects/{project_name}")
+async def delete_project(client_name: str, project_name: str):
+    """Clear a project tag from every session under this client. The
+    meetings stay; only the label goes."""
+    svc.load_settings()
+    if not svc.session_svc:
+        raise HTTPException(status_code=503, detail="Sessions unavailable")
+    ids = client_admin.plan_project_delete(
+        client_name, project_name, sessions=_all_session_tags())
+    cleared = await asyncio.to_thread(_retag_sessions, ids, None, "")
+    return {"ok": True, "sessions_retagged": cleared, "recordings_deleted": 0}
+
+
 @app.get("/clients/{client_name}/export-status")
 async def get_client_export_status(client_name: str):
     """How much of this client's library has reached its Designated
@@ -9829,7 +10018,7 @@ async def _auto_index_one_client() -> None:
     if not svc.client_cfg_svc or not svc.session_svc:
         return
 
-    configs = await asyncio.to_thread(svc.client_cfg_svc.all)
+    configs = await asyncio.to_thread(svc.client_cfg_svc.get_all)
     names = [
         name for name, cfg in (configs or {}).items()
         if (getattr(cfg, "knowledge_folder", "") or "")

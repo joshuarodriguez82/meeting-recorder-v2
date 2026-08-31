@@ -351,6 +351,19 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
           </div>
         </div>
 
+        <ManageClientCard
+          client={selected}
+          allClients={clients}
+          onRenamed={(newName) => {
+            setSelected(newName);
+            void refreshClientConfigs();
+          }}
+          onDeleted={() => {
+            setSelected("");
+            void refreshClientConfigs();
+          }}
+        />
+
         <DesignatedFolderCard
           client={selected}
           folder={clientConfigs[selected.trim().toLowerCase()]?.export_folder || ""}
@@ -1265,6 +1278,185 @@ function RenameClientDialog({
     </Dialog>
   );
 }
+
+/**
+ * Renaming, merging and deleting a client.
+ *
+ * Built because there was no way to remove or correct one, and a real
+ * install ended up with both "Montefiore" and "Montifiore" configured —
+ * the misspelling holding no folders, and every meeting tagged to it
+ * orphaned from the real account's data.
+ *
+ * Deleting the typo would not have repaired that: the meetings would
+ * still carry the wrong tag. The operation that repairs it is a MERGE,
+ * so renaming onto an existing client is a first-class path here and
+ * the word "merge" appears on the button when that is what will happen.
+ *
+ * Nothing in this card can delete a recording, in any mode.
+ */
+function ManageClientCard({
+  client,
+  allClients,
+  onRenamed,
+  onDeleted,
+}: {
+  client: string;
+  allClients: string[];
+  onRenamed: (newName: string) => void;
+  onDeleted: () => void;
+}) {
+  const [newName, setNewName] = useState(client);
+  const [busy, setBusy] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [untagOnDelete, setUntagOnDelete] = useState(false);
+
+  useEffect(() => {
+    setNewName(client);
+    setConfirmingDelete(false);
+    setUntagOnDelete(false);
+  }, [client]);
+
+  const trimmed = newName.trim();
+  const unchanged = trimmed === client;
+  // Same normalisation the backend uses: two names that lower-case the
+  // same ARE the same client, so "acme" -> "Acme" is a rename, not a
+  // merge into itself.
+  const norm = (s: string) => s.trim().toLowerCase();
+  const willMerge =
+    !unchanged &&
+    norm(trimmed) !== norm(client) &&
+    allClients.some((c) => norm(c) === norm(trimmed));
+
+  const doRename = async () => {
+    setBusy(true);
+    try {
+      const res = await api.renameClient(client, trimmed);
+      if (res.noop) return;
+      toast.success(
+        `${res.merged ? "Merged" : "Renamed"} to ${trimmed} — `
+        + `${res.sessions_retagged} meeting${res.sessions_retagged === 1 ? "" : "s"}`
+        + `${res.documents_rekeyed ? `, ${res.documents_rekeyed} document${res.documents_rekeyed === 1 ? "" : "s"}` : ""}`
+        + " moved."
+      );
+      onRenamed(trimmed);
+    } catch (e) {
+      toast.error(`Rename failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doDelete = async () => {
+    setBusy(true);
+    try {
+      const res = await api.deleteClient(client, untagOnDelete);
+      toast.success(
+        untagOnDelete
+          ? `Deleted ${client}. ${res.sessions_untagged} meeting${res.sessions_untagged === 1 ? "" : "s"} kept, now untagged.`
+          : `Deleted ${client}'s settings. Its meetings keep their tag.`
+      );
+      onDeleted();
+    } catch (e) {
+      toast.error(`Delete failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setBusy(false);
+      setConfirmingDelete(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader className="py-3">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Pencil className="h-4 w-4 text-primary" />
+          Rename or remove this client
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="space-y-2">
+          <Label>Client name</Label>
+          <div className="flex gap-2">
+            <Input
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder={client}
+            />
+            <Button
+              size="sm"
+              onClick={doRename}
+              disabled={busy || unchanged || !trimmed}
+              variant={willMerge ? "default" : "outline"}
+            >
+              {busy ? <Loader2 className="h-3 w-3 animate-spin" />
+                    : willMerge ? "Merge" : "Rename"}
+            </Button>
+          </div>
+          {willMerge ? (
+            // Say "merge" plainly. Users accept a rename readily and
+            // should think harder about folding two clients together.
+            <p className="text-xs text-amber-600 dark:text-amber-500">
+              <AlertTriangle className="mr-1 inline h-3 w-3" />
+              <strong>{trimmed}</strong> already exists — this merges the
+              two. Every meeting and document under {client} moves across,
+              and {trimmed} keeps its own folders. This can&apos;t be
+              undone with a button, but nothing is deleted.
+            </p>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Moves this client&apos;s meetings and indexed documents to the
+              new name. Use this to fix a misspelling — renaming to a name
+              that already exists merges the two.
+            </p>
+          )}
+        </div>
+
+        <div className="space-y-2 border-t pt-4">
+          {!confirmingDelete ? (
+            <Button size="sm" variant="outline" disabled={busy}
+                    onClick={() => setConfirmingDelete(true)}>
+              <Trash2 className="mr-1 h-3 w-3" /> Delete client
+            </Button>
+          ) : (
+            <div className="space-y-3 rounded-md border border-destructive/40 p-3">
+              <p className="text-sm font-medium">Delete {client}?</p>
+              {/* The reassurance that matters most, stated first. */}
+              <p className="text-xs text-muted-foreground">
+                <strong>Your recordings are never deleted.</strong> A client
+                is a name and its folder settings; the meetings stay in
+                your archive either way.
+              </p>
+              <label className="flex items-start gap-2 text-xs">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={untagOnDelete}
+                  onChange={(e) => setUntagOnDelete(e.target.checked)}
+                />
+                <span>
+                  Also remove this client&apos;s name from its meetings.
+                  Leave unticked to keep the tag, so re-creating the client
+                  later brings its history back.
+                </span>
+              </label>
+              <div className="flex gap-2">
+                <Button size="sm" variant="destructive" disabled={busy}
+                        onClick={doDelete}>
+                  {busy ? <Loader2 className="h-3 w-3 animate-spin" />
+                        : "Delete"}
+                </Button>
+                <Button size="sm" variant="outline" disabled={busy}
+                        onClick={() => setConfirmingDelete(false)}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 
 function DesignatedFolderCard({
   client, folder, onSaved,

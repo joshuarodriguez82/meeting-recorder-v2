@@ -132,6 +132,12 @@
   ]
  ],
  [
+  "/clients/{client_name}",
+  [
+   "DELETE"
+  ]
+ ],
+ [
   "/clients/{client_name}/export-status",
   [
    "GET"
@@ -150,7 +156,25 @@
   ]
  ],
  [
+  "/clients/{client_name}/projects/rename",
+  [
+   "POST"
+  ]
+ ],
+ [
+  "/clients/{client_name}/projects/{project_name}",
+  [
+   "DELETE"
+  ]
+ ],
+ [
   "/clients/{client_name}/reconcile",
+  [
+   "POST"
+  ]
+ ],
+ [
+  "/clients/{client_name}/rename",
   [
    "POST"
   ]
