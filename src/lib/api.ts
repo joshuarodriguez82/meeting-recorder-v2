@@ -2118,6 +2118,31 @@ export const api = {
   getClientKnowledge: (name: string) =>
     request<ClientKnowledgeStatus>(
       `/clients/${encodeURIComponent(name)}/knowledge`),
+  // Rename a client, or MERGE it into an existing one. Moves the
+  // session tags and the indexed documents too — renaming only the
+  // config entry is what leaves meetings stranded on a misspelling.
+  // Never deletes a recording.
+  renameClient: (name: string, newName: string) =>
+    request<{
+      ok: boolean; merged: boolean; sessions_retagged: number;
+      documents_rekeyed: number; noop: boolean;
+    }>(`/clients/${encodeURIComponent(name)}/rename`,
+       { method: "POST", body: JSON.stringify({ new_name: newName }) }),
+  // Removes the client's configuration. `untagSessions` also clears the
+  // tag from its meetings; either way the recordings are untouched.
+  deleteClient: (name: string, untagSessions: boolean) =>
+    request<{ ok: boolean; sessions_untagged: number; recordings_deleted: number }>(
+      `/clients/${encodeURIComponent(name)}?untag_sessions=${untagSessions}`,
+      { method: "DELETE" }),
+  renameProject: (client: string, oldName: string, newName: string) =>
+    request<{ ok: boolean; sessions_retagged: number }>(
+      `/clients/${encodeURIComponent(client)}/projects/rename`,
+      { method: "POST",
+        body: JSON.stringify({ old_name: oldName, new_name: newName }) }),
+  deleteProject: (client: string, project: string) =>
+    request<{ ok: boolean; sessions_retagged: number; recordings_deleted: number }>(
+      `/clients/${encodeURIComponent(client)}/projects/${encodeURIComponent(project)}`,
+      { method: "DELETE" }),
   reindexClientKnowledge: (name: string) =>
     request<KnowledgeReindexReport>(
       `/clients/${encodeURIComponent(name)}/knowledge/reindex`,
