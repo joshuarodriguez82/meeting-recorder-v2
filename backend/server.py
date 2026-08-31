@@ -9829,7 +9829,7 @@ async def _auto_index_one_client() -> None:
     if not svc.client_cfg_svc or not svc.session_svc:
         return
 
-    configs = await asyncio.to_thread(svc.client_cfg_svc.all)
+    configs = await asyncio.to_thread(svc.client_cfg_svc.get_all)
     names = [
         name for name, cfg in (configs or {}).items()
         if (getattr(cfg, "knowledge_folder", "") or "")
