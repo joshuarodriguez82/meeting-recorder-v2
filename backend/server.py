@@ -428,6 +428,8 @@ from services.portal_push_service import (
 from services.export_service import ExportService
 from services.export_worker import ExportWorker, PortalPushWorker, resolve_export_folder
 from services import export_reconcile
+from services import export_sweep
+from services.pipeline_progress import PipelineProgress
 from services import archive_reconcile
 from services import shared_state_sync
 from services.shared_state_sync import CLIENT_CONFIGS_FILE
@@ -795,6 +797,10 @@ class Services:
         # `_processing_count` / `is_processing` below, which track real
         # work instead of a leftover message.
         self.current_status: str = ""
+        # Structured view of the same information. current_status is the
+        # one line a cramped surface can show; this is what the activity
+        # centre reads to say which stage is running and how many remain.
+        self.pipeline = PipelineProgress()
         # Real busy signal for /recording/status, replacing the old
         # "current_status is non-empty" proxy the frontend used to infer
         # activity from (fragile — it never distinguished "still
@@ -822,7 +828,14 @@ class Services:
         with `_end_processing()` in a `finally` — see that method's
         docstring for why."""
         with self._processing_lock:
+            was_idle = self._processing_count == 0
             self._processing_count += 1
+        if was_idle:
+            # A new run starts from pending stages. Without this the
+            # second session of the day inherits the first one's stage
+            # states and renders as already finished before it has done
+            # anything — the same class of lie the welded label was.
+            self.pipeline.reset()
 
     def _end_processing(self) -> None:
         """Mark one unit of pipeline work as finished. Callers MUST call
@@ -839,6 +852,13 @@ class Services:
         permanently lie True->False for the wrong reason."""
         with self._processing_lock:
             self._processing_count = max(0, self._processing_count - 1)
+            now_idle = self._processing_count == 0
+        if now_idle and self.pipeline.error() is None:
+            # Every stage that ran, ran. Marking completion here rather
+            # than on a status message means a run that finishes without
+            # emitting a final token still reads as finished, instead of
+            # leaving a spinner that never resolves.
+            self.pipeline.complete()
 
     @property
     def is_processing(self) -> bool:
@@ -846,20 +866,27 @@ class Services:
             return self._processing_count > 0
 
     def _record_status(self, msg: str) -> None:
-        """Log + stash the status so /recording/status can return it."""
-        # Translate internal stage tokens into human-readable strings.
-        stage_labels = {
-            "__stage:transcribe:active__":  "Transcribing…",
-            "__stage:transcribe:done__":    "Transcription complete",
-            "__stage:diarize:active__":     "Identifying speakers…",
-            "__stage:diarize:done__":       "Speaker identification complete",
-            "__stage:speakers:active__":    "Assigning speakers to segments…",
-        }
-        display = msg
-        for token, label in stage_labels.items():
-            display = display.replace(token, label)
-        display = display.strip()
-        if display:
+        """Fold a status message into the pipeline model, and stash the
+        rendered line so /recording/status can return both.
+
+        WHAT THIS REPLACED (screenshot, 2026-09-01). This method used to
+        translate stage tokens by running ``str.replace`` once per known
+        token over the whole message. ``recording_service`` emits BOTH
+        tokens in one string when a stage ends and the next begins, so
+        two labels were substituted into one string with nothing between
+        them and the sidebar showed:
+
+            Transcription completeIdentifying s…
+
+        Inserting a separator would have fixed that line and left the UI
+        still guessing at meaning from prose. The stages are modelled
+        instead (services/pipeline_progress.py); ``current_status`` is
+        now a rendering of that model, which is why two of them can no
+        longer collide.
+        """
+        self.pipeline.apply(msg)
+        display = self.pipeline.label()
+        if display and display != self.current_status:
             self.current_status = display
             logger.info(f"[rec] {display}")
 
@@ -1378,6 +1405,16 @@ class RecordingStatus(BaseModel):
     # frontend against an older backend that omits it also degrades
     # gracefully (optional on the TS side too).
     is_processing: bool = False
+    # Structured view of the same pipeline `current_status` renders as
+    # one line: an ordered stage list with per-stage state, the running
+    # stage, a percentage, and any error. Added because a single string
+    # cannot answer "which stage?" or "how much is left?", so the UI had
+    # to guess — and because two labels welded into one string is what
+    # produced the "Transcription completeIdentifying s…" screenshot.
+    # See services/pipeline_progress.py for the shape; a default is
+    # supplied so an older frontend, or a newer one against a backend
+    # that predates this, degrades to `current_status` cleanly.
+    pipeline: dict = {}
     # Auto-stop / dead-air watchdog warnings, one per active condition.
     # Each entry is a small dict the frontend renders as a banner +
     # native notification. Codes are stable so the frontend can dedupe
@@ -2639,6 +2676,7 @@ async def recording_status():
         models_loading=svc.models_loading,
         models_error=svc.models_error,
         current_status=svc.current_status,
+        pipeline=svc.pipeline.payload(),
         is_processing=svc.is_processing,
         warnings=warnings,
         auto_record_subject=(svc.auto_record_subject if is_rec else None),
@@ -9947,6 +9985,19 @@ async def _watchdog_loop():
 #: without an app restart.
 _AUTO_INDEX_TICK_S = 60
 
+#: How long the knowledge indexer will stand aside for a non-empty
+#: export backlog before running anyway. Deference is a courtesy between
+#: two background jobs; without a ceiling, one session that can never
+#: export would disable indexing for the life of the process.
+_EXPORT_DEFERENCE_MAX_S = 30 * 60
+
+#: Cadence of the periodic export reconciliation sweep. Two minutes is
+#: the "syncs when processing finishes" promise expressed as a bound:
+#: the enqueue-on-mutation fast path still copies within seconds, and
+#: this is the ceiling on how long a MISSED or DROPPED enqueue can go
+#: unnoticed. Cheap because services/export_sweep.py caps the pass.
+_EXPORT_SWEEP_TICK_S = 120
+
 #: Last successful sweep per client, epoch seconds. In memory: it drives
 #: rotation within a run, and a restart simply starts the rotation over,
 #: which costs stat calls because index_folder skips unchanged files.
@@ -9955,20 +10006,144 @@ _auto_index_last_pass: Optional[float] = None
 
 
 def _auto_index_busy() -> bool:
-    """Recording or processing. Extraction and embedding compete with
+    """Recording, processing, or exporting.
+
+    Recording and processing: extraction and embedding compete with
     transcription and diarization for CPU, and this app already carries
     a setting that exists because those two contending made recordings
     vanish. A background indexer must never be the thing that does that
-    again."""
+    again.
+
+    Exporting (added 2026-09-01): a knowledge sweep walks a client's
+    Knowledge Folder, and the Knowledge Folder card offers "Same as
+    Designated Folder" as a one-click option — so on a common setup the
+    indexer is statting and reading the exact cloud-mounted tree the
+    export worker is copying INTO. On Google Drive File Stream a stat is
+    a network round-trip and a read forces a download, so the two
+    contend for one mount. Deferring a sweep costs nothing; the
+    documents are still there next tick. Delaying an export costs the
+    user a meeting that hasn't shown up in their folder, which they are
+    watching a counter for.
+
+    This became reachable in v2.78.0. v2.77.0 shipped auto-indexing on
+    by default and it never actually ran, so nothing contended.
+    """
     try:
         if svc.recording_svc is not None and svc.recording_svc.is_recording():
             return True
+        if _EXPORT_WORKER is not None and _EXPORT_WORKER.pending_count() > 0:
+            # Bounded on purpose. A session that can never export — a
+            # source file gone, a folder pointing somewhere unwritable —
+            # is re-enqueued by every sweep, so an unbounded deference
+            # would let one stuck export switch knowledge indexing off
+            # permanently. Standing aside is a courtesy between
+            # background jobs, not a kill switch one holds over another.
+            since = _EXPORT_WORKER.pending_since()
+            if since is None or (time.monotonic() - since) < _EXPORT_DEFERENCE_MAX_S:
+                return True
     except Exception as e:  # noqa: BLE001
         # Unable to tell => assume busy. The safe direction is to skip a
-        # sweep, never to run one during a recording.
+        # sweep, never to run one during a recording or a copy.
         logger.debug(f"Auto-index busy check failed, assuming busy: {e}")
         return True
     return _PROCESSING_LOCK.locked()
+
+
+def _sweep_recent_exports() -> int:
+    """Re-enqueue any recent session whose artifacts are missing from
+    its Designated Folder. Returns how many were queued.
+
+    THE GUARANTEE THIS RESTORES (field report 2026-09-01). A user
+    recorded a meeting and it had still not reached its folder two
+    hours later. Exports are enqueued on mutation and retried three
+    times over ~2.5 minutes, then DROPPED with a log line — so a mount
+    that was busy for those few minutes left a session owed artifacts
+    that nothing would ever attempt again.
+
+    export_reconcile was written to make that impossible; its docstring
+    says "a missed trigger becomes a delay, never a permanent hole".
+    But it only ever ran at startup, on folder-set, on rename, and from
+    the Sync now button. A guarantee wired only to events is not a
+    guarantee. This is the schedule that makes it one.
+
+    Stats files, never copies — the copying stays on the export worker
+    thread, off the event loop, which is the 2026-07-09 rule. Bounded by
+    services/export_sweep.py so a frequent pass stays affordable on a
+    cloud-streamed mount.
+    """
+    if not svc.session_svc:
+        return 0
+    try:
+        summaries = svc.session_svc.list_sessions()
+    except Exception as e:  # noqa: BLE001
+        # A flaky root must cost this tick, not the loop. The next one
+        # is two minutes away.
+        logger.warning(f"Export sweep could not list sessions: {e}")
+        return 0
+
+    rows = export_sweep.sweep_candidates(summaries, now_epoch=time.time())
+    # Resolution reads client config; one lookup per client per pass
+    # rather than one per session, which would be the same answer 20
+    # times over.
+    folders: Dict[str, str] = {}
+    queued = 0
+    for row in rows:
+        try:
+            if not export_reconcile.expected_artifacts(row):
+                # Nothing processed yet — owes its folder nothing, and
+                # enqueueing it would count as a pending export that
+                # holds the knowledge indexer off for no reason.
+                continue
+            client = str(row.get("client") or "")
+            if client not in folders:
+                folders[client] = _export_folder_for_client(client) or ""
+            folder = folders[client]
+            if not folder:
+                continue
+            if not export_reconcile.missing_artifacts(row, folder):
+                continue
+            sid = str(row.get("session_id") or "")
+            if not sid:
+                continue
+            _EXPORT_WORKER.enqueue(sid, copy_audio=False)
+            queued += 1
+        except Exception as e:  # noqa: BLE001
+            # One unreadable session must never abandon the rest — the
+            # same isolation list_sessions() learned in the 2026-08-07
+            # report, where a single OSError from a Drive mount took an
+            # entire library down with it.
+            logger.debug(
+                f"Export sweep skipped session "
+                f"{row.get('session_id', '?')}: {e}")
+    if queued:
+        logger.info(
+            f"Export sweep queued {queued} session(s) whose artifacts "
+            f"were missing from their Designated Folder")
+    return queued
+
+
+async def _export_sweep_loop():
+    """Run _sweep_recent_exports on a timer.
+
+    Skipped while recording: the sweep stats files on a cloud mount, and
+    the record path's standing rule is that nothing it does not need
+    touches a network folder mid-capture.
+    """
+    await asyncio.sleep(45)  # after the startup reconcile, not during it
+    try:
+        while True:
+            try:
+                recording = (svc.recording_svc is not None
+                             and svc.recording_svc.is_recording())
+                if not recording:
+                    await asyncio.to_thread(_sweep_recent_exports)
+            except Exception as e:  # noqa: BLE001
+                # A failing pass must never kill the loop; the reason
+                # belongs in the log, not in a silent death.
+                logger.warning(f"Export sweep failed: {e}")
+            await asyncio.sleep(_EXPORT_SWEEP_TICK_S)
+    except asyncio.CancelledError:
+        raise
 
 
 async def _auto_index_loop():
@@ -10406,6 +10581,10 @@ async def startup():
         # Keeps Knowledge Folders indexed without anyone
         # remembering to click Reindex — see _auto_index_loop.
         asyncio.create_task(_auto_index_loop())
+        # Makes "a missed trigger is a delay, never a permanent hole"
+        # actually true, by running reconciliation on a schedule instead
+        # of only at startup and on demand — see _sweep_recent_exports.
+        asyncio.create_task(_export_sweep_loop())
     except Exception as e:
         logger.warning(f"Auto prep-brief bootstrap failed: {e}")
 

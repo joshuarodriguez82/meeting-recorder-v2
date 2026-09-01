@@ -8,8 +8,8 @@ carried ``rename()`` and ``delete()`` but nothing exposed them, and both
 touch only the CONFIG entry — folders and portal binding — never the
 meetings.
 
-That gap produced a live state in a real install: both "Montefiore" and
-"Montifiore" configured, the misspelling holding no folders, and every
+That gap produced a live state in a real install: both "Northwind" and
+"Nortwind" configured, the misspelling holding no folders, and every
 meeting tagged to the typo orphaned from the real account's data.
 Deleting the typo's config would not have repaired it — the meetings
 would still carry the wrong tag and still be missing from the right

@@ -7,6 +7,7 @@ import {
   type DocumentSkip,
 } from "@/lib/api";
 import { PortalSyncControls } from "@/components/portal-sync-controls";
+import { isMerge, pluralMeetings } from "@/lib/client-admin";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -127,7 +128,6 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
   const [newClientName, setNewClientName] = useState("");
   const [showTagMeetings, setShowTagMeetings] = useState(false);
   const [showAiSuggest, setShowAiSuggest] = useState(false);
-  const [showRename, setShowRename] = useState(false);
 
   // Project sub-selection (null = show all meetings for this client)
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
@@ -138,7 +138,6 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
   const [showNewProject, setShowNewProject] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
   const [showTagProject, setShowTagProject] = useState(false);
-  const [showRenameProject, setShowRenameProject] = useState(false);
 
   // Reset project sub-selection whenever we switch clients
   useEffect(() => {
@@ -336,10 +335,13 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
             </p>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={() => setShowRename(true)}>
-              <Pencil className="h-3.5 w-3.5 mr-2" />
-              Rename
-            </Button>
+            {/* No "Rename" button here. There used to be one, opening a
+                dialog that only bulk-retagged sessions — it left the
+                client's CONFIG and its indexed documents behind under
+                the old name, which is exactly the stranded state the
+                merge feature was built to repair. Renaming now lives in
+                ManageClientCard below, in one place, on the complete
+                implementation. */}
             <Button variant="outline" size="sm" onClick={() => setShowAiSuggest(true)}>
               <Sparkles className="h-3.5 w-3.5 mr-2" />
               AI Suggest
@@ -415,12 +417,11 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
                   mode="manage"
                 />
               )}
-              {selectedProject && (
-                <Button variant="outline" size="sm" onClick={() => setShowRenameProject(true)}>
-                  <Pencil className="h-3.5 w-3.5 mr-2" />
-                  Rename Project
-                </Button>
-              )}
+              {/* Renaming a project moved out of a header dialog and
+                  into ManageProjectCard below, so it sits next to the
+                  delete it belongs with and reads the same as the
+                  client card. A control that only appears once you have
+                  already drilled into a project is one nobody finds. */}
               <Button size="sm" variant="outline" onClick={() => setShowNewProject(true)}>
                 <Plus className="h-3.5 w-3.5 mr-2" />
                 New Project
@@ -478,6 +479,19 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
             )}
           </CardContent>
         </Card>
+
+        {selectedProject && (
+          <ManageProjectCard
+            client={selected}
+            project={selectedProject}
+            allProjects={projectsList}
+            meetingCount={
+              clientSessions.filter((s) => s.project === selectedProject).length
+            }
+            onRenamed={(newName) => { setSelectedProject(newName); onReload(); }}
+            onDeleted={() => { setSelectedProject(null); onReload(); }}
+          />
+        )}
 
         {/* Stat cards — reflect the current filter (all client meetings OR just the selected project).
             Open Actions and Decisions double as toggles for the drill-down panel below; a card
@@ -573,14 +587,6 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
         onDone={onReload}
       />
 
-      <RenameClientDialog
-        open={showRename}
-        onOpenChange={setShowRename}
-        client={selected}
-        sessions={sessions}
-        onRenamed={(newName) => { setSelected(newName); onReload(); }}
-      />
-
       <NewProjectDialog
         open={showNewProject}
         onOpenChange={setShowNewProject}
@@ -597,15 +603,6 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
         project={selectedProject || ""}
         sessions={sessions}
         onDone={onReload}
-      />
-
-      <RenameProjectDialog
-        open={showRenameProject}
-        onOpenChange={setShowRenameProject}
-        client={selected}
-        project={selectedProject || ""}
-        sessions={sessions}
-        onRenamed={(newName) => { setSelectedProject(newName); onReload(); }}
       />
     </div>
   );
@@ -752,80 +749,6 @@ function TagProjectDialog({
           <Button onClick={apply} disabled={selected.size === 0 || applying}>
             {applying ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : null}
             Apply Tag
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function RenameProjectDialog({
-  open, onOpenChange, client, project, sessions, onRenamed,
-}: {
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
-  client: string;
-  project: string;
-  sessions: SessionSummary[];
-  onRenamed: (newName: string) => void;
-}) {
-  const [name, setName] = useState(project);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    if (open) setName(project);
-  }, [open, project]);
-
-  const affected = sessions.filter((s) => s.client === client && s.project === project).length;
-
-  const save = async () => {
-    const n = name.trim();
-    if (!n || n === project) {
-      onOpenChange(false);
-      return;
-    }
-    setSaving(true);
-    try {
-      const ids = sessions
-        .filter((s) => s.client === client && s.project === project)
-        .map((s) => s.session_id);
-      await api.bulkTag(ids, undefined, n);
-      toast.success(`Renamed project to "${n}" (${ids.length} meetings updated)`);
-      onRenamed(n);
-      onOpenChange(false);
-    } catch (e) {
-      toast.error(`Rename failed: ${e instanceof Error ? e.message : e}`);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle>Rename Project</DialogTitle>
-        </DialogHeader>
-        <div className="space-y-3 py-2">
-          <div className="space-y-2">
-            <Label>New Name</Label>
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              autoFocus
-              onKeyDown={(e) => e.key === "Enter" && save()}
-            />
-          </div>
-          <p className="text-xs text-muted-foreground">
-            This will update {affected} meeting{affected === 1 ? "" : "s"} under{" "}
-            <strong>{client}</strong> currently tagged &quot;{project}&quot;.
-          </p>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={save} disabled={!name.trim() || saving}>
-            {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : null}
-            Save
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1209,81 +1132,11 @@ function AiSuggestDialog({
   );
 }
 
-function RenameClientDialog({
-  open, onOpenChange, client, sessions, onRenamed,
-}: {
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
-  client: string;
-  sessions: SessionSummary[];
-  onRenamed: (newName: string) => void;
-}) {
-  const [name, setName] = useState(client);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    if (open) setName(client);
-  }, [open, client]);
-
-  const affected = sessions.filter((s) => s.client === client).length;
-
-  const save = async () => {
-    const n = name.trim();
-    if (!n || n === client) {
-      onOpenChange(false);
-      return;
-    }
-    setSaving(true);
-    try {
-      const ids = sessions.filter((s) => s.client === client).map((s) => s.session_id);
-      await api.bulkTag(ids, n);
-      toast.success(`Renamed to "${n}" (${ids.length} meetings updated)`);
-      onRenamed(n);
-      onOpenChange(false);
-    } catch (e) {
-      toast.error(`Rename failed: ${e instanceof Error ? e.message : e}`);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle>Rename Client</DialogTitle>
-        </DialogHeader>
-        <div className="space-y-3 py-2">
-          <div className="space-y-2">
-            <Label>New Name</Label>
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              autoFocus
-              onKeyDown={(e) => e.key === "Enter" && save()}
-            />
-          </div>
-          <p className="text-xs text-muted-foreground">
-            This will update {affected} meeting{affected === 1 ? "" : "s"} currently tagged &quot;{client}&quot;.
-          </p>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={save} disabled={!name.trim() || saving}>
-            {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : null}
-            Save
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 /**
  * Renaming, merging and deleting a client.
  *
  * Built because there was no way to remove or correct one, and a real
- * install ended up with both "Montefiore" and "Montifiore" configured —
+ * install ended up with both "Northwind" and "Nortwind" configured —
  * the misspelling holding no folders, and every meeting tagged to it
  * orphaned from the real account's data.
  *
@@ -1318,14 +1171,10 @@ function ManageClientCard({
 
   const trimmed = newName.trim();
   const unchanged = trimmed === client;
-  // Same normalisation the backend uses: two names that lower-case the
-  // same ARE the same client, so "acme" -> "Acme" is a rename, not a
-  // merge into itself.
-  const norm = (s: string) => s.trim().toLowerCase();
-  const willMerge =
-    !unchanged &&
-    norm(trimmed) !== norm(client) &&
-    allClients.some((c) => norm(c) === norm(trimmed));
+  // Rename-vs-merge is decided in lib/client-admin, which mirrors the
+  // backend's plan_rename and is tested against the same cases. The
+  // button's label has to match what the server will actually do.
+  const willMerge = isMerge(client, trimmed, allClients);
 
   const doRename = async () => {
     setBusy(true);
@@ -1456,6 +1305,168 @@ function ManageClientCard({
     </Card>
   );
 }
+
+/**
+ * Renaming, merging and deleting a PROJECT.
+ *
+ * Deliberately the same shape as ManageClientCard above, because to a
+ * user these are the same operation at two levels and any difference
+ * between them reads as a difference in what will happen.
+ *
+ * Projects are simpler than clients in one way that the copy should
+ * say out loud: a project has no configuration of its own. It exists
+ * only as a label on meetings, scoped to one client — "Phase 1" under
+ * Acme and "Phase 1" under Globex are different projects that happen to
+ * share a name. So deleting one clears the label and does nothing else,
+ * and there is no folder or portal binding to lose.
+ *
+ * Like the client card, nothing here can delete a recording.
+ */
+function ManageProjectCard({
+  client,
+  project,
+  allProjects,
+  meetingCount,
+  onRenamed,
+  onDeleted,
+}: {
+  client: string;
+  project: string;
+  allProjects: string[];
+  meetingCount: number;
+  onRenamed: (newName: string) => void;
+  onDeleted: () => void;
+}) {
+  const [newName, setNewName] = useState(project);
+  const [busy, setBusy] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+
+  useEffect(() => {
+    setNewName(project);
+    setConfirmingDelete(false);
+  }, [project, client]);
+
+  const trimmed = newName.trim();
+  const unchanged = trimmed === project;
+  const willMerge = isMerge(project, trimmed, allProjects);
+
+  const doRename = async () => {
+    setBusy(true);
+    try {
+      const res = await api.renameProject(client, project, trimmed);
+      toast.success(
+        `${willMerge ? "Merged into" : "Renamed to"} ${trimmed} — `
+        + `${pluralMeetings(res.sessions_retagged)} updated.`
+      );
+      onRenamed(trimmed);
+    } catch (e) {
+      toast.error(`Rename failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doDelete = async () => {
+    setBusy(true);
+    try {
+      const res = await api.deleteProject(client, project);
+      toast.success(
+        `Deleted project ${project}. `
+        + `${pluralMeetings(res.sessions_retagged)} kept, now unassigned.`
+      );
+      onDeleted();
+    } catch (e) {
+      toast.error(`Delete failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setBusy(false);
+      setConfirmingDelete(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader className="py-3">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Pencil className="h-4 w-4 text-primary" />
+          Rename or remove this project
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="space-y-2">
+          <Label>Project name</Label>
+          <div className="flex gap-2">
+            <Input
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder={project}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !busy && !unchanged && trimmed) {
+                  void doRename();
+                }
+              }}
+            />
+            <Button
+              size="sm"
+              onClick={doRename}
+              disabled={busy || unchanged || !trimmed}
+              variant={willMerge ? "default" : "outline"}
+            >
+              {busy ? <Loader2 className="h-3 w-3 animate-spin" />
+                    : willMerge ? "Merge" : "Rename"}
+            </Button>
+          </div>
+          {willMerge ? (
+            <p className="text-xs text-amber-600 dark:text-amber-500">
+              <AlertTriangle className="mr-1 inline h-3 w-3" />
+              <strong>{trimmed}</strong> already exists under {client} —
+              this folds the two together. All {pluralMeetings(meetingCount)}{" "}
+              under {project} move across. Nothing is deleted.
+            </p>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Retags this project&apos;s {pluralMeetings(meetingCount)} under{" "}
+              {client}. Renaming to a project that already exists merges
+              the two.
+            </p>
+          )}
+        </div>
+
+        <div className="space-y-2 border-t pt-4">
+          {!confirmingDelete ? (
+            <Button size="sm" variant="outline" disabled={busy}
+                    onClick={() => setConfirmingDelete(true)}>
+              <Trash2 className="mr-1 h-3 w-3" /> Delete project
+            </Button>
+          ) : (
+            <div className="space-y-3 rounded-md border border-destructive/40 p-3">
+              <p className="text-sm font-medium">Delete {project}?</p>
+              <p className="text-xs text-muted-foreground">
+                <strong>Your recordings are never deleted.</strong> A
+                project is only a label, so this clears it from{" "}
+                {pluralMeetings(meetingCount)}. They stay under {client}
+                {" "}with no project assigned, and you can retag them at
+                any time.
+              </p>
+              <div className="flex gap-2">
+                <Button size="sm" variant="destructive" disabled={busy}
+                        onClick={doDelete}>
+                  {busy ? <Loader2 className="h-3 w-3 animate-spin" />
+                        : "Delete"}
+                </Button>
+                <Button size="sm" variant="outline" disabled={busy}
+                        onClick={() => setConfirmingDelete(false)}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+
 
 
 function DesignatedFolderCard({
