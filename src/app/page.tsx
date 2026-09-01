@@ -8,12 +8,13 @@ import {
   Mic, History, CheckSquare, Target, Library,
   LayoutDashboard, Settings as SettingsIcon, HelpCircle, Loader2,
   Sparkles, Handshake, BarChart3, FileSpreadsheet,
-  Sun, PanelLeftClose, PanelLeftOpen, CheckCircle2,
+  Sun, PanelLeftClose, PanelLeftOpen,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { InsightsView } from "@/components/insights-view";
+import { ActivityCenter } from "@/components/activity-center";
 import { TodayView } from "@/components/today-view";
 import { OnboardingTour, onboardingDismissed } from "@/components/onboarding-tour";
 import { RecordView } from "@/components/record-view";
@@ -835,30 +836,21 @@ export default function Home() {
             </div>
           )}
         </div>
-        {pipelineStatus.text && (
-          // Icon mode drops the status text but keeps the icon (and the
-          // full text in the title attribute) — the user still sees a
-          // signal rather than losing it entirely. Spinner only while
-          // `loading` is true (genuine backend activity — see
-          // pipelineStatus above); once work finishes this still shows
-          // the last message as plain text with a static checkmark
-          // instead of a spinner that never stops.
-          <div
-            className={`flex items-center border-b border-border py-2 text-xs ${
-              pipelineStatus.loading
-                ? "bg-accent/30 text-foreground"
-                : "bg-muted/30 text-muted-foreground"
-            } ${navCollapsed ? "justify-center px-2" : "gap-2 px-4"}`}
-            title={pipelineStatus.text}
-          >
-            {pipelineStatus.loading ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0 text-primary" />
-            ) : (
-              <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-            )}
-            {!navCollapsed && <span className="truncate">{pipelineStatus.text}</span>}
-          </div>
-        )}
+        {/* The activity centre replaced a one-line, hard-truncated
+            status strip. That strip showed a user "Transcription
+            completeIdentifying s…" — two labels welded together by the
+            backend and then cut mid-word by the CSS. Both halves are
+            fixed: services/pipeline_progress.py models the stages
+            instead of building the sentence by substitution, and this
+            wraps rather than truncates, adds a real progress bar and a
+            step count, and keeps a history so work that finished while
+            you were on another tab is still there to read. */}
+        <ActivityCenter
+          pipeline={recordingStatus?.pipeline ?? null}
+          statusText={pipelineStatus.text}
+          busy={pipelineStatus.loading}
+          collapsed={navCollapsed}
+        />
 
         {recordingNow.isRecording && (
           // Two affordances in one strip: clicking the body opens the

@@ -1,3 +1,4 @@
+import type { PipelinePayload } from "@/lib/activity-log";
 /**
  * Client for the Python FastAPI backend sidecar.
  *
@@ -552,6 +553,12 @@ export interface RecordingStatus {
   // Do NOT infer "still busy" from this being non-empty; use
   // `is_processing` below for that. Treat this as display text only.
   current_status?: string;
+  // Structured view of the same pipeline. `current_status` is the one
+  // line a cramped surface can show; this says WHICH stage is running,
+  // how many remain, and whether it failed — none of which a sentence
+  // could answer. Optional: an older backend omits it and the UI falls
+  // back to current_status.
+  pipeline?: PipelinePayload;
   // True while the backend is genuinely doing pipeline work (transcribe
   // /diarize, LLM extraction, or finalizing a just-stopped recording).
   // Optional so an older backend that predates this field degrades to

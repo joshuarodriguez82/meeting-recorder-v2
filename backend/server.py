@@ -429,6 +429,7 @@ from services.export_service import ExportService
 from services.export_worker import ExportWorker, PortalPushWorker, resolve_export_folder
 from services import export_reconcile
 from services import export_sweep
+from services.pipeline_progress import PipelineProgress
 from services import archive_reconcile
 from services import shared_state_sync
 from services.shared_state_sync import CLIENT_CONFIGS_FILE
@@ -796,6 +797,10 @@ class Services:
         # `_processing_count` / `is_processing` below, which track real
         # work instead of a leftover message.
         self.current_status: str = ""
+        # Structured view of the same information. current_status is the
+        # one line a cramped surface can show; this is what the activity
+        # centre reads to say which stage is running and how many remain.
+        self.pipeline = PipelineProgress()
         # Real busy signal for /recording/status, replacing the old
         # "current_status is non-empty" proxy the frontend used to infer
         # activity from (fragile — it never distinguished "still
@@ -823,7 +828,14 @@ class Services:
         with `_end_processing()` in a `finally` — see that method's
         docstring for why."""
         with self._processing_lock:
+            was_idle = self._processing_count == 0
             self._processing_count += 1
+        if was_idle:
+            # A new run starts from pending stages. Without this the
+            # second session of the day inherits the first one's stage
+            # states and renders as already finished before it has done
+            # anything — the same class of lie the welded label was.
+            self.pipeline.reset()
 
     def _end_processing(self) -> None:
         """Mark one unit of pipeline work as finished. Callers MUST call
@@ -840,6 +852,13 @@ class Services:
         permanently lie True->False for the wrong reason."""
         with self._processing_lock:
             self._processing_count = max(0, self._processing_count - 1)
+            now_idle = self._processing_count == 0
+        if now_idle and self.pipeline.error() is None:
+            # Every stage that ran, ran. Marking completion here rather
+            # than on a status message means a run that finishes without
+            # emitting a final token still reads as finished, instead of
+            # leaving a spinner that never resolves.
+            self.pipeline.complete()
 
     @property
     def is_processing(self) -> bool:
@@ -847,20 +866,27 @@ class Services:
             return self._processing_count > 0
 
     def _record_status(self, msg: str) -> None:
-        """Log + stash the status so /recording/status can return it."""
-        # Translate internal stage tokens into human-readable strings.
-        stage_labels = {
-            "__stage:transcribe:active__":  "Transcribing…",
-            "__stage:transcribe:done__":    "Transcription complete",
-            "__stage:diarize:active__":     "Identifying speakers…",
-            "__stage:diarize:done__":       "Speaker identification complete",
-            "__stage:speakers:active__":    "Assigning speakers to segments…",
-        }
-        display = msg
-        for token, label in stage_labels.items():
-            display = display.replace(token, label)
-        display = display.strip()
-        if display:
+        """Fold a status message into the pipeline model, and stash the
+        rendered line so /recording/status can return both.
+
+        WHAT THIS REPLACED (screenshot, 2026-09-01). This method used to
+        translate stage tokens by running ``str.replace`` once per known
+        token over the whole message. ``recording_service`` emits BOTH
+        tokens in one string when a stage ends and the next begins, so
+        two labels were substituted into one string with nothing between
+        them and the sidebar showed:
+
+            Transcription completeIdentifying s…
+
+        Inserting a separator would have fixed that line and left the UI
+        still guessing at meaning from prose. The stages are modelled
+        instead (services/pipeline_progress.py); ``current_status`` is
+        now a rendering of that model, which is why two of them can no
+        longer collide.
+        """
+        self.pipeline.apply(msg)
+        display = self.pipeline.label()
+        if display and display != self.current_status:
             self.current_status = display
             logger.info(f"[rec] {display}")
 
@@ -1379,6 +1405,16 @@ class RecordingStatus(BaseModel):
     # frontend against an older backend that omits it also degrades
     # gracefully (optional on the TS side too).
     is_processing: bool = False
+    # Structured view of the same pipeline `current_status` renders as
+    # one line: an ordered stage list with per-stage state, the running
+    # stage, a percentage, and any error. Added because a single string
+    # cannot answer "which stage?" or "how much is left?", so the UI had
+    # to guess — and because two labels welded into one string is what
+    # produced the "Transcription completeIdentifying s…" screenshot.
+    # See services/pipeline_progress.py for the shape; a default is
+    # supplied so an older frontend, or a newer one against a backend
+    # that predates this, degrades to `current_status` cleanly.
+    pipeline: dict = {}
     # Auto-stop / dead-air watchdog warnings, one per active condition.
     # Each entry is a small dict the frontend renders as a banner +
     # native notification. Codes are stable so the frontend can dedupe
@@ -2640,6 +2676,7 @@ async def recording_status():
         models_loading=svc.models_loading,
         models_error=svc.models_error,
         current_status=svc.current_status,
+        pipeline=svc.pipeline.payload(),
         is_processing=svc.is_processing,
         warnings=warnings,
         auto_record_subject=(svc.auto_record_subject if is_rec else None),
