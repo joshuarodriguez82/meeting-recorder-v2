@@ -9955,17 +9955,36 @@ _auto_index_last_pass: Optional[float] = None
 
 
 def _auto_index_busy() -> bool:
-    """Recording or processing. Extraction and embedding compete with
+    """Recording, processing, or exporting.
+
+    Recording and processing: extraction and embedding compete with
     transcription and diarization for CPU, and this app already carries
     a setting that exists because those two contending made recordings
     vanish. A background indexer must never be the thing that does that
-    again."""
+    again.
+
+    Exporting (added 2026-09-01): a knowledge sweep walks a client's
+    Knowledge Folder, and the Knowledge Folder card offers "Same as
+    Designated Folder" as a one-click option — so on a common setup the
+    indexer is statting and reading the exact cloud-mounted tree the
+    export worker is copying INTO. On Google Drive File Stream a stat is
+    a network round-trip and a read forces a download, so the two
+    contend for one mount. Deferring a sweep costs nothing; the
+    documents are still there next tick. Delaying an export costs the
+    user a meeting that hasn't shown up in their folder, which they are
+    watching a counter for.
+
+    This became reachable in v2.78.0. v2.77.0 shipped auto-indexing on
+    by default and it never actually ran, so nothing contended.
+    """
     try:
         if svc.recording_svc is not None and svc.recording_svc.is_recording():
             return True
+        if _EXPORT_WORKER is not None and _EXPORT_WORKER.pending_count() > 0:
+            return True
     except Exception as e:  # noqa: BLE001
         # Unable to tell => assume busy. The safe direction is to skip a
-        # sweep, never to run one during a recording.
+        # sweep, never to run one during a recording or a copy.
         logger.debug(f"Auto-index busy check failed, assuming busy: {e}")
         return True
     return _PROCESSING_LOCK.locked()

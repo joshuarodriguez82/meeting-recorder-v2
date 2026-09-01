@@ -118,10 +118,10 @@ def test_none_and_empty_are_safe():
 def test_the_cards_echoed_subject_heading_is_dropped():
     """Field screenshot 2026-08-21: the captured agenda opened by
     repeating the meeting title already rendered directly above it."""
-    body = ("Montefiore demo - use cases\n"
+    body = ("Northwind demo - use cases\n"
             "Scheduling this time to discuss the use cases for the demo.\n"
             "Email organizer")
-    out = clean_invite_body(body, subject="Montefiore demo - use cases")
+    out = clean_invite_body(body, subject="Northwind demo - use cases")
     assert out == "Scheduling this time to discuss the use cases for the demo."
 
 
@@ -129,10 +129,10 @@ def test_a_subject_repeated_later_in_a_real_body_is_kept():
     """Only the LEADING echo is chrome. An invite that names the
     meeting inside its own text is writing, not a heading."""
     body = ("Agenda below.\n"
-            "Montefiore demo - use cases\n"
+            "Northwind demo - use cases\n"
             "Bring the slides.")
-    out = clean_invite_body(body, subject="Montefiore demo - use cases")
-    assert "Montefiore demo - use cases" in out
+    out = clean_invite_body(body, subject="Northwind demo - use cases")
+    assert "Northwind demo - use cases" in out
 
 
 def test_the_series_label_line_is_dropped():

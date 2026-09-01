@@ -8,8 +8,8 @@ carried `rename()` and `delete()` but nothing exposed them, and both
 touch only the CONFIG entry — folders and portal binding — never the
 meetings.
 
-That gap produced a real, live state: an install with both "Montefiore"
-and "Montifiore" configured, the misspelling holding no folders, and
+That gap produced a real, live state: an install with both "Northwind"
+and "Nortwind" configured, the misspelling holding no folders, and
 every meeting tagged to the typo orphaned from the real account's data.
 Deleting the typo's config would not have fixed it; the meetings would
 still carry the wrong tag and still be missing from the right client.
@@ -51,19 +51,19 @@ def _session(sid: str, client: str, project: str = "") -> dict:
 class TestPlanRename:
     def test_pure_rename_when_the_target_does_not_exist(self):
         plan = client_admin.plan_rename(
-            "Montifiore", "Montefiore",
-            existing_clients=["Montifiore"],
-            sessions=[_session("s1", "Montifiore")])
+            "Nortwind", "Northwind",
+            existing_clients=["Nortwind"],
+            sessions=[_session("s1", "Nortwind")])
         assert plan.is_merge is False
         assert plan.session_ids == ["s1"]
 
     def test_merge_when_the_target_already_exists(self):
         """The live case. Both names configured, meetings on the typo."""
         plan = client_admin.plan_rename(
-            "Montifiore", "Montefiore",
-            existing_clients=["Montifiore", "Montefiore"],
-            sessions=[_session("s1", "Montifiore"),
-                      _session("s2", "Montefiore")])
+            "Nortwind", "Northwind",
+            existing_clients=["Nortwind", "Northwind"],
+            sessions=[_session("s1", "Nortwind"),
+                      _session("s2", "Northwind")])
         assert plan.is_merge is True
         # Only the source's sessions are retagged; the target's are
         # already where they belong.
@@ -88,9 +88,9 @@ class TestPlanRename:
 
     def test_matching_is_case_insensitive_like_the_config_store(self):
         plan = client_admin.plan_rename(
-            "montifiore", "Montefiore",
-            existing_clients=["Montifiore"],
-            sessions=[_session("s1", "MONTIFIORE")])
+            "nortwind", "Northwind",
+            existing_clients=["Nortwind"],
+            sessions=[_session("s1", "NORTWIND")])
         assert plan.session_ids == ["s1"]
 
     def test_an_empty_new_name_is_rejected(self):
@@ -114,11 +114,11 @@ class TestMergeConfig:
         merged = client_admin.merge_config(
             source={"export_folder": "", "knowledge_folder": "",
                     "customer_id": ""},
-            target={"export_folder": "/drive/Montefiore/Exports",
-                    "knowledge_folder": "/drive/Montefiore/Knowledge",
+            target={"export_folder": "/drive/Northwind/Exports",
+                    "knowledge_folder": "/drive/Northwind/Knowledge",
                     "customer_id": "cus_real"})
-        assert merged["export_folder"] == "/drive/Montefiore/Exports"
-        assert merged["knowledge_folder"] == "/drive/Montefiore/Knowledge"
+        assert merged["export_folder"] == "/drive/Northwind/Exports"
+        assert merged["knowledge_folder"] == "/drive/Northwind/Knowledge"
         assert merged["customer_id"] == "cus_real"
 
     def test_source_fills_only_the_gaps(self):
@@ -200,17 +200,17 @@ class TestDocumentRekey:
         doc_dir = tmp_path / "doc_index"
         doc_dir.mkdir()
         (doc_dir / "doc_a.json").write_text(
-            json.dumps({"client": "Montifiore", "doc_name": "sow.pdf"}),
+            json.dumps({"client": "Nortwind", "doc_name": "sow.pdf"}),
             encoding="utf-8")
         (doc_dir / "doc_b.json").write_text(
             json.dumps({"client": "Globex", "doc_name": "other.pdf"}),
             encoding="utf-8")
 
-        n = client_admin.rekey_documents(tmp_path, "Montifiore", "Montefiore")
+        n = client_admin.rekey_documents(tmp_path, "Nortwind", "Northwind")
 
         assert n == 1
         assert json.loads((doc_dir / "doc_a.json").read_text())["client"] \
-            == "Montefiore"
+            == "Northwind"
         assert json.loads((doc_dir / "doc_b.json").read_text())["client"] \
             == "Globex"
 

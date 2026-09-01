@@ -113,6 +113,11 @@ class ExportWorker:
         # at DEQUEUE, so a re-enqueue arriving while a job runs schedules
         # a fresh export of the newer artifacts instead of being dropped.
         self._pending: dict[str, bool] = {}
+        # Sessions accepted and not yet finished — queued, mid-copy, OR
+        # waiting out a retry delay. Distinct from the queue depth,
+        # which drops to zero during a backoff window even though the
+        # export has not happened; see pending_count.
+        self._outstanding = 0
         self._lock = threading.Lock()
         self._thread = threading.Thread(
             target=self._run, name="export-worker", daemon=True)
@@ -129,7 +134,29 @@ class ExportWorker:
                     self._pending[session_id] or copy_audio)
                 return
             self._pending[session_id] = copy_audio
+            self._outstanding += 1
         self._q.put((session_id, copy_audio, 0))
+
+    def pending_count(self) -> int:
+        """How many sessions are still owed a copy.
+
+        Counts a job that is queued, one that is mid-copy, and one
+        sitting in retry backoff — the last of which is invisible in the
+        queue, because a retry is scheduled on a timer and only lands
+        back in the queue when the delay expires. A caller asking "is
+        the exporter busy?" during that window would otherwise be told
+        no while a session it is actively retrying goes uncopied, which
+        is this repo's recurring defect shape: work that could not be
+        delivered rendering as no work pending.
+        """
+        with self._lock:
+            return self._outstanding
+
+    def queued_count(self) -> int:
+        """Queue depth only — jobs waiting for the worker thread to pick
+        them up. Diagnostics and tests; callers deciding whether to
+        yield to the exporter want pending_count."""
+        return self._q.qsize()
 
     def _run(self) -> None:
         while True:
@@ -162,10 +189,21 @@ class ExportWorker:
                     args=((session_id, copy_audio, attempt + 1),))
                 t.daemon = True
                 t.start()
-            else:
-                logger.error(
-                    f"Export of session {session_id} failed after "
-                    f"{attempt + 1} attempts: {e} — giving up")
+                # Still owed a copy — deliberately NOT retired here, so
+                # pending_count keeps reporting it through the backoff.
+                return
+            logger.error(
+                f"Export of session {session_id} failed after "
+                f"{attempt + 1} attempts: {e} — giving up")
+        # Delivered, or abandoned after the last retry. Either way the
+        # worker owes this session nothing further; a give-up that kept
+        # counting would wedge every caller that waits on an idle queue.
+        self._retire(session_id)
+
+    def _retire(self, session_id: str) -> None:
+        with self._lock:
+            if self._outstanding > 0:
+                self._outstanding -= 1
 
 class PortalPushWorker:
     """Single daemon thread pushing engagement registers to the SA

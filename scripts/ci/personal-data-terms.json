@@ -50,7 +50,7 @@
       "category label plus a hash narrows a brute-force guess."
     ],
     "max_ngram": 3,
-    "count": 45,
+    "count": 47,
     "hashes": [
       "05a9e85bf7772d17",
       "05d1f3e790996c46",
@@ -72,7 +72,9 @@
       "52ac55e8fec16845",
       "55a25f379bc83715",
       "59805587e491cb0a",
+      "5a0cd71bc3b76bd1",
       "6c657425f73fe2dc",
+      "6df8d0c5b0eb9bfd",
       "739593944951c623",
       "73e7f27070524be0",
       "7b0406e4a8fdc176",
