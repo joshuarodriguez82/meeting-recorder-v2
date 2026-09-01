@@ -118,6 +118,12 @@ class ExportWorker:
         # which drops to zero during a backoff window even though the
         # export has not happened; see pending_count.
         self._outstanding = 0
+        # Monotonic time the backlog last went 0 -> non-zero, cleared
+        # when it drains. Callers that yield to the exporter need to
+        # bound how long they will do so: a session that can never
+        # export would otherwise hold a backlog open forever and switch
+        # those callers off permanently.
+        self._pending_since: Optional[float] = None
         self._lock = threading.Lock()
         self._thread = threading.Thread(
             target=self._run, name="export-worker", daemon=True)
@@ -134,6 +140,8 @@ class ExportWorker:
                     self._pending[session_id] or copy_audio)
                 return
             self._pending[session_id] = copy_audio
+            if self._outstanding == 0:
+                self._pending_since = time.monotonic()
             self._outstanding += 1
         self._q.put((session_id, copy_audio, 0))
 
@@ -200,10 +208,20 @@ class ExportWorker:
         # counting would wedge every caller that waits on an idle queue.
         self._retire(session_id)
 
+    def pending_since(self) -> Optional[float]:
+        """Monotonic time the current backlog started, or None when the
+        worker is idle. Used to bound how long another background job
+        will stand aside for exports — see server._auto_index_busy."""
+        with self._lock:
+            return self._pending_since
+
     def _retire(self, session_id: str) -> None:
         with self._lock:
             if self._outstanding > 0:
                 self._outstanding -= 1
+            if self._outstanding == 0:
+                # Timed from its own start, never from an hours-old one.
+                self._pending_since = None
 
 class PortalPushWorker:
     """Single daemon thread pushing engagement registers to the SA

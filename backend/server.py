@@ -428,6 +428,7 @@ from services.portal_push_service import (
 from services.export_service import ExportService
 from services.export_worker import ExportWorker, PortalPushWorker, resolve_export_folder
 from services import export_reconcile
+from services import export_sweep
 from services import archive_reconcile
 from services import shared_state_sync
 from services.shared_state_sync import CLIENT_CONFIGS_FILE
@@ -9947,6 +9948,19 @@ async def _watchdog_loop():
 #: without an app restart.
 _AUTO_INDEX_TICK_S = 60
 
+#: How long the knowledge indexer will stand aside for a non-empty
+#: export backlog before running anyway. Deference is a courtesy between
+#: two background jobs; without a ceiling, one session that can never
+#: export would disable indexing for the life of the process.
+_EXPORT_DEFERENCE_MAX_S = 30 * 60
+
+#: Cadence of the periodic export reconciliation sweep. Two minutes is
+#: the "syncs when processing finishes" promise expressed as a bound:
+#: the enqueue-on-mutation fast path still copies within seconds, and
+#: this is the ceiling on how long a MISSED or DROPPED enqueue can go
+#: unnoticed. Cheap because services/export_sweep.py caps the pass.
+_EXPORT_SWEEP_TICK_S = 120
+
 #: Last successful sweep per client, epoch seconds. In memory: it drives
 #: rotation within a run, and a restart simply starts the rotation over,
 #: which costs stat calls because index_folder skips unchanged files.
@@ -9981,13 +9995,118 @@ def _auto_index_busy() -> bool:
         if svc.recording_svc is not None and svc.recording_svc.is_recording():
             return True
         if _EXPORT_WORKER is not None and _EXPORT_WORKER.pending_count() > 0:
-            return True
+            # Bounded on purpose. A session that can never export — a
+            # source file gone, a folder pointing somewhere unwritable —
+            # is re-enqueued by every sweep, so an unbounded deference
+            # would let one stuck export switch knowledge indexing off
+            # permanently. Standing aside is a courtesy between
+            # background jobs, not a kill switch one holds over another.
+            since = _EXPORT_WORKER.pending_since()
+            if since is None or (time.monotonic() - since) < _EXPORT_DEFERENCE_MAX_S:
+                return True
     except Exception as e:  # noqa: BLE001
         # Unable to tell => assume busy. The safe direction is to skip a
         # sweep, never to run one during a recording or a copy.
         logger.debug(f"Auto-index busy check failed, assuming busy: {e}")
         return True
     return _PROCESSING_LOCK.locked()
+
+
+def _sweep_recent_exports() -> int:
+    """Re-enqueue any recent session whose artifacts are missing from
+    its Designated Folder. Returns how many were queued.
+
+    THE GUARANTEE THIS RESTORES (field report 2026-09-01). A user
+    recorded a meeting and it had still not reached its folder two
+    hours later. Exports are enqueued on mutation and retried three
+    times over ~2.5 minutes, then DROPPED with a log line — so a mount
+    that was busy for those few minutes left a session owed artifacts
+    that nothing would ever attempt again.
+
+    export_reconcile was written to make that impossible; its docstring
+    says "a missed trigger becomes a delay, never a permanent hole".
+    But it only ever ran at startup, on folder-set, on rename, and from
+    the Sync now button. A guarantee wired only to events is not a
+    guarantee. This is the schedule that makes it one.
+
+    Stats files, never copies — the copying stays on the export worker
+    thread, off the event loop, which is the 2026-07-09 rule. Bounded by
+    services/export_sweep.py so a frequent pass stays affordable on a
+    cloud-streamed mount.
+    """
+    if not svc.session_svc:
+        return 0
+    try:
+        summaries = svc.session_svc.list_sessions()
+    except Exception as e:  # noqa: BLE001
+        # A flaky root must cost this tick, not the loop. The next one
+        # is two minutes away.
+        logger.warning(f"Export sweep could not list sessions: {e}")
+        return 0
+
+    rows = export_sweep.sweep_candidates(summaries, now_epoch=time.time())
+    # Resolution reads client config; one lookup per client per pass
+    # rather than one per session, which would be the same answer 20
+    # times over.
+    folders: Dict[str, str] = {}
+    queued = 0
+    for row in rows:
+        try:
+            if not export_reconcile.expected_artifacts(row):
+                # Nothing processed yet — owes its folder nothing, and
+                # enqueueing it would count as a pending export that
+                # holds the knowledge indexer off for no reason.
+                continue
+            client = str(row.get("client") or "")
+            if client not in folders:
+                folders[client] = _export_folder_for_client(client) or ""
+            folder = folders[client]
+            if not folder:
+                continue
+            if not export_reconcile.missing_artifacts(row, folder):
+                continue
+            sid = str(row.get("session_id") or "")
+            if not sid:
+                continue
+            _EXPORT_WORKER.enqueue(sid, copy_audio=False)
+            queued += 1
+        except Exception as e:  # noqa: BLE001
+            # One unreadable session must never abandon the rest — the
+            # same isolation list_sessions() learned in the 2026-08-07
+            # report, where a single OSError from a Drive mount took an
+            # entire library down with it.
+            logger.debug(
+                f"Export sweep skipped session "
+                f"{row.get('session_id', '?')}: {e}")
+    if queued:
+        logger.info(
+            f"Export sweep queued {queued} session(s) whose artifacts "
+            f"were missing from their Designated Folder")
+    return queued
+
+
+async def _export_sweep_loop():
+    """Run _sweep_recent_exports on a timer.
+
+    Skipped while recording: the sweep stats files on a cloud mount, and
+    the record path's standing rule is that nothing it does not need
+    touches a network folder mid-capture.
+    """
+    await asyncio.sleep(45)  # after the startup reconcile, not during it
+    try:
+        while True:
+            try:
+                recording = (svc.recording_svc is not None
+                             and svc.recording_svc.is_recording())
+                if not recording:
+                    await asyncio.to_thread(_sweep_recent_exports)
+            except Exception as e:  # noqa: BLE001
+                # A failing pass must never kill the loop; the reason
+                # belongs in the log, not in a silent death.
+                logger.warning(f"Export sweep failed: {e}")
+            await asyncio.sleep(_EXPORT_SWEEP_TICK_S)
+    except asyncio.CancelledError:
+        raise
 
 
 async def _auto_index_loop():
@@ -10425,6 +10544,10 @@ async def startup():
         # Keeps Knowledge Folders indexed without anyone
         # remembering to click Reindex — see _auto_index_loop.
         asyncio.create_task(_auto_index_loop())
+        # Makes "a missed trigger is a delay, never a permanent hole"
+        # actually true, by running reconciliation on a schedule instead
+        # of only at startup and on demand — see _sweep_recent_exports.
+        asyncio.create_task(_export_sweep_loop())
     except Exception as e:
         logger.warning(f"Auto prep-brief bootstrap failed: {e}")
 
