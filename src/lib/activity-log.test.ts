@@ -74,10 +74,40 @@ describe("appendEvent", () => {
     expect(events).toHaveLength(2);
   });
 
-  it("treats a differing kind as a different event", () => {
+  it("collapses one message that changes state as it finishes", () => {
+    // Screenshot 2026-09-02: the panel showed "Processing complete."
+    // twice in a row, one blue dot and one green. Same message, logged
+    // once while `busy` was still true and again once `done` flipped —
+    // the kind changed, so the old rule treated them as two events.
+    //
+    // They are one thing that happened. Collapsing on TEXT and keeping
+    // the more informative kind is what a reader means by "one event".
+    let events = appendEvent([], { kind: "progress", text: "Done", at: T0 });
+    events = appendEvent(events, { kind: "success", text: "Done", at: T0 + 1 });
+    expect(events).toHaveLength(1);
+    expect(events[0].kind).toBe("success");
+  });
+
+  it("lets a failure overwrite the kind of the message it replaces", () => {
+    // The direction that matters most: a step that looked fine and then
+    // failed must end up red, never left green.
     let events = appendEvent([], { kind: "success", text: "Done", at: T0 });
     events = appendEvent(events, { kind: "error", text: "Done", at: T0 + 1 });
-    expect(events).toHaveLength(2);
+    expect(events).toHaveLength(1);
+    expect(events[0].kind).toBe("error");
+  });
+
+  it("does not downgrade an error back to a lesser kind", () => {
+    let events = appendEvent([], { kind: "error", text: "Done", at: T0 });
+    events = appendEvent(events, { kind: "info", text: "Done", at: T0 + 1 });
+    expect(events[0].kind).toBe("error");
+  });
+
+  it("does not count a state change as a repeat", () => {
+    // "×2" next to a message that only happened once would be a lie.
+    let events = appendEvent([], { kind: "progress", text: "Done", at: T0 });
+    events = appendEvent(events, { kind: "success", text: "Done", at: T0 + 1 });
+    expect(events[0].repeats).toBe(1);
   });
 
   it("ignores a blank event", () => {

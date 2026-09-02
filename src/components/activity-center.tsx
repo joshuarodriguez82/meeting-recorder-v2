@@ -153,6 +153,18 @@ export function ActivityCenter({
     if (next) setLastSeen(newestId(events));
   };
 
+  const clearEvents = () => {
+    setEvents([]);
+    // Reset the read baseline with it. Ids restart from 1 on an empty
+    // log, so leaving lastSeen at (say) 13 would make the next dozen
+    // events count as already-read and the "N new" badge would never
+    // appear again this session.
+    setLastSeen(0);
+    // Let the CURRENT status re-enter the log rather than being
+    // suppressed as an unchanged repeat of what was just cleared.
+    lastKeyRef.current = "";
+  };
+
   // Nothing has happened and nothing is happening: show nothing rather
   // than an empty chrome that implies something should be there.
   if (!headline && !events.length) return null;
@@ -229,8 +241,26 @@ export function ActivityCenter({
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
       {trigger}
-      <PopoverContent align="start" side="right" className="w-80 p-0">
-        <div className="border-b px-3 py-2">
+      {/* THE LAYOUT BUG (screenshot 2026-09-02). This was `w-80 p-0` with
+          a `max-h-64` ScrollArea inside and nothing else. Base UI's
+          ScrollArea gives its viewport `height: 100%`, which resolves
+          against a parent that had no definite height — so the viewport
+          never became a scroll container, the list rendered at its full
+          height, and a dozen events spilled out of the panel, past the
+          window, and straight over the Clear button underneath. That is
+          why Clear "didn't work": it was painted over, so the clicks
+          were landing on the list on top of it.
+
+          A max-height on the popover plus min-h-0 on the scrolling
+          child is what actually bounds it: min-h-0 lets a flex item
+          shrink below its content, which is the step that gives the
+          viewport a real height to scroll within. */}
+      <PopoverContent
+        align="start"
+        side="right"
+        className="flex max-h-[min(70vh,32rem)] w-80 flex-col overflow-hidden p-0"
+      >
+        <div className="shrink-0 border-b px-3 py-2">
           <p className="text-sm font-medium">Activity</p>
           <p className="text-xs text-muted-foreground">
             {state === "running"
@@ -242,7 +272,7 @@ export function ActivityCenter({
         </div>
 
         {pipeline?.stages?.length ? (
-          <div className="border-b px-3 py-2">
+          <div className="shrink-0 border-b px-3 py-2">
             {pipeline.stages.map((stage) => (
               <StageRow key={stage.key} stage={stage} />
             ))}
@@ -252,52 +282,60 @@ export function ActivityCenter({
           </div>
         ) : null}
 
-        <ScrollArea className="max-h-64">
+        <ScrollArea className="min-h-0 flex-1">
           <div className="px-3 py-2">
             {events.length === 0 ? (
               <p className="py-4 text-center text-xs text-muted-foreground">
                 Nothing yet today.
               </p>
             ) : (
-              events.map((event) => (
-                <div key={event.id} className="flex gap-2 py-1.5">
-                  <span
-                    className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${KIND_STYLES[event.kind].dot}`}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <p className={`text-xs leading-snug ${KIND_STYLES[event.kind].text}`}>
-                      {event.text}
-                      {event.repeats > 1 && (
-                        <span className="ml-1 text-muted-foreground">
-                          ×{event.repeats}
-                        </span>
-                      )}
-                    </p>
-                    {event.detail && (
-                      <p className="text-[11px] text-muted-foreground">
-                        {event.detail}
+              // A hairline between rows. Without it a dozen entries of
+              // similar length read as a wall of text, which is half of
+              // why the panel looked unfinished in the 2026-09-02
+              // screenshot — the other half being that it overflowed.
+              <div className="divide-y divide-border/60">
+                {events.map((event) => (
+                  <div key={event.id} className="flex items-baseline gap-2 py-2">
+                    <span
+                      className={`h-1.5 w-1.5 shrink-0 translate-y-[-1px] rounded-full ${KIND_STYLES[event.kind].dot}`}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className={`text-xs leading-snug ${KIND_STYLES[event.kind].text}`}>
+                        {event.text}
+                        {event.repeats > 1 && (
+                          <span className="ml-1 text-muted-foreground">
+                            ×{event.repeats}
+                          </span>
+                        )}
                       </p>
-                    )}
+                      {event.detail && (
+                        <p className="mt-0.5 text-[11px] text-muted-foreground">
+                          {event.detail}
+                        </p>
+                      )}
+                    </div>
+                    {/* Fixed width and tabular figures so the column
+                        stays straight as "now" becomes "12m". */}
+                    <span
+                      className="w-8 shrink-0 text-right text-[10px] tabular-nums text-muted-foreground"
+                      title={new Date(event.at).toLocaleString()}
+                    >
+                      {relativeTime(event.at, now)}
+                    </span>
                   </div>
-                  <span
-                    className="shrink-0 text-[10px] tabular-nums text-muted-foreground"
-                    title={new Date(event.at).toLocaleString()}
-                  >
-                    {relativeTime(event.at, now)}
-                  </span>
-                </div>
-              ))
+                ))}
+              </div>
             )}
           </div>
         </ScrollArea>
 
         {events.length > 0 && (
-          <div className="border-t px-3 py-1.5">
+          <div className="shrink-0 border-t bg-popover px-3 py-1.5">
             <Button
               variant="ghost"
               size="sm"
               className="h-7 w-full text-xs"
-              onClick={() => setEvents([])}
+              onClick={clearEvents}
             >
               Clear
             </Button>

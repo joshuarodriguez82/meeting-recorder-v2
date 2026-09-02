@@ -62,6 +62,22 @@ export interface ActivityEvent {
 /** Entries kept. Roughly a long working day of real events. */
 export const MAX_EVENTS = 50;
 
+/**
+ * How informative a kind is, for collapsing one message that changes
+ * state. A step that looked fine and then failed has to end up red;
+ * nothing may quietly downgrade it back.
+ */
+const KIND_RANK: Record<ActivityKind, number> = {
+  info: 0,
+  progress: 1,
+  success: 2,
+  error: 3,
+};
+
+function rank(kind: ActivityKind): number {
+  return KIND_RANK[kind] ?? 0;
+}
+
 export interface AppendInput {
   kind: ActivityKind;
   text: string;
@@ -89,16 +105,22 @@ export function appendEvent(
   if (!text) return events as ActivityEvent[];
 
   const head = events[0];
-  if (
-    head &&
-    head.kind === input.kind &&
-    head.text === text &&
-    (head.detail || "") === (input.detail || "")
-  ) {
+  if (head && head.text === text
+      && (head.detail || "") === (input.detail || "")) {
+    // Matched on TEXT, not on text-and-kind. One message routinely
+    // arrives twice as its run finishes — once while the pipeline is
+    // busy, once when it reports done — and the old rule, which
+    // required the kind to match too, put both in the list. The panel
+    // showed "Processing complete." twice, one blue and one green
+    // (screenshot 2026-09-02). That is one thing that happened.
+    const upgraded = rank(input.kind) > rank(head.kind) ? input.kind : head.kind;
     const bumped: ActivityEvent = {
       ...head,
+      kind: upgraded,
       at: input.at,
-      repeats: head.repeats + 1,
+      // A state change is not a recurrence. Showing "×2" beside a
+      // message that happened once would be a small, confident lie.
+      repeats: input.kind === head.kind ? head.repeats + 1 : head.repeats,
     };
     return [bumped, ...events.slice(1)];
   }
