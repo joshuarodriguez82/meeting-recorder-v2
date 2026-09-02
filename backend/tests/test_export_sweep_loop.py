@@ -24,6 +24,7 @@ bounded in time.
 
 from __future__ import annotations
 
+import datetime
 import time
 
 from _app_import import import_app
@@ -63,12 +64,27 @@ class _CountingWorker:
         return 0
 
 
+def _recent_iso() -> str:
+    """An `ended_at` inside the sweep's recency window, always.
+
+    This was a hardcoded "2026-09-01T10:00:00" when the file was
+    written, and every test using it started failing the following day:
+    the sweep only considers sessions that ended within
+    DEFAULT_WINDOW_HOURS, so a fixed timestamp silently ages out of
+    scope and the suite goes red for a reason that has nothing to do
+    with the code. A date literal inside a window-based test is a time
+    bomb with a one-day fuse.
+    """
+    return (datetime.datetime.now()
+            - datetime.timedelta(hours=1)).isoformat()
+
+
 def _row(sid: str, client: str = "Acme", **extra) -> dict:
     row = {
         "session_id": sid,
         "display_name": f"Meeting {sid}",
         "client": client,
-        "ended_at": "2026-09-01T10:00:00",
+        "ended_at": _recent_iso(),
         "has_transcript": True,
     }
     row.update(extra)
