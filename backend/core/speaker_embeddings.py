@@ -135,14 +135,42 @@ def extract_speaker_centroids(
                        f"skipping speaker fingerprinting")
         return {}
 
+    # Read the HEADER, not the audio (2026-09-02). This used to be a
+    # plain `torchaudio.load(audio_path)`, pulling the entire recording
+    # into RAM: sessions are written as 32-bit float mono at the capture
+    # rate, so a one-hour meeting is roughly 690 MB — and this runs
+    # immediately after the diarization pass, while pyannote's own
+    # allocations are still being released. Only the turn spans are
+    # ever read below, and every one of them is a fraction of the file.
     try:
-        signal, fs = torchaudio.load(audio_path)
+        info = torchaudio.info(audio_path)
+        fs = info.sample_rate
+        total_frames = info.num_frames
     except Exception as e:
-        logger.warning(f"Could not load audio for embedding: {e}")
+        logger.warning(f"Could not read audio header for embedding: {e}")
         return {}
 
-    if signal.shape[0] > 1:
-        signal = signal.mean(dim=0, keepdim=True)  # to mono
+    def _read_span(start_s: float, end_s: float):
+        """Just this turn's samples, as mono.
+
+        Returns None when the span is empty or unreadable — one bad turn
+        must not cost the whole centroid, which is the same rule the
+        ECAPA call below already follows.
+        """
+        start_frame = max(0, int(start_s * fs))
+        end_frame = min(total_frames, int(end_s * fs))
+        if end_frame <= start_frame:
+            return None
+        try:
+            chunk, _ = torchaudio.load(
+                audio_path, frame_offset=start_frame,
+                num_frames=end_frame - start_frame)
+        except Exception as e:
+            logger.debug(f"Could not read {start_s}-{end_s}s: {e}")
+            return None
+        if chunk.shape[0] > 1:
+            chunk = chunk.mean(dim=0, keepdim=True)
+        return chunk
 
     centroids: Dict[str, np.ndarray] = {}
     try:
@@ -158,11 +186,9 @@ def extract_speaker_centroids(
 
             embeddings = []
             for start_s, end_s in valid_turns:
-                start_idx = max(0, int(start_s * fs))
-                end_idx = min(signal.shape[1], int(end_s * fs))
-                if end_idx <= start_idx:
+                segment = _read_span(start_s, end_s)
+                if segment is None:
                     continue
-                segment = signal[:, start_idx:end_idx]
                 try:
                     with torch.no_grad():
                         emb = classifier.encode_batch(segment).squeeze().cpu().numpy()

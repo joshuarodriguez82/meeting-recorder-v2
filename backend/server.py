@@ -1184,6 +1184,9 @@ class SettingsDTO(BaseModel):
     anthropic_api_key: str
     hf_token: str
     whisper_model: str
+    # ISO code or "auto". Optional so an older frontend that
+    # does not send it keeps working and lands on "en".
+    whisper_language: str = "en"
     max_speakers: int
     recordings_dir: str
     email_to: str
@@ -1780,6 +1783,7 @@ async def get_settings():
         anthropic_api_key=s.anthropic_api_key,
         hf_token=s.hf_token,
         whisper_model=s.whisper_model,
+        whisper_language=s.whisper_language,
         max_speakers=s.max_speakers,
         recordings_dir=s.recordings_dir,
         email_to=s.email_to,
@@ -1898,6 +1902,7 @@ async def save_settings(payload: SettingsDTO):
         anthropic_api_key=payload.anthropic_api_key,
         hf_token=payload.hf_token,
         whisper_model=payload.whisper_model,
+        whisper_language=payload.whisper_language,
         max_speakers=payload.max_speakers,
         recordings_dir=payload.recordings_dir,
         email_to=payload.email_to,
@@ -3586,6 +3591,7 @@ async def set_live_copilot_enabled(payload: dict):
         anthropic_api_key=s.anthropic_api_key,
         hf_token=s.hf_token,
         whisper_model=s.whisper_model,
+        whisper_language=s.whisper_language,
         max_speakers=s.max_speakers,
         recordings_dir=s.recordings_dir,
         email_to=s.email_to,
@@ -8649,6 +8655,7 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         anthropic_api_key=s.anthropic_api_key,
         hf_token=s.hf_token,
         whisper_model=s.whisper_model,
+        whisper_language=s.whisper_language,
         max_speakers=s.max_speakers,
         recordings_dir=s.recordings_dir,
         email_to=s.email_to,

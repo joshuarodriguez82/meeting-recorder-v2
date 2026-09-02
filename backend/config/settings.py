@@ -153,6 +153,28 @@ def _normalize_model(model: str) -> str:
 _VALID_DIARIZATION_DEVICES = {"auto", "cpu", "cuda"}
 
 
+def _normalize_language(value: str) -> str:
+    """A stored language setting we can trust.
+
+    Accepts "auto" or an ISO-ish code; anything unusable falls back to
+    "en", which is what every install did before this setting existed.
+    Self-healing on read for the same reason
+    _normalize_diarization_device is: a hand-edited config.env or a
+    value written by an older build must not break transcription.
+    """
+    text = (value or "").strip().lower()
+    if not text:
+        return "en"
+    if text == "auto":
+        return "auto"
+    # Codes are 2-3 letters, optionally with a region we drop —
+    # faster-whisper wants the base code ("pt", not "pt-BR").
+    base = text.replace("_", "-").split("-")[0]
+    if base.isalpha() and 2 <= len(base) <= 3:
+        return base
+    return "en"
+
+
 def _normalize_diarization_device(value: str) -> str:
     v = (value or "").strip().lower()
     return v if v in _VALID_DIARIZATION_DEVICES else "auto"
@@ -200,6 +222,13 @@ class Settings:
     anthropic_api_key: str
     hf_token: str
     whisper_model: str
+    #: ISO language code for transcription, or "auto" to let Whisper
+    #: detect it. Was hardcoded "en" in BOTH transcription paths until
+    #: 2026-09-02: non-English audio was decoded as English, which
+    #: Whisper does without erroring — it emits fluent, confident, wrong
+    #: text, so the failure was invisible and every summary and
+    #: embedding downstream was built on it.
+    whisper_language: str
     max_speakers: int
     recordings_dir: str
     email_to: str
@@ -518,6 +547,8 @@ class Settings:
             anthropic_api_key=_get("ANTHROPIC_API_KEY", ""),
             hf_token=_get("HF_TOKEN", ""),
             whisper_model=_get("WHISPER_MODEL", "base"),
+            whisper_language=_normalize_language(
+                _get("WHISPER_LANGUAGE", "en")),
             max_speakers=_get_int("MAX_SPEAKERS", 10),
             # Default recordings dir is %LOCALAPPDATA%\MeetingRecorder\recordings.
             # Users can override via RECORDINGS_DIR in config.env but shouldn't
@@ -637,6 +668,9 @@ class Settings:
         whisper_model: str,
         max_speakers: int,
         recordings_dir: str,
+        # Defaulted so existing callers that never heard of it keep
+        # working and land on the previous behaviour exactly.
+        whisper_language: str = "en",
         email_to: str = "",
         claude_model: str = "claude-haiku-4-5",
         notify_minutes_before: int = 2,
@@ -743,6 +777,7 @@ class Settings:
             f"ANTHROPIC_API_KEY={env_anthropic}\n"
             f"HF_TOKEN={env_hf}\n"
             f"WHISPER_MODEL={whisper_model}\n"
+            f"WHISPER_LANGUAGE={_normalize_language(whisper_language)}\n"
             f"MAX_SPEAKERS={max_speakers}\n"
             f"RECORDINGS_DIR={recordings_dir}\n"
             f"EMAIL_TO={email_to}\n"

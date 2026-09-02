@@ -113,6 +113,7 @@ from typing import Callable, Deque, List, NamedTuple, Optional
 import numpy as np
 
 from core.vad import find_utterances
+from core import decode_options
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -371,6 +372,13 @@ class LiveTranscriber:
         # core.speaker_embeddings' lazy torch/speechbrain probe — at
         # import time; only `assign()` is ever called on it, duck-typed.
         self._speaker_tracker = speaker_tracker
+        # Decode settings for the CURRENT recording. Set in start(),
+        # not here: this object is constructed once and reused for every
+        # subsequent recording (see RecordingService), so reading
+        # Settings at construction would pin the first recording's
+        # language and glossary for the life of the process.
+        self._language: str = "en"
+        self._initial_prompt: str = ""
 
     @property
     def is_running(self) -> bool:
@@ -381,6 +389,8 @@ class LiveTranscriber:
         samplerate: int,
         conference_room_mode: bool = False,
         vad_enabled: bool = True,
+        language: str = "en",
+        initial_prompt: str = "",
     ) -> None:
         """Reset state and spawn the worker. Idempotent if already running.
 
@@ -397,7 +407,17 @@ class LiveTranscriber:
         vad_enabled selects speech-boundary chunking (default) vs the
         legacy fixed-15s-window path — see the module docstring. Wired
         from Settings.live_vad_enabled by recording_service.py.
+
+        language ("auto" or an ISO code) and initial_prompt (the
+        glossary bias) are read per recording rather than at
+        construction, because this object outlives any one meeting.
+        Before they existed the live path was hardcoded to English and
+        got no glossary at all, so it mis-heard the very terms the
+        glossary exists to correct while the batch transcript got them
+        right — two transcripts of one meeting, disagreeing.
         """
+        self._language = language or "en"
+        self._initial_prompt = initial_prompt or ""
         if self._running:
             return
         self._sr = samplerate
@@ -560,8 +580,22 @@ class LiveTranscriber:
                 f"Live window dropped [{source.label}] — engine not ready")
             return 0
         try:
+            # Decode options come from core.decode_options, the same
+            # place the batch pass gets them (core/transcription.py).
+            # Two hand-built argument lists is how this path ended up
+            # hardcoded to English AND without the glossary bias, so the
+            # live transcript mis-heard the exact product and customer
+            # terms the glossary exists to fix — while the transcript
+            # written to disk got them right. `live=True` keeps the
+            # cheaper beam and skips word timestamps; nothing else
+            # differs between the two.
             segments_iter, _ = engine._model.transcribe(
-                audio, language="en", vad_filter=True,
+                audio,
+                **decode_options.build(
+                    language=self._language,
+                    initial_prompt=self._initial_prompt,
+                    live=True,
+                ),
             )
         except Exception as e:
             logger.exception(

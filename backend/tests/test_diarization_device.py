@@ -300,6 +300,10 @@ def test_settings_round_trips_with_all_fields_preserved(tmp_path, monkeypatch):
     # config/settings.py's _normalize_calendar_source) — an unrecognized
     # value falls back to "auto" rather than round-tripping verbatim.
     distinctive["calendar_source"] = "extension"
+    # Also self-healing (_normalize_language): "auto" or a 2-3 letter
+    # code, anything else falls back to "en". A generic
+    # "distinctive-whisper_language" placeholder is not a language.
+    distinctive["whisper_language"] = "it"
 
     settings_mod.Settings.save_to_env(**distinctive)
     loaded = settings_mod.Settings.from_env()

@@ -619,10 +619,17 @@ class RecordingService:
                 # in-room people, not "you" specifically — pass the room
                 # label so live segments render with a neutral badge
                 # rather than "You".
+                # Language and glossary are passed per recording, not
+                # per construction: this transcriber is reused across
+                # meetings, so a settings change has to take effect on
+                # the next Start rather than the next app launch.
                 self._live_transcriber.start(
                     LIVE_SR, conference_room_mode=conference_room_mode,
                     vad_enabled=bool(
                         getattr(self._settings, "live_vad_enabled", True)),
+                    language=getattr(
+                        self._settings, "whisper_language", "en") or "en",
+                    initial_prompt=self._live_initial_prompt(),
                 )
         except Exception as e:
             # Live transcription failure is never fatal — recording must
@@ -1211,6 +1218,22 @@ class RecordingService:
             f"[stop] complete in {_t.monotonic()-stop_t0:.1f}s")
         return session
 
+    def _live_initial_prompt(self) -> str:
+        """The glossary bias for the live path.
+
+        Same source as the batch pass (see process_session, which builds
+        this for core/transcription.py). Best-effort and silent on
+        failure: a broken glossary must degrade the live transcript to
+        unbiased decoding, never stop a recording from starting.
+        """
+        if self.terminology is None:
+            return ""
+        try:
+            return self.terminology.build_initial_prompt() or ""
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"live glossary prompt unavailable: {e}")
+            return ""
+
     async def process_session(self, session: Optional[Session] = None) -> Session:
         # DATA-LOSS FIX (field repro 2026-06-15): every reference inside
         # this method used to read `self._session`. If a NEW recording
@@ -1270,7 +1293,9 @@ class RecordingService:
                 except Exception as e:
                     logger.warning(f"terminology initial_prompt build failed: {e}")
             raw_segments = await self._transcription.transcribe(
-                local_audio_path, initial_prompt=initial_prompt)
+                local_audio_path, initial_prompt=initial_prompt,
+                language=getattr(
+                    self._settings, "whisper_language", "en") or "en")
 
             if not raw_segments:
                 self._on_status("Transcription produced no output. Check audio quality.")
