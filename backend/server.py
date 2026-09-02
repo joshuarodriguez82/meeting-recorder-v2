@@ -1184,6 +1184,9 @@ class SettingsDTO(BaseModel):
     anthropic_api_key: str
     hf_token: str
     whisper_model: str
+    # ISO code or "auto". Optional so an older frontend that
+    # does not send it keeps working and lands on "en".
+    whisper_language: str = "en"
     max_speakers: int
     recordings_dir: str
     email_to: str
@@ -1780,6 +1783,7 @@ async def get_settings():
         anthropic_api_key=s.anthropic_api_key,
         hf_token=s.hf_token,
         whisper_model=s.whisper_model,
+        whisper_language=s.whisper_language,
         max_speakers=s.max_speakers,
         recordings_dir=s.recordings_dir,
         email_to=s.email_to,
@@ -1898,6 +1902,7 @@ async def save_settings(payload: SettingsDTO):
         anthropic_api_key=payload.anthropic_api_key,
         hf_token=payload.hf_token,
         whisper_model=payload.whisper_model,
+        whisper_language=payload.whisper_language,
         max_speakers=payload.max_speakers,
         recordings_dir=payload.recordings_dir,
         email_to=payload.email_to,
@@ -3586,6 +3591,7 @@ async def set_live_copilot_enabled(payload: dict):
         anthropic_api_key=s.anthropic_api_key,
         hf_token=s.hf_token,
         whisper_model=s.whisper_model,
+        whisper_language=s.whisper_language,
         max_speakers=s.max_speakers,
         recordings_dir=s.recordings_dir,
         email_to=s.email_to,
@@ -3935,6 +3941,11 @@ async def _auto_process_session(session_id: str, template: str,
         # Exhausted all attempts — make the failure visible.
         msg = f"Auto-processing failed after {attempts} attempts: {last_reason}"
         logger.error(f"[auto-process] session {session_id}: {msg}")
+        # The log is not a user-visible signal, and this is the path
+        # nobody is watching: the user stopped a recording and moved on.
+        # Without this the activity centre shows a green checkmark over
+        # a meeting that was never processed.
+        svc.pipeline.fail(msg)
         _stamp_processing_error(session_id, msg)
         _stamp_auto_process_pending(session_id, None)
     finally:
@@ -6833,6 +6844,14 @@ async def process_full(session_id: str, req: ProcessFullRequest):
                     except Exception as e:
                         logger.exception("process_full: transcribe/diarize failed")
                         stages["transcribe_diarize"] = f"failed: {e}"
+                        # Tell the stage model, or the activity centre
+                        # paints this run green. This endpoint RETURNS
+                        # ok:False rather than raising, so nothing
+                        # downstream can infer the failure — and
+                        # _end_processing's `finally` completes any run
+                        # with no error recorded. v2.79.0 shipped the
+                        # model and never called this.
+                        svc.pipeline.fail(str(e))
                         return {"ok": False, "stages": stages}
                 else:
                     stages["transcribe_diarize"] = "skipped (already processed)"
@@ -6856,6 +6875,12 @@ async def process_full(session_id: str, req: ProcessFullRequest):
         session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
         if not session or not session.segments:
             # No transcript to extract from (transcribe failed/empty).
+            # Also a failed run: the meeting produced nothing usable,
+            # and a green checkmark over an empty transcript is the
+            # worst version of this defect — it tells the user to stop
+            # looking.
+            svc.pipeline.fail(
+                "Processing produced no transcript for this recording.")
             return {"ok": False, "stages": stages}
         transcript = session.full_transcript()
         notes = session.notes or ""
@@ -7073,8 +7098,29 @@ async def process_full(session_id: str, req: ProcessFullRequest):
             logger.warning(f"could not clear processing_error on {session_id}: {e}")
 
         return {"ok": True, "stages": stages}
+    except Exception as e:
+        # ANY escape is a run that did not finish — an HTTPException
+        # from a guard above, or something unforeseen. Without this the
+        # `finally` reaches _end_processing with no error recorded, that
+        # method completes the pipeline, and the activity centre paints
+        # a green checkmark over a meeting that failed. Recorded here,
+        # then re-raised unchanged: this reports, it does not handle.
+        svc.pipeline.fail(_failure_reason(e))
+        raise
     finally:
         svc._end_processing()
+
+
+def _failure_reason(exc: BaseException) -> str:
+    """A sentence a user can act on, from whatever was raised.
+
+    HTTPException stringifies as "400: <detail>"; the status code is
+    noise on a status panel, so the detail is used alone when present.
+    """
+    detail = getattr(exc, "detail", None)
+    if detail:
+        return str(detail)
+    return str(exc) or exc.__class__.__name__
 
 
 async def _extract_and_save(
@@ -8609,6 +8655,7 @@ async def set_copilot_active(req: CoPilotActiveModeRequest):
         anthropic_api_key=s.anthropic_api_key,
         hf_token=s.hf_token,
         whisper_model=s.whisper_model,
+        whisper_language=s.whisper_language,
         max_speakers=s.max_speakers,
         recordings_dir=s.recordings_dir,
         email_to=s.email_to,

@@ -158,6 +158,11 @@ export interface Settings {
   anthropic_api_key: string;
   hf_token: string;
   whisper_model: string;
+  // ISO language code for transcription, or "auto" to detect it.
+  // Was hardcoded "en" in both transcription paths until 2026-09-02:
+  // non-English audio decoded as English, which Whisper does without
+  // erroring — fluent, confident, wrong text.
+  whisper_language: string;
   max_speakers: number;
   recordings_dir: string;
   email_to: string;

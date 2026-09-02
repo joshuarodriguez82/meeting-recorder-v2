@@ -29,7 +29,38 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-const WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"];
+// Verified against the pinned faster-whisper 1.2.1 model registry
+// (faster_whisper/utils.py::_MODELS). "large" resolves to large-v3.
+//
+// "turbo" (large-v3-turbo) is the notable addition: close to large-v3
+// accuracy for a fraction of the decode cost, which on a Mac running
+// CPU int8 is the difference between a large-class model being usable
+// and not. The picker previously offered only the five original tiers
+// and defaulted to "base", the weakest thing anyone ships for meetings.
+const WHISPER_MODELS = [
+  { value: "tiny", label: "tiny — fastest, least accurate" },
+  { value: "base", label: "base — default" },
+  { value: "small", label: "small" },
+  { value: "medium", label: "medium" },
+  { value: "turbo", label: "turbo — large-v3 accuracy, much faster" },
+  { value: "large", label: "large-v3 — most accurate, slowest" },
+];
+
+// "auto" detects per recording. The rest are the languages this app's
+// users actually record in; any other ISO code still works if set in
+// config.env directly.
+const WHISPER_LANGUAGES = [
+  { value: "en", label: "English" },
+  { value: "auto", label: "Detect automatically" },
+  { value: "es", label: "Spanish" },
+  { value: "fr", label: "French" },
+  { value: "de", label: "German" },
+  { value: "it", label: "Italian" },
+  { value: "pt", label: "Portuguese" },
+  { value: "nl", label: "Dutch" },
+  { value: "ja", label: "Japanese" },
+  { value: "zh", label: "Chinese" },
+];
 
 // Preset model options per provider. Picking a preset writes the value
 // into `claude_model` (the backend reuses that field as the model id
@@ -668,10 +699,36 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
                 </SelectTrigger>
                 <SelectContent>
                   {WHISPER_MODELS.map((m) => (
-                    <SelectItem key={m} value={m}>{m}</SelectItem>
+                    <SelectItem key={m.value} value={m.value}>
+                      {m.label}
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Spoken language</Label>
+              <Select
+                value={settings.whisper_language || "en"}
+                onValueChange={(v) => v && update("whisper_language", v)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {WHISPER_LANGUAGES.map((l) => (
+                    <SelectItem key={l.value} value={l.value}>
+                      {l.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Transcription assumed English until now, whatever was
+                actually spoken — and a wrong guess produces confident
+                nonsense rather than an error. Pick your usual language,
+                or Detect automatically if meetings vary.
+              </p>
             </div>
             <div className="space-y-2">
               <Label>Max Speakers</Label>

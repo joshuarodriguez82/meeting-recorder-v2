@@ -124,9 +124,21 @@ class _FakeModel:
 
     def __init__(self):
         self.calls = []
+        #: Decode options of the most recent call, so a test can assert
+        #: what the live path actually asked for.
+        self.last_opts = {}
 
-    def transcribe(self, audio, language="en", vad_filter=True):
+    def transcribe(self, audio, **opts):
+        # **opts, not a hand-copied parameter list. This fake used to
+        # restate the signature as (audio, language, vad_filter), so
+        # when the live path started passing the shared decode options
+        # (core/decode_options.py — glossary prompt, VAD parameters,
+        # beam size) every call raised TypeError. The live worker
+        # catches and logs that, so the suite saw "no segments" and the
+        # real failure — a fixture that had drifted from the caller —
+        # was invisible.
         self.calls.append(len(audio))
+        self.last_opts = dict(opts)
         if len(audio) == 0:
             return iter([]), None
         seg = _FakeSegment(0.0, len(audio) / SR, "hello world")
@@ -232,3 +244,58 @@ def test_no_speaker_tracker_never_raises_and_stays_them():
         assert "speaker_label" not in segs[0]
     finally:
         lt.stop()
+
+
+# ── The live path uses the SHARED decode options ────────────────────
+#
+# Finding 4 of the 2026-09-02 pipeline audit: the batch pass received a
+# glossary-derived `initial_prompt` and the live path did not, so the
+# transcript the user WATCHES mis-heard exactly the product and customer
+# terms the glossary exists to correct — while the transcript written to
+# disk got them right. Two transcripts of one meeting, disagreeing, and
+# nothing anywhere reported a problem.
+
+
+def _run_one_window(language="en", initial_prompt=""):
+    """Drive one real window through the worker and hand back the decode
+    options the engine was actually called with.
+
+    Same shape as test_vad_enabled_end_to_end_produces_segments_quickly
+    above — the point is that these options survive the REAL worker
+    path, not that a helper can be called directly.
+    """
+    engine = _FakeEngine()
+    lt = LiveTranscriber(engine_provider=lambda: engine, samplerate=SR)
+    lt.start(SR, vad_enabled=True, language=language,
+             initial_prompt=initial_prompt)
+    try:
+        lt.push_loopback(_sine(0.8))
+        lt.push_loopback(_silence(0.5))
+        assert _drain_history(lt), "no segment produced; options unverifiable"
+    finally:
+        lt.stop()
+    return engine._model.last_opts
+
+
+def test_the_live_path_receives_the_glossary_prompt():
+    opts = _run_one_window(initial_prompt="Globex, Initech, ACD")
+    assert opts.get("initial_prompt") == "Globex, Initech, ACD"
+
+
+def test_the_live_path_receives_the_configured_language():
+    """It was hardcoded "en" here, so an Italian meeting was decoded as
+    English in the live view no matter what the user had set."""
+    assert _run_one_window(language="it").get("language") == "it"
+
+
+def test_auto_reaches_the_live_decoder_as_none():
+    """"auto" is a sentinel, not a language code — sending it verbatim
+    would make faster-whisper fail rather than detect."""
+    assert _run_one_window(language="auto").get("language") is None
+
+
+def test_the_live_path_does_not_pay_for_word_timestamps():
+    """They cost decode time the live view spends on latency, and
+    nothing in it consumes them."""
+    assert _run_one_window().get("word_timestamps") is False
+
