@@ -43,8 +43,8 @@
 
 ## Your missing sessions
 
-A user reported seeing 12 sessions in the app. They had 73 on disk — 61
-of them sitting in an old folder the app had simply never looked at.
+The app was showing 12 sessions on an install that had 73 on disk — 61
+of them sitting in an old folder it had simply never looked at.
 
 Nothing was lost, and nothing had gone wrong with the recordings. The
 scan was one line:

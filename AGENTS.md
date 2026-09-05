@@ -49,6 +49,51 @@ from landing again; see `docs/ci-security-and-ai-review.md` for how to add a
 term. It only knows what it has been told, so it is a backstop, not a substitute
 for not writing the name in the first place.
 
+# Never record what the user said to you
+
+Write the technical fact, not its provenance in a conversation. A
+comment, docstring, release note or commit message explains what the
+code does and why; it is not a transcript.
+
+Do not commit:
+
+- **Quotes of the user.** Not their bug report, not their reaction, not
+  their phrasing — however useful it felt as evidence.
+- **Attribution of an opinion or a mood to them.** "User complained",
+  "user was frustrated", "user called it a regression", "(user
+  feedback)", "per the user's instruction". A record of someone being
+  annoyed is not documentation, and this repo is public.
+- **Anything characterising the exchange itself**, including a section
+  headed with the conversation it came from.
+
+The reason a change was made is a property OF THE CODE, and stating it
+that way is strictly better documentation:
+
+    BAD   # (user feedback 2026-08-21: setup buried in a viewing
+          #  screen "makes 0 sense")
+    GOOD  # Configuration buried inside a viewing screen is the wrong
+          # place for it; this view is where the register is READ.
+
+    BAD   # The user reported real "I forgot the recording was still
+          # going for hours" pain
+    GOOD  # A recording left running for hours unnoticed is the case
+          # these defaults catch.
+
+The good version survives the person who reported it, reads as
+engineering rather than gossip, and is the sentence a stranger
+cloning this repo actually needs.
+
+A field report is still worth citing — but cite the OBSERVED SYSTEM
+BEHAVIOUR and its date, never the person or their words. "Field repro
+2026-07-09: the WAV copy blocked on the sync filter driver" is exactly
+right. "A user complained that…" is not.
+
+September 2026: a scrub found quoted user messages — including
+profanity — in six source files, a release note, and a handoff doc that
+carried a section literally headed "User's explicit constraints (from
+our conversation)". All of it was public, and all of it was avoidable
+by writing down the constraint instead of who voiced it.
+
 # Release notes must always include macOS install commands
 
 Release notes live at `docs/release-notes/release-notes-vX.Y.Z.md` (moved out of the repo root in June 2026 — 47 of them were the first thing anyone saw cloning the repo; release.yml's body_path points at the new location). Every release-notes file MUST contain the Mac Gatekeeper-bypass instructions in a callout block near the top. The build is unsigned, so users hit "damaged and can't be opened" on first launch and need explicit guidance.

@@ -30,8 +30,8 @@ static BACKEND_PORT: OnceLock<u16> = OnceLock::new();
 // Preferred fixed port. Picked so the Chrome extension doesn't need
 // to be reconfigured with a new URL after every recorder launch —
 // previously the port was always dynamic via bind-port-0, which gave
-// us a free port but a different one each launch. Field repro
-// 2026-06-30: user complained about re-pasting the URL every launch.
+// us a free port but a different one each launch, so the extension
+// had to be re-pointed at a new URL after every single app start.
 // 17645 is in the IANA "Dynamic and/or Private" range (49152-65535
 // is technically reserved but 17645 has been in use for this app
 // since v2.1, with zero observed conflicts on real user machines).
