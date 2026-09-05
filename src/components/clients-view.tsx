@@ -39,9 +39,9 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
   // Clients with ZERO tagged meetings exist only in client_configs.json
   // and reach this view solely through GET /clients/config. Swallowing a
   // failure here therefore doesn't degrade gracefully — it silently
-  // erases every empty client from the roster, which is exactly the
-  // "I made a ton of clients and they're not in my list" report
-  // (2026-08-07). The backend deliberately raises 503 when the config
+  // erases every empty client from the roster — the 2026-08-07 defect
+  // where configured clients were absent from the list with no error
+  // shown. The backend deliberately raises 503 when the config
   // is an un-hydrated cloud placeholder; that signal used to be
   // discarded. Same bug class as the Today-tab briefing in v2.19.3:
   // a failed read must never render as "nothing there".
@@ -407,7 +407,7 @@ export function ClientsView({ sessions, onReload, onOpenSession }: Props) {
               {/* Portal binding lives HERE, with the rest of the
                   per-client/per-project configuration — not in the
                   Engagements view, which is where the register is
-                  read. (User feedback 2026-08-21.) Bindings are
+                  read. Bindings are
                   strictly per-project, so the control appears only
                   when one is selected. */}
               {selected && selectedProject && (

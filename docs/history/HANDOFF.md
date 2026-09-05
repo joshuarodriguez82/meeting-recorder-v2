@@ -12,7 +12,7 @@ Purpose: everything a fresh Claude session needs to pick up this project and hel
 - **Two machines:**
   - **Dev PC** (`C:\Users\<you>\...`) — where development happens, runs fine against the v1 Python venv at `C:\meeting_recorder\.venv\`
   - **Work laptop** (Northwind-managed, user `<you>`) — where he wants to use the app for actual work. This is where everything breaks.
-- **Non-negotiable:** the app must "just work" on the laptop the same as v1 did on dev. User is extremely frustrated with repeated failed install attempts.
+- **Non-negotiable:** the app must install and run on the work laptop with no developer tooling, the same way v1 does on the dev PC. Several install approaches had already failed at this point.
 
 ---
 
@@ -324,7 +324,7 @@ Real user-facing features *not yet in any shipped release* but present on `main`
 - Rust watchdog respawning Python
 - 4-minute cold-start timeout on backend readiness
 
-When we finally ship a working installer, these should land as v2.0.3 (per user's instruction: no dot releases past v2.0.2 until things actually work).
+When a working installer ships, these should land as v2.0.3 — no dot releases past v2.0.2 until the install itself works (see the constraints below).
 
 ---
 
@@ -410,12 +410,12 @@ Each step should **log what was detected and what path was chosen**, so when thi
 
 ---
 
-## User's explicit constraints (from our conversation)
+## Constraints this work operated under
 
-1. **No more dot releases until it actually works** — user was watching the Releases page fill up with broken installers and said "the release section of this github looks fucking stupid because nothing has fixed this shit"
+1. **No more dot releases until the installer actually works.** Repeated releases carrying a broken installer make the Releases page worse than useless — each one looks like a fix and is not.
 2. **When we do ship, go back to v2.0.1 as the latest** if it's still the best working version — i.e., don't ship v2.1.x-style half-broken attempts
-3. **Stop making changes without knowing the repercussions** — user called out that I was thrashing with rapid rebuilds, each one introducing a new failure mode
-4. **Don't delete session data** — user panicked when the app showed 0 sessions (data was safe at the v1 path, just needed RECORDINGS_DIR pointed correctly). Be defensive about not wiping `recordings/` directories.
+3. **Understand a change before making it.** Rapid rebuild-and-retry cycles were introducing a new failure mode with each attempt; diagnosis has to come first.
+4. **Never delete session data.** An install once displayed 0 sessions; the recordings were intact at the v1 path and only needed RECORDINGS_DIR pointed at it. Be defensive about never wiping a `recordings/` directory.
 
 ---
 

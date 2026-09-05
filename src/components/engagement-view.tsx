@@ -242,8 +242,8 @@ export function EngagementView({ sessions }: Props) {
 
         {/* Sync-only here. BINDING management lives in the Clients tab
             with the rest of the per-client/per-project configuration
-            (user feedback 2026-08-21: setup buried in a viewing screen
-            "makes 0 sense") — this view is where the register is READ,
+            — configuration buried inside a viewing screen is the wrong
+            place for it, and this view is where the register is READ,
             so the only portal control it keeps is the action on the
             data being looked at. Visible only when a specific project
             is chosen: bindings are strictly per-project. */}

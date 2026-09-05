@@ -578,10 +578,9 @@ class Settings:
             auto_screenshot_interval_minutes=_get_int(
                 "AUTO_SCREENSHOT_INTERVAL_MINUTES", 0),
             # Auto-stop defaults: warnings on, auto-stops opt-in, 4h hard cap.
-            # The user reported real "I forgot the recording was still going
-            # for hours" pain — these defaults catch the common case while
-            # leaving the more aggressive auto-stop behaviour off until the
-            # user explicitly opts in.
+            # A recording left running for hours unnoticed is the case
+            # these defaults catch, while leaving the more aggressive
+            # auto-stop behaviour off until it is explicitly opted into.
             silence_warn_min=_get_int("SILENCE_WARN_MIN", 5),
             silence_stop_min=_get_int("SILENCE_STOP_MIN", 0),
             overrun_warn_min=_get_int("OVERRUN_WARN_MIN", 5),
