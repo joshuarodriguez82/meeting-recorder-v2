@@ -3321,3 +3321,158 @@ test("the background refresh interval is configurable and can be off", () => {
   assert.match(src, /alarms\.clear\(CALENDAR_ALARM_NAME\)/,
                "0 must clear the alarm a previous version scheduled");
 });
+
+
+// ── Capture run state ────────────────────────────────────────────────
+//
+// Field report 2026-09-03, with a screenshot: the popup showed
+//
+//   "A listener indicated an asynchronous response by returning true,
+//    but the message channel closed before a response was received"
+//
+// The listener held the message channel open for the whole capture.
+// That capture reads five surfaces with waits of 25s, 40s, 30s, 40s and
+// 45s — three minutes in the worst case. An MV3 service worker is
+// reclaimed after roughly 30s idle and a popup closes on any click
+// elsewhere; either ends the channel and the reply lands nowhere.
+//
+// The channel now carries only an acknowledgement, and the run reports
+// through chrome.storage.local. These cover the part of that which can
+// silently regress: deciding whether a run is still alive.
+
+function sandboxWithStorage(initial) {
+  // A second sandbox with a real (in-memory) storage.local, so
+  // getCaptureRun/setCaptureRun can be exercised end to end rather than
+  // against the no-op stub the DOM tests use.
+  const store = { ...initial };
+  const noop = () => {};
+  const chromeStub = {
+    runtime: {
+      onInstalled: { addListener: noop },
+      onStartup: { addListener: noop },
+      onMessage: { addListener: noop },
+    },
+    storage: {
+      onChanged: { addListener: noop },
+      local: {
+        get: async (defaults) => {
+          const out = {};
+          for (const k of Object.keys(defaults)) {
+            out[k] = k in store ? store[k] : defaults[k];
+          }
+          return out;
+        },
+        set: async (patch) => { Object.assign(store, patch); },
+      },
+    },
+    alarms: { onAlarm: { addListener: noop }, create: noop, clearAll: async () => {} },
+    tabs: {},
+    scripting: {},
+  };
+  const ctx = { chrome: chromeStub, console, URL, location: { href: PAGE_HREF } };
+  vm.createContext(ctx);
+  vm.runInContext(SRC, ctx, { filename: BG_PATH });
+  ctx.__store = store;
+  return ctx;
+}
+
+test("no capture has ever run: not running, nothing to report", async () => {
+  const sb = sandboxWithStorage({});
+  const run = await sb.getCaptureRun();
+  assert.equal(run.running, false);
+  assert.equal(run.result, null);
+});
+
+test("a capture in flight reports as running, with its stage", async () => {
+  const sb = sandboxWithStorage({
+    captureRun: {
+      running: true, startedAt: Date.now() - 5_000,
+      stage: "Reading Teams Activity…", result: null,
+    },
+  });
+  const run = await sb.getCaptureRun();
+  assert.equal(run.running, true);
+  assert.equal(run.stage, "Reading Teams Activity…");
+});
+
+test("a run older than the ceiling is reported as stopped, not running", async () => {
+  // The failure this guards: a worker reclaimed mid-capture leaves
+  // `running: true` in storage forever. Trusting that flag would spin
+  // the popup indefinitely — a state you cannot tell from a working
+  // capture, which is the whole defect being fixed.
+  const sb = sandboxWithStorage({
+    captureRun: {
+      running: true, startedAt: Date.now() - (7 * 60_000),
+      stage: "Reading Inbox…", result: null,
+    },
+  });
+  const run = await sb.getCaptureRun();
+  assert.equal(run.running, false);
+  assert.ok(run.result, "a stalled run must report SOMETHING, never silence");
+  assert.equal(run.result.ok, false);
+});
+
+test("a capture still inside its worst case is left alone", async () => {
+  // Worst case is 25+40+30+40+45 = 180s of waits plus the POST. A run
+  // that long is slow, not dead, and calling it dead would show a
+  // failure over a capture that is about to succeed. Asserted through
+  // getCaptureRun rather than by reading the constant: the behaviour is
+  // what callers depend on, and the constant is not reachable from a vm
+  // sandbox anyway (a top-level `const` is a lexical binding, not a
+  // property of the global).
+  const sb = sandboxWithStorage({
+    captureRun: {
+      running: true, startedAt: Date.now() - 200_000,
+      stage: "Reading Calendar…", result: null,
+    },
+  });
+  const run = await sb.getCaptureRun();
+  assert.equal(run.running, true,
+    "a 200s capture is within the documented worst case and must not be "
+    + "reported as stalled");
+});
+
+test("a finished capture reports its result and stops running", async () => {
+  const sb = sandboxWithStorage({
+    captureRun: {
+      running: false, startedAt: Date.now() - 60_000, stage: "",
+      result: { ok: true, counts: { owa: 1200, calendar: 4 } },
+    },
+  });
+  const run = await sb.getCaptureRun();
+  assert.equal(run.running, false);
+  assert.equal(run.result.ok, true);
+  assert.equal(run.result.counts.calendar, 4);
+});
+
+test("a finished-and-failed capture keeps its reason", async () => {
+  const sb = sandboxWithStorage({
+    captureRun: {
+      running: false, startedAt: Date.now() - 60_000, stage: "",
+      result: { ok: false, error: "Backend returned 401" },
+    },
+  });
+  const run = await sb.getCaptureRun();
+  assert.equal(run.result.error, "Backend returned 401");
+});
+
+test("setCaptureRun merges rather than replacing the run", async () => {
+  // Stage updates arrive one per surface; each must not wipe startedAt,
+  // or every update would reset the staleness clock and a wedged run
+  // would never be recognised.
+  const sb = sandboxWithStorage({});
+  await sb.setCaptureRun({ running: true, startedAt: 1234, stage: "Starting…" });
+  await sb.setCaptureRun({ stage: "Reading OWA…" });
+  const run = await sb.getCaptureRun();
+  assert.equal(sb.__store.captureRun.startedAt, 1234);
+  assert.equal(run.stage, "Reading OWA…");
+  assert.equal(run.running, false, "startedAt 1234 is 1970 — long stale");
+});
+
+test("unreadable storage degrades to 'not running' rather than throwing", async () => {
+  const sb = sandboxWithStorage({});
+  sb.chrome.storage.local.get = async () => { throw new Error("storage gone"); };
+  const run = await sb.getCaptureRun();
+  assert.equal(run.running, false);
+});
+
