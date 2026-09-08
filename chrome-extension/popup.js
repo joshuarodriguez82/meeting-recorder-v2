@@ -118,44 +118,109 @@ function openOptions(e) {
 $("settingsLink").addEventListener("click", openOptions);
 $("optionsLink").addEventListener("click", openOptions);
 
+// ── Capture ─────────────────────────────────────────────────────────
+//
+// The background worker acknowledges the click immediately and reports
+// everything after that through chrome.storage.local. This popup used
+// to `await chrome.runtime.sendMessage(...)` for the whole capture,
+// which produced:
+//
+//   "A listener indicated an asynchronous response by returning true,
+//    but the message channel closed before a response was received"
+//
+// A capture reads five surfaces and can take three minutes. Neither
+// this popup nor an MV3 service worker reliably lives that long, and
+// when either goes the channel closes and the reply lands nowhere.
+//
+// Reading from storage instead means closing the popup no longer costs
+// you the capture, and reopening it mid-run shows where the run got to
+// rather than starting from nothing.
+
+/** Paint whatever the current run says, whether we started it or not. */
+async function renderCaptureRun() {
+  let run;
+  try {
+    run = await chrome.runtime.sendMessage({ type: "get-capture-run" });
+  } catch {
+    // The worker is asleep and has nothing in flight. Not an error.
+    run = null;
+  }
+  if (!run) return false;
+
+  $("captureBtn").disabled = !!run.running;
+
+  if (run.running) {
+    setStatus("busy",
+      `${run.stage || "Working…"} — reading OWA, Teams, Inbox, Chat and `
+      + `Calendar in background tabs. Up to about three minutes. You can `
+      + `close this popup; the capture keeps going.`);
+    return true;
+  }
+
+  const result = run.result;
+  if (!result) return false;
+
+  if (result.ok) {
+    const c = result.counts || {};
+    const parts = [];
+    if (c.owa) parts.push(`OWA: ${c.owa}`);
+    if (c.teams) parts.push(`Teams: ${c.teams}`);
+    if (c.inbox) parts.push(`Inbox: ${c.inbox}`);
+    if (c.chat) parts.push(`Chat: ${c.chat}`);
+    const calN = c.calendar ?? 0;
+    const calSuffix = (calN === 0 && result.calendarZeroReason)
+      ? ` (${result.calendarZeroReason})` : "";
+    parts.push(`Calendar: ${calN} event${calN === 1 ? "" : "s"}${calSuffix}`);
+    setStatus("ok", `✓ Sent (${parts.join(", ")}). Open the Today tab for the parsed brief.`);
+  } else {
+    setStatus("error", `✗ ${result.error || "Unknown error"}`);
+  }
+  return false;
+}
+
+/** Poll while a run is in flight. Storage events do not reach a popup
+ *  reliably across a worker restart, so this asks rather than waits. */
+let capturePollTimer = null;
+function watchCaptureRun() {
+  if (capturePollTimer) return;
+  capturePollTimer = setInterval(async () => {
+    const stillRunning = await renderCaptureRun();
+    if (!stillRunning) {
+      clearInterval(capturePollTimer);
+      capturePollTimer = null;
+      await renderLastCapture();
+      await renderCalendarStatus();
+      refreshConfigBanner();
+    }
+  }, 1000);
+}
+
 $("captureBtn").addEventListener("click", async () => {
   $("captureBtn").disabled = true;
-  setStatus("busy", "Opening tabs in the background (OWA, Teams, Inbox, Chat, Calendar), reading content, sending to recorder… ~30–90 sec.");
-
+  setStatus("busy", "Starting…");
   try {
     const cfg = await getConfig();
     if (!cfg.backendUrl || !cfg.token) {
       throw new Error("Backend URL or token not configured. Open Settings.");
     }
-    const result = await chrome.runtime.sendMessage({
+    // Returns as soon as the worker has accepted the job — this is an
+    // acknowledgement, not the result.
+    await chrome.runtime.sendMessage({
       type: "capture-and-send",
       backendUrl: cfg.backendUrl,
       token: cfg.token,
     });
-    if (result?.ok) {
-      const c = result.counts || {};
-      const parts = [];
-      if (c.owa) parts.push(`OWA: ${c.owa}`);
-      if (c.teams) parts.push(`Teams: ${c.teams}`);
-      if (c.inbox) parts.push(`Inbox: ${c.inbox}`);
-      if (c.chat) parts.push(`Chat: ${c.chat}`);
-      const calN = c.calendar ?? 0;
-      const calSuffix = (calN === 0 && result.calendarZeroReason)
-        ? ` (${result.calendarZeroReason})` : "";
-      parts.push(`Calendar: ${calN} event${calN === 1 ? "" : "s"}${calSuffix}`);
-      setStatus("ok", `✓ Sent (${parts.join(", ")}). Open the Today tab for the parsed brief.`);
-    } else {
-      setStatus("error", `✗ ${result?.error || "Unknown error"}`);
-    }
-    await renderLastCapture();
-    await renderCalendarStatus();
+    await renderCaptureRun();
+    watchCaptureRun();
   } catch (e) {
     setStatus("error", `✗ ${e.message || String(e)}`);
-  } finally {
     $("captureBtn").disabled = false;
     refreshConfigBanner();
   }
 });
+
+// Opening the popup during a run picks it up where it is.
+renderCaptureRun().then((running) => { if (running) watchCaptureRun(); });
 
 refreshConfigBanner();
 renderLastCapture();

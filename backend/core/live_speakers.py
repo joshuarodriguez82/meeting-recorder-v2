@@ -58,8 +58,8 @@ logger = get_logger(__name__)
 #   A real 2-person call on v2.23.0 produced SPEAKER 1, 2, 3, 4, 5, 6,
 #   7 and 9 for ONE continuous speaker — a brand-new identity every few
 #   seconds. Before v2.21.0 the same call was labelled a flat "them",
-#   which was less informative but never WRONG. The user called it a
-#   definite regression, and they're right.
+#   which was less informative but never WRONG. Trading a vague label
+#   for a confidently incorrect one is a regression, not a trade-off.
 #
 #   Root cause: the old single SIMILARITY_THRESHOLD of 0.75 did double
 #   duty. It decided both "is this the same voice?" AND, by failing,

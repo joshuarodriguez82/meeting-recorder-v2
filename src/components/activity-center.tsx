@@ -6,11 +6,11 @@
  * WHAT WAS THERE (screenshot, 2026-09-01)
  * ---------------------------------------
  * A one-line strip showing whatever string the backend last set, hard
- * `truncate`d to the sidebar width. The user's words for it: "words
- * merged together, cut off … looks like we put it together and forgot
- * all about it."
+ * `truncate`d to the sidebar width. It rendered welded-together words
+ * cut off mid-sentence, and could answer none of the questions a
+ * progress display exists to answer.
  *
- * They were right, and there were three separate faults behind it:
+ * Three separate faults were behind it:
  *
  *   1. The text was garbled at source. Two stage labels arrived welded
  *      into one string and the strip truncated the result mid-word

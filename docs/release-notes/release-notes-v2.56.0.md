@@ -90,7 +90,7 @@ repeat that history (round-trip test included).
 
 Binding a project to a portal opportunity is configuration, and
 configuration lives with the client setup — not in the Engagements
-view, which is where the register is read. (User feedback, correct.)
+view, which is where the register is read.
 The full bind/re-bind/unbind controls now sit in **Clients**, next to
 Rename Project, when a project is selected; Engagements keeps only the
 **Sync to portal** action for an already-bound project.

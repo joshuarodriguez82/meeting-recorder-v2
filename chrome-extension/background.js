@@ -577,11 +577,115 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 // Popup-initiated manual capture.
 // ──────────────────────────────────────────────────────────────────
 
+// ── Capture run state ───────────────────────────────────────────────
+//
+// A capture takes up to three minutes and neither the popup nor the
+// service worker is guaranteed to survive it, so the run's state lives
+// in storage rather than on a message channel. The popup renders from
+// this; nothing is lost if it closes, and a worker that gets reclaimed
+// mid-run leaves a record rather than silence.
+
+//: A run outliving this is not running — the worker was reclaimed or
+//: the browser closed. Comfortably past the ~180s worst case, because
+//: calling a live capture dead is worse than showing a stale spinner
+//: for another minute.
+const CAPTURE_RUN_STALE_MS = 6 * 60_000;
+
+async function setCaptureRun(patch) {
+  // Best-effort: a storage write must never be the thing that fails a
+  // capture that is otherwise working.
+  try {
+    const cur = (await chrome.storage.local.get({ captureRun: null })).captureRun;
+    await chrome.storage.local.set({
+      captureRun: { ...(cur || {}), ...patch },
+    });
+  } catch (e) {
+    console.warn("[ext] could not record capture state:", e);
+  }
+}
+
+/**
+ * The current run as the popup should see it.
+ *
+ * `running` is derived, never trusted from storage: a worker killed
+ * mid-capture leaves `running: true` behind forever, and a spinner that
+ * never resolves is exactly the "you cannot tell what happened" failure
+ * this whole mechanism exists to avoid.
+ */
+async function getCaptureRun() {
+  let run = null;
+  try {
+    run = (await chrome.storage.local.get({ captureRun: null })).captureRun;
+  } catch (e) {
+    console.warn("[ext] could not read capture state:", e);
+  }
+  if (!run) return { running: false, stage: "", startedAt: 0, result: null };
+  const age = Date.now() - (run.startedAt || 0);
+  const stalled = !!run.running && age > CAPTURE_RUN_STALE_MS;
+  return {
+    running: !!run.running && !stalled,
+    stage: run.stage || "",
+    startedAt: run.startedAt || 0,
+    result: stalled
+      ? {
+          ok: false,
+          error: "The capture stopped before it finished — Chrome shut the "
+               + "extension down mid-run. Try again, and keep this window "
+               + "in the foreground.",
+        }
+      : (run.result || null),
+  };
+}
+
+/**
+ * Kick off a capture and return at once.
+ *
+ * Deliberately not awaited by the message listener: the caller gets an
+ * acknowledgement, and everything after that is reported through
+ * storage.
+ */
+function startCapture(backendUrl, token) {
+  setCaptureRun({
+    running: true, startedAt: Date.now(), stage: "Starting…", result: null,
+  });
+  captureAndSend(backendUrl, token, { source: "manual" })
+    .then((result) => setCaptureRun({ running: false, stage: "", result }))
+    .catch((e) => setCaptureRun({
+      running: false,
+      stage: "",
+      result: { ok: false, error: e?.message || String(e) },
+    }));
+}
+
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "capture-and-send") {
-    captureAndSend(msg.backendUrl, msg.token, { source: "manual" })
-      .then(sendResponse)
-      .catch((e) => sendResponse({ ok: false, error: e.message || String(e) }));
+    // ACK IMMEDIATELY, then work in the background.
+    //
+    // This used to hold the message channel open for the whole
+    // capture, which produced:
+    //
+    //   "A listener indicated an asynchronous response by returning
+    //    true, but the message channel closed before a response was
+    //    received"
+    //
+    // A full capture visits five surfaces with waits of 25s, 40s, 30s,
+    // 40s and 45s — three minutes in the worst case. An MV3 service
+    // worker is not guaranteed to live that long (Chrome reclaims an
+    // idle one after ~30s), and the popup can be closed by a click
+    // anywhere. Either ends the channel, and the reply lands nowhere.
+    //
+    // So the channel now carries only the acknowledgement. Progress
+    // and the result go to chrome.storage.local, which the popup reads
+    // and subscribes to. That also means closing the popup no longer
+    // costs you the capture — you can shut it and come back, which is
+    // what anyone would do during a three-minute wait.
+    startCapture(msg.backendUrl, msg.token);
+    sendResponse({ started: true });
+    return false;
+  }
+  if (msg?.type === "get-capture-run") {
+    getCaptureRun().then(sendResponse);
     return true;
   }
   if (msg?.type === "get-status") {
@@ -649,6 +753,11 @@ async function captureAndSend(backendUrl, token, opts = {}) {
   // anti-flooding with 4 simultaneous tab opens. Per-source timeouts
   // (see SOURCES at top) — Teams gets ~40s, OWA/Inbox ~25-30s.
   for (const src of SOURCES) {
+    // Name the surface being read. Over a three-minute run a bare
+    // spinner is indistinguishable from a hang, and the whole reason
+    // this state is in storage is so the popup can say something true
+    // about where the run has got to.
+    await setCaptureRun({ stage: `Reading ${src.label}…` });
     try {
       const result = await captureUrl(src);
       payload[`${src.key}_text`] = result.text;
@@ -672,6 +781,7 @@ async function captureAndSend(backendUrl, token, opts = {}) {
   // whole briefing capture — the four sources above are independent
   // and still useful on their own.
   let calendarCapture = null;
+  await setCaptureRun({ stage: "Reading Calendar…" });
   try {
     calendarCapture = await captureCalendarTab();
     if (calendarCapture.events.length > 0) {
@@ -712,6 +822,7 @@ async function captureAndSend(backendUrl, token, opts = {}) {
 
   // POST to the recorder backend.
   try {
+    await setCaptureRun({ stage: "Sending to the recorder…" });
     const res = await fetch(`${backendUrl}/briefing/extension-import`, {
       method: "POST",
       headers: {
