@@ -372,6 +372,7 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from config.settings import Settings, USER_DATA_DIR
+from core.model_status import ModelStatus, describe_unavailable, wait_for_models
 from core.audio_capture import (
     list_input_devices, list_output_devices, probe_mic_device,
 )
@@ -1052,6 +1053,15 @@ class Services:
             # and corrects known mis-hears afterward. Set after construction
             # so the RecordingService signature stays unchanged.
             self.recording_svc.terminology = self.terminology_svc
+            # Lets the recorder say WHY the models are unavailable rather
+            # than asserting the most alarming guess. Set after
+            # construction, like `terminology` above, so the
+            # RecordingService signature stays unchanged.
+            self.recording_svc.model_status_provider = lambda: ModelStatus(
+                loading=self.models_loading,
+                configured=bool(self.settings and self.settings.is_configured),
+                error=self.models_error,
+            )
             # The summarizer is constructed whenever an LLM is configured
             # — either Anthropic (anthropic_api_key) or an OpenAI-compatible
             # endpoint (openai_base_url / openai_api_key, or a local Ollama
@@ -1142,11 +1152,36 @@ class Services:
         during "Loading transcription engine". One loader ever; every
         other caller returns immediately and polls models_ready.
         """
+        i_own_the_load = False
         with self._model_load_lock:
-            if self.models_ready or self.models_loading:
+            if self.models_ready:
                 return
-            self.models_loading = True
-            self.models_error = None
+            if not self.models_loading:
+                self.models_loading = True
+                self.models_error = None
+                i_own_the_load = True
+
+        if not i_own_the_load:
+            # ANOTHER THREAD IS LOADING — WAIT FOR IT.
+            #
+            # This used to return immediately, and the docstring above
+            # said the caller should then poll models_ready. process_full
+            # never polled: it called this, got an instant return while
+            # the load was still running, went straight on to processing
+            # with engines that were still None, and told the user to add
+            # API keys they already had and restart an app that was
+            # seconds from working (field report 2026-09-09).
+            #
+            # The lock is deliberately NOT held across this wait — that
+            # would block the very loader being waited on.
+            if not wait_for_models(
+                    is_ready=lambda: self.models_ready,
+                    is_loading=lambda: self.models_loading):
+                logger.warning(
+                    "Waited for an in-flight model load and it did not "
+                    "become ready; the caller will report why.")
+            return
+
         try:
             s = self.load_settings()
             if not s.is_configured:

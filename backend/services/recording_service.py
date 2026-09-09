@@ -424,6 +424,27 @@ class RecordingService:
     def can_process(self) -> bool:
         return self._transcription is not None and self._diarization is not None
 
+    def _model_unavailable_reason(self) -> str:
+        """Why the engines are missing, in words a user can act on.
+
+        `model_status_provider` is injected by the app (server.py wires
+        it to the loader's own flags). Absent — direct construction in a
+        test, an older caller — this degrades to the generic sentence
+        rather than raising, because a guard must never fail on its way
+        to reporting a failure.
+        """
+        provider = getattr(self, "model_status_provider", None)
+        if provider is None:
+            return ("AI models are not loaded. Check API keys in "
+                    "File > Settings.")
+        try:
+            from core.model_status import describe_unavailable
+            return describe_unavailable(provider())
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"model status unavailable: {e}")
+            return ("AI models are not loaded, and the reason could not "
+                    "be determined.")
+
     def _build_live_speaker_tracker(self):
         """Best-effort construction of the live "them"-speaker splitter.
 
@@ -1262,9 +1283,18 @@ class RecordingService:
         if not session or not session.audio_path:
             raise RuntimeError("No recorded session to process.")
         if not self.can_process:
-            raise RuntimeError(
-                "AI models not loaded. Add API keys in File > Settings "
-                "and restart the app to enable transcription and diarization.")
+            # Ask WHY rather than asserting the most alarming guess.
+            #
+            # This used to say "Add API keys in File > Settings and
+            # restart the app" for every case, because this service can
+            # only see whether the engine objects exist. It cannot tell
+            # "still loading" from "no keys" from "the load raised" — and
+            # in the field it told someone with correct keys to re-enter
+            # them and restart, three minutes before the same recording
+            # processed perfectly (2026-09-09). Diagnosing a state you
+            # cannot observe is how a temporary condition gets reported
+            # as a permanent misconfiguration.
+            raise RuntimeError(self._model_unavailable_reason())
 
         # READ-SIDE CLOUD-CONTENTION FIX (v2.12.0, field repro 2026-06-26):
         # Stream-copy the WAV to a LOCAL-only scratch path before any ML

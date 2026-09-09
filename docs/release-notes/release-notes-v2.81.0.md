@@ -62,6 +62,35 @@ While a recording is running, nothing is probed — the microphone is
 open and working, and reaching into the audio system underneath a live
 capture is exactly what caused a crash loop in an earlier release.
 
+## "Add API keys" when the keys were already there
+
+A second problem from the same install, and the message was simply
+wrong.
+
+Processing could fail with:
+
+> AI models not loaded. Add API keys in File > Settings and restart the
+> app to enable transcription and diarization.
+
+on a machine where the keys were correctly set. The models were not
+missing — they were still **loading**. A few minutes later the same
+recording processed perfectly.
+
+Two things caused it, both fixed here.
+
+The app serialises model loading so two threads never load at once
+(that combination used to crash it). But a second request arriving
+during a load returned immediately instead of waiting, then tried to
+process with models that were seconds from being ready. **It now waits
+for the load in progress.**
+
+And the message itself could not tell "still loading" from "no API
+keys" from "loading failed", so it asserted the most alarming of the
+three — telling someone to re-enter working credentials and restart an
+app that was about to work. Each case now says what is actually true,
+and a load that fails reports **its own error** rather than blaming
+your configuration.
+
 ## Why this took two releases
 
 v2.80.3 fixed the underlying failure: the app was asking fallback
