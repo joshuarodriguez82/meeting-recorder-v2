@@ -30,6 +30,7 @@ from typing import Callable, List, Optional
 import numpy as np
 import sounddevice as sd
 
+from core.mic_open_plan import build_mic_open_plan
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -539,88 +540,118 @@ class AudioCapture:
         try:
             if self._mic_idx is not None:
                 dev_info = sd.query_devices(self._mic_idx)
-                native_sr = int(dev_info["default_samplerate"])
-                max_ch = int(dev_info["max_input_channels"])
-                channels = min(2, max_ch)
-                self.actual_sr = native_sr
+                self.actual_sr = int(dev_info["default_samplerate"])
                 api_name = sd.query_hostapis(dev_info["hostapi"])["name"]
                 logger.info(
                     f"Mic device: [{self._mic_idx}] {dev_info['name']} | "
-                    f"api={api_name} ch={channels}/{max_ch} sr={native_sr}")
+                    f"api={api_name} "
+                    f"ch={dev_info['max_input_channels']} "
+                    f"sr={self.actual_sr}")
 
-                attempts = [
-                    dict(samplerate=native_sr, blocksize=0, latency="high"),
-                    dict(samplerate=native_sr, blocksize=0, latency="low"),
-                    dict(samplerate=native_sr, blocksize=BLOCK_SIZE, latency="high"),
-                    dict(samplerate=48000, blocksize=0, latency="high"),
-                    dict(samplerate=44100, blocksize=0, latency="high"),
-                    dict(samplerate=16000, blocksize=0, latency="high"),
-                ]
-                seen_cfgs = set()
-                unique_attempts = []
-                for cfg in attempts:
-                    key = (cfg["samplerate"], cfg["blocksize"], cfg["latency"])
-                    if key not in seen_cfgs:
-                        seen_cfgs.add(key)
-                        unique_attempts.append(cfg)
+                # Ask EACH candidate what IT supports. This used to
+                # compute `channels` once from the selected device and
+                # reuse it for every host-API alternative — and the same
+                # physical device does not report the same channel count
+                # under WASAPI, MME and DirectSound. Field log
+                # 2026-09-09: a headset that WASAPI called 2-channel
+                # failed its own open on a driver error, then every
+                # fallback asked the MME and DirectSound entries for 2
+                # channels and got "Invalid number of channels
+                # [PaErrorCode -9998]" five times each. The ladder varied
+                # sample rate, block size and latency; the one parameter
+                # that was wrong was the one it never varied.
+                #
+                # The plan is built in core/mic_open_plan.py — pure, and
+                # therefore testable without PortAudio or a sound card,
+                # which this module's sounddevice import otherwise
+                # prevents.
+                candidates = []
+                for dev_idx in ([self._mic_idx]
+                                + _find_device_alternatives(self._mic_idx)):
+                    try:
+                        candidates.append((dev_idx, sd.query_devices(dev_idx)))
+                    except Exception as e:
+                        # A device that vanished between enumeration and
+                        # now (unplugged headset) is skipped, not fatal:
+                        # the remaining candidates may still work.
+                        logger.warning(
+                            f" Skipping device [{dev_idx}] — cannot query: {e}")
 
-                # Try the user-selected device first; if every config fails,
-                # fall back to the SAME physical mic on other host APIs
-                # (Windows only — _find_device_alternatives returns [] on Mac).
-                device_candidates = [self._mic_idx] + _find_device_alternatives(self._mic_idx)
+                plan = build_mic_open_plan(candidates)
+                logger.info(
+                    f" Mic open plan: {len(plan)} attempt(s) across "
+                    f"{len({a['device'] for a in plan})} device(s)")
 
                 mic_stream = None
                 mic_started = False
                 last_err = None
-                for dev_idx in device_candidates:
-                    try:
-                        dev_info_alt = sd.query_devices(dev_idx)
-                        api_name_alt = sd.query_hostapis(dev_info_alt["hostapi"])["name"]
-                        logger.info(
-                            f" Trying device [{dev_idx}] '{dev_info_alt['name']}' via {api_name_alt}")
-                    except Exception:
-                        api_name_alt = "?"
-
-                    for i, cfg in enumerate(unique_attempts):
-                        candidate = None
+                # The FIRST failure is the one on the device the user
+                # actually chose. `last_err` is whatever the final
+                # fallback said — often a different host API complaining
+                # about something unrelated — so reporting only that
+                # sends the reader after the wrong device.
+                selected_err = None
+                last_device = None
+                for attempt_no, attempt in enumerate(plan, start=1):
+                    dev_idx = attempt["device"]
+                    if dev_idx != last_device:
+                        last_device = dev_idx
                         try:
-                            logger.info(f"  Mic attempt {i+1}: {cfg}")
-                            candidate = sd.InputStream(
-                                device=dev_idx,
-                                channels=channels,
-                                samplerate=cfg["samplerate"],
-                                blocksize=cfg["blocksize"],
-                                latency=cfg["latency"],
-                                dtype="float32",
-                                callback=self._mic_callback,
-                            )
-                            candidate.start()
-                            mic_stream = candidate
-                            mic_started = True
-                            self.actual_sr = cfg["samplerate"]
-                            self._mic_idx = dev_idx
+                            alt = sd.query_devices(dev_idx)
+                            api_alt = sd.query_hostapis(alt["hostapi"])["name"]
                             logger.info(
-                                f"  [OK] Mic stream opened: sr={cfg['samplerate']}Hz "
-                                f"ch={channels} latency={cfg['latency']} "
-                                f"blocksize={cfg['blocksize']} api={api_name_alt}")
-                            break
-                        except Exception as e:
-                            last_err = e
-                            logger.warning(f"  [FAIL] Attempt {i+1} failed: {e}")
-                            if candidate is not None:
-                                try:
-                                    candidate.close()
-                                except Exception as ce:
-                                    # The attempt's own failure is already
-                                    # logged above; this is cleanup of a
-                                    # half-open handle. Debug only — but a
-                                    # handle that won't close is why the
-                                    # NEXT attempt sees a busy device.
-                                    logger.debug(
-                                        "  closing failed candidate: %s", ce)
-                            continue
-                    if mic_started:
+                                f" Trying device [{dev_idx}] "
+                                f"'{alt['name']}' via {api_alt}")
+                        except Exception:
+                            logger.info(f" Trying device [{dev_idx}]")
+
+                    candidate = None
+                    try:
+                        logger.info(
+                            f"  Mic attempt {attempt_no}/{len(plan)}: "
+                            f"ch={attempt['channels']} "
+                            f"sr={attempt['samplerate']} "
+                            f"blocksize={attempt['blocksize']} "
+                            f"latency={attempt['latency']}")
+                        candidate = sd.InputStream(
+                            device=dev_idx,
+                            channels=attempt["channels"],
+                            samplerate=attempt["samplerate"],
+                            blocksize=attempt["blocksize"],
+                            latency=attempt["latency"],
+                            dtype="float32",
+                            callback=self._mic_callback,
+                        )
+                        candidate.start()
+                        mic_stream = candidate
+                        mic_started = True
+                        self.actual_sr = attempt["samplerate"]
+                        self._mic_idx = dev_idx
+                        logger.info(
+                            f"  [OK] Mic stream opened: device=[{dev_idx}] "
+                            f"sr={attempt['samplerate']}Hz "
+                            f"ch={attempt['channels']} "
+                            f"latency={attempt['latency']} "
+                            f"blocksize={attempt['blocksize']}")
                         break
+                    except Exception as e:
+                        last_err = e
+                        if selected_err is None and dev_idx == candidates[0][0]:
+                            selected_err = e
+                        logger.warning(
+                            f"  [FAIL] Attempt {attempt_no} failed: {e}")
+                        if candidate is not None:
+                            try:
+                                candidate.close()
+                            except Exception as ce:
+                                # The attempt's own failure is already
+                                # logged above; this is cleanup of a
+                                # half-open handle. Debug only — but a
+                                # handle that won't close is why the
+                                # NEXT attempt sees a busy device.
+                                logger.debug(
+                                    "  closing failed candidate: %s", ce)
+                        continue
 
                 if not mic_started:
                     if IS_MACOS:
@@ -635,9 +666,26 @@ class AudioCapture:
                             "Zoom, Windows Camera), disconnected, or the driver "
                             "may need a restart. Try closing other apps or "
                             "picking a different mic.")
+                    if not plan:
+                        # No candidate reported a usable input channel, so
+                        # nothing was ever attempted. Saying "last error:
+                        # None" here would send the reader looking for a
+                        # failure that never happened.
+                        raise RuntimeError(
+                            "No usable microphone was found. The selected "
+                            "device reports no input channels — it may be "
+                            "unplugged, or it may be an output-only device. "
+                            "Pick a different mic in Settings.")
+                    detail = f"Last error: {last_err}."
+                    if selected_err is not None and str(selected_err) != str(last_err):
+                        detail = (f"Your selected device failed with: "
+                                  f"{selected_err}. Other host APIs for the "
+                                  f"same device also failed; last error: "
+                                  f"{last_err}.")
                     raise RuntimeError(
-                        f"All mic configurations failed. Last error: {last_err}. "
-                        f"{hint}")
+                        f"All {len(plan)} mic configurations failed across "
+                        f"{len({a['device'] for a in plan})} device entries. "
+                        f"{detail} {hint}")
 
                 self._streams.append(mic_stream)
 
