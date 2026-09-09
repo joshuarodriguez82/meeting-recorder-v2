@@ -1,6 +1,6 @@
 {
   "name": "meeting-recorder-v2",
-  "version": "2.80.2",
+  "version": "2.80.3",
   "private": true,
   "scripts": {
     "dev": "next dev",
