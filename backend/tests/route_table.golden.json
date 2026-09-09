@@ -6,6 +6,12 @@
   ]
  ],
  [
+  "/audio/probe-mic",
+  [
+   "POST"
+  ]
+ ],
+ [
   "/audio/sync-risk",
   [
    "GET"

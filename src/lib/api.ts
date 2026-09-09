@@ -350,6 +350,18 @@ export interface AudioFormat {
   channels: number;
 }
 
+export interface MicProbe {
+  ok: boolean;
+  /** Headline for the readiness card. */
+  message: string;
+  /** Caveat worth surfacing, or null when the open was exactly as asked. */
+  detail: string | null;
+  /** What actually opened — null on failure, since nothing did. */
+  device: number | null;
+  channels: number | null;
+  samplerate: number | null;
+}
+
 export interface AudioSyncRisk {
   // ok=false implies level="warn" and the banner renders.
   ok: boolean;
@@ -1836,6 +1848,13 @@ export const api = {
       "/sessions/archive/sync", { method: "POST" }),
 
   // Audio devices
+  // Open the selected mic, release it, and report. Backs the Record
+  // tab's readiness indicator, which used to go green whenever a device
+  // was merely SELECTED — it had never been opened, so the app asserted
+  // a readiness it had not tested and Start Recording was where anyone
+  // found out (field report 2026-09-09).
+  probeMic: (index: number) =>
+    request<MicProbe>(`/audio/probe-mic?index=${index}`, { method: "POST" }),
   getAudioDevices: () =>
     request<{ input: AudioDevice[]; output: AudioDevice[] }>("/audio/devices"),
 

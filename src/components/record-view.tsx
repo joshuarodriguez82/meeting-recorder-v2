@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, openExternal, openSystemSettings, type AudioDevice, type AudioSyncRisk, type Meeting, type RecordingStatus, type SessionFull, type SessionSummary } from "@/lib/api";
+import { api, openExternal, openSystemSettings, type AudioDevice, type AudioSyncRisk, type Meeting, type MicProbe, type RecordingStatus, type SessionFull, type SessionSummary } from "@/lib/api";
 import {
   refreshRecordingStatus,
   suppressWatchdogForNewRecording,
@@ -735,7 +735,46 @@ export function RecordView({
   // Derived, not fetched — reuses device lists / backend reachability
   // already held in state, plus the one-shot calendar check above. No
   // new polling loops or endpoints.
-  const micReady = micIdx !== null && !!selectedMic;
+  // Result of actually opening the selected mic. null = not checked yet.
+  const [micProbe, setMicProbe] = useState<MicProbe | null>(null);
+  const [micProbing, setMicProbing] = useState(false);
+  useEffect(() => {
+    // Never while recording: the backend refuses anyway (two threads
+    // inside PortAudio is the 2026-08-20 access violation), and during
+    // a recording the answer is already known.
+    if (recording || micIdx === null) {
+      setMicProbe(null);
+      return;
+    }
+    let cancelled = false;
+    setMicProbing(true);
+    setMicProbe(null);
+    api.probeMic(micIdx)
+      .then((r) => { if (!cancelled) setMicProbe(r); })
+      .catch(() => {
+        // A probe that cannot run must not read as a working mic, nor
+        // as a broken one — leave the card in its unverified state.
+        if (!cancelled) setMicProbe(null);
+      })
+      .finally(() => { if (!cancelled) setMicProbing(false); });
+    return () => { cancelled = true; };
+  }, [micIdx, recording]);
+
+  // A device being SELECTED is not the same as it being openable, and
+  // this line used to conflate them: `micIdx !== null && !!selectedMic`
+  // is true the moment a dropdown has a value. It showed a green "Ready
+  // to record" over a microphone whose driver refused every attempt,
+  // and the first anyone learned otherwise was Start Recording failing
+  // (field report 2026-09-09). Same defect as a processing run that
+  // paints itself green: a status derived from what we intended rather
+  // than from what happened.
+  //
+  // micProbe is the answer from actually opening the device. Until it
+  // arrives the card says "checking" rather than guessing in either
+  // direction — a premature green is the bug, and a premature red would
+  // send people chasing drivers that are fine.
+  const micSelected = micIdx !== null && !!selectedMic;
+  const micReady = micSelected && micProbe?.ok !== false;
   // System audio is never a hard requirement — conference room mode is
   // a deliberate, legitimate choice to skip it, and even outside that
   // mode a mic-only recording is allowed (you just lose the far end).
@@ -1665,16 +1704,39 @@ export function RecordView({
               {(!readyToRecord || readinessOpen) && (
               <div className="divide-y divide-border/60">
                 <ReadinessRow
-                  status={micReady ? "pass" : "fail"}
+                  /* "warn" while the probe is in flight: claiming pass
+                     would be the original bug (green before anything
+                     was tested) and claiming fail would send people
+                     after drivers that are fine. */
+                  status={
+                    !micSelected ? "fail"
+                      : micProbing ? "warn"
+                        : micProbe?.ok === false ? "fail"
+                          : "pass"
+                  }
                   title="Microphone"
                   detail={
-                    micReady
-                      ? (selectedMic?.name ?? "Selected")
-                      : micIdx === null
-                        ? "No microphone selected"
-                        : "Selected microphone not found"
+                    !micSelected
+                      ? (micIdx === null
+                          ? "No microphone selected"
+                          : "Selected microphone not found")
+                      : micProbing
+                        ? "Checking that it opens…"
+                        // The probe's own words. It names what the
+                        // driver said, which is the difference between
+                        // "try another mic" and "reinstall Windows".
+                        : micProbe
+                          ? [micProbe.message, micProbe.detail]
+                              .filter(Boolean).join(" ")
+                          : (selectedMic?.name ?? "Selected")
                   }
-                  hint="Choose a microphone below before recording."
+                  hint={
+                    micProbe?.ok === false
+                      ? "This is what the audio driver reported when the app "
+                        + "tried to open the device. Try another microphone, "
+                        + "or close any app that may be holding this one."
+                      : "Choose a microphone below before recording."
+                  }
                 />
                 <ReadinessRow
                   status={conferenceRoomMode ? "pass" : systemAudioReady ? "pass" : "warn"}
