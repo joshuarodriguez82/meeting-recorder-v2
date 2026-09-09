@@ -5205,6 +5205,37 @@ _WORKER_EXPORT_SVC: Optional[ExportService] = None
 _EXPORT_WORKER = ExportWorker(_do_export_session)
 
 
+def _export_after_processing(session_id: str) -> None:
+    """Queue a just-processed session's export. Never raises.
+
+    Loads the saved session so the decision uses what is actually on
+    disk — the caller's in-memory object may predate the final save.
+
+    A session with nothing extractable owes its folder nothing, and
+    queueing it would burn a job AND count as a pending export, which
+    holds the knowledge indexer off (see _auto_index_busy) for no
+    reason.
+
+    Failure here is logged and swallowed: transcription and extraction
+    already succeeded, and a queueing problem must not turn a completed
+    meeting into a failed one. Reconciliation remains the safety net —
+    this is the fast path, not the only path.
+    """
+    try:
+        session = svc.session_svc.load_full(session_id)
+        if session is None:
+            return
+        if not any((session.segments, session.summary, session.action_items,
+                    session.decisions, session.requirements)):
+            return
+        _auto_export_to_client(session, copy_audio=False)
+        logger.info(f"Queued export for {session_id} on processing completion")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"Could not queue the export for {session_id} ({e}); "
+            f"reconciliation will pick it up within a couple of minutes.")
+
+
 def _auto_export_to_client(session: Session, copy_audio: bool = False) -> None:
     """Queue this session's export. Non-blocking, never raises — call
     sites keep the same signature they had when this ran inline."""
@@ -7005,6 +7036,16 @@ async def process_full(session_id: str, req: ProcessFullRequest):
             logger.info(
                 "process_full: %s inputs unchanged — skipped 5 LLM calls",
                 session_id)
+            # Still enqueue. Skipping the LLM calls means the ARTIFACTS
+            # are unchanged, not that they reached the Designated
+            # Folder: an export dropped after its retries, a folder that
+            # was offline, or a client tag added since all leave the
+            # session owing files it already has. Reprocessing is what
+            # someone does when a meeting looks wrong, and this is the
+            # branch that run lands on. The export rewrites the same
+            # handful of small text files and never the audio, so a
+            # redundant enqueue is cheap and idempotent.
+            _export_after_processing(session_id)
             return {"ok": True, "stages": stages, "skipped": True}
 
         # THE FIRST CALL WARMS THE CACHE; THE REST READ IT.
@@ -7170,6 +7211,28 @@ async def process_full(session_id: str, req: ProcessFullRequest):
                 await asyncio.to_thread(svc.session_svc.save, fresh)
         except Exception as e:
             logger.warning(f"could not clear processing_error on {session_id}: {e}")
+
+        # SYNC NOW, not on the next sweep.
+        #
+        # Five places enqueue an export — patch_session, bulk_tag,
+        # process_session, _run_extraction, summarize_session — and this
+        # function was not one of them. It is the one that matters:
+        # auto-process-after-stop calls process_full, so the normal path
+        # (stop a recording, let it process) produced every artifact and
+        # told the export worker nothing. The files then reached the
+        # Designated Folder only when reconciliation next noticed, up to
+        # two minutes later.
+        #
+        # process_full exists because five independent extractions each
+        # doing load → set one field → save clobbered each other. When
+        # they were consolidated into one pass with one save, the
+        # enqueue that lived on each individual endpoint did not come
+        # with them.
+        #
+        # ONE enqueue, AFTER the save: the worker re-loads the session
+        # from disk, so enqueueing earlier would copy the pre-save
+        # contents and look like a partial sync.
+        _export_after_processing(session_id)
 
         return {"ok": True, "stages": stages}
     except Exception as e:
