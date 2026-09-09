@@ -372,7 +372,10 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from config.settings import Settings, USER_DATA_DIR
-from core.audio_capture import list_input_devices, list_output_devices
+from core.model_status import ModelStatus, describe_unavailable, wait_for_models
+from core.audio_capture import (
+    list_input_devices, list_output_devices, probe_mic_device,
+)
 from core._precision import no_invented_precision
 from services.template_service import TemplateService
 from services.copilot_mode_service import CoPilotModeService
@@ -1050,6 +1053,15 @@ class Services:
             # and corrects known mis-hears afterward. Set after construction
             # so the RecordingService signature stays unchanged.
             self.recording_svc.terminology = self.terminology_svc
+            # Lets the recorder say WHY the models are unavailable rather
+            # than asserting the most alarming guess. Set after
+            # construction, like `terminology` above, so the
+            # RecordingService signature stays unchanged.
+            self.recording_svc.model_status_provider = lambda: ModelStatus(
+                loading=self.models_loading,
+                configured=bool(self.settings and self.settings.is_configured),
+                error=self.models_error,
+            )
             # The summarizer is constructed whenever an LLM is configured
             # — either Anthropic (anthropic_api_key) or an OpenAI-compatible
             # endpoint (openai_base_url / openai_api_key, or a local Ollama
@@ -1140,11 +1152,36 @@ class Services:
         during "Loading transcription engine". One loader ever; every
         other caller returns immediately and polls models_ready.
         """
+        i_own_the_load = False
         with self._model_load_lock:
-            if self.models_ready or self.models_loading:
+            if self.models_ready:
                 return
-            self.models_loading = True
-            self.models_error = None
+            if not self.models_loading:
+                self.models_loading = True
+                self.models_error = None
+                i_own_the_load = True
+
+        if not i_own_the_load:
+            # ANOTHER THREAD IS LOADING — WAIT FOR IT.
+            #
+            # This used to return immediately, and the docstring above
+            # said the caller should then poll models_ready. process_full
+            # never polled: it called this, got an instant return while
+            # the load was still running, went straight on to processing
+            # with engines that were still None, and told the user to add
+            # API keys they already had and restart an app that was
+            # seconds from working (field report 2026-09-09).
+            #
+            # The lock is deliberately NOT held across this wait — that
+            # would block the very loader being waited on.
+            if not wait_for_models(
+                    is_ready=lambda: self.models_ready,
+                    is_loading=lambda: self.models_loading):
+                logger.warning(
+                    "Waited for an in-flight model load and it did not "
+                    "become ready; the caller will report why.")
+            return
+
         try:
             s = self.load_settings()
             if not s.is_configured:
@@ -2320,6 +2357,43 @@ async def get_audio_devices():
     def _list_both():
         return {"input": list_input_devices(), "output": list_output_devices()}
     return await asyncio.to_thread(_list_both)
+
+
+@app.post("/audio/probe-mic")
+async def probe_mic(index: int):
+    """Open the selected microphone, release it, and report what happened.
+
+    Backs the Record tab's readiness indicator, which used to be green
+    whenever a device was merely SELECTED — it had never been opened, so
+    the app asserted a readiness it had not tested and the first anyone
+    heard otherwise was Start Recording failing (field report
+    2026-09-09).
+
+    REFUSED WHILE RECORDING. Every PortAudio entry point in this process
+    is serialised because two threads inside the library at once is the
+    2026-08-20 access violation that boot-looped the backend sixteen
+    times. Knowing whether a mic is free is not worth any part of that,
+    and during a recording the answer is already known.
+    """
+    if svc.recording_svc is not None and svc.recording_svc.is_recording():
+        return {
+            "ok": True,
+            "message": "Recording in progress — the microphone is open and "
+                       "working.",
+            "detail": None,
+            "device": None, "channels": None, "samplerate": None,
+        }
+    try:
+        return await asyncio.to_thread(probe_mic_device, index)
+    except Exception as e:  # noqa: BLE001
+        # A probe that itself falls over must not read as a working mic.
+        logger.exception("Mic probe raised")
+        return {
+            "ok": False,
+            "message": "The microphone could not be checked.",
+            "detail": str(e),
+            "device": None, "channels": None, "samplerate": None,
+        }
 
 
 @app.get("/audio/sync-risk")

@@ -444,6 +444,88 @@ def list_output_devices() -> List[dict]:
     return devices
 
 
+def probe_mic_device(mic_idx: int) -> dict:
+    """Open the selected microphone, close it again, and report.
+
+    The only way to know a device opens is to open it. Everything the
+    Record tab called "Ready to record" before this was the fact that a
+    device was SELECTED — see core/mic_probe for the field report where
+    that green light sat over a mic that could not record at all.
+
+    Runs the SAME ladder Start Recording runs (build_mic_open_plan), so
+    what this proves is what recording will actually attempt. A probe
+    with its own ladder would be worse than none: it would be
+    confidently wrong.
+
+    The stream is closed immediately. Callers must guarantee no
+    recording is in progress — every PortAudio entry point in this
+    process is serialised for the 2026-08-20 access-violation, and a
+    probe is not worth any part of that risk.
+    """
+    from core.mic_probe import summarize_probe
+
+    candidates = []
+    for dev_idx in [mic_idx] + _find_device_alternatives(mic_idx):
+        try:
+            candidates.append((dev_idx, sd.query_devices(dev_idx)))
+        except Exception as e:
+            logger.debug(f"probe: cannot query device [{dev_idx}]: {e}")
+
+    plan = build_mic_open_plan(candidates)
+    opened = None
+    last_err = None
+    tried = 0
+
+    with _PORTAUDIO_LOCK:
+        for attempt in plan:
+            tried += 1
+            stream = None
+            try:
+                stream = sd.InputStream(
+                    device=attempt["device"],
+                    channels=attempt["channels"],
+                    samplerate=attempt["samplerate"],
+                    blocksize=attempt["blocksize"],
+                    latency=attempt["latency"],
+                    dtype="float32",
+                )
+                # Opening alone can succeed on a device that fails to
+                # START — the field log shows exactly that distinction
+                # ("Error opening" vs "Error starting"). Probing only
+                # the open would hand back a green light for a device
+                # that still cannot record.
+                stream.start()
+                stream.stop()
+                opened = attempt
+                break
+            except Exception as e:
+                last_err = e
+            finally:
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception as ce:
+                        logger.debug(f"probe: closing candidate: {ce}")
+
+    if opened:
+        logger.info(
+            f"Mic probe OK: device=[{opened['device']}] "
+            f"ch={opened['channels']} sr={opened['samplerate']} "
+            f"after {tried}/{len(plan)} attempt(s)")
+    else:
+        logger.warning(
+            f"Mic probe failed after {tried}/{len(plan)} attempt(s): "
+            f"{last_err}")
+
+    return summarize_probe(
+        opened=opened,
+        attempts_tried=tried,
+        total_attempts=len(plan),
+        selected_device=mic_idx,
+        error=str(last_err) if last_err is not None else None,
+    ).as_dict()
+
+
 class AudioCapture:
 
     def __init__(
