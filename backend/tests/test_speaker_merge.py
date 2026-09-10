@@ -423,3 +423,109 @@ def test_merge_group_serializes_for_the_ui():
         "into": "SPEAKER_01", "absorb": ["SPEAKER_03"],
         "reason": "similar voice", "similarity": 0.91,
     }
+
+
+# ── The owner's own voice, split (field report 2026-09-10) ──────────
+#
+# The single most common split: the user's voice arrives twice, once
+# down the microphone and once echoed back through the meeting audio.
+# Both halves end up named "You". plan_certain_merges steps over it by
+# design — the microphone is stronger evidence than a name — so the
+# suggestion list is the only thing that can offer the fix, and it has
+# to do so WITHOUT an embedding, because the owner routinely has none.
+
+def test_the_owner_sharing_a_name_is_suggested():
+    """422 segments labelled "You" beside 212 more labelled "You", and
+    nothing offered to fix it. Refusing to ACT on a name collision with
+    the owner is right; refusing to MENTION it is not."""
+    suggestions = suggest_merges([
+        _facts(OWNER, "You", embedding=(), seconds=1800.0, segments=422),
+        _facts("SPEAKER_01", "You", embedding=(), seconds=900.0, segments=212),
+    ], owner_label=OWNER)
+    assert len(suggestions) == 1
+    assert set([suggestions[0].into, *suggestions[0].absorb]) == {
+        OWNER, "SPEAKER_01"}
+    assert suggestions[0].reason == "same name"
+
+
+def test_the_owner_sharing_a_profile_is_suggested():
+    suggestions = suggest_merges([
+        _facts(OWNER, "You", profile="p-me", embedding=()),
+        _facts("SPEAKER_01", "Jane Doe", profile="p-me", embedding=()),
+    ], owner_label=OWNER)
+    assert [g.reason for g in suggestions] == ["same known-speaker profile"]
+
+
+def test_the_owner_suggestion_does_not_need_a_fingerprint():
+    """The owner frequently has no centroid at all, so a suggestion list
+    built only from voice similarity is empty in precisely the case the
+    user is staring at."""
+    suggestions = suggest_merges([
+        _facts(OWNER, "You", embedding=()),
+        _facts("SPEAKER_01", "You", embedding=()),
+    ], owner_label=OWNER)
+    assert suggestions and suggestions[0].similarity is None
+
+
+def test_a_different_name_beside_the_owner_is_not_suggested():
+    """Everyone else in the meeting is not the user. A suggestion per
+    participant would train people to dismiss the panel."""
+    assert suggest_merges([
+        _facts(OWNER, "You", embedding=()),
+        _facts("SPEAKER_01", "Jane Doe", embedding=()),
+    ], owner_label=OWNER) == []
+
+
+def test_two_unnamed_speakers_beside_the_owner_are_not_suggested():
+    """Sharing "no name" with the owner is not evidence."""
+    assert suggest_merges([
+        _facts(OWNER, OWNER, embedding=()),
+        _facts("SPEAKER_01", embedding=()),
+    ], owner_label=OWNER) == []
+
+
+def test_the_owner_still_never_merges_automatically():
+    """The suggestion exists so the USER can decide. The automatic pass
+    must stay out of it — channel attribution's invariant is that
+    far-end words are never handed to the user on a guess."""
+    assert plan_certain_merges([
+        _facts(OWNER, "You", seconds=1800.0),
+        _facts("SPEAKER_01", "You", seconds=900.0),
+    ], owner_label=OWNER) == []
+
+
+def test_a_pair_is_offered_once_even_when_two_kinds_of_evidence_agree():
+    """A same-name owner pair whose voices also match must not appear
+    twice — the user would merge one and be left staring at a duplicate
+    pointing at a label that no longer exists."""
+    v = [1.0, 0.0]
+    suggestions = suggest_merges([
+        _facts(OWNER, "You", embedding=v),
+        _facts("SPEAKER_01", "You", embedding=v),
+    ], owner_label=OWNER)
+    assert len(suggestions) == 1
+
+
+def test_name_evidence_is_offered_before_a_voice_score():
+    """A shared name is a decision the app already made; a similarity is
+    a measurement it took. Lead with the former."""
+    v = [1.0, 0.0]
+    suggestions = suggest_merges([
+        _facts(OWNER, "You", embedding=()),
+        _facts("SPEAKER_01", "You", embedding=()),
+        _facts("SPEAKER_02", "Poe", embedding=v),
+        _facts("SPEAKER_03", embedding=[0.99, 0.14]),
+    ], owner_label=OWNER)
+    assert suggestions[0].reason == "same name"
+    assert "similar voice" in [g.reason for g in suggestions]
+
+
+def test_without_an_owner_label_nothing_changes():
+    """Every caller that predates the owner parameter keeps the
+    behaviour it had: similarity only."""
+    v = [1.0, 0.0]
+    suggestions = suggest_merges([
+        _facts("SPEAKER_01", "You", embedding=v),
+        _facts("SPEAKER_02", "You", embedding=v),
+    ])
+    assert [g.reason for g in suggestions] == ["similar voice"]

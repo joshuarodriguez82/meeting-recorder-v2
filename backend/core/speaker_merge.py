@@ -304,35 +304,79 @@ def suggest_merges(
     speakers: Sequence[SpeakerFacts],
     threshold: float = SUGGEST_THRESHOLD,
     already_merged: Iterable[str] = (),
+    owner_label: str = "",
 ) -> List[MergeGroup]:
-    """Pairs that SOUND like one person, for the user to decide on.
+    """Splits the user should decide on, strongest evidence first.
 
-    Every pair scoring at or above ``threshold`` is returned, most
-    similar first, as a two-speaker group. Deliberately pairwise rather
+    Two kinds, and the first exists because of a gap the second could
+    not close.
+
+    **A name or a profile shared with the OWNER.** The owner speaker is
+    excluded from ``plan_certain_merges`` on purpose — their spans come
+    from the capture device, and channel attribution's invariant is that
+    far-end words are never handed to the user on the strength of a
+    voice guess. But the single most common split in the field is the
+    user's own voice arriving twice: once down the microphone and once
+    echoed back through the meeting audio. Both halves then carry the
+    same name, the automatic pass steps over it by design, and nothing
+    else offered a fix (field report 2026-09-10: 422 segments labelled
+    "You" beside 212 more also labelled "You"). Refusing to ACT on that
+    evidence is right; refusing to MENTION it is not. Asking is exactly
+    the decision the microphone does not get to make alone.
+
+    **A voice that scores at or above ``threshold``.** Every such pair
+    is returned, most similar first.
+
+    Both are emitted as two-speaker groups. Deliberately pairwise rather
     than transitively clustered: A-B and B-C both scoring 0.76 does not
     make A and C the same person, and chaining them is how a
     three-person conversation collapses into one.
 
-    The owner speaker IS included here. Their own voice bleeding into a
-    second cluster is a real and common split, and a suggestion the
-    user accepts is a decision the microphone did not get to make
-    alone.
+    Name and profile evidence needs no embedding, which matters: the
+    owner frequently has none (see core/fingerprint_status.py), so a
+    suggestion list built only from similarity is empty in precisely the
+    case the user is looking at.
     """
     skip = set(already_merged)
-    pool = [s for s in speakers
-            if s.speaker_id not in skip and len(s.embedding) > 0]
+    pool = [s for s in speakers if s.speaker_id not in skip]
 
-    scored: List[Tuple[float, MergeGroup]] = []
-    for i, left in enumerate(pool):
-        for right in pool[i + 1:]:
+    groups: List[MergeGroup] = []
+    seen: set = set()
+
+    def _add(members: Sequence[SpeakerFacts], reason: str,
+             similarity: Optional[float] = None) -> None:
+        key = frozenset(s.speaker_id for s in members)
+        if key in seen:
+            return
+        seen.add(key)
+        groups.append(_group(members, reason, similarity=similarity))
+
+    owner = next((s for s in pool if owner_label
+                  and s.speaker_id == owner_label), None)
+    if owner is not None:
+        for other in pool:
+            if other.speaker_id == owner.speaker_id:
+                continue
+            if owner.profile_id and other.profile_id == owner.profile_id:
+                _add([owner, other], "same known-speaker profile")
+            elif (owner.is_named and other.is_named
+                    and normalize_name(owner.display_name)
+                    == normalize_name(other.display_name)):
+                _add([owner, other], "same name")
+
+    scored: List[Tuple[float, SpeakerFacts, SpeakerFacts]] = []
+    with_voice = [s for s in pool if len(s.embedding) > 0]
+    for i, left in enumerate(with_voice):
+        for right in with_voice[i + 1:]:
             similarity = cosine_similarity(left.embedding, right.embedding)
             if similarity is None or similarity < threshold:
                 continue
-            scored.append(
-                (similarity, _group([left, right], "similar voice",
-                                    similarity=round(similarity, 4))))
-    scored.sort(key=lambda pair: (-pair[0], pair[1].into))
-    return [group for _, group in scored]
+            scored.append((similarity, left, right))
+    scored.sort(key=lambda t: (-t[0], t[1].speaker_id, t[2].speaker_id))
+    for similarity, left, right in scored:
+        _add([left, right], "similar voice", round(similarity, 4))
+
+    return groups
 
 
 @dataclass

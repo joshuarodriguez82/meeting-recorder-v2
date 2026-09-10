@@ -78,6 +78,22 @@ asking:
 In both, the app had already decided they were one person and then
 rendered them as two.
 
+### Your own voice, split in two
+
+The most common version of this split is your own voice arriving twice
+— once down the microphone and once echoed back through the meeting
+audio. Both halves end up named **You**.
+
+The automatic pass deliberately leaves you alone: your segments are
+identified by which device captured them, and a name is weaker evidence
+than the microphone. But the app should still *mention* it, and it did
+not — so this split now appears as a suggestion you can accept, exactly
+like the others.
+
+It shows up **without needing a voice fingerprint**, which matters,
+because the owner speaker frequently has none — which is the other half
+of this release.
+
 ### It asks about the rest
 
 Two labels that merely *sound* alike get a suggestion at the top of the
@@ -100,6 +116,38 @@ match.
 A speaker who spoke for under 1.5 seconds never gets a voice
 fingerprint, so no suggestion can be made about them. The panel says so
 rather than leaving an empty list to read as "checked, all fine".
+
+## "No voice profile saved" now says why
+
+Renaming a speaker who had done most of the talking in a 93-minute
+meeting — **422 transcript segments** — produced:
+
+> Renamed to "You", but no voice profile saved.
+> no voice fingerprint available for this speaker — they may have
+> spoken too briefly (<1.5s), or the session audio may be missing from
+> disk
+
+Neither half of that had been checked. It was a fixed string, shown
+whenever a voice fingerprint was missing, offering two guesses: one
+that is plainly false for a speaker with 422 segments, and one that was
+a single file check away from being an answer.
+
+It now names the reason that actually applies:
+
+- **voice fingerprinting is not available in this install** — nothing
+  on any session can be saved to the known-speakers list, and no amount
+  of re-recording changes that
+- **this session has no audio file recorded**
+- **the session audio is no longer on disk** — and it tells you the
+  path, so you can go and look
+- **this speaker has only 0.4s of usable speech** — with the actual
+  measurement, so someone who really did just say "mm-hmm" reads as
+  explained rather than accused
+- **the reason was not recorded** — everything checkable passed, so it
+  says so, and gives you the numbers that make it worth reporting
+
+That last one is the point. An unknown cause dressed up as a known one
+is how someone ends up hunting for a recording that was never missing.
 
 ## Processing a meeting now queues its export
 

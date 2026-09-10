@@ -4505,6 +4505,45 @@ def _serialize_speaker(sp) -> dict:
     return d
 
 
+def _missing_fingerprint_reason(session: Session, speaker) -> str:
+    """Say which checkable condition actually stopped the fingerprint.
+
+    Every input is read here and the wording is decided in
+    core/fingerprint_status.py, so the sentence is testable without
+    speechbrain or a WAV on disk — which is exactly why the fixed string
+    this replaces never had a test.
+    """
+    from core.fingerprint_status import (
+        FingerprintInputs, describe_missing_fingerprint,
+        usable_speech_seconds,
+    )
+
+    spans = [(seg.start, seg.end) for seg in (session.segments or [])
+             if seg.speaker_id == speaker.speaker_id]
+
+    try:
+        from core.speaker_embeddings import is_available
+        encoder_available = is_available()
+    except Exception:  # noqa: BLE001
+        encoder_available = False
+
+    audio_path = session.audio_path or ""
+    audio_exists = False
+    if audio_path:
+        try:
+            audio_exists = Path(audio_path).exists()
+        except OSError:
+            audio_exists = False
+
+    return describe_missing_fingerprint(FingerprintInputs(
+        usable_seconds=usable_speech_seconds(spans),
+        segment_count=len(spans),
+        encoder_available=encoder_available,
+        audio_path=audio_path,
+        audio_exists=audio_exists,
+    ))
+
+
 def _ensure_session_embeddings(session: Session) -> bool:
     """Lazily compute speaker embeddings for an already-processed session
     that doesn't have them yet.
@@ -4636,11 +4675,14 @@ async def rename_speaker(session_id: str, speaker_id: str, req: SpeakerRenameReq
                 logger.exception(f"Embedding backfill failed: {e}")
 
         if not speaker.embedding:
-            skip_reason = (
-                "no voice fingerprint available for this speaker — they "
-                "may have spoken too briefly (<1.5s), or the session "
-                "audio may be missing from disk"
-            )
+            # WHY, not two guesses. This used to emit a fixed string
+            # naming both "spoke for under 1.5s" and "audio missing
+            # from disk" without testing either, so a speaker with 422
+            # segments was told they may have spoken too briefly
+            # (field report 2026-09-10). Same defect as the "Add API
+            # keys" message core/model_status.py exists for: a state
+            # the code could not see, asserted as a diagnosis.
+            skip_reason = _missing_fingerprint_reason(session, speaker)
         else:
             import numpy as np
             emb = np.asarray(speaker.embedding, dtype=np.float32)
@@ -4940,7 +4982,7 @@ async def suggest_speaker_merges(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
     from core.speaker_merge import suggest_merges
     facts = _speaker_facts(session)
-    groups = suggest_merges(facts)
+    groups = suggest_merges(facts, owner_label=_owner_label())
     by_id = {f.speaker_id: f for f in facts}
     return {
         "suggestions": [

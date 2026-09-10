@@ -1285,7 +1285,7 @@ function SpeakersView({
   const [selected, setSelected] = useState<string[]>([]);
   const [merging, setMerging] = useState(false);
   const [suggestions, setSuggestions] = useState<
-    { into: string; absorb: string[]; similarity: number | null; names: string[] }[]
+    { into: string; absorb: string[]; reason: string; similarity: number | null; names: string[] }[]
   >([]);
   const [dismissed, setDismissed] = useState<string[]>([]);
 
@@ -1365,7 +1365,15 @@ function SpeakersView({
           >
             <div className="text-sm">
               <span className="font-medium">{sug.names.join(" and ")}</span>{" "}
-              sound like the same person
+              {/* The wording has to match the evidence. "Sound like the
+                  same person" over a NAME match is wrong twice: it is
+                  not what was measured, and it invites the user to
+                  second-guess a decision the app already made. */}
+              {sug.reason === "same name"
+                ? "are both named that — the diarizer split one person in two"
+                : sug.reason === "same known-speaker profile"
+                ? "are both linked to the same known speaker"
+                : "sound like the same person"}
               {pct != null && (
                 <span className="text-muted-foreground"> · {pct}% voice match</span>
               )}

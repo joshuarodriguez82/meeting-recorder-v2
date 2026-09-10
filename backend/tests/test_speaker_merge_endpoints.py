@@ -315,3 +315,118 @@ def test_the_automatic_pass_never_fails_processing(wired, monkeypatch):
 
     assert server.auto_merge_split_speakers(session) == []
     assert set(session.speakers) == {"SPEAKER_01", "SPEAKER_02", "SPEAKER_03"}
+
+
+# ── The owner's own voice, split (field report 2026-09-10) ──────────
+
+def _owner_split_session():
+    """The reported shape: the user's voice arrives twice — once down
+    the microphone (the channel-attributed owner) and once echoed back
+    through the meeting audio — and both halves end up named "You".
+
+    Neither has a voice fingerprint, which is the second half of the
+    report and the reason a similarity-only suggestion list was empty
+    here.
+    """
+    from core.channel_attribution import OWNER_SPEAKER_LABEL
+
+    s = Session("S9")
+    s.audio_path = "(no such recording)"
+    for label, start, end in [
+        (OWNER_SPEAKER_LABEL, 0.0, 600.0),
+        ("SPEAKER_01", 600.0, 900.0),
+        ("SPEAKER_05", 900.0, 960.0),
+    ]:
+        s.get_or_create_speaker(label)
+        s.segments.append(Segment(speaker_id=label, start=start, end=end,
+                                  text="..."))
+    s.speakers[OWNER_SPEAKER_LABEL].display_name = "You"
+    s.speakers["SPEAKER_01"].display_name = "You"
+    s.speakers["SPEAKER_05"].display_name = "Jennifer Roe"
+    return s, OWNER_SPEAKER_LABEL
+
+
+def test_the_users_own_split_voice_is_offered(monkeypatch):
+    """422 segments labelled "You" beside 212 more labelled "You", with
+    no fingerprint on either and nothing in the app that could fix it.
+    A suggestion list built only from voice similarity is empty in
+    exactly this case."""
+    session, owner = _owner_split_session()
+    monkeypatch.setattr(server.svc, "load_settings", lambda: None,
+                        raising=False)
+    monkeypatch.setattr(server.svc, "session_svc", _Sessions(session),
+                        raising=False)
+
+    out = asyncio.run(server.suggest_speaker_merges("S9"))
+
+    pairs = {frozenset([s["into"], *s["absorb"]]) for s in out["suggestions"]}
+    assert frozenset({owner, "SPEAKER_01"}) in pairs
+    assert frozenset({owner, "SPEAKER_05"}) not in pairs
+
+
+def test_the_user_can_merge_their_own_split_voice(monkeypatch):
+    """The automatic pass will not do this — the microphone outranks a
+    name — but the user asking is the decision it does not get to make
+    alone."""
+    session, owner = _owner_split_session()
+    worker = _Worker()
+    monkeypatch.setattr(server.svc, "load_settings", lambda: None,
+                        raising=False)
+    monkeypatch.setattr(server.svc, "session_svc", _Sessions(session),
+                        raising=False)
+    monkeypatch.setattr(server.svc, "speaker_profile_svc", _Profiles(),
+                        raising=False)
+    monkeypatch.setattr(server, "_EXPORT_WORKER", worker, raising=False)
+
+    asyncio.run(server.merge_session_speakers("S9", server.SpeakerMergeRequest(
+        speaker_ids=[owner, "SPEAKER_01"], into=owner)))
+
+    assert "SPEAKER_01" not in session.speakers
+    assert [seg.speaker_id for seg in session.segments] == [
+        owner, owner, "SPEAKER_05"]
+
+
+def test_the_automatic_pass_still_leaves_the_owner_alone(monkeypatch):
+    session, owner = _owner_split_session()
+    assert server.auto_merge_split_speakers(session) == []
+    assert "SPEAKER_01" in session.speakers
+
+
+# ── Why a fingerprint is missing ────────────────────────────────────
+
+def test_a_speaker_with_hundreds_of_segments_is_not_told_they_spoke_too_briefly(
+        monkeypatch):
+    """The reported message. It named two causes without testing either,
+    and for this speaker one of them is provably false."""
+    session, owner = _owner_split_session()
+    # With the encoder genuinely absent that outranks everything (see
+    # the next test); pin it present so this exercises the branch the
+    # field report was actually in.
+    import core.speaker_embeddings as se
+    monkeypatch.setattr(se, "is_available", lambda: True, raising=False)
+
+    reason = server._missing_fingerprint_reason(
+        session, session.speakers[owner])
+
+    assert "too briefly" not in reason
+    # This fixture's audio genuinely is not on disk, so that IS the
+    # answer — and naming it is the point. The old string offered it as
+    # one of two guesses next to one that was false.
+    assert "no longer on disk" in reason
+    assert reason.strip(), "a missing reason must never render as silence"
+
+
+def test_a_build_without_the_encoder_says_so_rather_than_blaming_the_audio(
+        monkeypatch):
+    """No speaker on any session can be fingerprinted in that build.
+    Talking about this speaker's audio would send the user to look for a
+    file that is not the problem."""
+    session, owner = _owner_split_session()
+    import core.speaker_embeddings as se
+    monkeypatch.setattr(se, "is_available", lambda: False, raising=False)
+
+    reason = server._missing_fingerprint_reason(
+        session, session.speakers[owner])
+
+    assert "not available in this install" in reason
+    assert "disk" not in reason
