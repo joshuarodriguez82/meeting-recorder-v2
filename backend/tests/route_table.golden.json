@@ -760,6 +760,18 @@
   ]
  ],
  [
+  "/sessions/{session_id}/speakers/merge",
+  [
+   "POST"
+  ]
+ ],
+ [
+  "/sessions/{session_id}/speakers/merge-suggestions",
+  [
+   "GET"
+  ]
+ ],
+ [
   "/sessions/{session_id}/speakers/{speaker_id}",
   [
    "PATCH"

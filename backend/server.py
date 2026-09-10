@@ -4505,6 +4505,45 @@ def _serialize_speaker(sp) -> dict:
     return d
 
 
+def _missing_fingerprint_reason(session: Session, speaker) -> str:
+    """Say which checkable condition actually stopped the fingerprint.
+
+    Every input is read here and the wording is decided in
+    core/fingerprint_status.py, so the sentence is testable without
+    speechbrain or a WAV on disk — which is exactly why the fixed string
+    this replaces never had a test.
+    """
+    from core.fingerprint_status import (
+        FingerprintInputs, describe_missing_fingerprint,
+        usable_speech_seconds,
+    )
+
+    spans = [(seg.start, seg.end) for seg in (session.segments or [])
+             if seg.speaker_id == speaker.speaker_id]
+
+    try:
+        from core.speaker_embeddings import is_available
+        encoder_available = is_available()
+    except Exception:  # noqa: BLE001
+        encoder_available = False
+
+    audio_path = session.audio_path or ""
+    audio_exists = False
+    if audio_path:
+        try:
+            audio_exists = Path(audio_path).exists()
+        except OSError:
+            audio_exists = False
+
+    return describe_missing_fingerprint(FingerprintInputs(
+        usable_seconds=usable_speech_seconds(spans),
+        segment_count=len(spans),
+        encoder_available=encoder_available,
+        audio_path=audio_path,
+        audio_exists=audio_exists,
+    ))
+
+
 def _ensure_session_embeddings(session: Session) -> bool:
     """Lazily compute speaker embeddings for an already-processed session
     that doesn't have them yet.
@@ -4636,11 +4675,14 @@ async def rename_speaker(session_id: str, speaker_id: str, req: SpeakerRenameReq
                 logger.exception(f"Embedding backfill failed: {e}")
 
         if not speaker.embedding:
-            skip_reason = (
-                "no voice fingerprint available for this speaker — they "
-                "may have spoken too briefly (<1.5s), or the session "
-                "audio may be missing from disk"
-            )
+            # WHY, not two guesses. This used to emit a fixed string
+            # naming both "spoke for under 1.5s" and "audio missing
+            # from disk" without testing either, so a speaker with 422
+            # segments was told they may have spoken too briefly
+            # (field report 2026-09-10). Same defect as the "Add API
+            # keys" message core/model_status.py exists for: a state
+            # the code could not see, asserted as a diagnosis.
+            skip_reason = _missing_fingerprint_reason(session, speaker)
         else:
             import numpy as np
             emb = np.asarray(speaker.embedding, dtype=np.float32)
@@ -4750,6 +4792,299 @@ async def reject_speaker_match(session_id: str, speaker_id: str):
     speaker.display_name = speaker.speaker_id  # back to "SPEAKER_XX"
     svc.session_svc.save(session)
     return {"ok": True, "speaker": _serialize_speaker(speaker)}
+
+
+# ── Merging one person the diarizer split in two ───────────────────
+#
+# pyannote hands out a second label for the same participant partway
+# through a meeting — an echo, a headset swap, someone unmuting into a
+# different audio path — and because naming is per-label, the half that
+# matched a saved profile gets the name while the half that did not
+# stays SPEAKER_03. The transcript then reads as a named person talking
+# to a stranger who is the same person, and it feeds the summary, the
+# action items and the commitments in that state.
+#
+# /speaker-profiles/merge below merges entries in the GLOBAL roster and
+# never touches a session's segments, so it could not fix this. These
+# endpoints do, on the session.
+#
+# The decisions (which speaker survives, what the merged name is, how
+# the centroids blend, what is certain enough to do without asking)
+# live in core/speaker_merge.py, away from the speechbrain import that
+# makes the rest of the speaker stack untestable.
+
+
+def _speaker_facts(session) -> "list":
+    """Describe a session's speakers for core/speaker_merge.
+
+    Speech seconds and segment counts come from the SEGMENTS rather
+    than the diarization turns, because the segments are what a merge
+    rewrites and what the reader sees.
+    """
+    from core.speaker_merge import SpeakerFacts
+
+    seconds: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for seg in (session.segments or []):
+        seconds[seg.speaker_id] = seconds.get(seg.speaker_id, 0.0) + max(
+            0.0, float(seg.end) - float(seg.start))
+        counts[seg.speaker_id] = counts.get(seg.speaker_id, 0) + 1
+    return [
+        SpeakerFacts(
+            speaker_id=sp.speaker_id,
+            display_name=sp.display_name or "",
+            profile_id=sp.profile_id,
+            match_confirmed=bool(sp.match_confirmed),
+            embedding=tuple(sp.embedding or ()),
+            seconds=seconds.get(sp.speaker_id, 0.0),
+            segment_count=counts.get(sp.speaker_id, 0),
+        )
+        for sp in session.speakers.values()
+    ]
+
+
+def _owner_label() -> str:
+    """The capture-device-derived speaker label, or "" if unavailable.
+
+    Imported lazily and defensively: core/channel_attribution pulls in
+    numpy and scipy, and a failure to name the owner must degrade to
+    "there is no owner" rather than taking the merge endpoints down.
+    """
+    try:
+        from core.channel_attribution import OWNER_SPEAKER_LABEL
+        return OWNER_SPEAKER_LABEL
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _apply_speaker_merge(session, into: str, absorb: list,
+                         display_name: Optional[str] = None) -> dict:
+    """Rewrite `session` so `absorb` become `into`. Mutates in place.
+
+    Raises ValueError when the request does not describe a merge — see
+    core/speaker_merge.plan_merge. Does NOT save; the caller decides
+    when, so a merge and a re-export are one write.
+    """
+    from core.speaker_merge import plan_merge
+
+    plan = plan_merge(_speaker_facts(session), into, absorb, display_name)
+
+    absorbed = set(plan.absorbed)
+    moved = 0
+    for seg in (session.segments or []):
+        if seg.speaker_id in absorbed:
+            seg.speaker_id = plan.into
+            moved += 1
+
+    survivor = session.speakers[plan.into]
+    survivor.display_name = plan.display_name
+    if plan.embedding:
+        survivor.embedding = list(plan.embedding)
+    # A profile the merged-away half was linked to is the right answer
+    # when the survivor had none — that link is how the name got there.
+    if not survivor.profile_id:
+        for label in plan.absorbed:
+            donor = session.speakers.get(label)
+            if donor is not None and donor.profile_id:
+                survivor.profile_id = donor.profile_id
+                survivor.match_confidence = donor.match_confidence
+                survivor.match_confirmed = bool(donor.match_confirmed)
+                break
+
+    for label in plan.absorbed:
+        session.speakers.pop(label, None)
+
+    result = plan.as_dict()
+    # plan.segments_moved is what the plan EXPECTED to move; this is
+    # what actually moved. They differ only if the segments and the
+    # speakers map disagree, which is worth seeing in a log rather than
+    # papering over.
+    result["segments_moved"] = moved
+    return result
+
+
+def _refine_profile_after_merge(session, speaker) -> None:
+    """Push the blended centroid back into the known-speakers roster.
+
+    The whole point of merging is that the profile was learning half a
+    voice. Best-effort: a roster that cannot be updated must not fail a
+    merge the transcript already reflects.
+    """
+    if not svc.speaker_profile_svc or not speaker.profile_id:
+        return
+    if not speaker.embedding:
+        return
+    try:
+        import numpy as np
+        svc.speaker_profile_svc.confirm_match(
+            speaker.profile_id,
+            np.asarray(speaker.embedding, dtype=np.float32),
+            session.session_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"Merged {speaker.speaker_id} on {session.session_id} but could "
+            f"not refine profile {speaker.profile_id}: {e}")
+
+
+def auto_merge_split_speakers(session) -> list:
+    """Collapse the splits that are certain, before anyone reads them.
+
+    Runs after speaker identification, so it sees both the profile
+    auto-matches and the LLM's names. Only acts on evidence the app has
+    already committed to elsewhere — two labels on one roster profile,
+    or two labels carrying one name. Voice similarity is offered to the
+    user instead (see the suggestions endpoint); a number this app
+    invented is not permission to rewrite a transcript.
+
+    Never raises: a merge that cannot be worked out leaves the session
+    exactly as diarization produced it, which is the behaviour every
+    session had before this existed.
+    """
+    try:
+        from core.speaker_merge import plan_certain_merges
+        groups = plan_certain_merges(_speaker_facts(session), _owner_label())
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not plan speaker merges for "
+                       f"{session.session_id}: {e}")
+        return []
+
+    applied = []
+    for group in groups:
+        try:
+            result = _apply_speaker_merge(
+                session, group.into, list(group.absorb))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"Skipped merging {', '.join(group.absorb)} into "
+                f"{group.into} on {session.session_id}: {e}")
+            continue
+        result["reason"] = group.reason
+        applied.append(result)
+        logger.info(
+            "Merged %s into %s on %s (%s): %d segments now read as %r",
+            ", ".join(group.absorb), group.into, session.session_id,
+            group.reason, result["segments_moved"], result["display_name"])
+        _refine_profile_after_merge(session, session.speakers[group.into])
+    return applied
+
+
+@app.get("/sessions/{session_id}/speakers/merge-suggestions")
+async def suggest_speaker_merges(session_id: str):
+    """Pairs of speakers on this session that sound like one person.
+
+    A suggestion, never an action. ECAPA scores the same person 0.7-0.95
+    and different people 0.3-0.5, which is a good enough separation to
+    ask about and nowhere near good enough to rewrite a transcript on.
+    """
+    svc.load_settings()
+    session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    from core.speaker_merge import suggest_merges
+    facts = _speaker_facts(session)
+    groups = suggest_merges(facts, owner_label=_owner_label())
+    by_id = {f.speaker_id: f for f in facts}
+    return {
+        "suggestions": [
+            {
+                **group.as_dict(),
+                "names": [
+                    (by_id[sid].display_name or sid)
+                    for sid in (group.into, *group.absorb)
+                    if sid in by_id
+                ],
+            }
+            for group in groups
+        ],
+        # Speakers with under 1.5s of speech never get a centroid
+        # (core/speaker_embeddings.MIN_TOTAL_SECONDS), so the absence of
+        # a suggestion for them is a missing measurement, not a verdict.
+        # Say so rather than let an empty list read as "checked, fine".
+        "unfingerprinted": sorted(
+            f.speaker_id for f in facts if not f.embedding),
+    }
+
+
+class SpeakerMergeRequest(BaseModel):
+    #: Labels to absorb. They stop existing; their segments become
+    #: `into`.
+    speaker_ids: list[str]
+    #: Surviving label. Optional — omitted, core/speaker_merge picks the
+    #: one a reader would want kept (a confirmed name, then any name,
+    #: then a linked profile, then the most speech).
+    into: Optional[str] = None
+    #: Name for the merged speaker. Omitted, whichever half had a real
+    #: name keeps it.
+    display_name: Optional[str] = None
+
+
+@app.post("/sessions/{session_id}/speakers/merge")
+async def merge_session_speakers(session_id: str, req: SpeakerMergeRequest):
+    """Merge two or more speakers on one session into a single person.
+
+    The transcript is rewritten and saved, and the export is re-queued
+    so the Designated Folder copy stops disagreeing with the app.
+
+    The summary, action items and decisions are NOT regenerated here —
+    they are LLM output, they cost money, and a merge is often one of
+    several corrections someone makes in a sitting. Reprocess when the
+    names are right.
+    """
+    svc.load_settings()
+    session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    from core.speaker_merge import choose_target
+
+    requested = [s for s in dict.fromkeys(req.speaker_ids) if s]
+    if len(requested) < 2 and not (req.into and requested):
+        raise HTTPException(
+            status_code=400,
+            detail="Merging needs at least two speakers.")
+
+    unknown = [s for s in requested + ([req.into] if req.into else [])
+               if s not in session.speakers]
+    if unknown:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Not on this session: {', '.join(sorted(set(unknown)))}")
+
+    if req.into:
+        into = req.into
+        absorb = [s for s in requested if s != into]
+    else:
+        facts = {f.speaker_id: f for f in _speaker_facts(session)}
+        into = choose_target([facts[s] for s in requested])
+        absorb = [s for s in requested if s != into]
+    if not absorb:
+        raise HTTPException(
+            status_code=400,
+            detail="Merging needs at least two different speakers.")
+
+    try:
+        result = await asyncio.to_thread(
+            _apply_speaker_merge, session, into, absorb, req.display_name)
+    except ValueError as e:
+        # The caller's idea of the session and the session on disk have
+        # diverged — a stale dialog, or a concurrent reprocess.
+        raise HTTPException(status_code=409, detail=str(e))
+
+    survivor = session.speakers[into]
+    await asyncio.to_thread(_refine_profile_after_merge, session, survivor)
+    await asyncio.to_thread(svc.session_svc.save, session)
+    _auto_export_to_client(session, copy_audio=False)
+    logger.info(
+        "Merged %s into %s on %s by request: %d segments now read as %r",
+        ", ".join(result["absorbed"]), into, session_id,
+        result["segments_moved"], result["display_name"])
+    return {
+        "ok": True,
+        "merge": result,
+        "speaker": _serialize_speaker(survivor),
+        "speakers": {sid: _serialize_speaker(sp)
+                     for sid, sp in session.speakers.items()},
+    }
 
 
 # ── Speaker Profiles (cross-session voice fingerprints) ────────────
@@ -5203,6 +5538,37 @@ _WORKER_EXPORT_SVC: Optional[ExportService] = None
 # cloud mount can no longer freeze the backend, trip the Tauri
 # watchdog, and kill an in-flight recording.
 _EXPORT_WORKER = ExportWorker(_do_export_session)
+
+
+def _export_after_processing(session_id: str) -> None:
+    """Queue a just-processed session's export. Never raises.
+
+    Loads the saved session so the decision uses what is actually on
+    disk — the caller's in-memory object may predate the final save.
+
+    A session with nothing extractable owes its folder nothing, and
+    queueing it would burn a job AND count as a pending export, which
+    holds the knowledge indexer off (see _auto_index_busy) for no
+    reason.
+
+    Failure here is logged and swallowed: transcription and extraction
+    already succeeded, and a queueing problem must not turn a completed
+    meeting into a failed one. Reconciliation remains the safety net —
+    this is the fast path, not the only path.
+    """
+    try:
+        session = svc.session_svc.load_full(session_id)
+        if session is None:
+            return
+        if not any((session.segments, session.summary, session.action_items,
+                    session.decisions, session.requirements)):
+            return
+        _auto_export_to_client(session, copy_audio=False)
+        logger.info(f"Queued export for {session_id} on processing completion")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"Could not queue the export for {session_id} ({e}); "
+            f"reconciliation will pick it up within a couple of minutes.")
 
 
 def _auto_export_to_client(session: Session, copy_audio: bool = False) -> None:
@@ -6347,6 +6713,12 @@ async def process_session(session_id: str):
                 await _auto_identify_and_save_speakers(result)
             except Exception as e:
                 logger.warning(f"auto speaker identification skipped: {e}")
+            # Collapse a participant the diarizer split in two, now that
+            # both the profile matches and the LLM's names are in. Runs
+            # here rather than at diarization time because "same name"
+            # and "same profile" are the only evidence certain enough to
+            # act on, and neither exists until identification has run.
+            auto_merge_split_speakers(result)
             await asyncio.to_thread(svc.session_svc.save, result)
             _auto_export_to_client(result, copy_audio=False)
             # Build the semantic-search index entry for this session in the
@@ -6913,6 +7285,10 @@ async def process_full(session_id: str, req: ProcessFullRequest):
                             await _auto_identify_and_save_speakers(session)
                         except Exception as e:
                             logger.warning(f"auto speaker identification skipped: {e}")
+                        # See the same call in process_session: one
+                        # person diarized as two labels, collapsed once
+                        # identification has supplied the evidence.
+                        auto_merge_split_speakers(session)
                         await asyncio.to_thread(svc.session_svc.save, session)
                         stages["transcribe_diarize"] = "ok"
                     except Exception as e:
@@ -7005,6 +7381,16 @@ async def process_full(session_id: str, req: ProcessFullRequest):
             logger.info(
                 "process_full: %s inputs unchanged — skipped 5 LLM calls",
                 session_id)
+            # Still enqueue. Skipping the LLM calls means the ARTIFACTS
+            # are unchanged, not that they reached the Designated
+            # Folder: an export dropped after its retries, a folder that
+            # was offline, or a client tag added since all leave the
+            # session owing files it already has. Reprocessing is what
+            # someone does when a meeting looks wrong, and this is the
+            # branch that run lands on. The export rewrites the same
+            # handful of small text files and never the audio, so a
+            # redundant enqueue is cheap and idempotent.
+            _export_after_processing(session_id)
             return {"ok": True, "stages": stages, "skipped": True}
 
         # THE FIRST CALL WARMS THE CACHE; THE REST READ IT.
@@ -7170,6 +7556,28 @@ async def process_full(session_id: str, req: ProcessFullRequest):
                 await asyncio.to_thread(svc.session_svc.save, fresh)
         except Exception as e:
             logger.warning(f"could not clear processing_error on {session_id}: {e}")
+
+        # SYNC NOW, not on the next sweep.
+        #
+        # Five places enqueue an export — patch_session, bulk_tag,
+        # process_session, _run_extraction, summarize_session — and this
+        # function was not one of them. It is the one that matters:
+        # auto-process-after-stop calls process_full, so the normal path
+        # (stop a recording, let it process) produced every artifact and
+        # told the export worker nothing. The files then reached the
+        # Designated Folder only when reconciliation next noticed, up to
+        # two minutes later.
+        #
+        # process_full exists because five independent extractions each
+        # doing load → set one field → save clobbered each other. When
+        # they were consolidated into one pass with one save, the
+        # enqueue that lived on each individual endpoint did not come
+        # with them.
+        #
+        # ONE enqueue, AFTER the save: the worker re-loads the session
+        # from disk, so enqueueing earlier would copy the pre-save
+        # contents and look like a partial sync.
+        _export_after_processing(session_id)
 
         return {"ok": True, "stages": stages}
     except Exception as e:

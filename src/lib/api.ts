@@ -1480,6 +1480,54 @@ export const api = {
       { method: "POST" }
     ),
 
+  // ── Merging one person the diarizer split in two ──────────────────
+  //
+  // pyannote hands out a second label for the same participant partway
+  // through a meeting, and because naming is per-label the half that
+  // matched a saved profile gets the name while the other half stays
+  // SPEAKER_03. mergeSpeakers rewrites every affected segment, so the
+  // transcript, the export and the next regeneration all agree.
+  //
+  // Not to be confused with mergeSpeakerProfiles below, which merges
+  // entries in the GLOBAL known-speakers roster and does not touch any
+  // session's transcript.
+
+  speakerMergeSuggestions: (session_id: string) =>
+    request<{
+      suggestions: {
+        into: string;
+        absorb: string[];
+        reason: string;
+        similarity: number | null;
+        names: string[];
+      }[];
+      // Speakers with under 1.5s of speech never get a voice
+      // fingerprint, so no suggestion can be made about them either
+      // way. Listed so an empty `suggestions` doesn't read as
+      // "checked, all fine".
+      unfingerprinted: string[];
+    }>(`/sessions/${session_id}/speakers/merge-suggestions`),
+
+  mergeSpeakers: (
+    session_id: string,
+    speaker_ids: string[],
+    opts: { into?: string; display_name?: string } = {},
+  ) =>
+    request<{
+      ok: boolean;
+      merge: {
+        into: string;
+        absorbed: string[];
+        segments_moved: number;
+        display_name: string;
+      };
+      speaker: Speaker;
+      speakers: Record<string, Speaker>;
+    }>(`/sessions/${session_id}/speakers/merge`, {
+      method: "POST",
+      body: JSON.stringify({ speaker_ids, ...opts }),
+    }),
+
   // ── Semantic search ───────────────────────────────────────────────
   semanticSearch: (
     query: string,
