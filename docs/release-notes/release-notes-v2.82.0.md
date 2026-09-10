@@ -1,10 +1,10 @@
-# v2.81.1 — Meetings sync to the Designated Folder the moment they finish processing
+# v2.82.0 — Merge a speaker the diarizer split in two, and sync the moment processing finishes
 
 ## Install (macOS)
 
-> v2.81.1 ships **a single universal `.zip`** that runs on every Mac
+> v2.82.0 ships **a single universal `.zip`** that runs on every Mac
 > (Apple Silicon and Intel). On the [Releases page](https://github.com/joshuarodriguez82/meeting-recorder-v2/releases),
-> grab `Meeting.Recorder_2.81.1_universal.zip`.
+> grab `Meeting.Recorder_2.82.0_universal.zip`.
 >
 > Still unsigned for Gatekeeper purposes. First launch needs the
 > Gatekeeper bypass — pick whichever path you prefer:
@@ -18,19 +18,88 @@
 > **Path B — Terminal:**
 > ```sh
 > cd ~/Downloads
-> unzip -o Meeting.Recorder_2.81.1_universal.zip
+> unzip -o Meeting.Recorder_2.82.0_universal.zip
 > mv "Meeting Recorder.app" /Applications/
 > xattr -cr "/Applications/Meeting Recorder.app"
 > open "/Applications/Meeting Recorder.app"
 > ```
 >
-> **Windows users**: download `Meeting.Recorder_2.81.1_x64-setup.exe`
+> **Windows users**: download `Meeting.Recorder_2.82.0_x64-setup.exe`
 > or `.msi` and double-click. No Gatekeeper / quarantine handling
 > needed.
 
 ## No extension update
 
 App-only. The Chrome extension stays at **1.24.0**.
+
+## One person, two speakers
+
+**The diarizer hands out a second label for the same participant partway
+through a meeting** — an echo, a headset swap, someone unmuting into a
+different audio path. Because naming happens per label, the half that
+matched a saved profile gets the name and the other half stays
+`SPEAKER_03`. The transcript then reads as a named person talking to a
+stranger who is the same person:
+
+```
+[12:04 → 12:09]  Jane Doe:    ...one of the first things
+[12:09 → 12:14]  SPEAKER_03:  and then after that you'd
+[12:14 → 12:20]  Jane Doe:    determine where it goes
+```
+
+And there was no way to fix it. Settings → Known Speakers has a merge,
+but that merges entries in the **global** roster — it never touched a
+session's transcript, so merging there left the meeting reading exactly
+as before.
+
+### Merge them yourself
+
+In a meeting's **Speakers** tab, tick two or more speakers and choose
+**Merge into one person**. Every segment is rewritten, the extra label
+disappears, and the merged speaker keeps whichever half had a real name
+— in either direction, so it does not matter which one you tick first.
+
+The export is re-queued at the same time, so the copy in the Designated
+Folder stops disagreeing with the app.
+
+The summary, action items and decisions are **not** regenerated
+automatically. They are language-model output, they cost money, and a
+merge is usually one of several corrections made in a sitting.
+Reprocess when the names are right.
+
+### It fixes the obvious ones for you
+
+Two cases need no judgement, and now happen during processing without
+asking:
+
+- both labels matched the **same known-speaker profile**
+- both labels ended up with the **same name**
+
+In both, the app had already decided they were one person and then
+rendered them as two.
+
+### It asks about the rest
+
+Two labels that merely *sound* alike get a suggestion at the top of the
+Speakers tab — "Jane Doe and SPEAKER_03 sound like the same person ·
+91% voice match" — with **Merge them** and **Different people**.
+
+That stays a question on purpose. Failing to merge one person leaves an
+ugly transcript whose words are still on the right voice. Merging two
+people puts one person's words in another's mouth, silently, and
+downstream into the summary, the action items and the commitments. A
+similarity score is good enough to ask about and nowhere near good
+enough to rewrite a transcript on.
+
+Two things the automatic pass deliberately will not do: chain merges
+(A and B sounding alike, and B and C, does not make A and C one person),
+and merge **you** without being asked — your own segments are identified
+by which device captured them, which is stronger evidence than a voice
+match.
+
+A speaker who spoke for under 1.5 seconds never gets a voice
+fingerprint, so no suggestion can be made about them. The panel says so
+rather than leaving an empty list to read as "checked, all fine".
 
 ## Processing a meeting now queues its export
 

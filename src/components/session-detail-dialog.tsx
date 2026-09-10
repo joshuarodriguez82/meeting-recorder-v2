@@ -1260,6 +1260,20 @@ function TranscriptView({ session }: { session: SessionFull }) {
   );
 }
 
+// MERGING ONE PERSON THE DIARIZER SPLIT IN TWO.
+//
+// pyannote hands out a second label for the same participant partway
+// through a meeting — an echo, a headset swap, someone unmuting into a
+// different audio path. Naming is per-label, so the half that matched a
+// saved profile gets the name and the other half stays SPEAKER_03, and
+// the transcript reads as a named person talking to a stranger who is
+// the same person.
+//
+// The backend merges the cases that are certain on its own (two labels
+// on one profile, two labels with one name). What is left is the case
+// only the person who was in the meeting can settle: two labels that
+// merely SOUND alike. So this view offers the suggestion and does the
+// merge on request — it never decides.
 function SpeakersView({
   session,
   onRenamed,
@@ -1268,15 +1282,152 @@ function SpeakersView({
   onRenamed: () => void | Promise<void>;
 }) {
   const speakers = Object.values(session.speakers);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [merging, setMerging] = useState(false);
+  const [suggestions, setSuggestions] = useState<
+    { into: string; absorb: string[]; similarity: number | null; names: string[] }[]
+  >([]);
+  const [dismissed, setDismissed] = useState<string[]>([]);
+
+  const sessionId = session.session_id;
+  const speakerCount = speakers.length;
+
+  useEffect(() => {
+    // Nothing to suggest below two speakers, and asking would light up
+    // the backend's ECAPA path for no reason. Returning without
+    // clearing keeps this effect free of a synchronous setState; the
+    // render below ignores stale suggestions on its own.
+    if (speakerCount < 2) return;
+    let live = true;
+    api
+      .speakerMergeSuggestions(sessionId)
+      .then((r) => { if (live) setSuggestions(r.suggestions); })
+      // A suggestion that cannot be fetched is not an error worth a
+      // toast — the merge button still works, and this panel is the
+      // convenience, not the feature.
+      .catch(() => { if (live) setSuggestions([]); });
+    return () => { live = false; };
+  }, [sessionId, speakerCount]);
+
+  const toggle = (speakerId: string) =>
+    setSelected((prev) =>
+      prev.includes(speakerId)
+        ? prev.filter((s) => s !== speakerId)
+        : [...prev, speakerId]);
+
+  const runMerge = async (ids: string[]) => {
+    setMerging(true);
+    try {
+      const res = await api.mergeSpeakers(sessionId, ids);
+      const moved = res.merge.segments_moved;
+      toast.success(
+        `Merged into ${res.merge.display_name}`,
+        { description: `${moved} segment${moved === 1 ? "" : "s"} now read as ${res.merge.display_name}.` });
+      setSelected([]);
+      setSuggestions([]);
+      await onRenamed();
+    } catch (e) {
+      toast.error("Could not merge those speakers", {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setMerging(false);
+    }
+  };
+
   if (speakers.length === 0) {
     return <p className="text-sm text-muted-foreground text-center py-8">No speakers identified yet.</p>;
   }
+
+  // A suggestion names two labels. After a merge one of them is gone,
+  // so anything left over from the previous fetch would point at a
+  // speaker that no longer exists — drop it here rather than render it.
+  const present = new Set(speakers.map((sp) => sp.speaker_id));
+  const open = suggestions.filter(
+    (s) => [s.into, ...s.absorb].every((id) => present.has(id))
+      && !dismissed.includes([s.into, ...s.absorb].sort().join("+")));
+
   return (
     <div className="space-y-2">
       <p className="text-xs text-muted-foreground mb-3">
         Click a speaker&apos;s name to rename them. The new name flows into the transcript,
         summary, action items, and decisions (next time you regenerate them).
+        Tick two or more to merge them into one person.
       </p>
+
+      {open.map((sug) => {
+        const key = [sug.into, ...sug.absorb].sort().join("+");
+        const pct = sug.similarity == null ? null : Math.round(sug.similarity * 100);
+        return (
+          <div
+            key={key}
+            className="rounded-lg border border-primary/40 bg-primary/5 p-3 space-y-2"
+          >
+            <div className="text-sm">
+              <span className="font-medium">{sug.names.join(" and ")}</span>{" "}
+              sound like the same person
+              {pct != null && (
+                <span className="text-muted-foreground"> · {pct}% voice match</span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                className="h-7 px-3"
+                disabled={merging}
+                onClick={() => runMerge([sug.into, ...sug.absorb])}
+              >
+                {merging
+                  ? <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                  : <Users className="h-3 w-3 mr-1" />}
+                Merge them
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 px-3"
+                disabled={merging}
+                onClick={() => setDismissed((d) => [...d, key])}
+              >
+                <X className="h-3 w-3 mr-1" />
+                Different people
+              </Button>
+            </div>
+          </div>
+        );
+      })}
+
+      {selected.length > 0 && (
+        <div className="flex items-center gap-2 rounded-lg border bg-muted/40 p-3">
+          <span className="text-sm flex-1 min-w-0">
+            {selected.length} selected
+            {selected.length < 2 && (
+              <span className="text-muted-foreground"> · pick one more to merge</span>
+            )}
+          </span>
+          <Button
+            size="sm"
+            className="h-7 px-3"
+            disabled={merging || selected.length < 2}
+            onClick={() => runMerge(selected)}
+          >
+            {merging
+              ? <Loader2 className="h-3 w-3 animate-spin mr-1" />
+              : <Users className="h-3 w-3 mr-1" />}
+            Merge into one person
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 px-3"
+            disabled={merging}
+            onClick={() => setSelected([])}
+          >
+            Clear
+          </Button>
+        </div>
+      )}
+
       {speakers.map((sp) => {
         const count = session.segments.filter((s) => s.speaker_id === sp.speaker_id).length;
         return (
@@ -1286,6 +1437,9 @@ function SpeakersView({
             speaker={sp}
             segmentCount={count}
             onRenamed={onRenamed}
+            selected={selected.includes(sp.speaker_id)}
+            onToggleSelected={() => toggle(sp.speaker_id)}
+            disabled={merging}
           />
         );
       })}
@@ -1295,11 +1449,15 @@ function SpeakersView({
 
 function SpeakerRow({
   sessionId, speaker, segmentCount, onRenamed,
+  selected = false, onToggleSelected, disabled = false,
 }: {
   sessionId: string;
   speaker: Speaker;
   segmentCount: number;
   onRenamed: () => void | Promise<void>;
+  selected?: boolean;
+  onToggleSelected?: () => void;
+  disabled?: boolean;
 }) {
   const speakerId = speaker.speaker_id;
   const displayName = speaker.display_name;
@@ -1395,9 +1553,24 @@ function SpeakerRow({
 
   return (
     <div className="flex items-center gap-4 rounded-lg border p-3">
-      <div className="flex h-10 w-10 items-center justify-center rounded-full bg-accent text-accent-foreground shrink-0">
-        <Users className="h-4 w-4" />
-      </div>
+      {/* Selecting is how two labels get merged back into one person.
+          The avatar doubles as the control so the row does not grow a
+          column that is empty in the single-speaker case. */}
+      <button
+        type="button"
+        role="checkbox"
+        aria-checked={selected}
+        aria-label={`Select ${displayName || speakerId} for merging`}
+        onClick={onToggleSelected}
+        disabled={disabled || !onToggleSelected}
+        className={`flex h-10 w-10 items-center justify-center rounded-full shrink-0 transition-colors ${
+          selected
+            ? "bg-primary text-primary-foreground"
+            : "bg-accent text-accent-foreground hover:bg-accent/70"
+        } disabled:opacity-50`}
+      >
+        {selected ? <Check className="h-4 w-4" /> : <Users className="h-4 w-4" />}
+      </button>
       <div className="flex-1 min-w-0">
         {editing ? (
           <div className="flex items-center gap-2">
