@@ -9420,6 +9420,12 @@ def _emit_calendar_import_event(
             calendar_only=bool(calendar_only),
             raw=int((stats or {}).get("raw") or 0),
             kept=int((stats or {}).get("kept") or 0),
+            # How many of those carry a join link, after the read-time
+            # body fallback. Counts the OUTCOME the Record tab's Join
+            # button depends on, not the extraction attempts — which is
+            # what a field bundle could not previously distinguish.
+            kept_with_join_url=int(
+                (stats or {}).get("kept_with_join_url") or 0),
             dropped=int(dropped or 0),
             drop_reasons=drop_reasons,
             fallback_reason=fallback_reason,
@@ -10980,6 +10986,11 @@ async def _parent_pid_watchdog():
                 except Exception as e:
                     logger.exception(
                         f"Parent-PID watchdog: clean stop failed: {e}")
+                # Record the stop BEFORE exiting. os._exit skips the
+                # shutdown handler, which is why this exit — the normal
+                # one when the user closes the app — left no trace and
+                # made every subsequent start look unclean.
+                _emit_backend_stop("parent_gone")
                 # Force-exit. os._exit() bypasses any pending tasks
                 # (we explicitly DO NOT want graceful shutdown here —
                 # the parent is gone, there's nothing left to serve).
@@ -11389,6 +11400,35 @@ async def startup():
     _t.Thread(target=_backfill_search_index, daemon=True).start()
 
 
+def _emit_backend_stop(reason: str) -> None:
+    """``backend.stop`` with WHY, from whichever path is exiting.
+
+    The pairing with ``backend.start`` is only informative if a clean
+    exit actually records one. It did not: a field log showed 89 starts,
+    89 prior-crash markers and ZERO stops, because the usual exit on
+    Windows is the parent-PID watchdog's ``os._exit(0)`` — which bypasses
+    uvicorn's shutdown handler by design (the parent is gone; there is
+    nothing left to serve). So "a start with no preceding stop is an
+    unclean exit" was true of every exit, and therefore said nothing.
+
+    ``reason`` is a code, never prose — utils/events scrubs anything
+    with a space in it.
+    """
+    try:
+        events.emit(
+            events.BACKEND_STOP,
+            reason=reason,
+            uptime_s=max(0.0, time.monotonic() - _BACKEND_STARTED_MONOTONIC),
+            recording_active=bool(
+                svc.recording_svc and svc.recording_svc.is_recording),
+        )
+    except Exception:  # noqa: BLE001
+        # Never let telemetry delay or block an exit — but a silent
+        # pass is how the missing stop went unnoticed in the first
+        # place, so the failure is still written down.
+        logger.debug("Could not record backend.stop", exc_info=True)
+
+
 @app.on_event("shutdown")
 async def _shutdown_event_log():
     """``backend.stop`` — the counterpart that makes ``backend.start``
@@ -11400,15 +11440,7 @@ async def _shutdown_event_log():
     rust.log, and it is the first question asked whenever a recording
     goes missing. This handler does not run on a 0xC0000005 — that is
     exactly what makes its absence informative."""
-    try:
-        events.emit(
-            events.BACKEND_STOP,
-            uptime_s=max(0.0, time.monotonic() - _BACKEND_STARTED_MONOTONIC),
-            recording_active=bool(
-                svc.recording_svc and svc.recording_svc.is_recording),
-        )
-    except Exception:
-        pass
+    _emit_backend_stop("shutdown_event")
 
 
 if __name__ == "__main__":

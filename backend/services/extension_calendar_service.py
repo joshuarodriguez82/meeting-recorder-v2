@@ -503,6 +503,22 @@ def events_from_briefing(briefing: Dict[str, Any],
         stats.update(
             raw=len(agenda),
             kept=len(out),
+            # HOW MANY MEETINGS ARRIVED WITH A JOIN LINK.
+            #
+            # A field diagnostic (2026-09-10) showed the extension's own
+            # join-URL extraction at zero on every counter —
+            # joinFromAnchor, joinFromMarkup, joinFromResponseBody all 0,
+            # responsesContainJoinShapedUrl false — while 48 events
+            # imported cleanly. There is a read-time fallback that pulls
+            # a link out of the body text, so whether the Join button is
+            # actually missing could not be answered from the bundle at
+            # all: nothing counted the outcome, only the attempts.
+            #
+            # Counts only. The URL itself is meeting content and never
+            # leaves the machine.
+            kept_with_join_url=sum(
+                1 for e in out if str(e.get("join_url") or "").strip()),
+
             dropped_no_subject=dropped_no_subject,
             dropped_cancelled=dropped_cancelled,
             dropped_no_start=dropped_no_start,
@@ -602,6 +618,22 @@ def events_from_structured(events: Iterable[Any],
         stats.update(
             raw=len(events),
             kept=len(out),
+            # HOW MANY MEETINGS ARRIVED WITH A JOIN LINK.
+            #
+            # A field diagnostic (2026-09-10) showed the extension's own
+            # join-URL extraction at zero on every counter —
+            # joinFromAnchor, joinFromMarkup, joinFromResponseBody all 0,
+            # responsesContainJoinShapedUrl false — while 48 events
+            # imported cleanly. There is a read-time fallback that pulls
+            # a link out of the body text, so whether the Join button is
+            # actually missing could not be answered from the bundle at
+            # all: nothing counted the outcome, only the attempts.
+            #
+            # Counts only. The URL itself is meeting content and never
+            # leaves the machine.
+            kept_with_join_url=sum(
+                1 for e in out if str(e.get("join_url") or "").strip()),
+
             dropped_not_dict=dropped_not_dict,
             dropped_no_subject=dropped_no_subject,
             dropped_no_start=dropped_no_start,

@@ -75,3 +75,33 @@ the attribute is declared in another file, and Python only finds out
 when the line actually runs.
 
 Reintroducing the bug turns five tests red.
+
+## Closing the app left no trace
+
+A backend log showed **89 starts, 89 prior-crash markers, and zero
+clean stops**. The app records a "stopped cleanly" marker so that a
+start without one means something went wrong — and that marker had
+never once been written, so every start looked unclean and the signal
+said nothing.
+
+The handler that writes it was correct and was never reached. Closing
+the app kills the backend outright, on purpose (the window is gone;
+there is nothing left to serve), and that path skipped the marker. It
+now writes one first, and records which of the two exits it was.
+
+This is the signal you would go looking for the next time a recording
+goes missing.
+
+## Whether a meeting had a join link is now countable
+
+Every counter for the extension's join-link extraction reads zero,
+while meetings themselves import fine — 44 kept out of 48, the four
+drops all genuinely cancelled. There is a fallback that pulls the link
+out of the invite body, so zero extraction does not necessarily mean a
+missing **Join** button.
+
+Nothing counted the outcome, only the attempts, which made "is the Join
+button missing?" unanswerable from a diagnostics bundle. The import now
+records how many meetings ended up with a join link. Counts only — the
+link itself is meeting content and never leaves the machine.
+
