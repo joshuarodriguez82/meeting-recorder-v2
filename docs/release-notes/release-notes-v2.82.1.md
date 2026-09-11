@@ -85,6 +85,30 @@ left to click.
 they were most likely merged and to reopen the meeting, instead of
 reporting a bare "not on this session".
 
+## The Clear button in the Activity panel
+
+With a dozen events queued, the list rendered past the bottom of the
+panel and painted **over** the Clear button — so clicks landed on the
+list drawn on top of it and Clear appeared to do nothing.
+
+This was reported once before and the fix held for that case and not
+this one. The panel was bounded using flex sizing, which left the
+scrolling to a `height: 100%` that only works when the parent resolves
+to a definite height. The list now has an explicit maximum height and
+its own scrollbar, which needs nothing from its parent and cannot come
+apart the same way.
+
+Six tests pin the property rather than the pixels — three of them fail
+against v2.82.0.
+
+## Telling whether the Drive fix held
+
+The app now records a countable event whenever it falls back to a
+second copy of a session. Export diagnostics and the bundle answers the
+question directly: no entries means the condition stopped happening, and
+entries mean it happened and was survived. Previously the only evidence
+either way was a screenshot of the error.
+
 ### Tests
 
 Ten tests covering the exact sequence — a locked newest copy with a

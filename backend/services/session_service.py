@@ -291,6 +291,21 @@ class SessionService:
         found.sort(key=lambda t: (-t[0], t[1]))
         return [path for _, _, path in found]
 
+    @staticmethod
+    def _emit_read_fallback_reason(errors: List[str]) -> str:
+        """Reason code for the LAST failure before the fallback won.
+
+        Codes, never prose or paths — the event log rejects both (see
+        utils/events._scrub)."""
+        last = errors[-1].lower() if errors else ""
+        if "corrupt" in last:
+            return "corrupt"
+        if "disappeared" in last:
+            return "vanished"
+        if "permission" in last or "errno 13" in last or "in use" in last:
+            return "locked"
+        return "unreadable"
+
     def load(self, session_id: str) -> Optional[dict]:
         """Load a session JSON by ID. Returns raw dict.
 
@@ -360,7 +375,7 @@ class SessionService:
                 errors.append(f"{path}: {e}")
                 continue
             try:
-                return json.loads(raw)
+                data = json.loads(raw)
             except json.JSONDecodeError as e:
                 # A corrupt copy is a real problem, but not a reason to
                 # ignore an intact one somewhere else.
@@ -369,6 +384,25 @@ class SessionService:
                 # app (and its tests) recognise a corrupt session by.
                 errors.append(f"Corrupt session file {path}: {e}")
                 continue
+            if index > 0:
+                # The preferred copy did not open and this one did.
+                # Recorded as a countable event, not just a log line,
+                # so a diagnostics bundle can answer "is this still
+                # happening?" — zero means the condition stopped, and a
+                # count means it happened and was survived. No paths:
+                # the event log scrubs them by design.
+                try:
+                    from utils import events
+                    events.emit(
+                        events.SESSION_READ_FALLBACK,
+                        session_id=session_id,
+                        reason=self._emit_read_fallback_reason(errors),
+                        skipped=index,
+                        candidates=len(candidates))
+                except Exception as e:  # noqa: BLE001
+                    # Telemetry must never cost the read it is reporting.
+                    logger.debug(f"Could not record read-fallback event: {e}")
+            return data
 
         raise ValueError(
             f"Session {session_id} was found in {len(candidates)} "
