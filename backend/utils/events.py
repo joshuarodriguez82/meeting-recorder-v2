@@ -96,6 +96,13 @@ AUDIO_INTEGRITY = "audio.integrity"
 CHANNEL_ATTRIBUTION = "channel_attribution.evaluated"
 CALENDAR_IMPORT = "calendar.extension_import"
 DOCUMENTS_INDEXED = "documents.indexed"
+#: A session JSON could not be read from the copy the app preferred, so
+#: it fell back to another one. Emitted so "did the 2026-09-10 Drive
+#: lock fix actually fire?" is answerable from a diagnostics bundle
+#: instead of from another screenshot: zero occurrences over a week of
+#: normal use means the condition stopped happening, and a non-zero
+#: count means it happened AND was survived.
+SESSION_READ_FALLBACK = "session.read_fallback"
 
 ALL_EVENTS = (
     BACKEND_START,
@@ -110,6 +117,7 @@ ALL_EVENTS = (
     CHANNEL_ATTRIBUTION,
     CALENDAR_IMPORT,
     DOCUMENTS_INDEXED,
+    SESSION_READ_FALLBACK,
 )
 
 # ── scrubbing ────────────────────────────────────────────────────────

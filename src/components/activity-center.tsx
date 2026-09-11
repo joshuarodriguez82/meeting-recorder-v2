@@ -47,7 +47,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Popover, PopoverContent, PopoverTrigger,
 } from "@/components/ui/popover";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import {
   Loader2, CheckCircle2, AlertTriangle, Circle, Activity, Check,
@@ -282,7 +281,22 @@ export function ActivityCenter({
           </div>
         ) : null}
 
-        <ScrollArea className="min-h-0 flex-1">
+        {/* A PLAIN SCROLL CONTAINER, DELIBERATELY.
+            This was a ScrollArea sized `min-h-0 flex-1`. Our ScrollArea
+            wrapper gives its viewport `size-full` — height: 100% — and
+            no overflow of its own, so whether the list scrolls depends
+            on a percentage height resolving through a flex item. When
+            it does not resolve, the viewport is never a scroll
+            container: the list renders at full height and paints over
+            the Clear button below it, which is why Clear appears not to
+            work — the clicks land on the list drawn on top of it.
+            Reported twice (2026-09-02, 2026-09-10); the flex fix held
+            for one of them.
+            An explicit max-height plus overflow-y-auto needs neither a
+            resolved percentage nor anything from the primitive's own
+            styles, so it cannot come apart the same way. Cost is the
+            unstyled scrollbar, which is worth a button that works. */}
+        <div className="max-h-80 overflow-y-auto overscroll-contain">
           <div className="px-3 py-2">
             {events.length === 0 ? (
               <p className="py-4 text-center text-xs text-muted-foreground">
@@ -327,7 +341,7 @@ export function ActivityCenter({
               </div>
             )}
           </div>
-        </ScrollArea>
+        </div>
 
         {events.length > 0 && (
           <div className="shrink-0 border-t bg-popover px-3 py-1.5">

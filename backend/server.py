@@ -4646,7 +4646,16 @@ async def rename_speaker(session_id: str, speaker_id: str, req: SpeakerRenameReq
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     if speaker_id not in session.speakers:
-        raise HTTPException(status_code=404, detail="Speaker not on this session")
+        # A label that is not here is usually one a merge just removed
+        # (field repro 2026-09-10: a merge succeeded, the view failed to
+        # refresh, and the next click reported this against a speaker
+        # that no longer existed). Say what to do about it, or the
+        # message points at nothing the user can act on.
+        raise HTTPException(
+            status_code=404,
+            detail=("That speaker is no longer on this session — they were "
+                    "most likely merged into another one. Reopen the "
+                    "meeting to see the current list."))
 
     new_name = req.display_name.strip()
     if not new_name:
@@ -4748,7 +4757,16 @@ async def confirm_speaker_match(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     if speaker_id not in session.speakers:
-        raise HTTPException(status_code=404, detail="Speaker not on this session")
+        # A label that is not here is usually one a merge just removed
+        # (field repro 2026-09-10: a merge succeeded, the view failed to
+        # refresh, and the next click reported this against a speaker
+        # that no longer existed). Say what to do about it, or the
+        # message points at nothing the user can act on.
+        raise HTTPException(
+            status_code=404,
+            detail=("That speaker is no longer on this session — they were "
+                    "most likely merged into another one. Reopen the "
+                    "meeting to see the current list."))
     speaker = session.speakers[speaker_id]
     if speaker.profile_id != req.profile_id:
         raise HTTPException(
@@ -4784,7 +4802,16 @@ async def reject_speaker_match(session_id: str, speaker_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     if speaker_id not in session.speakers:
-        raise HTTPException(status_code=404, detail="Speaker not on this session")
+        # A label that is not here is usually one a merge just removed
+        # (field repro 2026-09-10: a merge succeeded, the view failed to
+        # refresh, and the next click reported this against a speaker
+        # that no longer existed). Say what to do about it, or the
+        # message points at nothing the user can act on.
+        raise HTTPException(
+            status_code=404,
+            detail=("That speaker is no longer on this session — they were "
+                    "most likely merged into another one. Reopen the "
+                    "meeting to see the current list."))
     speaker = session.speakers[speaker_id]
     speaker.profile_id = None
     speaker.match_confidence = None

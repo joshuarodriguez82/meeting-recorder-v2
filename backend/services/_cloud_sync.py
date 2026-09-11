@@ -32,6 +32,23 @@ logger = logging.getLogger(__name__)
 # flight. EIO: provider hiccup mid-fault-in. Any of these is retryable.
 _HYDRATING_ERRNOS = {errno.ENODATA, errno.EAGAIN, errno.EIO}
 
+# errno values that mean "another process has the file open right now",
+# which on a synced folder is the sync client itself mid-write.
+#
+# Field repro 2026-09-10: on Google Drive's G:\ stream mount, reading a
+# session JSON ~90ms after the archive step rewrote it raised
+# ``PermissionError: [Errno 13] Permission denied``. Windows reports a
+# sharing violation as EACCES, which is indistinguishable by errno from
+# a real permissions problem — but a file the app itself wrote seconds
+# ago is not one the user has lost access to, and the lock clears in
+# well under a second.
+#
+# Kept separate from _HYDRATING_ERRNOS because the remedy differs: a
+# placeholder needs downloading, a lock needs waiting.
+_LOCKED_ERRNOS = {errno.EACCES, errno.EBUSY}
+
+_RETRYABLE_ERRNOS = _HYDRATING_ERRNOS | _LOCKED_ERRNOS
+
 
 class CloudFileNotReadyError(OSError):
     """A file exists in a cloud-synced folder but its contents haven't
@@ -84,17 +101,30 @@ def read_text_hydrated(
         except FileNotFoundError:
             raise
         except OSError as e:
-            if e.errno in _HYDRATING_ERRNOS and attempt < retries - 1:
+            if e.errno in _RETRYABLE_ERRNOS and attempt < retries - 1:
                 logger.info(
-                    "%s not yet hydrated from cloud sync (errno=%s, "
-                    "attempt %d/%d) — retrying",
-                    path.name, e.errno, attempt + 1, retries)
+                    "%s not readable yet (errno=%s, attempt %d/%d) — "
+                    "%s; retrying",
+                    path.name, e.errno, attempt + 1, retries,
+                    "locked by the sync client"
+                    if e.errno in _LOCKED_ERRNOS else
+                    "not yet hydrated from cloud sync")
                 last_exc = e
                 time.sleep(delay * (attempt + 1))
                 continue
             last_exc = e
             break
 
+    # The remedy depends on WHICH failure this was, and telling someone
+    # to re-download a file that is merely locked sends them to the
+    # wrong place.
+    if last_exc is not None and last_exc.errno in _LOCKED_ERRNOS:
+        raise CloudFileNotReadyError(
+            f"{path.name} is in a synced folder and another program — "
+            f"almost certainly the sync client — still has it open, so "
+            f"it could not be read. This normally clears in a second or "
+            f"two; retry."
+        ) from last_exc
     raise CloudFileNotReadyError(
         f"{path.name} exists in the synced folder but its contents "
         f"haven't downloaded to this device yet. In OneDrive (or "
