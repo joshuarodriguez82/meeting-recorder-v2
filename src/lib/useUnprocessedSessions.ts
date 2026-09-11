@@ -67,6 +67,11 @@ export function useUnprocessedSessions(enabled: boolean) {
   return { items, count: items.length };
 }
 
+// Declared above its readers on purpose: a const read before its
+// declaration throws at runtime, and tsc does not flag it when the
+// read is inside a function body (2026-09-11).
+const SEEN_KEY = "mr:unprocessed_seen_v1";
+
 function loadSeen(): Set<string> {
   if (typeof window === "undefined") return new Set();
   try {
@@ -92,7 +97,6 @@ function saveSeen(s: Set<string>) {
   }
 }
 
-const SEEN_KEY = "mr:unprocessed_seen_v1";
 
 async function fireToast(freshOnes: UnprocessedSession[]) {
   // Lazy import so the hook works in any SSR / non-Tauri context too.
