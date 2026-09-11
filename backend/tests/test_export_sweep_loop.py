@@ -47,6 +47,12 @@ class _Recorder:
     def __init__(self, recording: bool = False):
         self._recording = recording
 
+    # A PROPERTY, matching RecordingService. Defining this as a
+    # method is what let `svc.recording_svc.is_recording()` ship:
+    # the fakes answered the call, the real object raised
+    # "'bool' object is not callable", and the export sweep died
+    # on every pass for four hours (field log 2026-09-10).
+    @property
     def is_recording(self) -> bool:
         return self._recording
 
