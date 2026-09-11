@@ -1281,8 +1281,6 @@ function SpeakersView({
   session: SessionFull;
   onRenamed: () => void | Promise<void>;
 }) {
-  const speakers = Object.values(session.speakers)
-    .filter((sp) => !gone.includes(sp.speaker_id));
   const [selected, setSelected] = useState<string[]>([]);
   const [merging, setMerging] = useState(false);
   const [suggestions, setSuggestions] = useState<
@@ -1292,6 +1290,16 @@ function SpeakersView({
   // Labels this view has merged away. The refetch normally removes
   // them; this is what keeps them off the screen when it does not.
   const [gone, setGone] = useState<string[]>([]);
+
+  // DECLARED AFTER `gone`, DELIBERATELY. This filter used to sit above
+  // the useState calls, which made every render of this tab throw
+  // "Cannot access 'gone' before initialization" and took the whole
+  // window down with it (field repro 2026-09-11). TypeScript does not
+  // flag it: the reference is inside a closure, and a closure COULD be
+  // called later — it is `.filter` calling it immediately that turns a
+  // legal-looking hoist into a crash.
+  const speakers = Object.values(session.speakers)
+    .filter((sp) => !gone.includes(sp.speaker_id));
 
   const sessionId = session.session_id;
   const speakerCount = speakers.length;

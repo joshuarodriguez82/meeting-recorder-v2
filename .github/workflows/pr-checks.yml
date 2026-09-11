@@ -66,6 +66,21 @@ jobs:
         run: npm test
       - name: Build (typechecks via strict tsconfig)
         run: npm run build
+      # A SMALL LINT GATE, FOR CRASHES ONLY.
+      #
+      # Still no blanket eslint step, for the reason above. But the
+      # 2026-09-11 field repro was a const read one line before its
+      # useState — every render of the Speakers tab threw and the whole
+      # window showed WebView2's "This page couldn't load". `next build`
+      # passed: tsc will not flag a reference inside a closure, because
+      # a closure COULD run later, and nothing tells it that .filter()
+      # runs this one immediately.
+      #
+      # This gates on a short list of rules whose violations are
+      # runtime crashes, against a committed baseline of the sites that
+      # predate it — so it is red only for a crash the PR introduced.
+      - name: Crash-class lint (no-use-before-define, rules-of-hooks)
+        run: node scripts/ci/lint-crash-rules.mjs
         env:
           NEXT_TELEMETRY_DISABLED: "1"
 
