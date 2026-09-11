@@ -1281,13 +1281,17 @@ function SpeakersView({
   session: SessionFull;
   onRenamed: () => void | Promise<void>;
 }) {
-  const speakers = Object.values(session.speakers);
+  const speakers = Object.values(session.speakers)
+    .filter((sp) => !gone.includes(sp.speaker_id));
   const [selected, setSelected] = useState<string[]>([]);
   const [merging, setMerging] = useState(false);
   const [suggestions, setSuggestions] = useState<
     { into: string; absorb: string[]; reason: string; similarity: number | null; names: string[] }[]
   >([]);
   const [dismissed, setDismissed] = useState<string[]>([]);
+  // Labels this view has merged away. The refetch normally removes
+  // them; this is what keeps them off the screen when it does not.
+  const [gone, setGone] = useState<string[]>([]);
 
   const sessionId = session.session_id;
   const speakerCount = speakers.length;
@@ -1315,19 +1319,49 @@ function SpeakersView({
         ? prev.filter((s) => s !== speakerId)
         : [...prev, speakerId]);
 
+  // THE MERGE AND THE REFRESH ARE TWO OUTCOMES, NOT ONE.
+  //
+  // Field repro 2026-09-10: the merge returned 200 and rewrote 153
+  // segments, the refresh that followed it returned 500 (a session
+  // copy on a Drive mount was momentarily locked by the sync client),
+  // and this function reported "Could not merge those speakers" — of
+  // the two things that happened, it announced the one that had not.
+  // The list then stayed stale, so the next click landed on a speaker
+  // the merge had already removed and produced "Speaker not on this
+  // session", three steps from the actual fault.
+  //
+  // So: the merge's own result is reported on its own, the absorbed
+  // labels are dropped from this view immediately rather than waiting
+  // for a refetch that may not arrive, and a refresh failure is
+  // reported as what it is.
   const runMerge = async (ids: string[]) => {
     setMerging(true);
+    let merged: Awaited<ReturnType<typeof api.mergeSpeakers>> | null = null;
     try {
-      const res = await api.mergeSpeakers(sessionId, ids);
-      const moved = res.merge.segments_moved;
-      toast.success(
-        `Merged into ${res.merge.display_name}`,
-        { description: `${moved} segment${moved === 1 ? "" : "s"} now read as ${res.merge.display_name}.` });
-      setSelected([]);
-      setSuggestions([]);
-      await onRenamed();
+      merged = await api.mergeSpeakers(sessionId, ids);
     } catch (e) {
       toast.error("Could not merge those speakers", {
+        description: e instanceof Error ? e.message : String(e),
+      });
+      setMerging(false);
+      return;
+    }
+
+    const moved = merged.merge.segments_moved;
+    const name = merged.merge.display_name;
+    toast.success(`Merged into ${name}`, {
+      description: `${moved} segment${moved === 1 ? "" : "s"} now read as ${name}.`,
+    });
+    // Local truth, applied before any refetch: these labels are gone,
+    // and a row for one of them is a button that can only fail.
+    setGone((g) => [...g, ...merged!.merge.absorbed]);
+    setSelected([]);
+    setSuggestions([]);
+
+    try {
+      await onRenamed();
+    } catch (e) {
+      toast.warning("Merged, but the view could not be refreshed", {
         description: e instanceof Error ? e.message : String(e),
       });
     } finally {

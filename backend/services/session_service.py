@@ -258,19 +258,38 @@ class SessionService:
         list_sessions() uses for its cross-root dedupe — otherwise the
         list shows one version and clicking it opens another.
         """
+        candidates = self._resolve_json_candidates(session_id)
+        return candidates[0] if candidates else None
+
+    def _resolve_json_candidates(self, session_id: str) -> List[Path]:
+        """Every copy of this session's JSON, newest first.
+
+        ``_resolve_json`` returns the head of this list — the canonical
+        copy. The REST of the list is the fallback that keeps a locked
+        or half-synced copy from costing the user a session that is
+        readable somewhere else on the same machine (see ``load``).
+        """
         target_name = f"session_{session_id}.json"
-        best_path: Optional[Path] = None
-        best_mtime = -1.0
+        found: List[tuple] = []
         for root in self._scan_roots():
-            for path in root.rglob(target_name):
+            try:
+                paths = list(root.rglob(target_name))
+            except OSError as e:
+                # An offline or misbehaving mount must never hide the
+                # copies under the roots that ARE reachable — the same
+                # isolation rule list_sessions() uses.
+                logger.warning(f"Skipping unreadable root {root}: {e}")
+                continue
+            for path in paths:
                 try:
                     mtime = path.stat().st_mtime
                 except OSError:
                     continue
-                if mtime > best_mtime:
-                    best_mtime = mtime
-                    best_path = path
-        return best_path
+                found.append((mtime, str(path), path))
+        # Newest first; path string breaks ties so the order is stable
+        # across calls rather than filesystem-walk order.
+        found.sort(key=lambda t: (-t[0], t[1]))
+        return [path for _, _, path in found]
 
     def load(self, session_id: str) -> Optional[dict]:
         """Load a session JSON by ID. Returns raw dict.
@@ -286,17 +305,75 @@ class SessionService:
         BOM still decode identically.
 
         Resolves across every root (see _resolve_json) — a session that
-        exists only under an archive root must still load, not 404."""
-        path = self._resolve_json(session_id)
-        if path is None:
+        exists only under an archive root must still load, not 404.
+
+        A COPY THAT WILL NOT OPEN IS NOT A SESSION THAT DOES NOT EXIST
+        (field repro 2026-09-10). This used to be a plain ``open()`` on
+        whichever copy was newest. Merging two speakers saved the
+        session and queued its export; the export's archive step
+        rewrote the copy under a Google Drive stream mount,
+        which made THAT copy the newest; the UI's refresh 90ms later
+        resolved to it and got ``PermissionError: [Errno 13]`` because
+        the sync client still had it open. The request 500'd, the
+        Speakers list stayed stale, and the next click landed on a
+        speaker the merge had already removed — surfacing as "Speaker
+        not on this session", which pointed at nothing real.
+
+        The local copy was sitting right there and was perfectly
+        readable the whole time. So: read through the cloud-aware
+        reader (which retries a lock or an un-hydrated placeholder),
+        and if the newest copy still will not open, fall back to the
+        next one rather than failing the read. Only when NO copy opens
+        does this raise — and then it says which paths it tried.
+
+        Falling back can briefly disagree with list_sessions() about
+        which copy is canonical. That is the right trade: the
+        disagreement is transient and invisible, while the alternative
+        is a 500 on a session the machine can read."""
+        candidates = self._resolve_json_candidates(session_id)
+        if not candidates:
             logger.warning(
                 f"Session file not found for {session_id} in any root")
             return None
-        try:
-            with open(path, "r", encoding="utf-8-sig") as f:
-                return json.load(f)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Corrupt session file {path}: {e}") from e
+
+        errors: List[str] = []
+        for index, path in enumerate(candidates):
+            # PATIENCE ONLY WHERE IT BUYS SOMETHING. The reader's full
+            # retry budget is ~3s, which is right for an un-hydrated
+            # placeholder that nothing else can supply — and far too
+            # slow for a UI refresh when an identical copy is readable
+            # on local disk. So every copy but the last gets a brief
+            # nudge, and the last one gets the full budget.
+            last = index == len(candidates) - 1
+            try:
+                raw = (read_text_hydrated(path) if last
+                       else read_text_hydrated(path, retries=2, delay=0.1))
+            except FileNotFoundError:
+                # Deleted between the scan and the read — a retention
+                # sweep or another device. Try the next copy.
+                errors.append(f"{path}: disappeared during the read")
+                continue
+            except OSError as e:
+                logger.warning(
+                    f"Could not read {path} for {session_id} ({e}); "
+                    f"trying another copy")
+                errors.append(f"{path}: {e}")
+                continue
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError as e:
+                # A corrupt copy is a real problem, but not a reason to
+                # ignore an intact one somewhere else.
+                logger.warning(f"Corrupt session file {path}: {e}")
+                # Keep this exact phrasing: it is what the rest of the
+                # app (and its tests) recognise a corrupt session by.
+                errors.append(f"Corrupt session file {path}: {e}")
+                continue
+
+        raise ValueError(
+            f"Session {session_id} was found in {len(candidates)} "
+            f"location(s) but none could be read: "
+            + "; ".join(errors))
 
     def load_full(self, session_id: str) -> Optional[Session]:
         """Load a session and rebuild the full Session object."""
