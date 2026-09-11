@@ -91,6 +91,12 @@ class _Recording:
     def __init__(self, exc=None):
         self.exc = exc or RuntimeError("Diarization failed: CUDA out of memory")
 
+    # A PROPERTY, matching RecordingService. Defining this as a
+    # method is what let `svc.recording_svc.is_recording()` ship:
+    # the fakes answered the call, the real object raised
+    # "'bool' object is not callable", and the export sweep died
+    # on every pass for four hours (field log 2026-09-10).
+    @property
     def is_recording(self):
         return False
 

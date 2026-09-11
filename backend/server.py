@@ -2375,7 +2375,7 @@ async def probe_mic(index: int):
     times. Knowing whether a mic is free is not worth any part of that,
     and during a recording the answer is already known.
     """
-    if svc.recording_svc is not None and svc.recording_svc.is_recording():
+    if svc.recording_svc is not None and svc.recording_svc.is_recording:
         return {
             "ok": True,
             "message": "Recording in progress — the microphone is open and "
@@ -10585,7 +10585,7 @@ def _auto_index_busy() -> bool:
     by default and it never actually ran, so nothing contended.
     """
     try:
-        if svc.recording_svc is not None and svc.recording_svc.is_recording():
+        if svc.recording_svc is not None and svc.recording_svc.is_recording:
             return True
         if _EXPORT_WORKER is not None and _EXPORT_WORKER.pending_count() > 0:
             # Bounded on purpose. A session that can never export — a
@@ -10690,7 +10690,7 @@ async def _export_sweep_loop():
         while True:
             try:
                 recording = (svc.recording_svc is not None
-                             and svc.recording_svc.is_recording())
+                             and svc.recording_svc.is_recording)
                 if not recording:
                     await asyncio.to_thread(_sweep_recent_exports)
             except Exception as e:  # noqa: BLE001
