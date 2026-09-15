@@ -799,29 +799,62 @@ class AudioCapture:
                 f"Loopback device (WASAPI): [{self._out_idx}] {dev_info['name']} "
                 f"ch={self._loopback_channels} sr={self._loopback_sr}")
 
-            buffer_attempts = [0, 1024, 4096, 2048]
+            # VARY THE FORMAT, NOT JUST THE BUFFER (field log 2026-09-15).
+            #
+            # This was `for buf in [0, 1024, 4096, 2048]` with `channels`
+            # and `rate` read once from the device and reused on every
+            # rung. A Windows install recorded a whole meeting with no
+            # far-end audio because all four attempts returned
+            # AUDCLNT_E_UNSUPPORTED_FORMAT — WASAPI saying "that rate /
+            # channel pair is not this endpoint's mix format", which no
+            # buffer size can answer. Two of the four were not even
+            # distinct: `buf if buf else 1024` mapped 0 and 1024 to the
+            # same call.
+            #
+            # The ladder now lives in core/loopback_open_plan (pure, so
+            # it is testable without PortAudio) and varies rate and
+            # channels, keeping today's first attempt first so a machine
+            # that works keeps taking the same path.
+            from core.loopback_open_plan import (
+                build_loopback_open_plan, describe_attempt,
+            )
+            plan = build_loopback_open_plan(
+                self._loopback_sr, self._loopback_channels)
             opened = False
             last_err = None
-            for buf in buffer_attempts:
+            for attempt in plan:
                 try:
-                    logger.info(f"  Loopback attempt buffer={buf}")
+                    logger.info(f"  Loopback attempt {describe_attempt(attempt)}")
                     self._pa_stream = self._pa.open(
                         format=pyaudio.paFloat32,
-                        channels=self._loopback_channels,
-                        rate=self._loopback_sr,
+                        channels=attempt["channels"],
+                        rate=attempt["samplerate"],
                         input=True,
                         input_device_index=self._out_idx,
-                        frames_per_buffer=buf if buf else 1024,
+                        frames_per_buffer=attempt["frames_per_buffer"],
                     )
+                    # The stream is open at THESE values, which may not be
+                    # what the device advertised. Everything downstream —
+                    # the reader thread's soundfile writer, the merge's
+                    # resample, channel attribution — reads these
+                    # attributes, so they have to describe the stream that
+                    # actually exists rather than the one we asked for
+                    # first.
+                    self._loopback_sr = attempt["samplerate"]
+                    self._loopback_channels = attempt["channels"]
                     opened = True
-                    logger.info(f"  [OK] Loopback opened with buffer={buf}")
+                    logger.info(
+                        f"  [OK] Loopback opened {describe_attempt(attempt)}")
                     break
                 except Exception as e:
                     last_err = e
-                    logger.warning(f"  [FAIL] Loopback buffer={buf} failed: {e}")
+                    logger.warning(
+                        f"  [FAIL] Loopback {describe_attempt(attempt)} "
+                        f"failed: {e}")
                     continue
             if not opened:
-                raise last_err or RuntimeError("No working loopback config")
+                raise last_err or RuntimeError(
+                    f"No working loopback config after {len(plan)} attempt(s)")
 
             self._loopback_thread = threading.Thread(
                 target=self._loopback_reader_pa, daemon=True)
