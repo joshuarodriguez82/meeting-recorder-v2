@@ -162,8 +162,23 @@ doesn't care).
 
 ## Audio routing for system-audio capture
 
+### macOS 13 or later — no routing needed (recommended)
+
+On the Record tab, set **System Audio** to **System audio — all apps (no
+BlackHole needed)**. The app records whatever your Mac plays, through any
+output — built-in speakers, Bluetooth headphones, USB or HDMI — with no
+BlackHole and no Multi-Output Device. Switching headphones mid-meeting
+doesn't break it.
+
+The first recording asks for **Screen & System Audio Recording**
+permission. Allow it, or turn it on later under **System Settings →
+Privacy & Security → Screen & System Audio Recording**, then stop and
+restart the recording. Only audio is kept.
+
+### macOS 12, or if you prefer BlackHole
+
 To capture what the other meeting participants are saying (not just your
-voice), you need to route system audio through BlackHole. Two ways:
+voice), route system audio through BlackHole. Two ways:
 
 ### Option A — Multi-Output Device (recommended, you can still hear audio)
 

@@ -474,6 +474,19 @@ def list_output_devices() -> List[dict]:
         except Exception as e:
             logger.warning(f"Could not enumerate loopback devices: {e}")
     else:
+        # macOS 13+: native system audio (ScreenCaptureKit) comes first —
+        # it records whatever the Mac plays through ANY output, Bluetooth
+        # included, with no BlackHole and no Multi-Output Device. See
+        # core/mac_system_audio.py. Virtual loopback drivers stay listed
+        # below for older macOS and for anyone who prefers them.
+        from core import mac_system_audio
+        if mac_system_audio.is_supported():
+            devices.append({
+                "index": mac_system_audio.SYSTEM_AUDIO_INDEX,
+                "name": mac_system_audio.SYSTEM_AUDIO_NAME,
+                "channels": mac_system_audio.CHANNELS,
+                "default_samplerate": mac_system_audio.SAMPLE_RATE,
+            })
         # macOS / Linux: list any input device whose name matches a known
         # virtual-loopback driver. We use sounddevice indices directly so
         # AudioCapture can open them as ordinary InputStreams below.
@@ -629,6 +642,9 @@ class AudioCapture:
         # suggested a restart that re-opens the same device the same way
         # (field report 2026-09-15). None = opened, or never configured.
         self.loopback_error: Optional[str] = None
+        # core.mac_system_audio.ScreenCaptureAudio when system audio is
+        # recorded natively on macOS (no BlackHole).
+        self._native_loopback = None
         # Wallclock anchors stamped on the FIRST chunk that actually arrives
         # from each stream. WASAPI loopback typically starts a few hundred ms
         # after the mic stream because it blocks until audio plays — without
@@ -839,7 +855,10 @@ class AudioCapture:
                 self._streams.append(mic_stream)
 
             if self._out_idx is not None:
-                if IS_WINDOWS and pyaudio is not None:
+                from core.mac_system_audio import SYSTEM_AUDIO_INDEX
+                if self._out_idx == SYSTEM_AUDIO_INDEX:
+                    self._start_loopback_native()
+                elif IS_WINDOWS and pyaudio is not None:
                     self._start_loopback_windows()
                 else:
                     self._start_loopback_macos()
@@ -937,6 +956,34 @@ class AudioCapture:
                 portaudio_terminate(self._pa)
                 self._pa = None
 
+    def _start_loopback_native(self) -> None:
+        """macOS system audio through ScreenCaptureKit — the same queue,
+        writer thread and live-transcript tee as the BlackHole path, so
+        everything downstream is unchanged."""
+        from core.mac_system_audio import ScreenCaptureAudio, SAMPLE_RATE
+        self._loopback_sr = SAMPLE_RATE
+        self._loopback_channels = 1
+
+        def _on_block(block: np.ndarray) -> None:
+            if self.loopback_start_monotonic is None:
+                self.loopback_start_monotonic = time.monotonic()
+            self._loopback_samples += int(len(block))
+            self._loopback_q_putter(block)
+
+        try:
+            self._native_loopback = ScreenCaptureAudio(_on_block)
+            self._native_loopback.start()
+            self._loopback_thread = threading.Thread(
+                target=self._loopback_writer_sd, daemon=True)
+            self._loopback_thread.start()
+            logger.info("System audio stream started (ScreenCaptureKit)")
+        except Exception as e:
+            self._native_loopback = None
+            self.loopback_error = str(e) or type(e).__name__
+            logger.warning(f"System audio capture unavailable: {e}. "
+                           f"Mic only.")
+            self._out_idx = None
+
     def _start_loopback_macos(self) -> None:
         """
         BlackHole / virtual-loopback path. The "loopback" device is just an
@@ -1022,6 +1069,12 @@ class AudioCapture:
                     logger.warning(f"Error closing sd loopback stream: {e}")
             sd_closed = (_run_with_timeout(_stop_sd, 2.0, "loopback_sd.stop")
                          and sd_closed)
+
+        # Native macOS system audio (ScreenCaptureKit).
+        native = getattr(self, "_native_loopback", None)
+        if native is not None:
+            self._native_loopback = None
+            _run_with_timeout(native.stop, 4.0, "system_audio.stop")
 
         # Wake the loopback writer thread out of its queue wait (Mac path).
         try:

@@ -89,3 +89,13 @@ transformers<5
 pyobjc-core>=10.0; sys_platform == "darwin"
 pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"
 pyobjc-framework-EventKit>=10.0; sys_platform == "darwin"
+# Native system audio on macOS 13+ (core/mac_system_audio.py): records
+# what the Mac plays through any output, Bluetooth included, without
+# BlackHole or a Multi-Output Device.
+# Pinned to the pyobjc-core version constraints-mac.txt already fixes:
+# every pyobjc-framework-* release requires the same-version core, so an
+# unpinned newer framework would conflict with that pin and fail the
+# install. Loosen these once Freeze Dependencies has regenerated the
+# constraints file with them in it.
+pyobjc-framework-ScreenCaptureKit==12.2.2; sys_platform == "darwin"
+pyobjc-framework-CoreMedia==12.2.2; sys_platform == "darwin"
