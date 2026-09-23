@@ -76,7 +76,7 @@ logger = get_logger(__name__)
 #     still reads as a conversation; a human skims it and moves on.
 #   * Splitting one person into nine labels is BADLY wrong. It makes the
 #     transcript unusable — no one can follow who said what.
-#   * A confidently WRONG NAME ("Caleb Johnson" on a female speaker) is
+#   * A confidently WRONG NAME ("John Doe" on a female speaker) is
 #     the WORST of all. It doesn't just look broken, it actively
 #     misleads, and it poisons trust in the whole transcript.
 #
@@ -138,7 +138,7 @@ STICKY_MARGIN = 0.05
 # whole recording to average over and the user gets a confirm/undo step.
 #
 # Field report 2026-08-11: at 0.75 the live transcript labelled a FEMALE
-# speaker "CALEB JOHNSON" — a male colleague whose voiceprint happened
+# speaker "JOHN DOE" — a male colleague whose voiceprint happened
 # to be saved. A wrong Speaker NUMBER is recoverable; a wrong NAME is
 # actively misleading and undermines trust in everything else on screen.
 # Below this bar we fall back to "Speaker N" and never guess a name.
@@ -257,8 +257,8 @@ class LiveSpeakerTracker:
 
         # ── Known-profile naming: two gates, both required ────────────
         #
-        # Field report 2026-08-11: a female speaker was labelled "CALEB
-        # JOHNSON" live. A wrong name is worse than a wrong number — it
+        # Field report 2026-08-11: a female speaker was labelled "JOHN
+        # DOE" live. A wrong name is worse than a wrong number — it
         # reads as a confident assertion about a real person. So a name
         # is only attached when the clip is long enough to be worth
         # trusting AND the similarity clears a bar well above the

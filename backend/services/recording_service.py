@@ -537,7 +537,7 @@ class RecordingService:
                 # Ask the profile store with the LIVE naming bar, not
                 # its own post-stop default (0.75). Field report
                 # 2026-08-11: at 0.75 a female speaker was labelled
-                # "CALEB JOHNSON" mid-call. LiveSpeakerTracker re-checks
+                # "JOHN DOE" mid-call. LiveSpeakerTracker re-checks
                 # the returned similarity against the same constant —
                 # belt and braces, because a wrong name is the worst
                 # failure mode this feature has.

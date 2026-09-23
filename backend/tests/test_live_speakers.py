@@ -308,12 +308,12 @@ def test_known_profile_match_returns_real_name_immediately():
 
 
 def test_profile_match_below_the_live_naming_bar_yields_speaker_n():
-    """Field report 2026-08-11: a FEMALE speaker was labelled "CALEB
-    JOHNSON" — a male colleague with a saved voiceprint. 0.80 clears
+    """Field report 2026-08-11: a FEMALE speaker was labelled "JOHN
+    DOE" — a male colleague with a saved voiceprint. 0.80 clears
     SpeakerProfileService's post-stop default of 0.75 but must NOT be
     enough to assert a real person's name in the live preview."""
     def _profile_lookup(embedding):
-        return "Caleb Johnson", 0.80  # above 0.75, below 0.88
+        return "John Doe", 0.80  # above 0.75, below 0.88
 
     tracker = LiveSpeakerTracker(
         embed_fn=_make_embed_fn({1.0: VEC_A}),
@@ -321,7 +321,7 @@ def test_profile_match_below_the_live_naming_bar_yields_speaker_n():
     )
     label = tracker.assign(_clip(1.0), SR)
     assert label == "Speaker 1"
-    assert "Caleb" not in label
+    assert "John" not in label
     # It fell through to the ordinary live-centroid path, so the voice
     # is now tracked generically.
     assert tracker.speaker_count == 1
@@ -334,7 +334,7 @@ def test_short_clip_never_yields_a_name_even_at_perfect_similarity():
 
     def _profile_lookup(embedding):
         calls.append(1)
-        return "Caleb Johnson", 0.99
+        return "John Doe", 0.99
 
     tracker = LiveSpeakerTracker(
         embed_fn=_make_embed_fn({1.0: VEC_A}),
@@ -352,7 +352,7 @@ def test_profile_lookup_without_a_usable_similarity_does_not_name():
     """A lookup that can't say how confident it is is treated as not
     confident enough — never as a licence to print a name."""
     def _profile_lookup(embedding):
-        return "Caleb Johnson", None  # type: ignore[return-value]
+        return "John Doe", None  # type: ignore[return-value]
 
     tracker = LiveSpeakerTracker(
         embed_fn=_make_embed_fn({1.0: VEC_A}),
