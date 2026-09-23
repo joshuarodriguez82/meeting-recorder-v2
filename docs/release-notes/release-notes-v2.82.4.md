@@ -166,6 +166,14 @@ Now:
   conversation only."* Previously it carried nothing, and a one-sided
   transcript looked exactly like a meeting in which one person talked.
 
+- **The summary knows too.** When the other participants weren't
+  recorded, the summary, action items, decisions and requirements are
+  now written knowing the transcript is one side of the conversation:
+  they don't present it as the whole discussion, and they don't hand
+  commitments to people whose words were never captured. Your own
+  notes are unchanged. Reprocessing such a meeting runs again rather
+  than being skipped as "unchanged".
+
 A recording set up without system audio on purpose — an in-room
 meeting, or no speaker selected — is not a failure and raises none of
 this. Neither is a quiet far end: "system audio stopped" still waits 45
@@ -178,10 +186,6 @@ the endpoint still sends that shape.
 
 ## Still being looked at
 
-- **The summary isn't told that only one side was recorded.** The red
-  note on the session is the signal for now; the summary and action
-  items themselves are still written as if the transcript were the whole
-  meeting.
 - **Voice fingerprinting silently unavailable** on one install because
   the installed speech library no longer matches what the app expects.
   That is an environment mismatch rather than a code defect, and it

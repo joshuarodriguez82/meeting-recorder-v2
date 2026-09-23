@@ -221,3 +221,25 @@ def missing_system_audio_warning(
     return ("Other participants were not recorded — " + why + ". Only your "
             "microphone was captured, so the transcript, summary and action "
             "items cover your side of the conversation only.")
+
+
+def one_sided_transcript_note(capture_warning: Optional[str]) -> str:
+    """Context for the summarizer when the other participants were not
+    recorded, or "" when nothing is missing.
+
+    The Sessions list shows the reader that a meeting is one-sided; the
+    model writing its summary and action items could not see that, and
+    wrote them as if the user's lines were the whole discussion — so
+    every decision and commitment landed on the one person recorded.
+    This rides in with the session notes, the channel every extractor
+    already reads, rather than being threaded through each prompt.
+    """
+    if not (capture_warning or "").strip():
+        return ""
+    return ("RECORDING LIMITATION (stated by the app, not the user): the "
+            "other participants' audio was not captured — this transcript "
+            "is only the user's side of the conversation. Do not present "
+            "it as the whole discussion; do not attribute decisions or "
+            "commitments to other people unless the user's own words "
+            "state them; where it matters, say that the other side was "
+            "not recorded.")

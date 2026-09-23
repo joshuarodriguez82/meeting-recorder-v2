@@ -6832,6 +6832,22 @@ def _meeting_date(session) -> str:
         return str(started or "")
 
 
+def _llm_notes(session) -> str:
+    """The notes every summarizer call receives: the user's own notes,
+    preceded by the app's caveat when the other participants were not
+    recorded (core/capture_health.one_sided_transcript_note). Built in one
+    place so every extractor — and the reprocessing fingerprint, which
+    hashes these same notes — sees the same thing. The stored notes are
+    never modified."""
+    from core.capture_health import one_sided_transcript_note
+    user = session.notes or ""
+    caveat = one_sided_transcript_note(
+        getattr(session, "capture_warning", None))
+    if not caveat:
+        return user
+    return f"{caveat}\n\n{user}".rstrip()
+
+
 async def _run_extraction(session_id: str, extractor_name: str, field_name: str,
                            export_fn_name: str, extra_arg=None):
     svc.load_settings()
@@ -6849,7 +6865,7 @@ async def _run_extraction(session_id: str, extractor_name: str, field_name: str,
         raise HTTPException(status_code=400,
                             detail="Session has no transcript (run /process first)")
     transcript = session.full_transcript()
-    user_notes = session.notes or ""
+    user_notes = _llm_notes(session)
     try:
         method = getattr(svc.summarizer, extractor_name)
         # Wrap the actual LLM call in the retry helper. Coro factory
@@ -6952,7 +6968,7 @@ async def summarize_session(session_id: str, req: TemplateRequest):
             return await svc.summarizer.summarize(
                 session.full_transcript(),
                 prompt=prompt_text,
-                notes=session.notes or "",
+                notes=_llm_notes(session),
                 template_name=req.template,
                 image_paths=list(session.screenshots or []),
                 copilot_observations=_copilot_observations_blob(session),
@@ -7364,7 +7380,7 @@ async def process_full(session_id: str, req: ProcessFullRequest):
                 "Processing produced no transcript for this recording.")
             return {"ok": False, "stages": stages}
         transcript = session.full_transcript()
-        notes = session.notes or ""
+        notes = _llm_notes(session)
         images = list(session.screenshots or [])
         meeting_date = _meeting_date(session)
 
@@ -7645,7 +7661,7 @@ async def _extract_and_save(
     if not session or not session.segments:
         raise RuntimeError("no transcript")
     transcript = session.full_transcript()
-    notes = session.notes or ""
+    notes = _llm_notes(session)
     method = getattr(svc.summarizer, method_name)
     if method_name == "summarize":
         # Resolve the template name to its current prompt the same way
@@ -7699,7 +7715,7 @@ async def _extract_structured_and_save(session_id: str) -> dict:
         return {k: 0 for k in STRUCTURED_FIELDS}
     parsed = await svc.summarizer.extract_structured(
         session.full_transcript(),
-        notes=session.notes or "",
+        notes=_llm_notes(session),
         image_paths=list(session.screenshots or []),
         meeting_date=_meeting_date(session))
     created_at = session.started_at.isoformat() if session.started_at else ""
