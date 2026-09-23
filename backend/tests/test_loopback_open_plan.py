@@ -191,3 +191,106 @@ def test_the_log_label_names_the_format():
     label = describe_attempt({"samplerate": 44100, "channels": 1,
                               "frames_per_buffer": 4096})
     assert "44100" in label and "ch=1" in label
+
+
+# ── Wired into the real WASAPI open ─────────────────────────────────
+#
+# The ladder above is pure. These drive AudioCapture._start_loopback_windows
+# itself against a fake PyAudio, so a regression in the LOOP — reverting
+# to one format, dropping the write-back, forgetting to record why it
+# gave up — fails here rather than in someone's meeting.
+
+from tests._app_import import _stub_optional_modules  # noqa: E402
+
+_stub_optional_modules()
+
+from core import audio_capture  # noqa: E402
+
+FIELD_FORMAT_ERROR = ("Error starting stream: Unanticipated host error "
+                      "[PaErrorCode -9999]: 'AUDCLNT_E_UNSUPPORTED_FORMAT' "
+                      "[Windows WASAPI error -2004287480]")
+
+
+class _Stream:
+    def close(self):
+        pass
+
+
+def _fake_pyaudio(accepts, opens):
+    """A PyAudio whose loopback endpoint advertises 48 kHz stereo — the
+    field device — and accepts only the (rate, channels) pairs in
+    ``accepts``. Every open is recorded in ``opens``."""
+
+    class _PA:
+        def get_device_info_by_index(self, idx):
+            return {"name": "Speakers (loopback)", "maxInputChannels": 2,
+                    "defaultSampleRate": 48000.0}
+
+        def open(self, *, rate, channels, frames_per_buffer, **_):
+            opens.append((rate, channels, frames_per_buffer))
+            if (rate, channels) not in accepts:
+                raise OSError(FIELD_FORMAT_ERROR)
+            return _Stream()
+
+        def terminate(self):
+            pass
+
+    class _Module:
+        paFloat32 = 1
+
+        @staticmethod
+        def PyAudio():  # noqa: N802 - mirrors the real API
+            return _PA()
+
+    return _Module
+
+
+def _capture(monkeypatch, accepts, opens):
+    monkeypatch.setattr(audio_capture, "pyaudio",
+                        _fake_pyaudio(accepts, opens))
+    cap = audio_capture.AudioCapture(mic_device_index=0,
+                                     output_device_index=7,
+                                     on_chunk=lambda _c: None)
+    # The reader thread would block on a real stream; the open is what
+    # is under test.
+    monkeypatch.setattr(cap, "_loopback_reader_pa", lambda: None)
+    return cap
+
+
+def test_a_device_that_refuses_its_advertised_format_still_opens(monkeypatch):
+    """The field shape: 48 kHz stereo refused. Mono at the same rate is
+    accepted — and the stream must be recorded as what actually opened,
+    because the WAV writer and the merge read these attributes."""
+    opens = []
+    cap = _capture(monkeypatch, accepts={(48000, 1)}, opens=opens)
+
+    cap._start_loopback_windows()
+
+    assert cap.loopback_error is None
+    assert (cap._loopback_sr, cap._loopback_channels) == (48000, 1)
+    assert cap._out_idx == 7
+    assert len({(r, c) for r, c, _ in opens}) > 1
+
+
+def test_a_device_that_refuses_everything_says_why(monkeypatch):
+    """Every rung refused: recording continues mic-only, and the reason
+    is kept for RecordingService to report — it used to exist only in a
+    WARNING line."""
+    opens = []
+    cap = _capture(monkeypatch, accepts=set(), opens=opens)
+
+    cap._start_loopback_windows()
+
+    assert cap.loopback_error == FIELD_FORMAT_ERROR
+    assert cap._out_idx is None
+    assert len(opens) == len(build_loopback_open_plan(48000, 2))
+
+
+def test_a_device_that_works_takes_todays_path(monkeypatch):
+    opens = []
+    cap = _capture(monkeypatch, accepts={(48000, 2)}, opens=opens)
+
+    cap._start_loopback_windows()
+
+    assert opens == [(48000, 2, 1024)]
+    assert cap.loopback_error is None

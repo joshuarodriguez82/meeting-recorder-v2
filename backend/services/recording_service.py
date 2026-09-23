@@ -663,6 +663,24 @@ class RecordingService:
             self._capture = None
             raise RuntimeError(f"Failed to open recording file: {e}") from e
 
+        # Recording without the other participants is a degraded start,
+        # not a normal one. Counted once, here, with a reason code; the
+        # live warning and the session's own warning come from
+        # core/capture_health. Best-effort: telemetry must never be the
+        # thing that stops a recording from starting.
+        loopback_error = getattr(self._capture, "loopback_error", None)
+        if output_device_index is not None and loopback_error:
+            try:
+                from core.capture_health import classify_open_error
+                events.emit(
+                    events.CAPTURE_DEGRADED,
+                    session_id=session_id,
+                    stream="system",
+                    reason=classify_open_error(loopback_error))
+            except Exception:  # noqa: BLE001
+                logger.debug("Could not record capture.degraded",
+                             exc_info=True)
+
         # Spin up live transcription only if the user hasn't disabled it
         # in Settings. When disabled we skip the LiveTranscriber thread
         # AND the per-chunk resampling in _on_audio_chunk, saving CPU on
@@ -1199,6 +1217,37 @@ class RecordingService:
                 except Exception as e:
                     logger.warning(f"sync-integrity measurement failed: {e}")
 
+                # OTHER PARTICIPANTS NOT RECORDED. A meeting whose system
+                # audio never arrived used to reach the Sessions list with
+                # no warning at all: lb=0 made drift "n/a", so the sync
+                # check above had nothing to say (field log 2026-09-15:
+                # "lb=n/a … mic=1505.8s", then silence), and a one-sided
+                # transcript read exactly like a meeting in which one
+                # person spoke. Its own field rather than a clause in
+                # sync_warning — that one is an informational measurement;
+                # this changes what every artifact of the meeting means.
+                # Outside the >30 s gate: a short call missing the other
+                # side is missing it all the same. Without stats, only a
+                # KNOWN open failure is reported — no stats is not
+                # evidence that nothing arrived.
+                try:
+                    from core.capture_health import (
+                        missing_system_audio_warning)
+                    open_error = getattr(own.capture, "loopback_error", None)
+                    if capture_stats is not None or open_error:
+                        session.capture_warning = missing_system_audio_warning(
+                            system_configured=own.loopback_path is not None,
+                            system_samples=int(
+                                (capture_stats or {}).get(
+                                    "loopback_samples", 0) or 0),
+                            system_open_error=open_error)
+                    if session.capture_warning:
+                        logger.warning(
+                            f"CAPTURE WARNING: session {session.session_id}: "
+                            f"{session.capture_warning}")
+                except Exception as e:
+                    logger.warning(f"missing-audio check failed: {e}")
+
                 # capture.stopped — the per-stream telemetry, emitted
                 # unconditionally rather than behind the >30s gate the
                 # human SYNC_INTEGRITY line uses. Computed from the same
@@ -1728,6 +1777,7 @@ class RecordingService:
                 "mic_state": "dead",
                 "system_state": None,
                 "capture_warning": None,
+                "capture_warning_code": None,
             }
 
         now = datetime.now()
@@ -1749,36 +1799,40 @@ class RecordingService:
         # the post-start grace period. Deliberately independent of
         # mic_state/system_state's shorter STREAM_DEAD_S so the meter
         # itself is responsive while the banner stays conservative.
-        capture_warning: Optional[str] = None
+        # WHAT to say, and WHEN, lives in core/capture_health (pure,
+        # tested without PortAudio). The case it exists for: system audio
+        # that FAILED TO OPEN used to be reported only after 45 s of
+        # "silence", as "may have stopped — try restarting", and only on
+        # the Record tab — so a meeting on 2026-09-15 was recorded
+        # mic-only end to end. A refused open is now reported at once,
+        # with its cause, and with a stable code the UI turns into one
+        # notification that reaches the user wherever they are.
+        from core.capture_health import live_capture_issue
+
         started_at = self._session.started_at if self._session else None
         elapsed_s = (now - started_at).total_seconds() if started_at else 0.0
-        if elapsed_s > CAPTURE_WARNING_GRACE_S:
-            mic_dead_s = (
+        issue = live_capture_issue(
+            elapsed_s=elapsed_s,
+            mic_silent_for_s=(
                 (now - self._last_chunk_at).total_seconds()
-                if self._last_chunk_at else elapsed_s
-            )
-            if mic_dead_s >= CAPTURE_WARNING_DEAD_S:
-                capture_warning = (
-                    f"No microphone audio for {int(mic_dead_s)} seconds — "
-                    f"capture may have stopped. Consider stopping and "
-                    f"restarting the recording.")
-            elif system_configured:
-                sys_dead_s = (
-                    (now - self._last_loopback_chunk_at).total_seconds()
-                    if self._last_loopback_chunk_at else elapsed_s
-                )
-                if sys_dead_s >= CAPTURE_WARNING_DEAD_S:
-                    capture_warning = (
-                        f"No system audio for {int(sys_dead_s)} seconds — "
-                        f"capture may have stopped. Consider stopping and "
-                        f"restarting the recording.")
+                if self._last_chunk_at else None),
+            system_configured=system_configured,
+            system_open_error=getattr(self._capture, "loopback_error", None),
+            system_silent_for_s=(
+                (now - self._last_loopback_chunk_at).total_seconds()
+                if self._last_loopback_chunk_at else None),
+            platform=sys.platform,
+            grace_s=CAPTURE_WARNING_GRACE_S,
+            dead_after_s=CAPTURE_WARNING_DEAD_S,
+        )
 
         return {
             "mic_level": mic_level,
             "system_level": system_level,
             "mic_state": mic_state,
             "system_state": system_state,
-            "capture_warning": capture_warning,
+            "capture_warning": issue.message if issue else None,
+            "capture_warning_code": issue.code if issue else None,
         }
 
     def watchdog_tick(self) -> dict:

@@ -1486,6 +1486,9 @@ class RecordingStatus(BaseModel):
     mic_state: Optional[str] = None
     system_state: Optional[str] = None
     capture_warning: Optional[str] = None
+    # Stable identity for capture_warning — see core/capture_health.py.
+    # The UI notifies once per code per recording, not once per poll.
+    capture_warning_code: Optional[str] = None
 
 
 # ── Health ───────────────────────────────────────────────────────────
@@ -2765,6 +2768,7 @@ async def recording_status():
         mic_state=levels.get("mic_state"),
         system_state=levels.get("system_state"),
         capture_warning=levels.get("capture_warning"),
+        capture_warning_code=levels.get("capture_warning_code"),
     )
 
 

@@ -1,0 +1,44 @@
+{
+  "is_recording": true,
+  "session_id": "ABBA4F68",
+  "started_at": "2026-09-23T13:56:53.895646",
+  "duration_s": 0,
+  "models_ready": false,
+  "models_loading": false,
+  "models_error": null,
+  "current_status": "",
+  "is_processing": false,
+  "pipeline": {
+    "stages": [
+      {
+        "key": "transcribe",
+        "label": "Transcribing",
+        "state": "pending"
+      },
+      {
+        "key": "diarize",
+        "label": "Identifying speakers",
+        "state": "pending"
+      },
+      {
+        "key": "speakers",
+        "label": "Assigning speakers",
+        "state": "pending"
+      }
+    ],
+    "label": "",
+    "percent": 0,
+    "active": null,
+    "error": null,
+    "done": false
+  },
+  "warnings": [],
+  "auto_record_subject": null,
+  "auto_record_skip_reason": null,
+  "mic_level": 0.0,
+  "system_level": 0.0,
+  "mic_state": "dead",
+  "system_state": "dead",
+  "capture_warning": "Other participants are NOT being recorded \u2014 only your microphone is. Windows refused this speaker's audio format. In Sound settings, open the speaker's Properties \u2192 Advanced and set Default Format to a 2 channel, 48000 Hz option, then stop and restart the recording.",
+  "capture_warning_code": "system_audio_unavailable"
+}

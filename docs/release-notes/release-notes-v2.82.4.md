@@ -125,16 +125,63 @@ v2.80.3 fixed exactly this for the **microphone**: a ladder that varied
 sample rate, block size and latency, and never varied the one parameter
 that was wrong. System audio never got that treatment. It has it now,
 and the decision lives in its own module with 18 tests — five of which
-fail against the previous behaviour.
+fail against the previous behaviour — plus three that drive the real
+Windows open against a simulated speaker that refuses its own format.
+
+## You're told at once when the other participants aren't being recorded
+
+When system audio couldn't be opened, the app waited for 45 seconds of
+"silence" and then showed, on the Record tab only: *"No system audio for
+45 seconds — capture may have stopped. Consider stopping and restarting
+the recording."* All three parts of that were wrong for this failure:
+
+- **It waited.** The app knew at the first second that system audio had
+  never started.
+- **The advice didn't work.** When Windows refuses a speaker's format, a
+  restart asks the same question and gets the same answer.
+- **Nobody was looking.** During an auto-recorded meeting you're in the
+  meeting, not on the Record tab.
+
+Now:
+
+- **At once, from any tab.** On the first status check after the
+  recording starts (about two seconds), you get a system notification
+  and an in-app alert that stays until you dismiss it: **"Other
+  participants aren't being recorded"**, with an **Open Record** button.
+  The red recording strip in the sidebar, which is visible from every
+  tab, changes to **"Only your mic is recording"**.
+- **What to actually do.** The message names the cause and the fix for
+  it: a refused audio format (on Windows: Sound settings → the speaker's
+  Properties → Advanced → a 2 channel, 48000 Hz Default Format, then
+  restart the recording), a speaker that was unplugged or switched, or
+  another app holding exclusive control of it. A cause the app doesn't
+  recognise shows the underlying error rather than a guess.
+- **Once, not every two seconds.** One notification per problem per
+  recording. If the microphone then fails as well, that's a new problem
+  and you're told about that too.
+- **Afterwards, on the session.** A meeting recorded without the other
+  participants now carries a red note in Sessions: *"Other participants
+  were not recorded — … Only your microphone was captured, so the
+  transcript, summary and action items cover your side of the
+  conversation only."* Previously it carried nothing, and a one-sided
+  transcript looked exactly like a meeting in which one person talked.
+
+A recording set up without system audio on purpose — an in-room
+meeting, or no speaker selected — is not a failure and raises none of
+this. Neither is a quiet far end: "system audio stopped" still waits 45
+seconds, because participants who aren't talking are normal.
+
+The tests drive the real start → status → stop path with only the sound
+card simulated. The status payload the app's own tests use was captured
+from the real endpoint, and the backend suite checks on every run that
+the endpoint still sends that shape.
 
 ## Still being looked at
 
-Two problems from the same report are **not** fixed here:
-
-- **Nothing tells you while it's happening.** Both the missing system
-  audio and the lost recordings were written to the log and shown to
-  nobody. A live warning on the recording screen — while the meeting can
-  still be saved — is next.
+- **The summary isn't told that only one side was recorded.** The red
+  note on the session is the signal for now; the summary and action
+  items themselves are still written as if the transcript were the whole
+  meeting.
 - **Voice fingerprinting silently unavailable** on one install because
   the installed speech library no longer matches what the app expects.
   That is an environment mismatch rather than a code defect, and it

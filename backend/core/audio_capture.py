@@ -565,6 +565,13 @@ class AudioCapture:
         self._loopback_thread: Optional[threading.Thread] = None
         self._loopback_sr: int = SAMPLE_RATE
         self._loopback_channels: int = 1
+        # WHY system audio did not open, when it did not. Read by
+        # RecordingService.get_capture_levels so the user is told at once,
+        # in terms of the cause — before this, the failure existed only as
+        # a WARNING log line, and the UI waited 45 s of "silence" and then
+        # suggested a restart that re-opens the same device the same way
+        # (field report 2026-09-15). None = opened, or never configured.
+        self.loopback_error: Optional[str] = None
         # Wallclock anchors stamped on the FIRST chunk that actually arrives
         # from each stream. WASAPI loopback typically starts a few hundred ms
         # after the mic stream because it blocks until audio plays — without
@@ -861,6 +868,7 @@ class AudioCapture:
             self._loopback_thread.start()
             logger.info("System audio stream started (WASAPI)")
         except Exception as e:
+            self.loopback_error = str(e) or type(e).__name__
             logger.warning(f"System audio capture unavailable: {e}. Mic only.")
             self._out_idx = None
             if self._pa:
@@ -899,6 +907,7 @@ class AudioCapture:
             self._loopback_thread.start()
             logger.info("System audio stream started (sounddevice loopback)")
         except Exception as e:
+            self.loopback_error = str(e) or type(e).__name__
             logger.warning(
                 f"System audio capture unavailable on this device: {e}. "
                 f"Mic only. (On macOS, install BlackHole and pick it from "
