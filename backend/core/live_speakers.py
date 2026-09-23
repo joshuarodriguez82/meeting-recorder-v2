@@ -151,6 +151,27 @@ PROFILE_NAME_THRESHOLD = 0.88
 # mic) from fragmenting into an ever-growing speaker list.
 MAX_LIVE_SPEAKERS = 10
 
+# Two tracked voices whose CENTROIDS are this similar are one person, and
+# are merged. Field report (2026-09): one far-end speaker alternating
+# between "Speaker 1" and "Speaker 2" for a whole call.
+#
+# How that happens with the create bar at 0.40: a centroid is born from
+# ONE clip. If that clip was noisy, the same person's next long clip can
+# score under 0.40 against it and mint a second identity — and nothing
+# ever undid that. From then on their clips split between the two by
+# whichever noisy mean is closer, and both centroids keep learning the
+# same voice.
+#
+# That learning is what makes the mistake detectable: two centroids
+# trained on one voice converge. A centroid is an average of several
+# clips, so it is far less noisy than a single clip — same-person
+# centroids settle well above the 0.55 clip MATCH bar, while different
+# people's stay down in the 0.2-0.5 range clips show. 0.65 is above
+# every "different people" figure this module was tuned on. Merging is
+# the cheap failure per the asymmetry above; this bar is still set so
+# that it takes a real convergence, not one lucky clip.
+CONSOLIDATE_THRESHOLD = 0.65
+
 
 class LiveSpeakerTracker:
     """Assigns a running "Speaker N" (or known display name) label to
@@ -174,6 +195,7 @@ class LiveSpeakerTracker:
         sticky_margin: float = STICKY_MARGIN,
         profile_name_threshold: float = PROFILE_NAME_THRESHOLD,
         max_speakers: int = MAX_LIVE_SPEAKERS,
+        consolidate_threshold: float = CONSOLIDATE_THRESHOLD,
         profile_lookup: Optional[
             Callable[[np.ndarray], Optional[Tuple[str, float]]]
         ] = None,
@@ -194,6 +216,7 @@ class LiveSpeakerTracker:
         self._sticky_margin = max(0.0, sticky_margin)
         self._profile_name_threshold = profile_name_threshold
         self._max_speakers = max(1, max_speakers)
+        self._consolidate_threshold = consolidate_threshold
         # Optional: profile_lookup(embedding) -> (display_name, similarity)
         # or None. Wraps SpeakerProfileService.find_match() so a known
         # voice gets its real name immediately instead of a generic
@@ -207,6 +230,18 @@ class LiveSpeakerTracker:
         # Running-mean sample counts, parallel to _centroids/_labels.
         self._counts: List[int] = []
         self._last_label: Optional[str] = None
+        # Monotonic, so a merge that removes "Speaker 2" can't make the
+        # next new voice collide with a surviving "Speaker 3".
+        self._next_number = 1
+        # (from_label, to_label) renames since the last drain — the
+        # transcriber rewrites what's on screen from these.
+        self._relabels: List[Tuple[str, str]] = []
+
+    def drain_relabels(self) -> List[Tuple[str, str]]:
+        """Label renames decided since the last call, oldest first.
+        Every segment already shown under ``from`` belongs under ``to``."""
+        out, self._relabels = self._relabels, []
+        return out
 
     @property
     def speaker_count(self) -> int:
@@ -224,6 +259,8 @@ class LiveSpeakerTracker:
         self._labels = []
         self._counts = []
         self._last_label = None
+        self._next_number = 1
+        self._relabels = []
 
     def assign(self, pcm: np.ndarray, samplerate: int) -> str:
         """Return a speaker label for one utterance of loopback audio.
@@ -286,6 +323,12 @@ class LiveSpeakerTracker:
                     # asymmetry note at the top of this module.
                     sim = -1.0
                 if sim >= self._profile_name_threshold:
+                    # Bind the name to a centroid. Returning it without
+                    # one left the same person's SHORT clips — which
+                    # never reach this lookup — to be matched against
+                    # the generic centroids, so one known voice
+                    # alternated between its name and "Speaker N".
+                    self._bind_name(name, embedding)
                     self._last_label = name
                     return name
                 logger.debug(
@@ -316,8 +359,82 @@ class LiveSpeakerTracker:
         return emb / norm
 
     def _new_label(self) -> str:
-        label = f"Speaker {len(self._centroids) + 1}"
-        return label
+        taken = set(self._labels)
+        while f"Speaker {self._next_number}" in taken:
+            self._next_number += 1
+        return f"Speaker {self._next_number}"
+
+    def _is_generic(self, label: str) -> bool:
+        return label.startswith("Speaker ")
+
+    def _rename(self, old: str, new: str) -> None:
+        if old == new:
+            return
+        self._relabels.append((old, new))
+        if self._last_label == old:
+            self._last_label = new
+
+    def _bind_name(self, name: str, embedding: np.ndarray) -> None:
+        """Give a confidently named voice a centroid under its name."""
+        if name in self._labels:
+            self._update_centroid(self._labels.index(name), embedding)
+            self._consolidate()
+            return
+        sims = [float(np.dot(embedding, c)) for c in self._centroids]
+        best = max(range(len(sims)), key=sims.__getitem__, default=-1)
+        if (best >= 0 and sims[best] >= self._match_threshold
+                and self._is_generic(self._labels[best])):
+            # The generic speaker we've been tracking IS this person.
+            self._rename(self._labels[best], name)
+            self._labels[best] = name
+            self._update_centroid(best, embedding)
+            self._consolidate()
+            return
+        self._centroids.append(embedding)
+        self._labels.append(name)
+        self._counts.append(1)
+        self._consolidate()
+
+    def _consolidate(self) -> None:
+        """Merge centroids that have converged on one voice. The older
+        identity survives (it is what the user has been reading), except
+        that a real name always outlives a generic number; two different
+        names are never merged."""
+        merged = True
+        while merged:
+            merged = False
+            n = len(self._centroids)
+            for i in range(n):
+                for j in range(i + 1, n):
+                    sim = float(np.dot(self._centroids[i],
+                                       self._centroids[j]))
+                    if sim < self._consolidate_threshold:
+                        continue
+                    a, b = self._labels[i], self._labels[j]
+                    if not self._is_generic(a) and not self._is_generic(b):
+                        continue
+                    keep, drop = (i, j)
+                    if self._is_generic(a) and not self._is_generic(b):
+                        keep, drop = (j, i)
+                    ck, cd = self._counts[keep], self._counts[drop]
+                    mean = (self._centroids[keep] * ck
+                            + self._centroids[drop] * cd) / (ck + cd)
+                    norm = float(np.linalg.norm(mean))
+                    if norm > 1e-8:
+                        self._centroids[keep] = mean / norm
+                    self._counts[keep] = ck + cd
+                    logger.info(
+                        f"Live speakers merged: {self._labels[drop]} → "
+                        f"{self._labels[keep]} (centroid similarity "
+                        f"{sim:.3f} ≥ {self._consolidate_threshold})")
+                    self._rename(self._labels[drop], self._labels[keep])
+                    del self._centroids[drop]
+                    del self._labels[drop]
+                    del self._counts[drop]
+                    merged = True
+                    break
+                if merged:
+                    break
 
     def _match_or_create(
         self, embedding: np.ndarray, duration_s: float,
@@ -358,8 +475,12 @@ class LiveSpeakerTracker:
             # Same voice as someone we're already tracking. The common,
             # boring, correct case — and now MUCH easier to reach than
             # it was at 0.75.
+            label = self._labels[best_idx]
             self._update_centroid(best_idx, embedding)
-            return self._labels[best_idx]
+            # Learning may have pulled this centroid onto another one
+            # that is the same person; if so the label may have changed.
+            self._consolidate()
+            return label if label in self._labels else self._resolve(label)
 
         at_cap = len(self._centroids) >= self._max_speakers
         # "Clearly different" means below the (much lower) create bar
@@ -372,6 +493,7 @@ class LiveSpeakerTracker:
 
         if not at_cap and clearly_different and long_enough:
             label = self._new_label()
+            self._next_number += 1
             self._centroids.append(embedding)
             self._labels.append(label)
             self._counts.append(1)
@@ -405,6 +527,13 @@ class LiveSpeakerTracker:
         # long enough still gets to create "Speaker 1" from a
         # trustworthy sample.
         return "Speaker 1"
+
+    def _resolve(self, label: str) -> str:
+        """Where a label went after the renames recorded so far."""
+        for old, new in self._relabels:
+            if old == label:
+                label = new
+        return label
 
     def _update_centroid(self, idx: int, embedding: np.ndarray) -> None:
         """Running-mean update of centroid `idx` with a new sample,

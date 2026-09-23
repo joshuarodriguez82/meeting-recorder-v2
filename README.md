@@ -203,7 +203,7 @@ questions worth asking the assistant afterwards.
 
 ### Speakers
 - **Automatic naming** — speakers who introduce themselves ("Hi, I'm Sarah") or are addressed by name are auto-labeled and their voiceprint saved, with no manual tagging
-- **Cross-session fingerprinting** — rename a speaker once (e.g. SPEAKER_01 → "Maria Chen") and the embedding is saved. Future meetings auto-label her without re-tagging.
+- **Cross-session fingerprinting** — rename a speaker once (e.g. SPEAKER_01 → "Jane Roe") and the embedding is saved. Future meetings auto-label her without re-tagging.
 - **Known Speakers UI** — manage the roster from Settings: rename, delete, or merge two profiles that ended up as separate entries. All local, stored as JSON.
 
 ### Workflow

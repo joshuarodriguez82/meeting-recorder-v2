@@ -294,7 +294,7 @@ def test_at_the_cap_everything_folds_into_best_match():
 def test_known_profile_match_returns_real_name_immediately():
     def _profile_lookup(embedding):
         if float(np.dot(embedding, VEC_A)) > 0.9:
-            return "Maria Chen", 0.91
+            return "Jane Roe", 0.91
         return None
 
     tracker = LiveSpeakerTracker(
@@ -302,9 +302,12 @@ def test_known_profile_match_returns_real_name_immediately():
         profile_lookup=_profile_lookup,
     )
     label = tracker.assign(_clip(1.0), SR)
-    assert label == "Maria Chen"
-    # A known-profile match should not pollute the generic centroid list.
-    assert tracker.speaker_count == 0
+    assert label == "Jane Roe"
+    # One tracked identity, under the name — never a "Speaker N" too.
+    # (It used to track nothing, which is how the same person's short
+    # clips, which skip the profile lookup, came out as "Speaker 1".)
+    assert tracker.speaker_count == 1
+    assert tracker.drain_relabels() == []
 
 
 def test_profile_match_below_the_live_naming_bar_yields_speaker_n():
@@ -386,3 +389,111 @@ def test_reset_clears_state_but_keeps_config():
     # Fresh meeting starts back at "Speaker 1".
     label = tracker.assign(_clip(1.0), SR)
     assert label == "Speaker 1"
+
+
+
+# ── Fix 3 (2026-09): one voice, two labels ───────────────────────────
+#
+# Field report: the live view split one far-end person across two labels
+# for a whole call. Two mechanisms, both covered here.
+
+
+def test_a_named_voices_short_clips_keep_the_name():
+    """Short clips never reach the profile lookup (it needs 2.5 s). They
+    used to be matched only against generic centroids, so the same known
+    person read "Jane Roe" on long clips and "Speaker 1" on short ones."""
+    def _profile_lookup(embedding):
+        if float(np.dot(embedding, VEC_A)) > 0.9:
+            return "Jane Roe", 0.95
+        return None
+
+    tracker = LiveSpeakerTracker(
+        embed_fn=_make_embed_fn({1.0: VEC_A, 2.0: VEC_A_NEAR}),
+        profile_lookup=_profile_lookup,
+    )
+    assert tracker.assign(_clip(1.0, duration_s=4.0), SR) == "Jane Roe"
+    assert tracker.assign(_clip(2.0, duration_s=1.5), SR) == "Jane Roe"
+
+
+def test_a_generic_speaker_later_recognised_is_renamed_not_duplicated():
+    def _profile_lookup(embedding):
+        return ("Jane Roe", 0.95) if long_clip[0] else None
+
+    long_clip = [False]
+    tracker = LiveSpeakerTracker(
+        embed_fn=_make_embed_fn({1.0: VEC_A, 2.0: VEC_A_NEAR}),
+        profile_lookup=_profile_lookup,
+    )
+    assert tracker.assign(_clip(1.0), SR) == "Speaker 1"
+    long_clip[0] = True
+    assert tracker.assign(_clip(2.0), SR) == "Jane Roe"
+    assert tracker.speaker_count == 1
+    assert tracker.drain_relabels() == [("Speaker 1", "Jane Roe")]
+
+
+def _unit(v):
+    v = np.asarray(v, dtype=np.float32)
+    return v / np.linalg.norm(v)
+
+
+def test_two_labels_that_converge_on_one_voice_are_merged():
+    """Speaker 2 is minted from a clip that scored under the create bar
+    against Speaker 1's single founding clip. The same person's later
+    clips then split between the two by whichever noisy mean is closer —
+    the field symptom. Both centroids learn that one voice, converge,
+    and must then become one label, with everything shown under
+    Speaker 2 moved to Speaker 1."""
+    view_a = _unit([0.95, 0.31, 0.0])    # the voice, heard one way
+    view_b = _unit([0.95, -0.31, 0.0])   # the same voice, another way
+    vectors = {1.0: _unit([0.6, 0.8, 0.0]), 2.0: _unit([0.6, -0.8, 0.0])}
+    for k in range(12):
+        vectors[3.0 + k] = view_a if k % 2 == 0 else view_b
+    tracker = LiveSpeakerTracker(embed_fn=_make_embed_fn(vectors))
+    assert tracker.assign(_clip(1.0), SR) == "Speaker 1"
+    assert tracker.assign(_clip(2.0), SR) == "Speaker 2"
+    labels = [tracker.assign(_clip(3.0 + k), SR) for k in range(12)]
+    assert tracker.speaker_count == 1
+    assert ("Speaker 2", "Speaker 1") in tracker.drain_relabels()
+    assert labels[-1] == "Speaker 1"
+
+
+def test_two_different_voices_are_never_merged():
+    tracker = LiveSpeakerTracker(embed_fn=_make_embed_fn({
+        1.0: VEC_A, 2.0: VEC_B, 3.0: VEC_A, 4.0: VEC_B, 5.0: VEC_A_NEAR,
+    }))
+    for m in (1.0, 2.0, 3.0, 4.0, 5.0):
+        tracker.assign(_clip(m), SR)
+    assert tracker.speaker_count == 2
+    assert tracker.drain_relabels() == []
+
+
+def test_two_different_names_are_never_merged():
+    names = iter([("Jane Roe", 0.95), ("John Doe", 0.95)])
+
+    tracker = LiveSpeakerTracker(
+        embed_fn=_make_embed_fn({1.0: VEC_A, 2.0: VEC_A_NEAR}),
+        profile_lookup=lambda e: next(names),
+    )
+    assert tracker.assign(_clip(1.0), SR) == "Jane Roe"
+    assert tracker.assign(_clip(2.0), SR) == "John Doe"
+    assert tracker.speaker_count == 2
+
+
+def test_a_merge_never_makes_the_next_label_collide():
+    """Numbering is monotonic: after Speaker 2 merges away, the next new
+    voice must not reuse a label that is still on screen."""
+    tracker = LiveSpeakerTracker(embed_fn=_make_embed_fn({
+        1.0: _unit([0.6, 0.8, 0.0]), 2.0: _unit([0.6, -0.8, 0.0]),
+        3.0: _unit([0.0, 0.0, 1.0]),
+        **{4.0 + k: (_unit([0.95, 0.31, 0.0]) if k % 2 == 0
+                     else _unit([0.95, -0.31, 0.0])) for k in range(12)},
+        20.0: _unit([0.0, -0.6, -0.8]),
+    }))
+    tracker.assign(_clip(1.0), SR)   # Speaker 1
+    tracker.assign(_clip(2.0), SR)   # Speaker 2
+    tracker.assign(_clip(3.0), SR)   # Speaker 3, a different person
+    for k in range(12):
+        tracker.assign(_clip(4.0 + k), SR)
+    assert ("Speaker 2", "Speaker 1") in tracker.drain_relabels()
+    shown = {"Speaker 1", "Speaker 3"}
+    assert tracker.assign(_clip(20.0), SR) not in shown

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Loader2, Mic } from "lucide-react";
 import { api } from "@/lib/api";
+import { applyLiveMessage, type LiveMessage } from "@/lib/live-transcript";
 
 // Live transcript panel.
 //
@@ -31,6 +32,9 @@ import { api } from "@/lib/api";
 type Speaker = "you" | "them" | "room";
 
 type Segment = {
+  // Backend-assigned, so a later correction (retract / relabel — see
+  // src/lib/live-transcript.ts) can name it.
+  id?: number;
   start: number;
   end: number;
   text: string;
@@ -48,7 +52,7 @@ type Segment = {
   // notetaker parity) — set ONLY on "them" segments, when the backend
   // has speechbrain/torch available AND has accumulated enough audio
   // to fingerprint the voice. "Speaker 2" for an unrecognized voice, or
-  // a known SpeakerProfile's real display name (e.g. "Maria Chen") when
+  // a known SpeakerProfile's real display name (e.g. "Jane Roe") when
   // it matches. Never set on "you"/"room" segments — the speaker
   // field's existing meaning is unchanged, this is purely additive.
   // Absent = render the plain "Them" badge exactly as before.
@@ -246,23 +250,10 @@ export function LiveTranscriptPanel({ recording }: { recording: boolean }) {
       };
       es.onmessage = (e) => {
         try {
-          const seg: Segment = JSON.parse(e.data);
-          setSegments((prev) => {
-            // Dedupe against the most recent ~50 entries. The history
-            // hydrate that runs on mount may overlap with the first
-            // few SSE events in flight at subscribe time; matching on
-            // (start, end, text) is a tight enough key that a real
-            // distinct segment with the same shape essentially can't
-            // happen, and bounding the lookup keeps appends O(1).
-            const tail = prev.slice(-50);
-            const dup = tail.some(
-              (s) =>
-                s.start === seg.start &&
-                s.end === seg.end &&
-                s.text === seg.text,
-            );
-            return dup ? prev : [...prev, seg];
-          });
+          // A new segment, or a correction to what's shown: a duplicate
+          // withdrawn, or two speaker labels found to be one person.
+          const msg: LiveMessage = JSON.parse(e.data);
+          setSegments((prev) => applyLiveMessage(prev, msg));
         } catch {
           // ignore malformed event
         }

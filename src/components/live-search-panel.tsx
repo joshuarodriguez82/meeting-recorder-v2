@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Loader2, Search, Square } from "lucide-react";
 import { api, type QASource } from "@/lib/api";
+import { applyLiveMessage, type LiveMessage } from "@/lib/live-transcript";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -30,10 +31,12 @@ import { Input } from "@/components/ui/input";
 // stay decoupled — neither has to know about the other's lifecycle.
 
 type Segment = {
+  id?: number;
   start: number;
   end: number;
   text: string;
   speaker?: "you" | "them" | "room";
+  speaker_label?: string;
 };
 
 // Three search scopes:
@@ -71,8 +74,8 @@ export function LiveSearchPanel({ recording }: { recording: boolean }) {
       es = new EventSource(`${baseUrl}/recording/transcript/stream${authQ}`);
       es.onmessage = (e) => {
         try {
-          const seg: Segment = JSON.parse(e.data);
-          setSegments((prev) => [...prev, seg]);
+          const msg: LiveMessage = JSON.parse(e.data);
+          setSegments((prev) => applyLiveMessage(prev, msg));
         } catch { /* ignore malformed */ }
       };
       es.addEventListener("done", () => es?.close());

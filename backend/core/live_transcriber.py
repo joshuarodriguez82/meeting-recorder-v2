@@ -114,6 +114,7 @@ import numpy as np
 
 from core.vad import find_utterances
 from core import decode_options
+from core.live_dedup import CrossStreamDeduper
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -379,6 +380,12 @@ class LiveTranscriber:
         # language and glossary for the life of the process.
         self._language: str = "en"
         self._initial_prompt: str = ""
+        # Every published segment carries an id, so a later correction
+        # can name it: a retraction (a duplicate heard by both streams,
+        # core/live_dedup) or a relabel (two live speakers found to be
+        # one person, core/live_speakers).
+        self._next_id = 1
+        self._deduper = CrossStreamDeduper()
 
     @property
     def is_running(self) -> bool:
@@ -427,6 +434,7 @@ class LiveTranscriber:
             SPEAKER_THEM, samplerate, vad_enabled=vad_enabled)
         with self._history_lock:
             self._history.clear()
+        self._deduper.reset()
         if self._speaker_tracker is not None:
             # Fresh meeting, fresh speakers — "Speaker 1" from a
             # previous recording must not bleed into this one. Known
@@ -541,6 +549,37 @@ class LiveTranscriber:
 
     # ── Worker internals ─────────────────────────────────────────────
 
+    def _fan_out(self, item: dict) -> None:
+        with self._consumers_lock:
+            consumers = list(self._consumers)
+        for q in consumers:
+            try:
+                q.put_nowait(item)
+            except queue.Full:
+                logger.debug("Live event dropped — consumer too slow")
+
+    def _retract(self, ids: List[int]) -> None:
+        """Withdraw published segments: gone from history (so a
+        reconnecting client's hydrate and the co-pilot never see them)
+        and from every open view."""
+        if not ids:
+            return
+        drop = set(ids)
+        with self._history_lock:
+            kept = [s for s in self._history if s.get("id") not in drop]
+            self._history.clear()
+            self._history.extend(kept)
+        self._fan_out({"type": "retract", "ids": sorted(drop)})
+
+    def _relabel(self, old: str, new: str) -> None:
+        """Every segment shown under speaker_label ``old`` belongs under
+        ``new`` — the tracker found them to be one person."""
+        with self._history_lock:
+            for s in self._history:
+                if s.get("speaker_label") == old:
+                    s["speaker_label"] = new
+        self._fan_out({"type": "relabel", "from": old, "to": new})
+
     def _publish(self, segment: dict) -> None:
         """Record into the rolling history, then fan out to every
         consumer. History is the source of truth for the co-pilot tick;
@@ -607,6 +646,9 @@ class LiveTranscriber:
                 and len(audio) > 0):
             try:
                 speaker_label = self._speaker_tracker.assign(audio, source.sr)
+                drain = getattr(self._speaker_tracker, "drain_relabels", None)
+                for old, new in (drain() if drain else []):
+                    self._relabel(old, new)
             except Exception as e:
                 # Never let a speaker-ID failure take down the live
                 # transcript — degrade to the plain "them" label for
@@ -614,22 +656,50 @@ class LiveTranscriber:
                 logger.debug(f"Live speaker assignment failed: {e}")
                 speaker_label = None
 
-        published = 0
+        pending: List[dict] = []
         for s in segments_iter:
             text = (s.text or "").strip()
             if not text:
                 continue
             segment = {
+                "id": self._next_id,
                 "start": float(s.start) + window_start,
                 "end": float(s.end) + window_start,
                 "text": text,
                 "speaker": source.label,
             }
+            self._next_id += 1
             if speaker_label:
                 segment["speaker_label"] = speaker_label
+            pending.append(segment)
+        if not pending:
+            return 0
+
+        # The same speech heard by BOTH streams — far end through the
+        # speakers into the mic, or the user's voice routed into system
+        # audio — would otherwise show as two people saying the same
+        # thing at once. See core/live_dedup for which copy is kept.
+        try:
+            decision = self._deduper.observe(
+                source.label, [seg["id"] for seg in pending],
+                " ".join(seg["text"] for seg in pending),
+                _level_dbfs(audio))
+        except Exception as e:
+            logger.debug(f"Live cross-stream dedup failed: {e}")
+            decision = None
+        if decision is not None and decision.drop:
+            logger.info(
+                f"Live [{source.label}] chunk dropped as a duplicate of the "
+                f"other stream ({len(pending)} segment(s))")
+            return 0
+        if decision is not None and decision.retract:
+            logger.info(
+                f"Live [{source.label}] chunk replaces {len(decision.retract)} "
+                f"quieter duplicate segment(s) from the other stream")
+            self._retract(decision.retract)
+        for segment in pending:
             self._publish(segment)
-            published += 1
-        return published
+        return len(pending)
 
     def _try_drain_one(self, source: _SourceBuffer) -> bool:
         """If `source` has a chunk ready (VAD boundary, or a full fixed
@@ -739,6 +809,14 @@ class LiveTranscriber:
                 except Exception as e:
                     logger.exception(
                         f"Tail transcribe failed [{source.label}]: {e}")
+
+
+def _level_dbfs(audio: np.ndarray) -> float:
+    """RMS level of one chunk, in dBFS (floor -120)."""
+    if audio is None or len(audio) == 0:
+        return -120.0
+    rms = float(np.sqrt(np.mean(np.square(audio.astype(np.float64)))))
+    return 20.0 * float(np.log10(max(rms, 1e-6)))
 
 
 def serialize_segment_sse(segment: dict) -> str:
