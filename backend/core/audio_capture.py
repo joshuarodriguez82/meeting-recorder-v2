@@ -176,6 +176,63 @@ _MAC_LOOPBACK_NAME_HINTS = (
 )
 
 
+# ── Picking up devices connected after launch ────────────────────────
+#
+# PortAudio takes its device list once, when it is initialised, and
+# sounddevice initialises it once, at import. A Bluetooth headset
+# connected after the app started was therefore invisible — to the mic
+# list and to recording — until the whole app was restarted (field
+# report 2026-09-23, macOS). The 60 s cache above was a second, smaller
+# layer of the same staleness.
+#
+# refresh_devices() re-initialises sounddevice's PortAudio so the next
+# enumeration sees the hardware as it is now. Terminating PortAudio with
+# a stream open is undefined behaviour, so it only runs when no capture
+# holds a stream: every AudioCapture registers itself here, under
+# _PORTAUDIO_LOCK, BEFORE it opens anything, and leaves only once every
+# stream it opened has closed. A capture whose close timed out stays
+# registered — an abandoned stream may still be live, and a restart is a
+# better outcome than a crash.
+_ACTIVE_CAPTURES: set = set()
+
+
+def _register_capture(capture: object) -> None:
+    with _PORTAUDIO_LOCK:
+        _ACTIVE_CAPTURES.add(id(capture))
+
+
+def _unregister_capture(capture: object) -> None:
+    with _PORTAUDIO_LOCK:
+        _ACTIVE_CAPTURES.discard(id(capture))
+
+
+def _reinitialize_portaudio() -> None:
+    """sounddevice's documented way to see newly connected devices."""
+    sd._terminate()
+    sd._initialize()
+
+
+def refresh_devices() -> bool:
+    """Re-scan audio hardware. True when the next listing will reflect
+    devices connected since launch; False when a capture is open and the
+    re-scan was skipped (the caller still gets the current list)."""
+    global _input_cache, _output_cache
+    with _PORTAUDIO_LOCK:
+        if _ACTIVE_CAPTURES:
+            logger.info("Device re-scan skipped: a capture stream is open")
+            return False
+        try:
+            _reinitialize_portaudio()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Device re-scan failed: {e}")
+            return False
+        with _DEVICE_CACHE_LOCK:
+            _input_cache = None
+            _output_cache = None
+    logger.info("Audio devices re-scanned")
+    return True
+
+
 def _get_wasapi_host_api_index() -> Optional[int]:
     """Find the Windows WASAPI host API index for sounddevice deduplication."""
     try:
@@ -622,6 +679,9 @@ class AudioCapture:
         return self._loopback_sr
 
     def start(self) -> None:
+        # Before any stream exists: a device re-scan must never tear
+        # PortAudio down under a stream that is opening.
+        _register_capture(self)
         self._running = True
         self._chunk_count = 0
         logger.info(f"Starting capture: mic={self._mic_idx}, output={self._out_idx}")
@@ -787,6 +847,8 @@ class AudioCapture:
         except Exception:
             self._close_all_streams()
             self._running = False
+            if self._loopback_sd_stream is None:
+                _unregister_capture(self)
             raise
 
     def _start_loopback_windows(self) -> None:
@@ -944,7 +1006,8 @@ class AudioCapture:
 
         # Stop sounddevice mic stream (and the sd loopback if we used it).
         logger.info("[capture.stop] close mic streams …")
-        _run_with_timeout(self._close_all_streams, 3.0, "close_all_streams")
+        sd_closed = _run_with_timeout(
+            self._close_all_streams, 3.0, "close_all_streams")
         logger.info("[capture.stop] mic streams closed")
 
         # Mac path: also stop the dedicated loopback sd.InputStream.
@@ -957,7 +1020,8 @@ class AudioCapture:
                     sd_stream.close()
                 except Exception as e:
                     logger.warning(f"Error closing sd loopback stream: {e}")
-            _run_with_timeout(_stop_sd, 2.0, "loopback_sd.stop")
+            sd_closed = (_run_with_timeout(_stop_sd, 2.0, "loopback_sd.stop")
+                         and sd_closed)
 
         # Wake the loopback writer thread out of its queue wait (Mac path).
         try:
@@ -1043,6 +1107,12 @@ class AudioCapture:
                 lambda: portaudio_terminate(pa), 2.0, "pa.terminate"
             )
             logger.info("[capture.stop] pa terminated")
+        if sd_closed:
+            _unregister_capture(self)
+        else:
+            logger.warning(
+                "[capture.stop] a stream did not close in time — device "
+                "re-scan stays disabled until restart")
         logger.info(f"Audio capture stopped. Total chunks captured: {self._chunk_count}")
 
     def _close_all_streams(self) -> None:

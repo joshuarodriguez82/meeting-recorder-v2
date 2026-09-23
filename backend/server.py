@@ -374,7 +374,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from config.settings import Settings, USER_DATA_DIR
 from core.model_status import ModelStatus, describe_unavailable, wait_for_models
 from core.audio_capture import (
-    list_input_devices, list_output_devices, probe_mic_device,
+    list_input_devices, list_output_devices, probe_mic_device, refresh_devices,
 )
 from core._precision import no_invented_precision
 from services.template_service import TemplateService
@@ -2353,12 +2353,20 @@ async def gpu_install(req: GpuInstallRequest):
 
 # ── Audio devices ────────────────────────────────────────────────────
 @app.get("/audio/devices")
-async def get_audio_devices():
+async def get_audio_devices(refresh: bool = False):
     # sd.query_devices() is synchronous and can take 1-3s on Windows
     # (Bluetooth stack enumeration). Run in a thread so the event loop
     # stays responsive for other endpoints.
+    #
+    # refresh=true re-scans the hardware first, so a headset connected
+    # since launch appears without restarting the app (see
+    # core.audio_capture.refresh_devices). `refreshed` says whether that
+    # happened — it is skipped while a capture stream is open.
     def _list_both():
-        return {"input": list_input_devices(), "output": list_output_devices()}
+        refreshed = refresh_devices() if refresh else False
+        return {"input": list_input_devices(),
+                "output": list_output_devices(),
+                "refreshed": refreshed}
     return await asyncio.to_thread(_list_both)
 
 
