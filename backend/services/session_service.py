@@ -495,6 +495,10 @@ class SessionService:
             # Read-only sync-integrity finding (mic/loopback drift or
             # dropped frames vs wall-clock). Surfaced as an info chip.
             "sync_warning": data.get("sync_warning"),
+            # Other participants not recorded (system audio never
+            # arrived). A warning chip, not an info one — see
+            # Session.capture_warning.
+            "capture_warning": data.get("capture_warning"),
             # How long finalize (WAV merge + optional AEC) took, kept
             # separate from duration_s (the capture window) so a slow
             # post-process never reads as missing audio. See

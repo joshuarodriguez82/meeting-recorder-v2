@@ -103,6 +103,13 @@ DOCUMENTS_INDEXED = "documents.indexed"
 #: normal use means the condition stopped happening, and a non-zero
 #: count means it happened AND was survived.
 SESSION_READ_FALLBACK = "session.read_fallback"
+#: A recording started with part of its capture missing — today, system
+#: audio (the other participants) that failed to open. Emitted once per
+#: recording, at start, with a reason CODE. A meeting was recorded
+#: mic-only on 2026-09-15 and the only trace was one WARNING line in a
+#: 2 MB log; a count in events.jsonl is what a diagnostics bundle — and
+#: any future health report — can actually be read for.
+CAPTURE_DEGRADED = "capture.degraded"
 
 ALL_EVENTS = (
     BACKEND_START,
@@ -118,6 +125,7 @@ ALL_EVENTS = (
     CALENDAR_IMPORT,
     DOCUMENTS_INDEXED,
     SESSION_READ_FALLBACK,
+    CAPTURE_DEGRADED,
 )
 
 # ── scrubbing ────────────────────────────────────────────────────────

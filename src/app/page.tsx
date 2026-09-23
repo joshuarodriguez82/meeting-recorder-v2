@@ -4,11 +4,12 @@ import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { toast } from "sonner";
 import { api, formatBytes, openExternal, type Meeting, type SessionSummary } from "@/lib/api";
 import { refreshRecordingStatus, useRecordingStatus } from "@/lib/recording-status";
+import { captureAnnouncement, captureWarningShortLabel } from "@/lib/capture-warning";
 import {
   Mic, History, CheckSquare, Target, Library,
   LayoutDashboard, Settings as SettingsIcon, HelpCircle, Loader2,
   Sparkles, Handshake, BarChart3, FileSpreadsheet,
-  Sun, PanelLeftClose, PanelLeftOpen,
+  Sun, PanelLeftClose, PanelLeftOpen, AlertTriangle,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
@@ -268,6 +269,8 @@ export default function Home() {
     sessionId: recordingStatus?.session_id ?? null,
     startedAt: recordingStatus?.started_at ?? null,
     autoSubject: recordingStatus?.auto_record_subject ?? null,
+    captureWarning: recordingStatus?.capture_warning ?? null,
+    captureWarningCode: recordingStatus?.capture_warning_code ?? null,
   }), [recordingStatus]);
   // Sidebar pipeline message: shown WITHOUT a spinner once nothing is
   // actually in flight, and cleared a few seconds after the backend
@@ -353,6 +356,9 @@ export default function Home() {
   // session, and only show each unique skip-reason once.
   const lastAutoSessionRef = useRef<string | null>(null);
   const lastSkipReasonRef = useRef<string | null>(null);
+  // One entry per (recording, capture_warning_code) already announced —
+  // see src/lib/capture-warning.ts.
+  const announcedCaptureRef = useRef<Set<string>>(new Set());
   // Live timer for the recording badge. Ticks every second while a
   // recording is active so the badge label shows real elapsed time.
   const [recordingElapsedS, setRecordingElapsedS] = useState(0);
@@ -454,6 +460,35 @@ export default function Home() {
             await sendNotification({
               title: "Auto-recording started", body: subject,
             });
+          }
+        } catch { /* not Tauri */ }
+      })();
+    }
+
+    // A recording that is losing audio — above all, system audio refused
+    // so the other participants are not being recorded (field report
+    // 2026-09-15). Raised HERE, in the shell mounted on every tab,
+    // because the Record-tab banner alone went unseen for a whole
+    // meeting: during an auto-recorded call the user is in the call.
+    // The toast stays until dismissed — this is the one message the app
+    // has that is worth interrupting for — and offers the way to the
+    // banner, which carries the same remedy.
+    const capture = captureAnnouncement(s, announcedCaptureRef.current);
+    if (capture) {
+      announcedCaptureRef.current.add(capture.key);
+      toast.error(capture.title, {
+        description: capture.body,
+        duration: Infinity,
+        action: { label: "Open Record", onClick: () => setNav("record") },
+      });
+      void (async () => {
+        try {
+          const { sendNotification, isPermissionGranted, requestPermission } =
+            await import("@tauri-apps/plugin-notification");
+          let granted = await isPermissionGranted();
+          if (!granted) granted = (await requestPermission()) === "granted";
+          if (granted) {
+            await sendNotification({ title: capture.title, body: capture.body });
           }
         } catch { /* not Tauri */ }
       })();
@@ -879,17 +914,35 @@ export default function Home() {
                   ? "flex-col justify-center gap-1 px-1 py-2"
                   : "gap-2 px-4 py-2 flex-1 text-left"
               }`}
-              title="Open the Record view"
+              title={recordingNow.captureWarning ?? "Open the Record view"}
             >
-              <span className="relative inline-flex h-2.5 w-2.5 shrink-0">
-                <span className="absolute inset-0 inline-flex h-full w-full animate-ping rounded-full bg-red-500 opacity-75" />
-                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
-              </span>
+              {/* A degraded capture replaces the pulse: this strip is the
+                  one recording indicator visible from every tab, so it
+                  is where "only your mic is recording" has to show. */}
+              {recordingNow.captureWarning ? (
+                <AlertTriangle
+                  className="h-3.5 w-3.5 shrink-0 text-red-600 dark:text-red-400"
+                  aria-hidden
+                />
+              ) : (
+                <span className="relative inline-flex h-2.5 w-2.5 shrink-0">
+                  <span className="absolute inset-0 inline-flex h-full w-full animate-ping rounded-full bg-red-500 opacity-75" />
+                  <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
+                </span>
+              )}
               {!navCollapsed && (
-                <span className="truncate flex-1">
-                  {recordingNow.autoSubject
-                    ? `Auto-recording: ${recordingNow.autoSubject}`
-                    : "Recording…"}
+                <span
+                  className={`truncate flex-1 ${
+                    recordingNow.captureWarning
+                      ? "font-medium text-red-700 dark:text-red-300"
+                      : ""
+                  }`}
+                >
+                  {recordingNow.captureWarning
+                    ? captureWarningShortLabel(recordingNow.captureWarningCode)
+                    : recordingNow.autoSubject
+                      ? `Auto-recording: ${recordingNow.autoSubject}`
+                      : "Recording…"}
                 </span>
               )}
               <span

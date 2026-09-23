@@ -13,7 +13,8 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, List, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, List, Optional
 
 import numpy as np
 import soundfile as sf
@@ -262,6 +263,49 @@ def _resample_for_live(audio: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarra
     down = src_sr // g
     out = resample_poly(audio.astype(np.float64, copy=False), up, down)
     return out.astype(np.float32)
+
+
+@dataclass(frozen=True)
+class _RecordingHandles:
+    """Everything that belongs to ONE recording, copied off the service
+    at the top of ``stop_recording``.
+
+    WHY THIS EXISTS (field log 2026-09-15). Each recording's temp files,
+    WAV writer, capture and session log live in fields on the single
+    ``RecordingService``. ``stop_recording`` clears ``_recording`` early
+    — deliberately, so the next back-to-back meeting can start without
+    waiting out an 80-second finalize — and then waits in
+    ``finalize_slot`` behind the previous meeting's finalize. During
+    that wait the NEXT meeting's start rewrites those fields and the
+    PREVIOUS meeting's stop, finishing, deletes and nulls them. Three
+    back-to-back meetings on one machine produced:
+
+      * meeting B finalized with mic path ``None`` — crash, audio lost;
+      * meeting C's mic path nulled by A's cleanup, so C's stop found
+        nothing to finalize and reported success in 0.1 s — 29 minutes
+        lost with no error;
+      * C's session log closed and copied out 28 minutes early by A.
+
+    And with slightly different timing, B would have been saved with
+    C's microphone audio — silently.
+
+    The 2026-06-15 data-loss fix already applied this rule to
+    ``_session`` alone. This extends it to every per-recording field:
+    copy once, use only the copy, and clear a shared field only if it
+    still holds THIS recording's value (see ``_clear_if_still_ours``).
+    Step one of moving per-recording state off the singleton entirely.
+    """
+
+    capture: Any
+    live_transcriber: Any
+    wav_writer: Any
+    mic_path: Optional[str]
+    loopback_path: Optional[str]
+    chunk_count: int
+    conference_room_mode: bool
+    log_handler: Any
+    log_temp: Optional[str]
+    log_final: Optional[str]
 
 
 class RecordingService:
@@ -619,6 +663,24 @@ class RecordingService:
             self._capture = None
             raise RuntimeError(f"Failed to open recording file: {e}") from e
 
+        # Recording without the other participants is a degraded start,
+        # not a normal one. Counted once, here, with a reason code; the
+        # live warning and the session's own warning come from
+        # core/capture_health. Best-effort: telemetry must never be the
+        # thing that stops a recording from starting.
+        loopback_error = getattr(self._capture, "loopback_error", None)
+        if output_device_index is not None and loopback_error:
+            try:
+                from core.capture_health import classify_open_error
+                events.emit(
+                    events.CAPTURE_DEGRADED,
+                    session_id=session_id,
+                    stream="system",
+                    reason=classify_open_error(loopback_error))
+            except Exception:  # noqa: BLE001
+                logger.debug("Could not record capture.degraded",
+                             exc_info=True)
+
         # Spin up live transcription only if the user hasn't disabled it
         # in Settings. When disabled we skip the LiveTranscriber thread
         # AND the per-chunk resampling in _on_audio_chunk, saving CPU on
@@ -691,6 +753,21 @@ class RecordingService:
         # read. Capture `_session` exactly once here; the local survives
         # any concurrent reassignment.
         session = self._session
+        # Same rule, every other per-recording field. Taken BEFORE
+        # `_recording` goes False: from the next line on, a new meeting
+        # may start and overwrite all of these. See _RecordingHandles.
+        own = _RecordingHandles(
+            capture=self._capture,
+            live_transcriber=self._live_transcriber,
+            wav_writer=self._wav_writer,
+            mic_path=self._wav_temp_path,
+            loopback_path=getattr(self, "_loopback_temp_path", None),
+            chunk_count=int(self._chunk_count or 0),
+            conference_room_mode=bool(self._conference_room_mode),
+            log_handler=self._session_log_handler,
+            log_temp=getattr(self, "_session_log_temp", None),
+            log_final=getattr(self, "_session_log_final", None),
+        )
 
         self._recording = False
         # Grab the per-stream wallclock anchors before tearing the capture
@@ -698,8 +775,8 @@ class RecordingService:
         # audio is captured) the difference is the real cross-stream start
         # offset and gets passed to the merge step. None means: fall back to
         # the legacy right-aligned heuristic.
-        mic_start = getattr(self._capture, "mic_start_monotonic", None)
-        lb_start = getattr(self._capture, "loopback_start_monotonic", None)
+        mic_start = getattr(own.capture, "mic_start_monotonic", None)
+        lb_start = getattr(own.capture, "loopback_start_monotonic", None)
         if mic_start is not None and lb_start is not None:
             loopback_start_offset_s = max(0.0, lb_start - mic_start)
         else:
@@ -708,18 +785,18 @@ class RecordingService:
         # for the sync-integrity report computed after finalize.
         try:
             capture_stats = (
-                self._capture.get_capture_stats() if self._capture else None)
+                own.capture.get_capture_stats() if own.capture else None)
         except Exception as e:
             logger.warning(f"[stop] get_capture_stats failed: {e}")
             capture_stats = None
         logger.info("[stop] capture.stop() …")
         t = _t.monotonic()
         try:
-            self._capture.stop()
+            own.capture.stop()
         except Exception as e:
             logger.exception(f"[stop] capture.stop raised: {e}")
         logger.info(f"[stop] capture.stop done in {_t.monotonic()-t:.1f}s")
-        self._capture = None
+        self._clear_if_still_ours("_capture", own.capture)
 
         # TIMING FIX: stamp ended_at HERE — the moment capture actually
         # stops — not after finalize returns. Finalize (WAV merge,
@@ -741,11 +818,11 @@ class RecordingService:
         # threads) so its tail flush + None sentinel reach SSE clients
         # while they're still listening. The 10-second join inside
         # stop() covers the worst case where Whisper is mid-window.
-        if self._live_transcriber is not None:
+        if own.live_transcriber is not None:
             logger.info("[stop] live_transcriber.stop() …")
             t = _t.monotonic()
             try:
-                self._live_transcriber.stop()
+                own.live_transcriber.stop()
             except Exception as e:
                 logger.warning(f"[stop] live transcriber raised: {e}")
             logger.info(
@@ -755,20 +832,21 @@ class RecordingService:
         logger.info("[stop] close mic WAV writer …")
         t = _t.monotonic()
         with self._chunks_lock:
-            if self._wav_writer is not None:
+            if own.wav_writer is not None:
                 try:
-                    self._wav_writer.close()
+                    own.wav_writer.close()
                 except Exception as e:
                     logger.exception(f"[stop] mic WAV close raised: {e}")
-                self._wav_writer = None
+                if self._wav_writer is own.wav_writer:
+                    self._wav_writer = None
         logger.info(f"[stop] close mic WAV done in {_t.monotonic()-t:.1f}s")
 
-        if session and self._chunk_count > 0 and self._wav_temp_path:
+        if session and own.chunk_count > 0 and own.mic_path:
             # Stream-merge mic + loopback into final WAV with bounded memory.
             # Earlier versions sf.read() both files fully into RAM before
             # mixing — a 36-minute 48kHz session allocates ~2-3 GB and can
             # trigger a native STATUS_ACCESS_VIOLATION on stop (lost session).
-            loopback_path = getattr(self, '_loopback_temp_path', None)
+            loopback_path = own.loopback_path
             final_path = self._build_audio_path(session.session_id)
             # FINALIZE-IN-PROGRESS STATE (field repro 2026-08-14): stamp
             # this BEFORE the stub write (so it's on disk before the
@@ -888,7 +966,7 @@ class RecordingService:
                     # audio" and we LEAVE the temp WAVs on disk for the
                     # next-launch recovery flow to pick up.
                     duration_s, _, aec_outcome = self._run_finalize_subprocess(
-                        mic_wav_path=self._wav_temp_path,
+                        mic_wav_path=own.mic_path,
                         loopback_wav_path=loopback_path,
                         output_wav_path=final_path,
                         target_sr=TARGET_SR,
@@ -896,7 +974,7 @@ class RecordingService:
                         echo_cancellation_enabled=echo_cancellation_requested,
                         channel_attribution_enabled=(
                             channel_attribution_requested),
-                        conference_room_mode=self._conference_room_mode,
+                        conference_room_mode=own.conference_room_mode,
                     )
                 session.audio_path = final_path
                 # Subprocess returned successfully — clear the
@@ -969,7 +1047,7 @@ class RecordingService:
                     residual_delay_ms=_aec.get("residual_delay_ms"),
                     channel_attribution_requested=bool(
                         channel_attribution_requested),
-                    conference_room_mode=bool(self._conference_room_mode),
+                    conference_room_mode=own.conference_room_mode,
                     audio_duration_s=float(duration_s),
                 )
 
@@ -1139,6 +1217,37 @@ class RecordingService:
                 except Exception as e:
                     logger.warning(f"sync-integrity measurement failed: {e}")
 
+                # OTHER PARTICIPANTS NOT RECORDED. A meeting whose system
+                # audio never arrived used to reach the Sessions list with
+                # no warning at all: lb=0 made drift "n/a", so the sync
+                # check above had nothing to say (field log 2026-09-15:
+                # "lb=n/a … mic=1505.8s", then silence), and a one-sided
+                # transcript read exactly like a meeting in which one
+                # person spoke. Its own field rather than a clause in
+                # sync_warning — that one is an informational measurement;
+                # this changes what every artifact of the meeting means.
+                # Outside the >30 s gate: a short call missing the other
+                # side is missing it all the same. Without stats, only a
+                # KNOWN open failure is reported — no stats is not
+                # evidence that nothing arrived.
+                try:
+                    from core.capture_health import (
+                        missing_system_audio_warning)
+                    open_error = getattr(own.capture, "loopback_error", None)
+                    if capture_stats is not None or open_error:
+                        session.capture_warning = missing_system_audio_warning(
+                            system_configured=own.loopback_path is not None,
+                            system_samples=int(
+                                (capture_stats or {}).get(
+                                    "loopback_samples", 0) or 0),
+                            system_open_error=open_error)
+                    if session.capture_warning:
+                        logger.warning(
+                            f"CAPTURE WARNING: session {session.session_id}: "
+                            f"{session.capture_warning}")
+                except Exception as e:
+                    logger.warning(f"missing-audio check failed: {e}")
+
                 # capture.stopped — the per-stream telemetry, emitted
                 # unconditionally rather than behind the >30s gate the
                 # human SYNC_INTEGRITY line uses. Computed from the same
@@ -1214,7 +1323,7 @@ class RecordingService:
                     session.audio_path and Path(session.audio_path).exists()
                 )
                 if merge_succeeded and not keep_temps:
-                    for temp in (self._wav_temp_path, loopback_path):
+                    for temp in (own.mic_path, loopback_path):
                         if temp and Path(temp).exists():
                             try:
                                 Path(temp).unlink()
@@ -1223,18 +1332,23 @@ class RecordingService:
                 elif keep_temps:
                     logger.info(
                         "[stop] KEEP_AUDIO_TEMPS=1 set — preserving "
-                        f"{self._wav_temp_path} + {loopback_path}")
+                        f"{own.mic_path} + {loopback_path}")
                 elif not merge_succeeded:
                     logger.warning(
                         f"[stop] merge did not produce {session.audio_path} "
                         f"— preserving temps for recovery: "
-                        f"{self._wav_temp_path} + {loopback_path}")
-        elif session and self._chunk_count == 0:
+                        f"{own.mic_path} + {loopback_path}")
+        elif session and own.chunk_count == 0:
             logger.warning("Recording stopped with no audio chunks captured.")
             self._on_status("No audio was captured. Try again.")
 
-        self._wav_temp_path = None
-        self._stop_session_log()
+        # Clear the shared fields ONLY if they still hold this
+        # recording's values. When a back-to-back meeting started during
+        # this stop's finalize they hold THAT meeting's — and nulling
+        # them is how meeting C was lost without an error on 2026-09-15.
+        self._clear_if_still_ours("_wav_temp_path", own.mic_path)
+        self._clear_if_still_ours("_loopback_temp_path", own.loopback_path)
+        self._stop_session_log(own)
         logger.info(
             f"[stop] complete in {_t.monotonic()-stop_t0:.1f}s")
         return session
@@ -1663,6 +1777,7 @@ class RecordingService:
                 "mic_state": "dead",
                 "system_state": None,
                 "capture_warning": None,
+                "capture_warning_code": None,
             }
 
         now = datetime.now()
@@ -1684,36 +1799,40 @@ class RecordingService:
         # the post-start grace period. Deliberately independent of
         # mic_state/system_state's shorter STREAM_DEAD_S so the meter
         # itself is responsive while the banner stays conservative.
-        capture_warning: Optional[str] = None
+        # WHAT to say, and WHEN, lives in core/capture_health (pure,
+        # tested without PortAudio). The case it exists for: system audio
+        # that FAILED TO OPEN used to be reported only after 45 s of
+        # "silence", as "may have stopped — try restarting", and only on
+        # the Record tab — so a meeting on 2026-09-15 was recorded
+        # mic-only end to end. A refused open is now reported at once,
+        # with its cause, and with a stable code the UI turns into one
+        # notification that reaches the user wherever they are.
+        from core.capture_health import live_capture_issue
+
         started_at = self._session.started_at if self._session else None
         elapsed_s = (now - started_at).total_seconds() if started_at else 0.0
-        if elapsed_s > CAPTURE_WARNING_GRACE_S:
-            mic_dead_s = (
+        issue = live_capture_issue(
+            elapsed_s=elapsed_s,
+            mic_silent_for_s=(
                 (now - self._last_chunk_at).total_seconds()
-                if self._last_chunk_at else elapsed_s
-            )
-            if mic_dead_s >= CAPTURE_WARNING_DEAD_S:
-                capture_warning = (
-                    f"No microphone audio for {int(mic_dead_s)} seconds — "
-                    f"capture may have stopped. Consider stopping and "
-                    f"restarting the recording.")
-            elif system_configured:
-                sys_dead_s = (
-                    (now - self._last_loopback_chunk_at).total_seconds()
-                    if self._last_loopback_chunk_at else elapsed_s
-                )
-                if sys_dead_s >= CAPTURE_WARNING_DEAD_S:
-                    capture_warning = (
-                        f"No system audio for {int(sys_dead_s)} seconds — "
-                        f"capture may have stopped. Consider stopping and "
-                        f"restarting the recording.")
+                if self._last_chunk_at else None),
+            system_configured=system_configured,
+            system_open_error=getattr(self._capture, "loopback_error", None),
+            system_silent_for_s=(
+                (now - self._last_loopback_chunk_at).total_seconds()
+                if self._last_loopback_chunk_at else None),
+            platform=sys.platform,
+            grace_s=CAPTURE_WARNING_GRACE_S,
+            dead_after_s=CAPTURE_WARNING_DEAD_S,
+        )
 
         return {
             "mic_level": mic_level,
             "system_level": system_level,
             "mic_state": mic_state,
             "system_state": system_state,
-            "capture_warning": capture_warning,
+            "capture_warning": issue.message if issue else None,
+            "capture_warning_code": issue.code if issue else None,
         }
 
     def watchdog_tick(self) -> dict:
@@ -2069,17 +2188,42 @@ class RecordingService:
         except Exception as e:
             logger.warning(f"Could not create session log file: {e}")
 
-    def _stop_session_log(self) -> None:
-        if self._session_log_handler:
+    def _clear_if_still_ours(self, field: str, value: Any) -> None:
+        """Set ``self.<field>`` to None only if it still holds ``value``.
+
+        A stop that finishes while the next meeting is already recording
+        must leave that meeting's state alone. Identity for objects,
+        equality for paths — both are what "still ours" means here.
+        """
+        current = getattr(self, field, None)
+        if current is None or value is None:
+            return
+        if current is value or current == value:
+            setattr(self, field, None)
+
+    def _stop_session_log(self, own: "Optional[_RecordingHandles]" = None) -> None:
+        """Close and copy out ONE recording's session log.
+
+        ``own`` is the stopping recording's snapshot. Reading the handler
+        from ``self`` instead is how, on 2026-09-15, meeting A's stop
+        closed meeting C's log 28 minutes early — and left A's own
+        handler attached to the root logger, writing every later line of
+        every later meeting into A's file.
+        """
+        if own is None:
+            handler = self._session_log_handler
+            src = getattr(self, "_session_log_temp", None)
+            dst = getattr(self, "_session_log_final", None)
+        else:
+            handler, src, dst = own.log_handler, own.log_temp, own.log_final
+        if handler:
             logger.info("Session log closed.")
-            logging.getLogger().removeHandler(self._session_log_handler)
-            self._session_log_handler.close()
-            self._session_log_handler = None
+            logging.getLogger().removeHandler(handler)
+            handler.close()
+            self._clear_if_still_ours("_session_log_handler", handler)
             # Copy the local-only temp log into recordings_dir so it
             # rides cloud sync alongside the WAV and JSON. One-shot
             # copy, no contention with an active capture thread.
-            src = getattr(self, "_session_log_temp", None)
-            dst = getattr(self, "_session_log_final", None)
             if src and dst:
                 try:
                     Path(dst).parent.mkdir(parents=True, exist_ok=True)
@@ -2096,8 +2240,10 @@ class RecordingService:
                     # (WAV, JSON) is unaffected.
                     logger.warning(
                         f"Could not copy session log to {dst}: {e}")
-            self._session_log_temp = None
-            self._session_log_final = None
+            # Only if these are still THIS recording's paths — a meeting
+            # that started during the stop owns them now.
+            self._clear_if_still_ours("_session_log_temp", src)
+            self._clear_if_still_ours("_session_log_final", dst)
 
     def _build_audio_path(self, session_id: str) -> str:
         recordings_dir = Path(self._settings.recordings_dir)
@@ -2224,6 +2370,20 @@ class RecordingService:
         script_path = (
             Path(__file__).resolve().parents[1] / "scripts" / "finalize_audio.py"
         )
+        # Say what is missing, in words. A None here used to surface as
+        # `TypeError: sequence item 2: expected str instance, NoneType
+        # found` — from the LOG LINE below, not the merge — which is what
+        # a user saw on 2026-09-15 when a recording was lost. The caller
+        # preserves the temps for recovery on any exception; this only
+        # makes the reason readable in the session and the log.
+        missing = [name for name, value in (("microphone recording",
+                                             mic_wav_path),
+                                            ("output path", output_wav_path))
+                   if not value]
+        if missing:
+            raise RuntimeError(
+                f"Finalize was started without a {' or '.join(missing)} — "
+                f"nothing to merge. The temp files are kept for recovery.")
         argv = [
             sys.executable,
             str(script_path),
@@ -2249,7 +2409,7 @@ class RecordingService:
             if conference_room_mode:
                 argv.append("--conference-room")
         logger.info(
-            f"[finalize-subprocess] spawn {' '.join(argv[1:])}"
+            f"[finalize-subprocess] spawn {' '.join(map(str, argv[1:]))}"
         )
         # NEVER-OUTRANK-LIVE-CAPTURE (field data 2026-08): even the one
         # finalize the gate lets through must not compete on equal

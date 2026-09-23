@@ -78,8 +78,6 @@ const BASELINE = new Map([
   // `PAGE_HREF` and `page` are read inside function bodies that run
   // well after module initialisation.
   ["chrome-extension/tests/background.test.js|@typescript-eslint/no-use-before-define", 2],
-  // `SEEN_KEY` likewise — both reads are inside functions.
-  ["src/lib/useUnprocessedSessions.ts|@typescript-eslint/no-use-before-define", 2],
   // `useMeeting` is an ordinary click handler, not a hook; the rule
   // matches on the `use` prefix. Worth renaming, but renaming it is
   // not a hotfix.

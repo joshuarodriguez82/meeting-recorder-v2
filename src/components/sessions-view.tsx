@@ -670,6 +670,18 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
                       </span>
                     </div>
                   )}
+                  {/* First, and red: this one changes what the rest of
+                      the session means — the transcript, summary and
+                      action items are one side of the conversation. */}
+                  {s.capture_warning && (
+                    <div
+                      className="inline-flex items-start gap-1.5 max-w-full rounded-full border border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300 text-[11px] px-2.5 py-1 mt-2"
+                      title="System audio never reached this recording, so only your microphone was captured."
+                    >
+                      <span aria-hidden className="font-bold leading-none mt-0.5">⚠</span>
+                      <span className="flex-1">{s.capture_warning}</span>
+                    </div>
+                  )}
                   {s.audio_integrity_warning && (
                     <div
                       className="inline-flex items-start gap-1.5 max-w-full rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300 text-[11px] px-2.5 py-1 mt-2"

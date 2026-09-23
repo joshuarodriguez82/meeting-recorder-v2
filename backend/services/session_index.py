@@ -66,7 +66,9 @@ logger = get_logger(__name__)
 #          changed, so nothing re-parses — and the banner falls back to
 #          "not running" on every pre-existing session regardless of
 #          the truth.
-SCHEMA_VERSION = 3
+#   3 → 4: added capture_warning (other participants not recorded).
+#          Same reason: a cached v3 row would never show the chip.
+SCHEMA_VERSION = 4
 
 # The exact summary shape SessionService.list_sessions() has always
 # returned (see its docstring / the summary dict built in
@@ -86,7 +88,7 @@ SUMMARY_FIELDS: Tuple[str, ...] = (
     "audio_expected_duration_s", "processing_error", "sync_warning",
     "finalize_duration_s", "aec_outcome",
     "finalize_status", "finalize_started_at", "finalize_error",
-    "finalize_aec_requested",
+    "finalize_aec_requested", "capture_warning",
 )
 
 

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, openExternal, openSystemSettings, type AudioDevice, type AudioSyncRisk, type Meeting, type MicProbe, type RecordingStatus, type SessionFull, type SessionSummary } from "@/lib/api";
+import { captureWarningTitle } from "@/lib/capture-warning";
 import {
   refreshRecordingStatus,
   suppressWatchdogForNewRecording,
@@ -1399,7 +1400,7 @@ export function RecordView({
           <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 animate-pulse text-red-600 dark:text-red-400" />
           <div className="flex-1">
             <div className="text-sm font-semibold text-red-900 dark:text-red-100">
-              Capture problem detected
+              {captureWarningTitle(recordingStatus.capture_warning_code)}
             </div>
             <div className="mt-0.5 text-sm text-red-800 dark:text-red-200">
               {recordingStatus.capture_warning}

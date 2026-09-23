@@ -159,6 +159,13 @@ class Session:
         # chip so drift is visible; informs whether the heavier timestamp-
         # anchoring correction is worth building. None = clean.
         self.sync_warning: Optional[str] = None
+        # Set at stop when a capture problem changes what this session's
+        # transcript and summary MEAN — today, system audio configured but
+        # never delivered, so the other participants are absent and every
+        # word is the user's (core/capture_health.missing_system_audio_
+        # warning). Separate from sync_warning, which is an informational
+        # measurement. None = nothing missing.
+        self.capture_warning: Optional[str] = None
         # How long the post-stop finalize subprocess (WAV merge, optional
         # AEC, resample) took, in seconds. Deliberately SEPARATE from
         # ``ended_at - started_at`` (the capture window) — folding this
@@ -304,6 +311,7 @@ class Session:
             "processing_error": self.processing_error,
             "auto_process_pending": self.auto_process_pending,
             "sync_warning": self.sync_warning,
+            "capture_warning": self.capture_warning,
             "finalize_duration_s": self.finalize_duration_s,
             "aec_outcome": self.aec_outcome,
             "finalize_status": self.finalize_status,
@@ -380,6 +388,7 @@ class Session:
         session.processing_error = data.get("processing_error") or None
         session.auto_process_pending = data.get("auto_process_pending") or None
         session.sync_warning = data.get("sync_warning") or None
+        session.capture_warning = data.get("capture_warning") or None
         session.finalize_duration_s = data.get("finalize_duration_s")
         session.aec_outcome = data.get("aec_outcome") or None
         session.finalize_status = data.get("finalize_status")

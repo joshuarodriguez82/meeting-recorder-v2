@@ -460,6 +460,11 @@ export interface SessionSummary {
   // frames vs wall-clock, measured at stop. Informational (no audio
   // altered). null = clean.
   sync_warning?: string | null;
+  // Other participants were not recorded: system audio was configured
+  // but never delivered, so the transcript and summary are one side of
+  // the conversation. A warning, not information — set at stop by
+  // backend/core/capture_health.py. null = nothing missing.
+  capture_warning?: string | null;
   // How long finalize (WAV merge + optional AEC) took, in seconds —
   // kept separate from duration_s (the capture window). See SessionFull.
   finalize_duration_s?: number | null;
@@ -622,6 +627,11 @@ export interface RecordingStatus {
   // real problem — never for mere silence. See the backend's "silence
   // is not failure" guard.
   capture_warning?: string | null;
+  // Stable identity for capture_warning (backend/core/capture_health.py):
+  // "mic_dead" | "system_audio_unavailable" | "system_audio_dead". The
+  // UI notifies once per code per recording, so the message can change
+  // wording without re-notifying, and a new problem still gets through.
+  capture_warning_code?: string | null;
 }
 
 export interface SessionFull {
@@ -659,6 +669,7 @@ export interface SessionFull {
   audio_expected_duration_s?: number | null;
   processing_error?: string | null;
   sync_warning?: string | null;
+  capture_warning?: string | null;
   // How long finalize (WAV merge + optional AEC) took, in seconds. Kept
   // separate from ended_at/duration so a slow post-process never reads
   // as missing audio. null = predates this field, or finalize hasn't
