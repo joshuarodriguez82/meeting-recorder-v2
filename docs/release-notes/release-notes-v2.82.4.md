@@ -1,4 +1,4 @@
-# v2.82.4 — System audio is no longer given up on after four identical tries
+# v2.82.4 — Back-to-back meetings no longer lose each other's audio
 
 ## Install (macOS)
 
@@ -31,6 +31,58 @@
 ## No extension update
 
 App-only. The Chrome extension stays at **1.24.0**.
+
+## Back-to-back meetings could lose each other's recordings
+
+**This is the most important fix in this release.** Three back-to-back
+meetings recorded on one machine, with auto-record on, came out as:
+
+- **the first** — saved;
+- **the second** — lost, with the error *"sequence item 2: expected str
+  instance, NoneType found"*;
+- **the third** — 29 minutes long, lost with **no error at all**. The
+  app reported the stop as complete in a tenth of a second.
+
+When a meeting stops, its audio is merged into the final recording in
+the background, and a merge waits its turn if the previous meeting's is
+still running — a 25-minute meeting took 82 seconds. So that the next
+meeting can start straight away, a stop hands the recorder back
+immediately and does its merge afterwards.
+
+The problem was *where* each recording kept track of its own files: in
+one shared place on the recorder, which the next meeting's start
+overwrote and the previous meeting's cleanup erased. So while the second
+meeting waited its turn, the third meeting started and the first
+meeting's cleanup ran — and by the time the second meeting's merge
+began, the pointer to its own microphone file was gone. The first
+meeting's cleanup also erased the third meeting's pointer while it was
+still recording, which is why the third meeting's stop found nothing to
+save and said nothing.
+
+With slightly different timing, the second meeting would have been
+saved **with the third meeting's microphone audio** — silently. The
+tests for this release reproduce that case too.
+
+Each stop now takes its own copy of everything that belongs to its
+recording — microphone file, system-audio file, recorder, session log,
+settings — before it hands the recorder back, and uses only that copy
+from then on. Cleanup only clears something if it still belongs to the
+meeting being cleaned up. A merge that is somehow started without a
+microphone file now says exactly that, instead of a type error.
+
+Ten tests drive the real stop path through the exact sequence from the
+field, deterministically. Eight fail against v2.82.3, and each of the
+four parts of the fix is independently covered — reverting any one of
+them turns tests red.
+
+### If you lost a meeting this way
+
+The audio is very likely still on your machine. A failed or skipped
+merge leaves the raw recording files in Meeting Recorder's temporary
+capture folder, and the app looks for them every time it starts:
+**restart Meeting Recorder** and check Sessions for the missing
+meetings. On Windows, don't clear `%TEMP%\meeting_recorder_capture\`
+before you've done that.
 
 ## A meeting recorded with nobody else's voice in it
 
@@ -77,12 +129,12 @@ fail against the previous behaviour.
 
 ## Still being looked at
 
-Two other problems turned up in the same report and are **not** fixed
-here:
+Two problems from the same report are **not** fixed here:
 
-- A recording whose **stop** failed with a Python type error, losing
-  that session's audio. The cause is understood well enough to know the
-  fix is not a one-liner, and rushing it risks the save path.
+- **Nothing tells you while it's happening.** Both the missing system
+  audio and the lost recordings were written to the log and shown to
+  nobody. A live warning on the recording screen — while the meeting can
+  still be saved — is next.
 - **Voice fingerprinting silently unavailable** on one install because
   the installed speech library no longer matches what the app expects.
   That is an environment mismatch rather than a code defect, and it
