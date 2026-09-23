@@ -63,7 +63,7 @@ person could never earn a label of their own.
 
 ## Names are only shown when they're actually certain
 
-The live transcript labelled a woman speaking as **CALEB JOHNSON**.
+The live transcript labelled a woman speaking as **JOHN DOE**.
 
 Live labels were reusing the same `0.75` match threshold as offline
 processing, which is tuned for long, clean, whole-meeting audio — far

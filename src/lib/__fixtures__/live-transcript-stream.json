@@ -1,0 +1,153 @@
+[
+  {
+    "id": 1,
+    "start": 0.0,
+    "end": 3.0,
+    "text": "my own point number 0 about this",
+    "speaker": "you"
+  },
+  {
+    "id": 2,
+    "start": 0.0,
+    "end": 3.0,
+    "text": "my own point number 1 about this",
+    "speaker": "you"
+  },
+  {
+    "id": 3,
+    "start": 0.0,
+    "end": 3.0,
+    "text": "my own point number 2 about this",
+    "speaker": "you"
+  },
+  {
+    "id": 4,
+    "start": 0.0,
+    "end": 3.0,
+    "text": "we should ship the release on friday",
+    "speaker": "you"
+  },
+  {
+    "id": 5,
+    "start": 0.0,
+    "end": 3.0,
+    "text": "far end sentence number 0 goes here",
+    "speaker": "them",
+    "speaker_label": "Speaker 1"
+  },
+  {
+    "id": 6,
+    "start": 0.0,
+    "end": 3.0,
+    "text": "far end sentence number 1 goes here",
+    "speaker": "them",
+    "speaker_label": "Speaker 2"
+  },
+  {
+    "id": 7,
+    "start": 0.0,
+    "end": 3.0,
+    "text": "far end sentence number 2 goes here",
+    "speaker": "them",
+    "speaker_label": "Speaker 1"
+  },
+  {
+    "type": "retract",
+    "ids": [
+      4
+    ]
+  },
+  {
+    "id": 8,
+    "start": 0.0,
+    "end": 3.0,
+    "text": "we should ship the release on friday",
+    "speaker": "them",
+    "speaker_label": "Speaker 2"
+  },
+  {
+    "id": 9,
+    "start": 0.0,
+    "end": 3.0,
+    "text": "far end sentence number 4 goes here",
+    "speaker": "them",
+    "speaker_label": "Speaker 1"
+  },
+  {
+    "id": 10,
+    "start": 0.0,
+    "end": 3.0,
+    "text": "far end sentence number 5 goes here",
+    "speaker": "them",
+    "speaker_label": "Speaker 2"
+  },
+  {
+    "id": 11,
+    "start": 0.0,
+    "end": 3.0,
+    "text": "far end sentence number 6 goes here",
+    "speaker": "them",
+    "speaker_label": "Speaker 1"
+  },
+  {
+    "id": 12,
+    "start": 0.0,
+    "end": 3.0,
+    "text": "far end sentence number 7 goes here",
+    "speaker": "them",
+    "speaker_label": "Speaker 2"
+  },
+  {
+    "id": 13,
+    "start": 0.0,
+    "end": 3.0,
+    "text": "far end sentence number 8 goes here",
+    "speaker": "them",
+    "speaker_label": "Speaker 1"
+  },
+  {
+    "id": 14,
+    "start": 0.0,
+    "end": 3.0,
+    "text": "far end sentence number 9 goes here",
+    "speaker": "them",
+    "speaker_label": "Speaker 2"
+  },
+  {
+    "type": "relabel",
+    "from": "Speaker 2",
+    "to": "Speaker 1"
+  },
+  {
+    "id": 15,
+    "start": 0.0,
+    "end": 3.0,
+    "text": "far end sentence number 10 goes here",
+    "speaker": "them",
+    "speaker_label": "Speaker 1"
+  },
+  {
+    "id": 16,
+    "start": 0.0,
+    "end": 3.0,
+    "text": "far end sentence number 11 goes here",
+    "speaker": "them",
+    "speaker_label": "Speaker 1"
+  },
+  {
+    "id": 17,
+    "start": 0.0,
+    "end": 3.0,
+    "text": "far end sentence number 12 goes here",
+    "speaker": "them",
+    "speaker_label": "Speaker 1"
+  },
+  {
+    "id": 18,
+    "start": 0.0,
+    "end": 3.0,
+    "text": "far end sentence number 13 goes here",
+    "speaker": "them",
+    "speaker_label": "Speaker 1"
+  }
+]

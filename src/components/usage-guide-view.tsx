@@ -768,7 +768,7 @@ const SECTIONS: Section[] = [
 
         <p className="font-medium mt-4">Cross-session speaker fingerprinting</p>
         <p>
-          When you rename a speaker (e.g. SPEAKER_01 → &quot;Maria Chen&quot;), the embedding
+          When you rename a speaker (e.g. SPEAKER_01 → &quot;Jane Roe&quot;), the embedding
           fingerprint is saved. Future sessions where Maria speaks will auto-label her — no
           re-tagging. Manage the roster in <strong>Settings → Known Speakers</strong>: rename,
           delete, or merge two profiles that ended up as separate entries (typical when the same
