@@ -378,8 +378,11 @@ class _AlreadyHandledFilter(logging.Filter):
         return not logging.getLogger(record.name).handlers
 
 
-def dedupe_root_handlers() -> None:
-    """Install _AlreadyHandledFilter on every root handler."""
-    for h in logging.getLogger().handlers:
+def dedupe_root_handlers(handlers=None) -> None:
+    """Install _AlreadyHandledFilter on the root handlers (or on the
+    ``handlers`` given — tests pass their own, so pytest's capture
+    handler on the root is never touched)."""
+    for h in (handlers if handlers is not None
+              else logging.getLogger().handlers):
         if not any(isinstance(f, _AlreadyHandledFilter) for f in h.filters):
             h.addFilter(_AlreadyHandledFilter())

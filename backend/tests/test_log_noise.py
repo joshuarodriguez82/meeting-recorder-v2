@@ -60,7 +60,7 @@ def test_an_app_log_line_is_written_once():
     app.setLevel(logging.INFO)
     root.addHandler(root_handler)
     try:
-        dedupe_root_handlers()
+        dedupe_root_handlers([root_handler])
         app.info("recording started")
         logging.getLogger("third.party").warning("lib warning")
     finally:
