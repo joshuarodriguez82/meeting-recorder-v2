@@ -11087,8 +11087,10 @@ def _emit_backend_start_event() -> None:
     except Exception:
         pass
     try:
-        from utils.crash_log import last_crash_time, is_recent_crash
-        ts = last_crash_time()
+        from utils.crash_log import unreported_crash_time, is_recent_crash
+        # Once per crash, on the first start after it — see
+        # unreported_crash_time for why not on every start.
+        ts = unreported_crash_time()
         if ts is not None:
             age_days = max(
                 0.0, (datetime.now() - ts).total_seconds() / 86400.0)

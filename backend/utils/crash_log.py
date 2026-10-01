@@ -329,3 +329,35 @@ def is_recent_crash(
         return False
     now = now or datetime.now()
     return (now - ts) <= timedelta(days=threshold_days)
+
+
+REPORTED_MARKER_NAME = "crash.reported"
+
+
+def unreported_crash_time(log_dir: Optional[Path] = None):
+    """The last crash's time if it has not been reported before, else
+    None — and records it as reported.
+
+    backend.prior_crash used to fire on EVERY start while any crash sat
+    in crash.log: the diagnostics bundle of 2026-10-01 had 96 starts and
+    96 prior-crash events, all for one 35-day-old crash. An event that
+    is always present says nothing, and would make any crash alerting
+    built on it useless. Now a crash is reported once, on the first
+    start after it.
+    """
+    ts = last_crash_time(log_dir)
+    if ts is None:
+        return None
+    marker = crash_log_path(log_dir).with_name(REPORTED_MARKER_NAME)
+    stamp = ts.isoformat()
+    try:
+        if marker.read_text(encoding="utf-8").strip() == stamp:
+            return None
+    except OSError:
+        pass
+    try:
+        marker.write_text(stamp, encoding="utf-8")
+    except OSError:
+        # Can't remember it: report it (a duplicate beats a miss).
+        pass
+    return ts
