@@ -64,6 +64,14 @@ jobs:
       # nothing could have caught, because the frontend had no suite.
       - name: Frontend tests
         run: npm test
+      # The Chrome extension's suite (178 tests over the real
+      # background.js, loaded in a vm sandbox). It existed and was never
+      # run here, so extension changes — the calendar import, the join
+      # link scan — shipped with no gate at all. Named file, not the
+      # directory: `node --test <dir>` resolves differently across Node
+      # versions.
+      - name: Chrome extension tests
+        run: node --test chrome-extension/tests/background.test.js
       - name: Build (typechecks via strict tsconfig)
         run: npm run build
       # A SMALL LINT GATE, FOR CRASHES ONLY.

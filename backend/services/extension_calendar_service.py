@@ -238,24 +238,70 @@ _JOIN_PROVIDERS = (
 
 _URLISH_RE = re.compile(r"https?://[^\s\"'<>)\]\\]+")
 
+# Microsoft Defender Safe Links. Microsoft 365 tenants with Defender
+# rewrite every link in mail AND meeting invites to
+#   https://<region>.safelinks.protection.outlook.com/?url=<encoded>&data=…
+# so a Teams invite's "Join the meeting now" href arrives with a
+# safelinks host and the real teams.microsoft.com address percent-
+# encoded inside it. Matched by host, it was never a join link: Teams
+# meetings on such tenants imported with no link while Zoom ones —
+# typed into Location, which Safe Links does not rewrite — kept theirs
+# (field report 2026-10-01).
+_SAFELINKS_HOST_RE = re.compile(
+    r"(?:^|\.)safelinks\.protection\.(?:outlook\.com|office365\.us|"
+    r"outlook\.de|apps\.mil)$", re.I)
+
+
+def unwrap_safelink(url: str) -> str:
+    """The destination of a Safe Links URL; any other URL unchanged."""
+    from urllib.parse import parse_qs, urlparse
+    u = str(url or "")
+    for _ in range(3):  # a link wrapped more than once, at most
+        try:
+            parsed = urlparse(u)
+        except ValueError:
+            return u
+        if not _SAFELINKS_HOST_RE.search(parsed.hostname or ""):
+            return u
+        inner = parse_qs(parsed.query).get("url")
+        if not inner or not inner[0]:
+            return u
+        u = inner[0]
+    return u
+
+
+def join_provider_for_url(url: str) -> str:
+    """Provider name for a conferencing join URL (after Safe Links
+    unwrapping), or "" — host AND path must both match."""
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(unwrap_safelink(url))
+    except ValueError:
+        return ""
+    host = (parsed.hostname or "")
+    for name, (host_re, path_re) in zip(_JOIN_PROVIDER_NAMES,
+                                        _JOIN_PROVIDERS):
+        if host_re.search(host) and path_re.search(parsed.path or ""):
+            return name
+    return ""
+
+
+_JOIN_PROVIDER_NAMES = ("teams", "zoom", "webex", "meet")
+
 
 def find_join_url_in_text(text: Any) -> str:
     """First conferencing-provider URL in a text/HTML blob — the same
     host+path contract the extension uses, applied server-side for the
     Graph body fallback (some tenants leave onlineMeeting empty and
-    keep the link only in the invite HTML)."""
-    from urllib.parse import urlparse
+    keep the link only in the invite HTML). A Safe Links wrapper is
+    unwrapped and the provider's own URL returned: only a URL whose
+    destination is a known provider host AND join path is ever
+    accepted, so the unwrap cannot let an arbitrary link through."""
     s = str(text or "").replace("&amp;", "&")
     for raw in _URLISH_RE.findall(s):
         u = raw.rstrip(".,;)]}\"'")
-        try:
-            parsed = urlparse(u)
-        except ValueError:
-            continue
-        host = (parsed.hostname or "")
-        for host_re, path_re in _JOIN_PROVIDERS:
-            if host_re.search(host) and path_re.search(parsed.path or ""):
-                return u
+        if join_provider_for_url(u):
+            return unwrap_safelink(u)
     return ""
 
 

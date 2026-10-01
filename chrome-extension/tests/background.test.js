@@ -3476,3 +3476,94 @@ test("unreadable storage degrades to 'not running' rather than throwing", async 
   assert.equal(run.running, false);
 });
 
+
+// ── Microsoft Defender Safe Links (field report 2026-10-01) ──────────
+//
+// The bundle: 44 meetings imported, 7 invite bodies read, join links
+// only on the Zoom meetings. Microsoft 365 tenants with Defender rewrite
+// every invite link to safelinks.protection.outlook.com with the real
+// destination percent-encoded in `url=`, and every scan here matched by
+// HOST — so no Teams link was ever recognised, while Zoom links typed
+// into Location (not rewritten) kept working.
+//
+// The wrapper below follows Microsoft's documented Safe Links URL
+// shape; the destination and every token are synthetic. The extension
+// now reports `sawSafeLink` / `joinViaSafeLink`, so the next real
+// capture confirms the shape against the tenant itself.
+
+const TEAMS_JOIN =
+  "https://teams.microsoft.com/l/meetup-join/19%3ameeting_EXAMPLEID%40thread.v2/0" +
+  "?context=%7b%22Tid%22%3a%2200000000-0000-0000-0000-000000000000%22%7d";
+const NEW_TEAMS_JOIN = "https://teams.microsoft.com/meet/0000000000000?p=EXAMPLEPASS";
+function safeLink(dest) {
+  return "https://nam12.safelinks.protection.outlook.com/?url=" +
+    encodeURIComponent(dest) +
+    "&data=05%7C02%7Cuser%40example.com%7CEXAMPLEDATA%7C0" +
+    "&sdata=EXAMPLESIGNATURE%3D&reserved=0";
+}
+
+test("safelinks: the wrapper is unwrapped to its destination", () => {
+  assert.equal(sandbox.unwrapSafeLink(safeLink(TEAMS_JOIN)), TEAMS_JOIN);
+  assert.equal(sandbox.unwrapSafeLink(safeLink(NEW_TEAMS_JOIN)), NEW_TEAMS_JOIN);
+});
+
+test("safelinks: a link wrapped twice is unwrapped twice", () => {
+  assert.equal(sandbox.unwrapSafeLink(safeLink(safeLink(TEAMS_JOIN))), TEAMS_JOIN);
+});
+
+test("safelinks: an ordinary URL is left alone", () => {
+  assert.equal(sandbox.unwrapSafeLink(TEAMS_JOIN), TEAMS_JOIN);
+  assert.equal(sandbox.unwrapSafeLink("not a url"), "not a url");
+});
+
+test("safelinks: a wrapped Teams link is a Teams join link", () => {
+  assert.equal(sandbox.joinProviderForUrl(safeLink(TEAMS_JOIN)), "teams");
+  assert.equal(sandbox.joinProviderForUrl(safeLink(NEW_TEAMS_JOIN)), "teams");
+});
+
+test("safelinks: a wrapped NON-meeting link is still not a join link", () => {
+  // Unwrapping must never widen what counts as a join URL.
+  assert.equal(sandbox.joinProviderForUrl(
+    safeLink("https://learning.example.com/library/course-42")), null);
+  assert.equal(sandbox.joinProviderForUrl(safeLink("https://zoom.us/pricing")), null);
+});
+
+test("safelinks: the Teams link in a rewritten invite body is found", () => {
+  // How an OWA response carries the invite: HTML, href attribute,
+  // &amp;-escaped, link text with no URL in it at all.
+  const html = '<div><a href="' + safeLink(TEAMS_JOIN).replace(/&/g, "&amp;") +
+    '" title="Meeting join link">Join the meeting now</a></div>' +
+    "<div>Meeting ID: 000 000 000 000</div>";
+  assert.equal(sandbox._joinUrlFromHtml(html), TEAMS_JOIN);
+});
+
+test("safelinks: a rewritten invite in a captured response yields the link", () => {
+  const item = {
+    Subject: "Weekly sync",
+    Start: "2026-10-02T10:00:00",
+    Body: { BodyType: "HTML", Value: '<a href="' +
+      safeLink(NEW_TEAMS_JOIN).replace(/&/g, "&amp;") + '">Join</a>' },
+  };
+  const diag = {};
+  const found = sandbox.detailsFromResponses([{ value: [item] }], diag);
+  const [only] = Array.from(found.values());
+  assert.equal(only.joinUrl, NEW_TEAMS_JOIN);
+  assert.equal(diag.joinViaSafeLink, 1);
+});
+
+test("join field: EWS/OWA JoinOnlineMeetingUrl is read", () => {
+  const item = {
+    Subject: "Weekly sync",
+    Start: "2026-10-02T10:00:00",
+    JoinOnlineMeetingUrl: TEAMS_JOIN,
+  };
+  const [only] = Array.from(
+    sandbox.detailsFromResponses([{ value: [item] }], {}).values());
+  assert.equal(only.joinUrl, TEAMS_JOIN);
+});
+
+test("safelinks: a wrapped link in the Location text becomes the join URL", () => {
+  const got = sandbox.extractUrlsFromLabel(labelWithUrl(safeLink(TEAMS_JOIN)));
+  assert.equal(got.joinUrl, TEAMS_JOIN);
+  assert.equal(got.joinProvider, "teams");
+});
