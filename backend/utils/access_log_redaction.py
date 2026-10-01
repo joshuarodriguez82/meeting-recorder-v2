@@ -60,9 +60,44 @@ class TokenRedactionFilter(logging.Filter):
         return True
 
 
+# Polled every one or two seconds by the UI, the extension and the
+# Tauri watchdog. Diagnostics bundle 2026-10-01: 30,859 of the 31,015
+# lines in the shipped 2 MB log tail were these requests (25,006 of them
+# /recording/status), so the tail covered four hours and almost none of
+# what happened in them. A SUCCESSFUL poll carries no information; a
+# failed one is kept.
+QUIET_POLL_PATHS = frozenset({
+    "/recording/status",
+    "/health",
+    "/prep-brief/auto/pending",
+    "/sessions/unprocessed",
+    "/recording/copilot/state",
+})
+
+
+class QuietPollingFilter(logging.Filter):
+    """Drop uvicorn access lines for successful GETs of polling
+    endpoints. uvicorn.access records carry
+    ``(client, method, path_with_query, http_version, status)`` in
+    ``record.args``. Anything else, or any doubt, passes through."""
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
+        try:
+            args = record.args
+            if not isinstance(args, tuple) or len(args) < 5:
+                return True
+            method, path, status = args[1], args[2], args[4]
+            if method != "GET" or int(status) >= 400:
+                return True
+            return str(path).split("?", 1)[0] not in QUIET_POLL_PATHS
+        except Exception:  # noqa: BLE001
+            return True
+
+
 def install_access_log_redaction() -> None:
     """Attach the filter to every logger that could render a request
     line. uvicorn.access is the one that does today; uvicorn.error and
     the root are covered for the error paths that echo a URL."""
     for name in ("uvicorn.access", "uvicorn.error"):
         logging.getLogger(name).addFilter(TokenRedactionFilter())
+    logging.getLogger("uvicorn.access").addFilter(QuietPollingFilter())

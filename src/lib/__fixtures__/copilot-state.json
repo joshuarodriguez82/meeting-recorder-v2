@@ -1,0 +1,69 @@
+{
+  "active": true,
+  "paused": false,
+  "board": [
+    {
+      "kind": "clarifying_questions",
+      "text": "Ask Jane Roe which Genesys routing features they rely on",
+      "id": "eb03a15679",
+      "status": "open",
+      "first_seen": "2026-10-01T12:49:40",
+      "last_seen": "2026-10-01T12:49:40",
+      "times_suggested": 1,
+      "fresh": false
+    },
+    {
+      "kind": "risks",
+      "text": "Q3 go-live leaves no time for UAT",
+      "id": "5dd001feb2",
+      "status": "done",
+      "first_seen": "2026-10-01T12:49:40",
+      "last_seen": "2026-10-01T12:49:40",
+      "times_suggested": 1,
+      "fresh": false
+    },
+    {
+      "kind": "risks",
+      "text": "Vendor lock-in with the CCaaS platform",
+      "id": "9465205583",
+      "status": "dismissed",
+      "first_seen": "2026-10-01T12:49:40",
+      "last_seen": "2026-10-01T12:49:40",
+      "times_suggested": 1,
+      "fresh": false
+    },
+    {
+      "kind": "follow_ups",
+      "text": "Send the routing workbook to Pat Roe",
+      "id": "8cf2dd419d",
+      "status": "saved",
+      "first_seen": "2026-10-01T12:49:40",
+      "last_seen": "2026-10-01T12:49:40",
+      "times_suggested": 1,
+      "fresh": false
+    },
+    {
+      "kind": "risks",
+      "text": "Number porting lead time from the current carrier",
+      "id": "8fa1cc40b9",
+      "status": "open",
+      "first_seen": "2026-10-01T12:49:40",
+      "last_seen": "2026-10-01T12:49:40",
+      "times_suggested": 1,
+      "fresh": true
+    }
+  ],
+  "last_tick_at": "2026-10-01T12:49:40",
+  "next_tick_in_s": 45,
+  "wide_interval_s": 45,
+  "segment_count": 1,
+  "error": null,
+  "error_detail": null,
+  "qa": [
+    {
+      "question": "When do they want to go live?",
+      "answer": "Jane Roe said they want Connect live by Q3.",
+      "asked_at": "2026-10-01T12:49:40"
+    }
+  ]
+}

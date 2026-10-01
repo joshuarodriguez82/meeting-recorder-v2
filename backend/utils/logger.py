@@ -363,3 +363,26 @@ def get_logger(name: str) -> logging.Logger:
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
     return logger
+
+
+
+class _AlreadyHandledFilter(logging.Filter):
+    """For the ROOT handler: skip records whose own logger already wrote
+    them. App loggers (get_logger) have their own stdout handler AND
+    propagate to the root, so with a root handler installed every line
+    reached backend.log twice — once as "… [INFO] name: msg", once as
+    "INFO:name:msg". Third-party loggers have no handler of their own
+    and still come through the root."""
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
+        return not logging.getLogger(record.name).handlers
+
+
+def dedupe_root_handlers(handlers=None) -> None:
+    """Install _AlreadyHandledFilter on the root handlers (or on the
+    ``handlers`` given — tests pass their own, so pytest's capture
+    handler on the root is never touched)."""
+    for h in (handlers if handlers is not None
+              else logging.getLogger().handlers):
+        if not any(isinstance(f, _AlreadyHandledFilter) for f in h.filters):
+            h.addFilter(_AlreadyHandledFilter())

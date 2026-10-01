@@ -233,6 +233,15 @@ def refresh_devices() -> bool:
     return True
 
 
+def _write_silence(writer, samples: int, chunk: int = SAMPLE_RATE * 10) -> None:
+    """Write ``samples`` of silence in bounded pieces."""
+    remaining = int(samples)
+    while remaining > 0:
+        n = min(remaining, chunk)
+        writer.write(np.zeros(n, dtype=np.float32))
+        remaining -= n
+
+
 def _get_wasapi_host_api_index() -> Optional[int]:
     """Find the Windows WASAPI host API index for sounddevice deduplication."""
     try:
@@ -681,6 +690,11 @@ class AudioCapture:
             "mic_overflows": self._mic_overflows,
             "loopback_overflows": self._loopback_overflows,
             "loopback_drops": getattr(self, "_loopback_drops", 0),
+            # Silence inserted where system audio paused (nothing
+            # playing) — counted in loopback_samples, reported apart.
+            "loopback_gap_filled_s": round(
+                getattr(getattr(self, "_loopback_gaps", None),
+                        "padded_seconds", 0.0), 3),
             "mic_sr": int(getattr(self, "actual_sr", SAMPLE_RATE) or SAMPLE_RATE),
             "loopback_sr": int(self._loopback_sr or SAMPLE_RATE),
             "mic_start_monotonic": self.mic_start_monotonic,
@@ -964,10 +978,22 @@ class AudioCapture:
         self._loopback_sr = SAMPLE_RATE
         self._loopback_channels = 1
 
+        from core.loopback_gaps import GapFiller
+        gaps = GapFiller(SAMPLE_RATE)
+        self._loopback_gaps = gaps
+
         def _on_block(block: np.ndarray) -> None:
+            now = time.monotonic()
             if self.loopback_start_monotonic is None:
-                self.loopback_start_monotonic = time.monotonic()
-            self._loopback_samples += int(len(block))
+                self.loopback_start_monotonic = now
+            # Same wall-clock rule as the Windows reader, in case macOS
+            # also pauses delivery while nothing plays. The silence goes
+            # through the queue as a COUNT, not an array — an hour-long
+            # gap must not become a 700 MB allocation on Apple's queue.
+            pad = gaps.before(int(len(block)), now)
+            if pad:
+                self._loopback_q_putter(int(pad))
+            self._loopback_samples += pad + int(len(block))
             self._loopback_q_putter(block)
 
         try:
@@ -1213,6 +1239,13 @@ class AudioCapture:
             logger.error(f"Could not open loopback WAV: {e}")
             return
 
+        # WASAPI loopback sends nothing while nothing plays; without this
+        # every quiet stretch was cut out of the far-end track and the
+        # rest of the call slid earlier (core/loopback_gaps.py).
+        from core.loopback_gaps import GapFiller
+        gaps = GapFiller(self._loopback_sr)
+        self._loopback_gaps = gaps
+
         while self._running:
             try:
                 if self._pa_stream is None or not self._pa_stream.is_active():
@@ -1222,9 +1255,13 @@ class AudioCapture:
                 if audio.size > BLOCK_SIZE:
                     channels = audio.size // BLOCK_SIZE
                     audio = audio.reshape(BLOCK_SIZE, channels).mean(axis=1)
+                now = time.monotonic()
                 if self.loopback_start_monotonic is None:
-                    self.loopback_start_monotonic = time.monotonic()
-                self._loopback_samples += int(audio.size)
+                    self.loopback_start_monotonic = now
+                pad = gaps.before(int(audio.size), now)
+                if pad:
+                    _write_silence(writer, pad)
+                self._loopback_samples += pad + int(audio.size)
                 writer.write(audio)
                 # Tee to the live-transcription consumer if there is one.
                 # The callback is in the recording_service thread, NOT
@@ -1297,7 +1334,9 @@ class AudioCapture:
                         self._loopback_drops, e)
 
     def _loopback_writer_sd(self):
-        """Drain the loopback queue and write frames to a WAV on disk."""
+        """Drain the loopback queue and write frames to a WAV on disk.
+        An ``int`` item is a count of silent samples to write (a gap
+        filled by the native macOS path — see _start_loopback_native)."""
         import soundfile as sf
         if self._loopback_queue is None:
             import queue
@@ -1322,6 +1361,9 @@ class AudioCapture:
                     continue
                 if block is None:
                     break
+                if isinstance(block, int):
+                    _write_silence(writer, block)
+                    continue
                 writer.write(block)
                 # Tee to live transcription. We do this from the writer
                 # thread (not the audio callback) so any cost from the

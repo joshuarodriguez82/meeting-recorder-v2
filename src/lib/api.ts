@@ -330,9 +330,53 @@ export interface CoPilotTickResponse {
   // instead of looking like an empty meeting). "timeout" = model too
   // slow (often a local model under load), "unreachable" = can't connect
   // (e.g. Ollama not running), "error" = other. Absent on success.
-  error?: "timeout" | "unreachable" | "error" | null;
+  error?: CoPilotErrorCode | null;
   error_detail?: string | null;
   hot?: boolean;
+  // The whole board after this tick (backend/core/copilot_board.py).
+  board?: CoPilotBoardItem[];
+}
+
+// "no_output" = the model answered with nothing usable (empty or
+// non-JSON) — the backend has always sent it; the type didn't say so.
+export type CoPilotErrorCode = "timeout" | "unreachable" | "error" | "no_output";
+
+export type CoPilotKind = "clarifying_questions" | "risks" | "follow_ups";
+export type CoPilotStatus = "open" | "done" | "dismissed" | "saved";
+
+// One suggestion on the Co-Pilot board: repeats merge into it, and the
+// user's verdict (done / dismissed / saved) sticks.
+export interface CoPilotBoardItem {
+  id: string;
+  kind: CoPilotKind;
+  text: string;
+  status: CoPilotStatus;
+  first_seen: string;
+  last_seen: string;
+  times_suggested: number;
+  // Brought in or re-raised by the latest tick.
+  fresh: boolean;
+}
+
+export interface CoPilotQA {
+  question: string;
+  answer: string;
+  asked_at: string;
+}
+
+// GET /recording/copilot/state — everything the panel shows. The
+// backend runs the ticks itself; the panel only reads this.
+export interface CoPilotState {
+  active: boolean;
+  paused: boolean;
+  board: CoPilotBoardItem[];
+  last_tick_at: string | null;
+  next_tick_in_s: number | null;
+  wide_interval_s: number | null;
+  segment_count: number;
+  error: CoPilotErrorCode | null;
+  error_detail: string | null;
+  qa: CoPilotQA[];
 }
 
 export interface AudioDevice {
@@ -1200,6 +1244,24 @@ export const api = {
   // Pulls every persisted tick on the active session so the panel can
   // rehydrate after a reload — otherwise the bullets vanish until the
   // next 45s tick fires.
+  copilotState: () =>
+    request<CoPilotState>("/recording/copilot/state"),
+  copilotSetItem: (id: string, status: CoPilotStatus) =>
+    request<CoPilotBoardItem>(
+      `/recording/copilot/items/${encodeURIComponent(id)}`, {
+        method: "POST",
+        body: JSON.stringify({ status }),
+      }),
+  copilotPause: (paused: boolean) =>
+    request<{ paused: boolean }>("/recording/copilot/pause", {
+      method: "POST",
+      body: JSON.stringify({ paused }),
+    }),
+  copilotAsk: (question: string) =>
+    request<CoPilotQA>("/recording/copilot/ask", {
+      method: "POST",
+      body: JSON.stringify({ question }),
+    }),
   copilotHistory: () =>
     request<{ ticks: CoPilotTickResponse[] }>("/recording/copilot/history"),
 

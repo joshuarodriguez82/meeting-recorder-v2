@@ -1558,6 +1558,8 @@ class RecordingService:
                 # Blocks that reached no file at all — distinct from an
                 # overflow, which keeps the newest audio.
                 loopback_drops=int(stats.get("loopback_drops") or 0),
+                loopback_gap_filled_s=float(
+                    stats.get("loopback_gap_filled_s") or 0.0),
                 mic_gap_s=((expected_s - mic_secs)
                            if mic_secs is not None else None),
                 drift_s=drift,

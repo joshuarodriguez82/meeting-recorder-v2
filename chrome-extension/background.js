@@ -1652,9 +1652,41 @@ const LABEL_URL_MAX_LEN = 2000;
 // Which provider (if any) this URL joins a meeting on. null for a URL
 // that is merely a place. Returns the provider NAME only — the URL
 // itself never goes anywhere but the event record.
+// MICROSOFT DEFENDER SAFE LINKS (field report 2026-10-01).
+//
+// Microsoft 365 tenants with Defender rewrite every link in mail AND
+// meeting invites to
+//   https://<region>.safelinks.protection.outlook.com/?url=<encoded>&data=…
+// A Teams invite's "Join the meeting now" href therefore arrives with a
+// safelinks HOST and the real teams.microsoft.com address percent-
+// encoded inside it. Every scan here matches by host, so on such a
+// tenant no Teams link was ever recognised — while Zoom links, typed
+// into Location (which Safe Links does not rewrite), kept working. The
+// field diagnostics matched it exactly: 44 meetings, 7 invite bodies
+// read, join links found only for the Zoom ones.
+//
+// The destination is taken out and judged by the SAME host+path rules
+// as any other link, so the unwrap can only ever surface a real
+// provider join URL — never an arbitrary one.
+const SAFELINKS_HOST_RE =
+  /(?:^|\.)safelinks\.protection\.(?:outlook\.com|office365\.us|outlook\.de|apps\.mil)$/i;
+
+function unwrapSafeLink(rawUrl) {
+  let s = String(rawUrl || "");
+  for (let i = 0; i < 3; i++) {
+    let u;
+    try { u = new URL(s); } catch (_) { return s; }
+    if (!SAFELINKS_HOST_RE.test(u.hostname)) return s;
+    const inner = u.searchParams.get("url");
+    if (!inner) return s;
+    s = inner;
+  }
+  return s;
+}
+
 function joinProviderForUrl(rawUrl) {
   try {
-    const u = new URL(String(rawUrl || ""));
+    const u = new URL(unwrapSafeLink(rawUrl));
     if (u.protocol !== "http:" && u.protocol !== "https:") return null;
     for (const p of JOIN_PROVIDER_PATTERNS) {
       if (new RegExp(p.host, "i").test(u.host)
@@ -1698,7 +1730,10 @@ function extractUrlsFromLabel(label) {
       if (!url || url.length > LABEL_URL_MAX_LEN) continue;
       const provider = joinProviderForUrl(url);
       if (provider) {
-        if (!out.joinUrl) { out.joinUrl = url; out.joinProvider = provider; }
+        if (!out.joinUrl) {
+          out.joinUrl = unwrapSafeLink(url);
+          out.joinProvider = provider;
+        }
       } else if (!out.locationUrl) {
         out.locationUrl = url;
       }
@@ -2311,6 +2346,9 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
                 // pane text nor an anchor carried one — the count that
                 // says "the button's shape was the problem".
                 joinFromMarkup: 0,
+                // A Safe Links wrapper was unwrapped while looking for a
+                // join link — says whether this tenant rewrites invites.
+                sawSafeLink: false,
                 // Per-event outcome, so the app can tell the user WHY a
                 // specific meeting has no detail instead of a flat "(No
                 // description on this invite.)" for every cause.
@@ -2323,9 +2361,26 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
       name: p.name, host: new RegExp(p.host, "i"), path: new RegExp(p.path, "i"),
     }));
 
+    // Defender Safe Links: judge the destination, not the wrapper.
+    // Inline because this function runs in the page and cannot reach
+    // the service worker's unwrapSafeLink (same rules).
+    const unwrapLink = (u) => {
+      let s = String(u || "");
+      for (let i = 0; i < 3; i++) {
+        let url;
+        try { url = new URL(s); } catch (_) { return s; }
+        if (!/(?:^|\.)safelinks\.protection\.(?:outlook\.com|office365\.us|outlook\.de|apps\.mil)$/i
+          .test(url.hostname)) return s;
+        const inner = url.searchParams.get("url");
+        if (!inner) return s;
+        s = inner;
+        out.sawSafeLink = true;
+      }
+      return s;
+    };
     const isJoin = (u) => {
       try {
-        const url = new URL(u);
+        const url = new URL(unwrapLink(u));
         return providers.some((p) => p.host.test(url.hostname) && p.path.test(url.pathname));
       } catch (_) { return false; }
     };
@@ -2569,7 +2624,7 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
           }
           // Trailing punctuation from surrounding markup/JSON.
           u = u.replace(/[.,;)\]}"']+$/, "");
-          if (isJoin(u)) found.add(u);
+          if (isJoin(u)) found.add(unwrapLink(u));
         }
       }
       return found;
@@ -2825,8 +2880,8 @@ async function _readEventDetailsFunc(wanted, joinPatterns, maxEvents, budgetMs) 
         // appeared anywhere in the markup with this click.
         const fromMarkup = Array.from(markupJoinUrls())
           .filter((u) => !markupJoinBefore.has(u));
-        const joinUrl = urls.find(isJoin) || newAnchors.find(isJoin)
-          || fromMarkup[0] || "";
+        const joinUrl = unwrapLink(urls.find(isJoin) || newAnchors.find(isJoin)
+          || fromMarkup[0] || "");
         if (!urls.find(isJoin) && newAnchors.find(isJoin)) out.joinFromAnchor++;
         if (!urls.find(isJoin) && !newAnchors.find(isJoin) && fromMarkup[0]) {
           out.joinFromMarkup++;
@@ -3049,7 +3104,12 @@ const DETAIL_KEYS = {
   start: ["start", "starttime", "startdate", "originalstart", "startdatetime"],
   attendees: ["attendees", "requiredattendees", "optionalattendees", "participants"],
   body: ["body", "bodypreview", "description", "textbody"],
-  joinUrl: ["joinurl", "onlinemeetingurl", "skypeteamsmeetingurl", "joinweburl"],
+  // EWS / OWA name the Teams link JoinOnlineMeetingUrl and
+  // OnlineMeetingJoinUrl; Graph uses joinUrl / joinWebUrl under
+  // onlineMeeting. The 2026-10-01 bundle's key census found none of
+  // the earlier aliases on matched items.
+  joinUrl: ["joinurl", "onlinemeetingurl", "skypeteamsmeetingurl", "joinweburl",
+            "joinonlinemeetingurl", "onlinemeetingjoinurl"],
   onlineMeeting: ["onlinemeeting", "onlinemeetinginformation"],
 };
 
@@ -3179,14 +3239,8 @@ function _joinUrlFromHtml(html) {
     .match(/https?:\/\/[^\s"'<>\\]+/g) || [];
   for (let u of candidates) {
     u = u.replace(/[.,;)\]}"']+$/, "");
-    try {
-      const parsed = new URL(u);
-      if (JOIN_PROVIDER_PATTERNS.some((p) =>
-        new RegExp(p.host, "i").test(parsed.hostname)
-        && new RegExp(p.path, "i").test(parsed.pathname))) {
-        return u;
-      }
-    } catch (_) { /* not a URL after trimming — skip */ }
+    // joinProviderForUrl unwraps Safe Links before judging host+path.
+    if (joinProviderForUrl(u)) return unwrapSafeLink(u);
   }
   return "";
 }
@@ -3222,12 +3276,17 @@ function detailsFromResponses(bodies, diag) {
           joinUrl = (om && typeof om === "object") ? _pick(om, DETAIL_KEYS.joinUrl) : "";
         }
         if (typeof joinUrl !== "string") joinUrl = "";
+        if (joinUrl) joinUrl = unwrapSafeLink(joinUrl);
         if (!joinUrl) {
           // No explicit join field on this item — the raw body HTML,
           // BEFORE stripping, is where a Teams invite's href lives.
           joinUrl = _joinUrlFromHtml(rawBody);
           if (joinUrl && diag) {
             diag.joinFromResponseBody = (diag.joinFromResponseBody || 0) + 1;
+            // Yes/no: was the link only reachable by unwrapping?
+            if (/safelinks\.protection\./i.test(String(rawBody || ""))) {
+              diag.joinViaSafeLink = (diag.joinViaSafeLink || 0) + 1;
+            }
           }
         }
         if (diag) {
@@ -3548,6 +3607,7 @@ async function collectWeekDetail(tabId, candidates, capturedBodies, diag, into,
     // and never copied out, so the field run that would have said
     // whether the markup scan works reported nothing (2026-08-23).
     diag.joinFromMarkup += got.joinFromMarkup || 0;
+    if (got.sawSafeLink) diag.sawSafeLink = true;
     diag.bodyFromFrame += got.bodyFromFrame || 0;
 
     // Record each event's outcome into the SHARED map so the final

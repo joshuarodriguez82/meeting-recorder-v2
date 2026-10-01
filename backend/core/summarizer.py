@@ -801,6 +801,8 @@ class Summarizer:
         meeting_type_prompt: str = "",
         hot: bool = False,
         timeout_s: Optional[float] = None,
+        board_memory: str = "",
+        meeting_context: str = "",
     ) -> dict:
         """In-call coaching tick. Given the last few minutes of live
         transcript segments, produce three short bullet lists:
@@ -835,21 +837,22 @@ class Summarizer:
         if not segments:
             return {"clarifying_questions": [], "risks": [], "follow_ups": []}
 
-        lines = []
-        for s in segments[-200:]:
-            speaker = (s.get("speaker") or "?").strip()
-            text = (s.get("text") or "").strip()
-            if not text:
-                continue
-            lines.append(f"[{speaker}] {text}")
-        transcript = "\n".join(lines)
+        # Speaker-aware turns ("Jane Roe: …", "Speaker 2: …", "You: …")
+        # rather than the stream tag, which made every other participant
+        # one indistinguishable "[them]" — see core/copilot_context.
+        from core.copilot_context import format_transcript
+        transcript = format_transcript(segments)
         if not transcript:
             return {"clarifying_questions": [], "risks": [], "follow_ups": []}
 
-        header = (
-            f"Meeting: {meeting_name}\n\n"
-            if meeting_name else ""
-        )
+        if meeting_context.strip():
+            header = (
+                "ABOUT THIS MEETING (from the calendar invite and the "
+                "user's notes):\n" + meeting_context.strip() + "\n\n")
+        elif meeting_name:
+            header = f"Meeting: {meeting_name}\n\n"
+        else:
+            header = ""
 
         # Optional custom context the SA pinned in Settings — per-
         # engagement framing the mode + meeting-type prompts can't
@@ -869,7 +872,15 @@ class Summarizer:
         # fits in a tight context window — older ticks would crowd out
         # the actual transcript.
         prior_block = ""
-        if prior_ticks:
+        if board_memory.strip():
+            # The board (core/copilot_board): everything still open,
+            # everything the user handled or dismissed — far more than
+            # one tick of memory, and it carries the user's verdicts.
+            prior_block = (
+                "\n\n" + board_memory.strip() + "\n"
+                "Never repeat or reword anything above. Raise something "
+                "only if it is new.\n")
+        elif prior_ticks:
             last = prior_ticks[-1]
             prior_lines = []
             for key, label in (
@@ -1021,6 +1032,46 @@ class Summarizer:
             result[key] = take
             budget -= len(take)
         return result
+
+    async def answer_question(
+        self, question: str, segments: List[dict],
+        meeting_context: str = "", custom_context: str = "",
+        timeout_s: float = 30.0,
+    ) -> str:
+        """Answer the user's question about the call in progress, from
+        the live transcript and what is known about the meeting.
+
+        Grounded on purpose: the answer may only use what was said and
+        what the invite says, and must say so plainly when the
+        transcript doesn't contain the answer — a confident invention
+        mid-call is worse than "that hasn't come up"."""
+        from core.copilot_context import format_transcript
+        question = (question or "").strip()
+        if not question:
+            return ""
+        transcript = format_transcript(segments, limit=600)
+        context = ""
+        if meeting_context.strip():
+            context += "ABOUT THIS MEETING:\n" + meeting_context.strip() + "\n\n"
+        if custom_context.strip():
+            context += ("CONTEXT THE USER PINNED:\n"
+                        + custom_context.strip() + "\n\n")
+        prompt = (
+            "You are a live meeting assistant. The user is in this meeting "
+            "right now and asked you a question about it. Answer from the "
+            "transcript and meeting details below ONLY.\n"
+            "- Be brief: 1-4 sentences or a few bullets. They are mid-call.\n"
+            "- Quote or name who said what when it matters.\n"
+            "- If the transcript does not contain the answer, say so in "
+            "one sentence. Never invent numbers, names, dates or "
+            "commitments.\n\n"
+            f"{context}"
+            f"TRANSCRIPT SO FAR (most recent last):\n"
+            f"{transcript or '(nothing transcribed yet)'}\n\n"
+            f"QUESTION: {question}")
+        tokens = 400 if self._provider == "anthropic" else 1200
+        raw = await self._chat(prompt, max_tokens=tokens, timeout=timeout_s)
+        return (raw or "").strip()
 
     async def extract_action_items(
         self, transcript: str, notes: str = "",

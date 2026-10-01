@@ -950,7 +950,7 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
             </div>
           </div>
           <Toggle
-            label="Live Co-Pilot (beta)"
+            label="Live Co-Pilot"
             description="Every ~45s during a recording, asks the configured LLM for three short bullet lists (clarifying questions, risks, suggested follow-ups) based on the last few minutes of conversation. Requires Live transcription to also be on. Costs an LLM call per tick — about $0.10–$0.20 per hour on Anthropic Haiku."
             checked={settings.live_copilot_enabled}
             onChange={(v) => update("live_copilot_enabled", v)}

@@ -509,7 +509,12 @@ def _extract_join_url(*texts: str) -> Optional[str]:
             continue
         for u in _URL_RE.findall(t):
             if any(h in u.lower() for h in _CONF_HOSTS):
-                return u.rstrip(".,);]>\"'")
+                # A Safe Links wrapper matched only because the encoded
+                # destination contains the provider's host; hand back
+                # the destination itself (see unwrap_safelink).
+                from services.extension_calendar_service import (
+                    unwrap_safelink)
+                return unwrap_safelink(u.rstrip(".,);]>\"'"))
     return None
 
 
