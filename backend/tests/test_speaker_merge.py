@@ -529,3 +529,72 @@ def test_without_an_owner_label_nothing_changes():
         _facts("SPEAKER_02", "You", embedding=v),
     ])
     assert [g.reason for g in suggestions] == ["similar voice"]
+
+
+# ── One voice split many ways (field report 2026-10-01) ──────────────
+#
+# A 34-minute call: one voice under a name and three SPEAKER_n labels,
+# every pair scoring 91-94 % — six pairwise cards for one decision.
+
+import math as _math  # noqa: E402
+
+
+def _unit(*v):
+    n = _math.sqrt(sum(x * x for x in v))
+    return [x / n for x in v]
+
+
+def _cos(a, b):
+    return sum(x * y for x, y in zip(a, b))
+
+
+# Four views of one voice (every pair 0.91-0.95) and one other person.
+_SAME = [_unit(1.0, 0.30, 0.0, 0.0), _unit(1.0, 0.0, 0.30, 0.0),
+         _unit(1.0, 0.0, 0.0, 0.30), _unit(1.0, 0.25, 0.25, 0.25)]
+_OTHER = _unit(0.2, 1.0, -0.9, 0.0)
+
+
+def test_the_fixture_has_the_field_shape():
+    sims = [_cos(a, b) for i, a in enumerate(_SAME) for b in _SAME[i + 1:]]
+    assert min(sims) >= 0.90 and max(sims) <= 0.96
+    assert max(_cos(_OTHER, a) for a in _SAME) < 0.5
+
+
+def test_one_voice_split_four_ways_is_one_suggestion():
+    suggestions = suggest_merges([
+        _facts("Jane Doe", "Jane Doe", embedding=_SAME[0]),
+        _facts("SPEAKER_00", embedding=_SAME[1]),
+        _facts("SPEAKER_04", embedding=_SAME[2]),
+        _facts("SPEAKER_05", embedding=_SAME[3]),
+        _facts("SPEAKER_07", embedding=_OTHER),
+    ])
+    voice = [g for g in suggestions if g.reason == "similar voice"]
+    assert len(voice) == 1
+    members = {voice[0].into, *voice[0].absorb}
+    assert members == {"Jane Doe", "SPEAKER_00", "SPEAKER_04", "SPEAKER_05"}
+    assert voice[0].into == "Jane Doe"     # the named one survives
+    assert 0.90 <= voice[0].similarity <= 0.96   # weakest pair, not best
+
+
+def test_two_people_each_split_are_two_groups():
+    p1 = [_unit(1, .2, 0, 0, 0, 0), _unit(1, 0, .2, 0, 0, 0)]
+    p2 = [_unit(0, 0, 0, 1, .2, 0), _unit(0, 0, 0, 1, 0, .2)]
+    suggestions = suggest_merges([
+        _facts("S1", embedding=p1[0]), _facts("S2", embedding=p1[1]),
+        _facts("S3", embedding=p2[0]), _facts("S4", embedding=p2[1]),
+    ])
+    groups = [frozenset((g.into, *g.absorb)) for g in suggestions]
+    assert sorted(map(sorted, groups)) == [["S1", "S2"], ["S3", "S4"]]
+
+
+def test_a_group_never_grows_by_chaining():
+    """C is close to B but not to A: A-B is one group, C stays out."""
+    a = [1.0, 0.0, 0.0]
+    b = _unit(0.8, 0.6, 0.0)
+    c = _unit(0.3, 0.95, 0.0)
+    assert _cos(a, b) >= 0.75 and _cos(b, c) >= 0.75 and _cos(a, c) < 0.75
+    suggestions = suggest_merges([
+        _facts("A", embedding=a), _facts("B", embedding=b),
+        _facts("C", embedding=c)])
+    for g in suggestions:
+        assert {"A", "C"} - {g.into, *g.absorb}

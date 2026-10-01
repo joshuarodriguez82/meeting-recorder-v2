@@ -1406,7 +1406,11 @@ function SpeakersView({
             className="rounded-lg border border-primary/40 bg-primary/5 p-3 space-y-2"
           >
             <div className="text-sm">
-              <span className="font-medium">{sug.names.join(" and ")}</span>{" "}
+              <span className="font-medium">
+                {sug.names.length > 2
+                  ? `${sug.names.slice(0, -1).join(", ")} and ${sug.names[sug.names.length - 1]}`
+                  : sug.names.join(" and ")}
+              </span>{" "}
               {/* The wording has to match the evidence. "Sound like the
                   same person" over a NAME match is wrong twice: it is
                   not what was measured, and it invites the user to
@@ -1430,7 +1434,7 @@ function SpeakersView({
                 {merging
                   ? <Loader2 className="h-3 w-3 animate-spin mr-1" />
                   : <Users className="h-3 w-3 mr-1" />}
-                Merge them
+                {sug.names.length > 2 ? `Merge all ${sug.names.length}` : "Merge them"}
               </Button>
               <Button
                 size="sm"
