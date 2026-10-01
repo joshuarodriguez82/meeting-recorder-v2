@@ -296,6 +296,12 @@ export function EngagementView({ sessions }: Props) {
             <Badge variant="outline">
               {reg.counts.open_questions} open questions
             </Badge>
+            {(reg.counts.open_copilot_followups ?? 0) > 0 && (
+              <Badge variant="outline">
+                {reg.counts.open_copilot_followups} open Co-Pilot follow-up
+                {reg.counts.open_copilot_followups === 1 ? "" : "s"}
+              </Badge>
+            )}
             {reg.counts.total_commitments > 0 && (
               <Badge variant={reg.counts.outstanding_commitments > 0 ? "default" : "outline"}>
                 {reg.counts.outstanding_commitments} outstanding commitment
@@ -355,6 +361,21 @@ export function EngagementView({ sessions }: Props) {
             records={reg.open_questions}
             primary={(r) => String(r.text || "")}
           />
+          {(reg.copilot_followups?.length ?? 0) > 0 && (
+            <Section
+              title="Co-Pilot Follow-ups"
+              records={reg.copilot_followups ?? []}
+              primary={(r) => String(r.text || "")}
+              secondary={(r) =>
+                [
+                  r.kind && `AI-suggested ${r.kind}`,
+                  r.answer && `Answer: ${r.answer}`,
+                ]
+                  .filter(Boolean)
+                  .join("  ·  ")
+              }
+            />
+          )}
         </>
       )}
     </div>

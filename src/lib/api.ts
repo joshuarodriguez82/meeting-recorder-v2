@@ -2655,6 +2655,9 @@ export interface EngagementRegister {
     decisions: number;
     open_action_items: number;
     open_questions: number;
+    // Co-Pilot questions / follow-ups not answered in any meeting yet.
+    // Optional: an older backend doesn't send it.
+    open_copilot_followups?: number;
     outstanding_commitments: number;
     total_commitments: number;
   };
@@ -2668,6 +2671,9 @@ export interface EngagementRegister {
   decisions: EngagementRecord[];
   action_items: EngagementRecord[];
   open_questions: EngagementRecord[];
+  // The Co-Pilot's questions and follow-ups across the engagement,
+  // checked against each meeting's transcript. AI suggestions.
+  copilot_followups?: EngagementRecord[];
   // Manual overlay merged in by the backend. Always present (with
   // empty fields when nothing has been set yet) so the UI doesn't
   // have to null-check.

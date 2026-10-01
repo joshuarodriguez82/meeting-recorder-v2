@@ -72,6 +72,14 @@ SHEETS: List[dict] = [
         ("Question", lambda r: r.get("text", "")),
         ("Source", lambda r: r.get("source", "")),
     ]},
+    # The Co-Pilot's questions and follow-ups, checked against each
+    # meeting's transcript (core/copilot_followups). AI suggestions —
+    # the sheet title says so.
+    {"key": "copilot_followups", "title": "Co-Pilot Follow-ups", "cols": [
+        ("Item", lambda r: r.get("text", "")),
+        ("Kind", lambda r: r.get("kind", "")),
+        ("Answer", lambda r: r.get("answer", "")),
+    ]},
     # Defect register. Ref leads because that is what triage calls the
     # row by, and the sheet is read in the meeting it came from.
     {"key": "defects", "title": "Defects", "cols": [
@@ -184,6 +192,7 @@ def _build_workbook(register: dict, prior: Optional[dict]):
         ("Decisions", counts.get("decisions", 0)),
         ("Open action items", counts.get("open_action_items", 0)),
         ("Open questions", counts.get("open_questions", 0)),
+        ("Open Co-Pilot follow-ups", counts.get("open_copilot_followups", 0)),
         ("Previous export", prior_gen or "(first export)"),
     ]
     for i, (k, v) in enumerate(meta, 1):
