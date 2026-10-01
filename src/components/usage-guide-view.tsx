@@ -780,42 +780,51 @@ const SECTIONS: Section[] = [
   },
   {
     id: "live-copilot",
-    title: "Live Co-Pilot (beta)",
+    title: "Live Co-Pilot",
     content: (
       <>
         <p>
-          A panel that watches the live transcript while you&apos;re recording
-          and, every ~45 seconds, asks the configured LLM for three short
-          bullet lists based on the last ~10 minutes of conversation:
+          While you&apos;re recording, the Co-Pilot reads the live transcript
+          and keeps one running board of what&apos;s worth acting on, in three
+          groups:
         </p>
         <ul className="list-disc pl-5 space-y-1">
           <li>
-            <strong>Clarifying questions</strong> — what to ask now to fill
-            gaps the room hasn&apos;t addressed.
+            <strong>Questions to ask</strong> — gaps the conversation
+            hasn&apos;t closed.
           </li>
           <li>
-            <strong>Risks &amp; assumptions</strong> — unspoken assumptions
-            or flags worth surfacing.
+            <strong>Risks &amp; assumptions</strong> — things the room
+            hasn&apos;t acknowledged.
           </li>
           <li>
-            <strong>Suggested follow-ups</strong> — concrete next steps.
+            <strong>Follow-ups</strong> — concrete next steps.
           </li>
         </ul>
         <p>
-          Each list is capped at three bullets per tick. The panel keeps a
-          scrolling history of every tick during the call so you can scroll
-          back to earlier suggestions; nothing is overwritten. <strong>Every
-          tick is also saved with the session</strong>, so after the meeting
-          ends you can open the saved session and find the full coaching
-          record in the <strong>Co-Pilot</strong> tab — alongside the
-          transcript, summary, and screenshots.
+          It runs in the background for the whole recording, whichever tab
+          you&apos;re on, and knows the meeting from its calendar invite —
+          name, client, project, organiser and attendees — and who is
+          speaking. A suggestion it makes again is merged into the existing
+          entry instead of piling up. For each item you can mark it{" "}
+          <strong>done</strong> (asked or handled), <strong>save</strong>{" "}
+          it as a follow-up, decision or note, or <strong>dismiss</strong>{" "}
+          it; the Co-Pilot is told, so it stops raising it. Handled items
+          collapse under <strong>Handled</strong>, with Undo.
+        </p>
+        <p>
+          <strong>Ask</strong> answers a question about the call so far —
+          &ldquo;what did they say about the timeline?&rdquo; — from the
+          transcript, and says so when it hasn&apos;t come up. Everything is
+          saved with the session; what you dismissed is left out of the
+          meeting summary.
         </p>
 
         <p className="font-medium pt-2">Turning it on</p>
         <p>The co-pilot is opt-in — there are two ways to enable it:</p>
         <ul className="list-disc pl-5 space-y-1">
           <li>
-            <strong>Settings → Workflow → Live Co-Pilot (beta)</strong>.
+            <strong>Settings → Workflow → Live Co-Pilot</strong>.
             Persists across restarts.
           </li>
           <li>
@@ -947,7 +956,7 @@ const SECTIONS: Section[] = [
         <p className="font-medium pt-2">Point Meeting Recorder at Ollama</p>
         <ol className="list-decimal pl-5 space-y-1">
           <li>
-            <strong>Settings → Workflow → Live Co-Pilot (beta)</strong>{" "}
+            <strong>Settings → Workflow → Live Co-Pilot</strong>{" "}
             → flip on.
           </li>
           <li>

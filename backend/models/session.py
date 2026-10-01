@@ -124,6 +124,13 @@ class Session:
         # typed model) because the prompt schema may evolve before the
         # feature leaves beta.
         self.copilot_ticks: List[Dict] = []
+        # The Co-Pilot board (core/copilot_board): one entry per
+        # suggestion with the user's verdict on it — open / done /
+        # dismissed / saved. The summary leaves out what was dismissed.
+        self.copilot_board: List[Dict] = []
+        # Questions asked of the Co-Pilot during the call and its
+        # answers: [{"question", "answer", "asked_at"}].
+        self.copilot_qa: List[Dict] = []
         # Audio integrity: set at stop_recording when the actual WAV
         # duration significantly disagrees with (ended_at - started_at).
         # Causes include process collisions, OneDrive sync truncation,
@@ -305,6 +312,8 @@ class Session:
             "exported_audio_paths": list(self.exported_audio_paths),
             "screenshots": list(self.screenshots),
             "copilot_ticks": list(self.copilot_ticks),
+            "copilot_board": list(self.copilot_board),
+            "copilot_qa": list(self.copilot_qa),
             "audio_integrity_warning": self.audio_integrity_warning,
             "audio_actual_duration_s": self.audio_actual_duration_s,
             "audio_expected_duration_s": self.audio_expected_duration_s,
@@ -382,6 +391,8 @@ class Session:
         session.exported_audio_paths = list(data.get("exported_audio_paths") or [])
         session.screenshots = list(data.get("screenshots") or [])
         session.copilot_ticks = list(data.get("copilot_ticks") or [])
+        session.copilot_board = list(data.get("copilot_board") or [])
+        session.copilot_qa = list(data.get("copilot_qa") or [])
         session.audio_integrity_warning = data.get("audio_integrity_warning") or None
         session.audio_actual_duration_s = data.get("audio_actual_duration_s")
         session.audio_expected_duration_s = data.get("audio_expected_duration_s")

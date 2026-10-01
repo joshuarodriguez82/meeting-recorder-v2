@@ -519,6 +519,12 @@
   ]
  ],
  [
+  "/recording/copilot/ask",
+  [
+   "POST"
+  ]
+ ],
+ [
   "/recording/copilot/history",
   [
    "GET"
@@ -531,9 +537,27 @@
   ]
  ],
  [
+  "/recording/copilot/items/{item_id}",
+  [
+   "POST"
+  ]
+ ],
+ [
+  "/recording/copilot/pause",
+  [
+   "POST"
+  ]
+ ],
+ [
   "/recording/copilot/save",
   [
    "POST"
+  ]
+ ],
+ [
+  "/recording/copilot/state",
+  [
+   "GET"
   ]
  ],
  [

@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Loader2, Pause, Play, RefreshCw, Sparkles, Copy, Check,
-  Save, CheckSquare, Lightbulb, StickyNote,
+  Loader2, Pause, Play, RefreshCw, Sparkles, Copy, Check, X,
+  Save, CheckSquare, Lightbulb, StickyNote, Undo2, Send, ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -12,79 +13,75 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { api, ApiError, type CoPilotTickResponse } from "@/lib/api";
+import {
+  api, ApiError,
+  type CoPilotBoardItem, type CoPilotKind, type CoPilotQA, type CoPilotState,
+  type CoPilotStatus,
+} from "@/lib/api";
+import { boardView, errorMessage, statusLine } from "@/lib/copilot-board";
 import { Button } from "@/components/ui/button";
 
 // Live Co-Pilot panel.
 //
-// While a recording is in progress AND the user has opted into
-// "Live Co-Pilot" in Settings (or via the in-bar toggle on the Record
-// view), this panel polls POST /recording/copilot/tick every ~45 s.
-// The backend reads the last ~10 min of live-transcript segments and
-// asks the configured LLM (default Anthropic Haiku) for three short
-// bullet lists:
+// The Co-Pilot runs in the BACKEND now (backend/services/copilot_runner.py):
+// it ticks on the configured interval while a recording is in progress,
+// whichever tab is open. It used to tick from this panel, so leaving the
+// Record tab stopped coaching altogether — and with it the observations
+// the post-meeting summary reads.
 //
-//   * clarifying_questions — what to ask now to fill gaps
-//   * risks                — unspoken assumptions / flags
-//   * follow_ups           — concrete next-step suggestions
-//
-// Each tick's bullets are also appended to the active session on the
-// backend so the coaching record survives past the recording — every
-// tick is rendered here in a scrolling history (newest at the top)
-// instead of replacing the previous one, matching how the live
-// transcript accumulates segments rather than overwriting.
-//
-// On mount we fetch GET /recording/copilot/history so a mid-recording
-// page reload doesn't blank the panel.
-//
-// Errors are silenced on the screen: a 403 means the user toggled the
-// feature off while recording (we just stop polling), a 409 means the
-// recording ended (same), and transient network failures just leave
-// the previous result on screen until the next tick.
+// This panel reads GET /recording/copilot/state every few seconds (no
+// model call — cheap) and shows ONE board: each suggestion once, with
+// the user's verdict on it. Repeats merge into the existing entry;
+// marking an item done or dismissed sticks, and the model is told about
+// both so it stops raising them. "Ask" answers a question about the call
+// from the live transcript.
 
-// Fallback intervals — used only until settings load. Real values
-// come from settings.live_copilot_wide_interval_sec and
-// live_copilot_hot_interval_sec; the user can dial them in
-// Settings → Live Co-Pilot.
-const DEFAULT_WIDE_INTERVAL_SEC = 45;
-const DEFAULT_HOT_INTERVAL_SEC = 0; // hot tier off by default
+const STATE_POLL_MS = 3000;
 
 interface Props {
   recording: boolean;
   enabled: boolean;
 }
 
+type SaveKind = "follow_up" | "decision" | "note";
+const DEFAULT_SAVE: Record<CoPilotKind, SaveKind> = {
+  clarifying_questions: "follow_up",
+  risks: "decision",
+  follow_ups: "follow_up",
+};
+
 export function CoPilotPanel({ recording, enabled }: Props) {
-  // Newest-first list of every tick we've shown. The backend also
-  // persists each one onto the active session, so this list is purely
-  // a render cache; the canonical history lives in session.copilot_ticks
-  // once the recording stops.
-  const [ticks, setTicks] = useState<CoPilotTickResponse[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [paused, setPaused] = useState(false);
-  const [lastError, setLastError] = useState<string | null>(null);
-  // Surfaced when a manual Refresh-now click returns an empty tick.
-  // Cleared on the next non-empty tick or the next manual click.
-  const [refreshNote, setRefreshNote] = useState<string | null>(null);
-  // Active persona + meeting-type. Hydrated from /settings on mount so
-  // the dropdowns reflect what the backend will actually use for the
-  // next tick. Changing a dropdown POSTs /settings/copilot-active so
-  // the next 45s tick picks up the new framing — no app restart needed.
+  const [state, setState] = useState<CoPilotState | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [showHandled, setShowHandled] = useState(false);
+  const [question, setQuestion] = useState("");
+  const [asking, setAsking] = useState(false);
   const [activeMode, setActiveMode] = useState<string>("SA");
   const [activeType, setActiveType] = useState<string>("General");
   const [modes, setModes] = useState<string[]>([]);
   const [meetingTypes, setMeetingTypes] = useState<string[]>([]);
-  // Polling intervals (seconds). Hydrated from settings on mount; the
-  // user can change them in Settings and they take effect at the next
-  // panel re-mount (next recording, basically — interval changes
-  // mid-recording don't currently rebuild the poll timers).
-  const [wideSec, setWideSec] = useState<number>(DEFAULT_WIDE_INTERVAL_SEC);
-  const [hotSec, setHotSec] = useState<number>(DEFAULT_HOT_INTERVAL_SEC);
+  const polling = useRef(false);
 
-  // Load mode + meeting-type names and the current settings selection
-  // once the panel mounts in a recording. Best-effort — if either fails
-  // we fall through to the SA/General defaults already in state and the
-  // dropdowns just show those single entries until the next reload.
+  const load = useCallback(async () => {
+    if (polling.current) return;
+    polling.current = true;
+    try {
+      setState(await api.copilotState());
+    } catch {
+      // Backend restarting or between recordings — keep what's shown.
+    } finally {
+      polling.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!recording || !enabled) return;
+    void load();
+    const id = setInterval(() => void load(), STATE_POLL_MS);
+    return () => clearInterval(id);
+  }, [recording, enabled, load]);
+
+  // Persona + meeting-type libraries, and the current choice.
   useEffect(() => {
     if (!recording || !enabled) return;
     let cancelled = false;
@@ -100,16 +97,8 @@ export function CoPilotPanel({ recording, enabled }: Props) {
         setMeetingTypes(t.map((x) => x.name));
         if (s.live_copilot_mode) setActiveMode(s.live_copilot_mode);
         if (s.live_copilot_meeting_type) setActiveType(s.live_copilot_meeting_type);
-        if (typeof s.live_copilot_wide_interval_sec === "number"
-            && s.live_copilot_wide_interval_sec > 0) {
-          setWideSec(s.live_copilot_wide_interval_sec);
-        }
-        if (typeof s.live_copilot_hot_interval_sec === "number") {
-          setHotSec(s.live_copilot_hot_interval_sec);
-        }
       } catch {
-        // Library load failed — leave defaults; dropdowns will be empty
-        // and just show the SA/General current choice.
+        // Dropdowns fall back to the current choice only.
       }
     })();
     return () => { cancelled = true; };
@@ -121,10 +110,10 @@ export function CoPilotPanel({ recording, enabled }: Props) {
     setActiveMode(next);
     try {
       await api.setCopilotActive(next, undefined);
-      toast.success(`Co-pilot mode: ${next}`);
+      toast.success(`Co-Pilot persona: ${next}`);
     } catch (e) {
       setActiveMode(prev);
-      toast.error(`Couldn't set mode: ${e instanceof Error ? e.message : e}`);
+      toast.error(`Couldn't change persona: ${e instanceof Error ? e.message : e}`);
     }
   };
 
@@ -137,163 +126,95 @@ export function CoPilotPanel({ recording, enabled }: Props) {
       toast.success(`Meeting type: ${next}`);
     } catch (e) {
       setActiveType(prev);
-      toast.error(`Couldn't set type: ${e instanceof Error ? e.message : e}`);
+      toast.error(`Couldn't change meeting type: ${e instanceof Error ? e.message : e}`);
     }
   };
-  // Track in-flight ticks so a manual "Refresh now" doesn't overlap
-  // with the timer-driven one. Ref (not state) so the latest value is
-  // visible inside the timer callback without re-creating the interval.
-  const inFlight = useRef(false);
-  // Track whether we've already hydrated history on mount so a fast
-  // re-render (e.g. parent state churn) doesn't refetch.
-  const hydrated = useRef(false);
 
-  // On mount (and any time the recording toggles back on), pull the
-  // persisted tick history so a page reload mid-call rehydrates the
-  // panel instead of starting from scratch. Best-effort; failures just
-  // mean the user waits ~45 s for the first live tick.
-  useEffect(() => {
-    if (!recording || !enabled || hydrated.current) return;
-    hydrated.current = true;
-    (async () => {
-      try {
-        const r = await api.copilotHistory();
-        if (r.ticks && r.ticks.length) {
-          // Newest first matches the live render order.
-          setTicks([...r.ticks].reverse());
-        }
-      } catch {
-        // No persisted history (no recording yet, fresh session) — fine.
-      }
-    })();
-  }, [recording, enabled]);
-
-  const tick = useCallback(async (manual = false) => {
-    if (inFlight.current) return;
-    inFlight.current = true;
-    setLoading(true);
-    if (manual) setRefreshNote(null);
+  const refresh = async () => {
+    setRefreshing(true);
     try {
       const r = await api.copilotTick();
-      // Drop empty ticks so the history doesn't fill up with no-ops
-      // before anyone has spoken. The backend already filters these
-      // before persisting, but the panel polls faster than meaningful
-      // speech sometimes happens, so this is a second guard.
-      const isEmpty =
-        r.clarifying_questions.length === 0 &&
-        r.risks.length === 0 &&
-        r.follow_ups.length === 0;
-      if (!isEmpty) {
-        setTicks((prev) => [r, ...prev]);
-        setRefreshNote(null);
-        setLastError(null);
-      } else if (r.error) {
-        // Model call failed (returned empty WITH a reason). Surface it so
-        // the panel explains the silence instead of looking like the
-        // meeting simply had nothing worth flagging.
-        if (r.error === "timeout") {
-          setLastError(
-            "Co-Pilot model is responding too slowly (timed out). If you're " +
-            "on a local model like Ollama, it may be overloaded — coaching " +
-            "will resume when it catches up.");
-        } else if (r.error === "unreachable") {
-          setLastError(
-            "Co-Pilot can't reach its model. If you're using Ollama, make " +
-            "sure it's running; check Settings → Diagnostics.");
-        } else {
-          setLastError("Co-Pilot model call failed — it'll retry next tick.");
-        }
-      } else {
-        setLastError(null);
-        if (manual) {
-          // User clicked Refresh and got nothing (and no error) — say so,
-          // otherwise it looks like the button is broken.
-          setRefreshNote("No new coaching content since the last tick.");
-        }
-      }
+      const added = r.clarifying_questions.length + r.risks.length
+        + r.follow_ups.length;
+      if (!added && !r.error) toast.message("Nothing new to add right now.");
+      await load();
     } catch (e) {
-      if (e instanceof ApiError && (e.status === 403 || e.status === 409)) {
-        // Feature disabled or no active recording — stop trying, the
-        // parent will unmount us shortly anyway.
-        setLastError(null);
-      } else if (e instanceof ApiError && e.status === 429) {
-        setLastError("Rate-limited by the LLM — retrying on the next tick.");
-      } else {
-        setLastError(e instanceof Error ? e.message : "Tick failed");
+      if (!(e instanceof ApiError && (e.status === 403 || e.status === 409))) {
+        toast.error(e instanceof Error ? e.message : "Refresh failed");
       }
     } finally {
-      inFlight.current = false;
-      setLoading(false);
+      setRefreshing(false);
     }
-  }, []);
+  };
 
-  // Wide poll — full window, slower cadence, runs always while
-  // recording + enabled + not paused. First tick fires on the next
-  // macrotask so users see something quickly.
-  useEffect(() => {
-    if (!recording || !enabled || paused) return;
-    const ms = Math.max(15, wideSec) * 1000;
-    const kick = setTimeout(() => void tick(), 0);
-    const id = setInterval(tick, ms);
-    return () => {
-      clearTimeout(kick);
-      clearInterval(id);
-    };
-  }, [recording, enabled, paused, tick, wideSec]);
+  const togglePause = async () => {
+    const next = !(state?.paused ?? false);
+    try {
+      await api.copilotPause(next);
+      await load();
+    } catch (e) {
+      toast.error(`Couldn't ${next ? "pause" : "resume"}: ${e instanceof Error ? e.message : e}`);
+    }
+  };
 
-  // Hot poll — narrow window, faster cadence, runs only when the user
-  // has opted in (hotSec > 0). Calls the same setTicks pipeline as the
-  // wide tick (responses share the CoPilotTickResponse shape) so the
-  // dedupe + render logic doesn't have to branch. Most hot ticks
-  // return empty arrays and are no-ops by design.
-  useEffect(() => {
-    if (!recording || !enabled || paused) return;
-    if (!hotSec || hotSec <= 0) return;
-    const ms = Math.max(5, hotSec) * 1000;
-    const hotTick = async () => {
-      if (inFlight.current) return;
-      inFlight.current = true;
-      try {
-        const r = await api.copilotHotTick();
-        const isEmpty =
-          r.clarifying_questions.length === 0 &&
-          r.risks.length === 0 &&
-          r.follow_ups.length === 0;
-        if (!isEmpty) setTicks((prev) => [r, ...prev]);
-      } catch {
-        // Hot-tick failures are silent — wide tick will report any
-        // real issue (auth / rate-limit / etc). The 90s window also
-        // sees a lot of "really nothing here", so noise from this
-        // loop would mostly be uninformative.
-      } finally {
-        inFlight.current = false;
-      }
-    };
-    const id = setInterval(hotTick, ms);
-    return () => clearInterval(id);
-  }, [recording, enabled, paused, hotSec]);
+  const setStatus = async (item: CoPilotBoardItem, status: CoPilotStatus) => {
+    // Optimistic: the board is the user's own list, the click should land.
+    setState((s) => s && {
+      ...s,
+      board: s.board.map((i) => (i.id === item.id ? { ...i, status, fresh: false } : i)),
+    });
+    try {
+      await api.copilotSetItem(item.id, status);
+    } catch (e) {
+      toast.error(`Couldn't update: ${e instanceof Error ? e.message : e}`);
+      void load();
+    }
+  };
+
+  const save = async (item: CoPilotBoardItem, kind: SaveKind) => {
+    try {
+      await api.saveCopilotSuggestion(kind, item.text);
+      toast.success(`Saved as ${kind === "follow_up" ? "follow-up" : kind}`);
+      await setStatus(item, "saved");
+    } catch (e) {
+      toast.error(`Save failed: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  const ask = async () => {
+    const q = question.trim();
+    if (!q || asking) return;
+    setAsking(true);
+    try {
+      await api.copilotAsk(q);
+      setQuestion("");
+      await load();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "The Co-Pilot didn't answer");
+    } finally {
+      setAsking(false);
+    }
+  };
 
   if (!recording || !enabled) return null;
+
+  const view = boardView(state?.board ?? []);
+  const error = errorMessage(state?.error);
+  const qa: CoPilotQA[] = [...(state?.qa ?? [])].reverse();
 
   return (
     <div className="rounded-lg border bg-card p-4 space-y-3">
       <div className="flex items-center gap-2 text-sm font-medium flex-wrap">
         <Sparkles className="h-4 w-4 text-primary" />
-        Live Co-Pilot
-        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-          beta
-        </span>
-        {loading && (
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+        Co-Pilot
+        {view.openCount > 0 && (
+          <span className="rounded-full bg-primary/10 px-1.5 text-[10px] text-primary">
+            {view.openCount} open
+          </span>
         )}
-
-        {/* Persona + meeting-type pickers. Both updates persist to
-            config.env and take effect on the NEXT tick — current
-            in-flight tick keeps its prompt. Names render compact in
-            the header; full prompt editing lives in Settings. */}
         <Select value={activeMode} onValueChange={changeMode}>
-          <SelectTrigger className="h-7 w-32 text-xs" title="Co-pilot persona">
-            <SelectValue placeholder="Mode" />
+          <SelectTrigger className="h-7 w-32 text-xs" title="Co-Pilot persona">
+            <SelectValue placeholder="Persona" />
           </SelectTrigger>
           <SelectContent>
             {(modes.length ? modes : [activeMode]).map((m) => (
@@ -311,241 +232,198 @@ export function CoPilotPanel({ recording, enabled }: Props) {
             ))}
           </SelectContent>
         </Select>
-
-        <span className="text-[10px] text-muted-foreground">
-          {ticks.length > 0
-            ? `${ticks.length} update${ticks.length === 1 ? "" : "s"}`
-            : ""}
-        </span>
         <div className="ml-auto flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => void tick(true)}
-            disabled={loading || paused}
-            title="Refresh now"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
+          <Button variant="ghost" size="sm" onClick={() => void refresh()}
+            disabled={refreshing || state?.paused}
+            title="Check the conversation now">
+            {refreshing
+              ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              : <RefreshCw className="h-3.5 w-3.5" />}
           </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setPaused((p) => !p)}
-            title={paused ? "Resume" : "Pause"}
-          >
-            {paused ? (
-              <Play className="h-3.5 w-3.5" />
-            ) : (
-              <Pause className="h-3.5 w-3.5" />
-            )}
+          <Button variant="ghost" size="sm" onClick={() => void togglePause()}
+            title={state?.paused ? "Resume" : "Pause"}>
+            {state?.paused
+              ? <Play className="h-3.5 w-3.5" />
+              : <Pause className="h-3.5 w-3.5" />}
           </Button>
         </div>
       </div>
 
-      {/* Scrollable history. Capped at a comfortable single-screen
-          height so the panel doesn't push the live transcript or other
-          recording-page sections off the page on long calls. */}
+      <form
+        className="flex items-center gap-2"
+        onSubmit={(e) => { e.preventDefault(); void ask(); }}
+      >
+        <input
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+          placeholder="Ask about this call — e.g. what did they say about the timeline?"
+          className="h-8 flex-1 rounded-md border bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          maxLength={1000}
+          aria-label="Ask the Co-Pilot about this call"
+        />
+        <Button type="submit" size="sm" variant="secondary"
+          disabled={asking || !question.trim()} aria-label="Ask">
+          {asking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+        </Button>
+      </form>
+      {qa.length > 0 && (
+        <div className="space-y-2">
+          {qa.slice(0, 3).map((x) => (
+            <div key={x.asked_at + x.question} className="rounded-md bg-muted/40 p-2 text-sm">
+              <p className="text-xs font-medium text-muted-foreground">{x.question}</p>
+              <p className="mt-1 whitespace-pre-wrap leading-snug">{x.answer}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="max-h-[28rem] overflow-y-auto pr-1 space-y-3">
-        {ticks.length === 0 ? (
+        {view.openCount === 0 ? (
           <p className="text-xs italic text-muted-foreground py-2">
-            Waiting for the first tick…
+            {state?.last_tick_at
+              ? "Nothing to act on right now — new suggestions appear here as the conversation moves."
+              : "Listening — the first suggestions appear after the first update."}
           </p>
         ) : (
-          ticks.map((t, i) => <TickCard key={t.generated_at + i} tick={t} />)
+          view.open.map((group) => (
+            <div key={group.kind} className="space-y-1">
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                {group.title}
+              </p>
+              <ul className="space-y-1">
+                {group.items.map((item) => (
+                  <BoardRow key={item.id} item={item}
+                    onStatus={(s) => void setStatus(item, s)}
+                    onSave={(k) => void save(item, k)} />
+                ))}
+              </ul>
+            </div>
+          ))
+        )}
+
+        {view.handled.length > 0 && (
+          <div className="border-t pt-2">
+            <button type="button"
+              onClick={() => setShowHandled((v) => !v)}
+              className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground">
+              {showHandled ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+              Handled ({view.handled.length})
+            </button>
+            {showHandled && (
+              <ul className="mt-1 space-y-1">
+                {view.handled.map((item) => (
+                  <li key={item.id} className="flex items-start gap-2 text-xs text-muted-foreground">
+                    <span className="mt-0.5 w-16 shrink-0 uppercase tracking-wide text-[9px]">
+                      {item.status}
+                    </span>
+                    <span className={`flex-1 ${item.status === "dismissed" ? "line-through" : ""}`}>
+                      {item.text}
+                    </span>
+                    <button type="button" title="Put back on the board"
+                      aria-label="Undo"
+                      onClick={() => void setStatus(item, "open")}
+                      className="rounded p-0.5 hover:bg-muted hover:text-foreground">
+                      <Undo2 className="h-3 w-3" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         )}
       </div>
 
-      <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+      <div className="flex items-start justify-between gap-2 text-[10px] text-muted-foreground">
         <span>
-          {paused
-            ? "Paused"
-            : (hotSec > 0
-                ? `Refreshing every ${wideSec}s (wide) + ${hotSec}s (hot)`
-                : `Refreshing every ${wideSec}s`)}
-          {ticks[0]?.segment_count
-            ? ` · ${ticks[0].segment_count} recent segments`
-            : ""}
+          {statusLine(state)}
+          {state?.segment_count ? ` · ${state.segment_count} recent segments` : ""}
         </span>
-        {lastError ? (
-          <span className="text-amber-600 dark:text-amber-400">
-            {lastError}
+        {error && (
+          <span className="text-right text-amber-600 dark:text-amber-400" title={state?.error_detail ?? ""}>
+            {error}
           </span>
-        ) : refreshNote ? (
-          <span className="text-muted-foreground italic">{refreshNote}</span>
-        ) : null}
+        )}
       </div>
     </div>
   );
 }
 
-// A single tick rendered as three labeled bullet lists with the
-// timestamp it was generated. Empty categories are hidden (rather than
-// showing "Nothing here right now") to keep the history dense.
-type SaveKind = "follow_up" | "decision" | "note";
-
-function TickCard({ tick }: { tick: CoPilotTickResponse }) {
-  // Each section knows the most natural Save target for its bullets —
-  // a clarifying question is something the SA should ASK (follow-up),
-  // a risk is something to TRACK as a decision-to-make, a suggested
-  // follow-up is also a follow-up. The dropdown still offers all three
-  // so the user can override per-bullet.
-  const sections: Array<{
-    title: string;
-    key: keyof CoPilotTickResponse;
-    defaultKind: SaveKind;
-  }> = [
-    { title: "Clarifying questions", key: "clarifying_questions", defaultKind: "follow_up" },
-    { title: "Risks & assumptions",  key: "risks",                defaultKind: "decision"  },
-    { title: "Suggested follow-ups", key: "follow_ups",           defaultKind: "follow_up" },
-  ];
-  const generated = tick.generated_at
-    ? new Date(tick.generated_at).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      })
-    : "";
-
-  // Build a plain-text copy of the whole tick formatted for paste-into-
-  // notes use. Empty sections are skipped so the clipboard isn't padded
-  // with blank headers.
-  const copyText = sections
-    .map(({ title, key }) => {
-      const items = (tick[key] as string[] | undefined) ?? [];
-      if (items.length === 0) return "";
-      return `${title}:\n${items.map((s) => `  • ${s}`).join("\n")}`;
-    })
-    .filter(Boolean)
-    .join("\n\n");
-
+function BoardRow({
+  item, onStatus, onSave,
+}: {
+  item: CoPilotBoardItem;
+  onStatus: (s: CoPilotStatus) => void;
+  onSave: (k: SaveKind) => void;
+}) {
+  const def = DEFAULT_SAVE[item.kind];
   return (
-    <div className="rounded-md border bg-muted/30 p-3 space-y-2">
-      <div className="flex items-center justify-between text-[10px] uppercase tracking-wide text-muted-foreground">
-        <span>{generated}</span>
-        <div className="flex items-center gap-2">
-          {tick.segment_count > 0 && <span>{tick.segment_count} segments</span>}
-          <TickCopyButton text={copyText} />
-        </div>
-      </div>
-      {sections.map(({ title, key, defaultKind }) => {
-        const items = (tick[key] as string[] | undefined) ?? [];
-        if (items.length === 0) return null;
-        return (
-          <div key={key} className="space-y-1">
-            <div className="flex items-center justify-between">
-              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                {title}
-              </p>
-              <TickCopyButton
-                text={`${title}:\n${items.map((s) => `  • ${s}`).join("\n")}`}
-                ariaLabel={`Copy ${title}`}
-              />
-            </div>
-            <ul className="space-y-1">
-              {items.map((s, i) => (
-                <li key={i} className="text-sm leading-snug flex gap-2 group items-start">
-                  <span className="text-muted-foreground select-none mt-0.5">•</span>
-                  <span className="flex-1">{s}</span>
-                  <TickSaveButton text={s} defaultKind={defaultKind} />
-                  <TickCopyButton
-                    text={s}
-                    ariaLabel="Copy bullet"
-                    subtle
-                  />
-                </li>
-              ))}
-            </ul>
-          </div>
-        );
-      })}
-    </div>
+    <li className="group flex items-start gap-2 text-sm leading-snug">
+      <span className="mt-0.5 select-none text-muted-foreground">•</span>
+      <span className="flex-1">
+        {item.text}
+        {item.fresh && (
+          <span className="ml-1.5 rounded bg-primary/10 px-1 text-[9px] uppercase tracking-wide text-primary">
+            new
+          </span>
+        )}
+        {item.times_suggested > 1 && (
+          <span className="ml-1.5 text-[10px] text-muted-foreground"
+            title="The Co-Pilot keeps coming back to this">
+            raised {item.times_suggested}×
+          </span>
+        )}
+      </span>
+      <span className="flex items-center gap-0.5 opacity-60 group-hover:opacity-100 focus-within:opacity-100">
+        <IconButton label={item.kind === "clarifying_questions" ? "Asked" : "Done"}
+          onClick={() => onStatus("done")}>
+          <Check className="h-3 w-3" />
+        </IconButton>
+        <DropdownMenu>
+          <DropdownMenuTrigger aria-label="Save" title="Save as a follow-up, decision or note"
+            className="inline-flex h-5 w-5 items-center justify-center rounded border-0 bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground">
+            <Save className="h-3 w-3" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-44">
+            {([
+              ["follow_up", "As follow-up", <CheckSquare key="f" className="mr-2 h-3.5 w-3.5 text-primary" />],
+              ["decision", "As decision", <Lightbulb key="d" className="mr-2 h-3.5 w-3.5 text-amber-500" />],
+              ["note", "To my notes", <StickyNote key="n" className="mr-2 h-3.5 w-3.5 text-muted-foreground" />],
+            ] as [SaveKind, string, React.ReactNode][]).map(([k, label, icon]) => (
+              <DropdownMenuItem key={k} onClick={() => onSave(k)}>
+                {icon}
+                {label}
+                {def === k && (
+                  <span className="ml-auto text-[9px] uppercase tracking-wide text-muted-foreground">
+                    default
+                  </span>
+                )}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <CopyButton text={item.text} />
+        <IconButton label="Dismiss — not useful" onClick={() => onStatus("dismissed")}>
+          <X className="h-3 w-3" />
+        </IconButton>
+      </span>
+    </li>
   );
 }
 
-// Tiny inline Copy button used at three levels inside TickCard: whole
-// tick (header), one section, one bullet. `subtle` hides until row hover
-// so bullet-level buttons don't clutter the panel until the user goes
-// looking for one.
-// Per-bullet save action. Click the icon to save with the section's
-// default kind; click the chevron-ish menu to override (follow-up vs
-// decision vs note). All three append to the active session's
-// corresponding field — show up in their respective tabs post-process.
-// Hover-only so the panel doesn't get visually noisy.
-function TickSaveButton({
-  text, defaultKind,
-}: { text: string; defaultKind: SaveKind }) {
-  const [saved, setSaved] = useState(false);
-  const [busy, setBusy] = useState(false);
-
-  const doSave = async (kind: SaveKind) => {
-    if (!text || busy) return;
-    setBusy(true);
-    try {
-      await api.saveCopilotSuggestion(kind, text);
-      setSaved(true);
-      const label = kind === "follow_up" ? "follow-up"
-        : kind === "decision" ? "decision"
-        : "note";
-      toast.success(`Saved as ${label}`);
-      setTimeout(() => setSaved(false), 1500);
-    } catch (e) {
-      toast.error(`Save failed: ${e instanceof Error ? e.message : e}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
+function IconButton({
+  label, onClick, children,
+}: { label: string; onClick: () => void; children: React.ReactNode }) {
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger
-        aria-label="Save bullet"
-        title="Save to follow-ups / decisions / notes"
-        className="opacity-0 group-hover:opacity-100 inline-flex items-center justify-center h-5 w-5 rounded text-muted-foreground hover:bg-muted hover:text-foreground transition-opacity bg-transparent border-0 cursor-pointer"
-      >
-        {saved
-          ? <Check className="h-3 w-3 text-primary" />
-          : <Save className="h-3 w-3" />}
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-44">
-        <DropdownMenuItem onClick={() => void doSave("follow_up")}>
-          <CheckSquare className="h-3.5 w-3.5 mr-2 text-primary" />
-          As follow-up
-          {defaultKind === "follow_up" && (
-            <span className="ml-auto text-[9px] uppercase tracking-wide text-muted-foreground">
-              default
-            </span>
-          )}
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => void doSave("decision")}>
-          <Lightbulb className="h-3.5 w-3.5 mr-2 text-amber-500" />
-          As decision
-          {defaultKind === "decision" && (
-            <span className="ml-auto text-[9px] uppercase tracking-wide text-muted-foreground">
-              default
-            </span>
-          )}
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => void doSave("note")}>
-          <StickyNote className="h-3.5 w-3.5 mr-2 text-muted-foreground" />
-          To my notes
-          {defaultKind === "note" && (
-            <span className="ml-auto text-[9px] uppercase tracking-wide text-muted-foreground">
-              default
-            </span>
-          )}
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <button type="button" onClick={onClick} aria-label={label} title={label}
+      className="inline-flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground">
+      {children}
+    </button>
   );
 }
 
-function TickCopyButton({
-  text, ariaLabel = "Copy", subtle = false,
-}: { text: string; ariaLabel?: string; subtle?: boolean }) {
+function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
-  const onClick = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (!text) return;
+  const onClick = async () => {
     try {
       if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(text);
@@ -560,27 +438,14 @@ function TickCopyButton({
         document.body.removeChild(ta);
       }
       setCopied(true);
-      toast.success("Copied");
       setTimeout(() => setCopied(false), 1200);
     } catch (err) {
       toast.error(`Copy failed: ${err instanceof Error ? err.message : err}`);
     }
   };
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label={ariaLabel}
-      title={ariaLabel}
-      className={
-        "inline-flex items-center justify-center h-5 w-5 rounded text-muted-foreground "
-        + "hover:bg-muted hover:text-foreground transition-opacity "
-        + (subtle ? "opacity-0 group-hover:opacity-100" : "opacity-70 hover:opacity-100")
-      }
-    >
-      {copied
-        ? <Check className="h-3 w-3" />
-        : <Copy className="h-3 w-3" />}
-    </button>
+    <IconButton label="Copy" onClick={() => void onClick()}>
+      {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+    </IconButton>
   );
 }

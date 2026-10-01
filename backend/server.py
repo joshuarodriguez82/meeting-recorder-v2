@@ -3454,210 +3454,167 @@ async def stream_live_transcript():
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@app.post("/recording/copilot/tick")
-async def copilot_tick():
-    """Live Co-Pilot tick.
+def _copilot_deps():
+    """What the Co-Pilot runner needs for a tick right now, or None when
+    there is nothing to coach: not recording, Co-Pilot off, no live
+    transcript, or no model configured."""
+    from services.copilot_runner import TickDeps
+    s = svc.settings
+    if s is None or not getattr(s, "live_copilot_enabled", False):
+        return None
+    rec = svc.recording_svc
+    if rec is None or not rec.is_recording:
+        return None
+    transcriber = rec.live_transcriber
+    if transcriber is None or not transcriber.is_running:
+        return None
+    coach = svc.live_summarizer or svc.summarizer
+    session = rec.current_session
+    if coach is None or session is None:
+        return None
+    mode_name = getattr(s, "live_copilot_mode", "") or "SA"
+    type_name = getattr(s, "live_copilot_meeting_type", "") or "General"
+    return TickDeps(
+        session=session, transcriber=transcriber, coach=coach,
+        wide_interval_s=int(getattr(s, "live_copilot_wide_interval_sec",
+                                    45) or 45),
+        hot_interval_s=int(getattr(s, "live_copilot_hot_interval_sec",
+                                   0) or 0),
+        mode_name=mode_name,
+        mode_prompt=(svc.copilot_mode_svc.get_prompt(mode_name)
+                     if svc.copilot_mode_svc else ""),
+        type_name=type_name,
+        type_prompt=(svc.copilot_meeting_type_svc.get_prompt(type_name)
+                     if svc.copilot_meeting_type_svc else ""),
+        custom_context=getattr(s, "copilot_custom_context", "") or "",
+    )
 
-    Reads the last ~10 minutes of live-transcript segments from the
-    active recording and asks the configured LLM for three short bullet
-    lists (clarifying questions / risks / suggested follow-ups). The
-    frontend polls this every ~45s while a recording is in progress.
 
-    Returns 409 when no recording is active or live transcription is
-    disabled — the panel only makes sense alongside live segments. The
-    feature itself is gated by the `live_copilot_enabled` setting so
-    users have to opt in; we return 403 when it's off so the frontend
-    can quietly hide the panel without retrying.
-    """
+def _make_copilot_runner():
+    from services.copilot_runner import CopilotRunner
+    return CopilotRunner(_copilot_deps)
+
+
+# One runner for the process. It ticks from the backend while a
+# recording runs — not from whichever tab happens to be open (see
+# services/copilot_runner.py).
+_copilot_runner = _make_copilot_runner()
+
+
+def _copilot_precheck() -> None:
+    """The HTTP meanings the panel relies on: 403 = Co-Pilot off,
+    409 = nothing to coach right now, 503 = no model configured."""
     s = svc.load_settings()
     if not s.live_copilot_enabled:
-        raise HTTPException(
-            status_code=403,
-            detail="Live Co-Pilot is disabled in Settings.",
-        )
+        raise HTTPException(status_code=403,
+                            detail="Live Co-Pilot is disabled in Settings.")
     if not svc.recording_svc or not svc.recording_svc.is_recording:
-        raise HTTPException(
-            status_code=409,
-            detail="No recording is active.",
-        )
+        raise HTTPException(status_code=409, detail="No recording is active.")
     transcriber = svc.recording_svc.live_transcriber
     if transcriber is None or not transcriber.is_running:
         raise HTTPException(
             status_code=409,
-            detail="Live transcription isn't running for this recording.",
-        )
-    # The live co-pilot reads from `live_summarizer` so users can route
-    # ticks to a cheaper or local model (Ollama, free OpenRouter) while
-    # post-meeting summaries stay on the main provider. When no live
-    # override is configured this points at the same instance as
-    # `summarizer`, so the fallback is automatic.
-    coach = svc.live_summarizer or svc.summarizer
-    if coach is None:
+            detail="Live transcription isn't running for this recording.")
+    if (svc.live_summarizer or svc.summarizer) is None:
         raise HTTPException(
             status_code=503,
-            detail="Summarizer not ready — check provider/API key in Settings.",
-        )
+            detail="Summarizer not ready — check provider/API key in Settings.")
 
-    # Window: feed only the recent conversation, not the whole call. A
-    # 10-min window made local-model (Ollama) inference slower and slower
-    # as a meeting ran long — eventually every tick exceeded the timeout
-    # and the panel went silently blank. ~4.5 min keeps inference roughly
-    # constant regardless of call length while still giving the model
-    # enough context to coach on.
-    segments = transcriber.recent_segments(last_seconds=270.0)
-    meeting_name = ""
-    sess = svc.recording_svc.current_session
-    if sess is not None:
-        meeting_name = getattr(sess, "meeting_name", "") or ""
 
-    # Pass any custom coaching context the SA pinned in Settings —
-    # per-engagement framing the baked-in prompt can't anticipate.
-    # Also pass the prior tick (if any) so the model can build on its
-    # last suggestion instead of repeating it.
-    custom_context = getattr(svc.settings, "copilot_custom_context", "") or ""
-    prior_ticks = (
-        list(sess.copilot_ticks)
-        if sess is not None and getattr(sess, "copilot_ticks", None)
-        else None
-    )
-    # Resolve mode + meeting-type names to their current prompt text.
-    # Both libraries seed defaults at startup so missing entries should
-    # only happen if the user deleted everything; the services fall
-    # back internally so we don't need to defend here.
-    mode_name = getattr(svc.settings, "live_copilot_mode", "") or "SA"
-    type_name = getattr(svc.settings, "live_copilot_meeting_type", "") or "General"
-    mode_prompt = (
-        svc.copilot_mode_svc.get_prompt(mode_name)
-        if svc.copilot_mode_svc else ""
-    )
-    type_prompt = (
-        svc.copilot_meeting_type_svc.get_prompt(type_name)
-        if svc.copilot_meeting_type_svc else ""
-    )
-    # Interval-aware timeout: keep it safely under the poll cadence so
-    # ticks never overlap/pile up, but give slow local models room.
-    # Anthropic is fast (cloud); Ollama/OpenRouter get more headroom.
-    interval = max(15, int(getattr(s, "live_copilot_wide_interval_sec", 45) or 45))
-    provider = getattr(coach, "_provider", "anthropic")
-    base = 20.0 if provider == "anthropic" else 35.0
-    tick_timeout = max(8.0, min(base, float(interval) - 5.0))
-    result = await coach.coach_tick(
-        segments=segments, meeting_name=meeting_name,
-        custom_context=custom_context, prior_ticks=prior_ticks,
-        mode_name=mode_name, mode_prompt=mode_prompt,
-        meeting_type_name=type_name, meeting_type_prompt=type_prompt,
-        timeout_s=tick_timeout,
-    )
-    payload = {
-        "clarifying_questions": result.get("clarifying_questions", []),
-        "risks": result.get("risks", []),
-        "follow_ups": result.get("follow_ups", []),
-        # Surface a model failure (timeout / unreachable) so the panel can
-        # explain the quiet instead of looking like an empty meeting.
-        "error": result.get("error"),
-        "error_detail": result.get("error_detail"),
-        "segment_count": len(segments),
-        "generated_at": datetime.now().isoformat(),
-    }
-    # Persist every tick into the active session so the bullets the
-    # model produced mid-call survive past the recording. The session
-    # JSON is written on stop_recording / process_session — appending
-    # in-memory here is enough; we don't write the file every 45s.
-    # Skip empty payloads (no segments yet, no bullets either) so the
-    # saved list isn't padded with no-ops from the first ticks before
-    # anyone has spoken.
-    if sess is not None and (
-        payload["clarifying_questions"]
-        or payload["risks"]
-        or payload["follow_ups"]
-    ):
-        sess.copilot_ticks.append(payload)
+@app.post("/recording/copilot/tick")
+async def copilot_tick():
+    """Run a Co-Pilot tick now ("Refresh"). The runner also ticks on
+    its own schedule; this just doesn't wait for it. Returns the tick's
+    bullets plus the whole board."""
+    _copilot_precheck()
+    payload = await _copilot_runner.tick(hot=False)
+    if payload is None:
+        raise HTTPException(status_code=409, detail="No recording is active.")
     return payload
 
 
 @app.post("/recording/copilot/hot-tick")
 async def copilot_hot_tick():
-    """Hot variant of /recording/copilot/tick.
-
-    Reads only the last ~90 seconds of transcript (vs ~10 min for the
-    wide tick) and uses a tighter prompt biased toward EMPTINESS —
-    fires only when something time-sensitive is happening RIGHT NOW.
-    Frontend can poll this every ~15 seconds in parallel with the
-    wide tick; most calls return empty arrays, the ones that fire
-    arrive while the moment is still live.
-
-    Uses the same mode + meeting-type + custom-context composition as
-    the wide tick; just swaps the operational rules. Cheaper per
-    call (max_tokens=256, timeout=10s) so the 3-4x call rate doesn't
-    triple LLM cost. Hot-tick payloads are STILL persisted to
-    session.copilot_ticks so the post-meeting summary sees them.
-    """
-    s = svc.load_settings()
-    if not s.live_copilot_enabled:
-        raise HTTPException(status_code=403, detail="Live Co-Pilot is disabled in Settings.")
-    if not svc.recording_svc or not svc.recording_svc.is_recording:
+    """The short-window tick, on demand. Kept for older panels; the
+    runner fires hot ticks itself when a hot interval is set."""
+    _copilot_precheck()
+    payload = await _copilot_runner.tick(hot=True)
+    if payload is None:
         raise HTTPException(status_code=409, detail="No recording is active.")
-    transcriber = svc.recording_svc.live_transcriber
-    if transcriber is None or not transcriber.is_running:
-        raise HTTPException(status_code=409, detail="Live transcription isn't running for this recording.")
-    coach = svc.live_summarizer or svc.summarizer
-    if coach is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Summarizer not ready — check provider/API key in Settings.")
-
-    segments = transcriber.recent_segments(last_seconds=90.0)
-    sess = svc.recording_svc.current_session
-    meeting_name = ""
-    if sess is not None:
-        meeting_name = getattr(sess, "meeting_name", "") or ""
-
-    custom_context = getattr(svc.settings, "copilot_custom_context", "") or ""
-    prior_ticks = (
-        list(sess.copilot_ticks)
-        if sess is not None and getattr(sess, "copilot_ticks", None)
-        else None
-    )
-    mode_name = getattr(svc.settings, "live_copilot_mode", "") or "SA"
-    type_name = getattr(svc.settings, "live_copilot_meeting_type", "") or "General"
-    mode_prompt = (
-        svc.copilot_mode_svc.get_prompt(mode_name)
-        if svc.copilot_mode_svc else ""
-    )
-    type_prompt = (
-        svc.copilot_meeting_type_svc.get_prompt(type_name)
-        if svc.copilot_meeting_type_svc else ""
-    )
-    # Interval-aware timeout for the hot poll (default 0 = off; when on,
-    # min 5s). Local models get more headroom than cloud.
-    hot_interval = max(5, int(getattr(s, "live_copilot_hot_interval_sec", 0) or 15))
-    provider = getattr(coach, "_provider", "anthropic")
-    base = 10.0 if provider == "anthropic" else 15.0
-    hot_timeout = max(6.0, min(base, float(hot_interval) - 3.0))
-    result = await coach.coach_tick(
-        segments=segments, meeting_name=meeting_name,
-        custom_context=custom_context, prior_ticks=prior_ticks,
-        mode_name=mode_name, mode_prompt=mode_prompt,
-        meeting_type_name=type_name, meeting_type_prompt=type_prompt,
-        hot=True, timeout_s=hot_timeout,
-    )
-    payload = {
-        "clarifying_questions": result.get("clarifying_questions", []),
-        "risks": result.get("risks", []),
-        "follow_ups": result.get("follow_ups", []),
-        "error": result.get("error"),
-        "error_detail": result.get("error_detail"),
-        "segment_count": len(segments),
-        "generated_at": datetime.now().isoformat(),
-        "hot": True,
-    }
-    if sess is not None and (
-        payload["clarifying_questions"]
-        or payload["risks"]
-        or payload["follow_ups"]
-    ):
-        sess.copilot_ticks.append(payload)
     return payload
+
+
+@app.get("/recording/copilot/state")
+async def copilot_state():
+    """The board, the schedule and the last error — everything the
+    panel shows. Cheap: no model call."""
+    svc.load_settings()
+    return _copilot_runner.state()
+
+
+class CoPilotItemRequest(BaseModel):
+    status: str
+
+
+@app.post("/recording/copilot/items/{item_id}")
+async def copilot_set_item(item_id: str, req: CoPilotItemRequest):
+    """Mark a board item done (asked / handled), dismissed (not useful,
+    and the model is told to stop suggesting it), saved, or open."""
+    try:
+        item = _copilot_runner.set_item_status(item_id, req.status)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="No such Co-Pilot item.")
+    from dataclasses import asdict
+    return asdict(item)
+
+
+class CoPilotPauseRequest(BaseModel):
+    paused: bool
+
+
+@app.post("/recording/copilot/pause")
+async def copilot_pause(req: CoPilotPauseRequest):
+    _copilot_runner.paused = bool(req.paused)
+    return {"paused": _copilot_runner.paused}
+
+
+class CoPilotAskRequest(BaseModel):
+    question: str
+
+
+@app.post("/recording/copilot/ask")
+async def copilot_ask(req: CoPilotAskRequest):
+    """Answer a question about the call in progress, from the live
+    transcript and the meeting's details."""
+    _copilot_precheck()
+    question = (req.question or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question is required")
+    if len(question) > 1000:
+        raise HTTPException(status_code=400, detail="question is too long")
+    from core.copilot_context import meeting_context
+    rec = svc.recording_svc
+    session = rec.current_session
+    segments = rec.live_transcriber.recent_segments(last_seconds=3600.0)
+    coach = svc.live_summarizer or svc.summarizer
+    try:
+        answer = await coach.answer_question(
+            question, segments,
+            meeting_context=meeting_context(session),
+            custom_context=getattr(svc.settings, "copilot_custom_context",
+                                   "") or "")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Co-Pilot ask failed: {type(e).__name__}: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail="The Co-Pilot model didn't answer — try again.")
+    entry = {"question": question, "answer": answer,
+             "asked_at": datetime.now().isoformat(timespec="seconds")}
+    if session is not None:
+        session.copilot_qa.append(entry)
+    return entry
 
 
 @app.post("/settings/live-copilot")
@@ -6937,12 +6894,20 @@ def _copilot_observations_blob(session) -> str:
         ("follow_ups",
          "Follow-ups the AI co-pilot proposed (not agreed by anyone)"),
     )
+    # What the user dismissed on the board during the call was judged
+    # not useful — it must not resurface in the summary.
+    from core.copilot_board import same_suggestion
+    dismissed = [str(i.get("text") or "") for i in
+                 (getattr(session, "copilot_board", None) or [])
+                 if i.get("status") == "dismissed"]
     out_lines: list[str] = []
     for key, header in sections:
         seen: dict[str, str] = {}
         for tick in ticks:
             for item in (tick.get(key) or []):
                 if not isinstance(item, str):
+                    continue
+                if any(same_suggestion(item, d) for d in dismissed):
                     continue
                 norm = " ".join(item.split()).lower()
                 if norm and norm not in seen:
@@ -11128,6 +11093,12 @@ async def startup():
         asyncio.create_task(_watchdog_loop())
     except Exception as e:
         logger.error(f"Could not start recording watchdog loop: {e}")
+
+    # Co-Pilot ticks from here, whichever tab is open.
+    try:
+        asyncio.create_task(_copilot_runner.run_forever())
+    except Exception as e:
+        logger.error(f"Could not start the Co-Pilot loop: {e}")
 
     # Start the calendar-driven auto-recorder if the user left it on
     # last session. Safe no-op when settings load failed above.
