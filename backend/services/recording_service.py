@@ -527,7 +527,7 @@ class RecordingService:
             if not is_available():
                 return None
             from core.live_speakers import (
-                LiveSpeakerTracker, PROFILE_NAME_THRESHOLD)
+                LiveSpeakerTracker, CENTROID_NAME_THRESHOLD)
 
             profile_service = self._profile_service
 
@@ -541,8 +541,11 @@ class RecordingService:
                 # the returned similarity against the same constant —
                 # belt and braces, because a wrong name is the worst
                 # failure mode this feature has.
+                # The LOWER of the two live naming bars: a single clip is
+                # held to PROFILE_NAME_THRESHOLD by the tracker itself, a
+                # speaker's averaged voice to CENTROID_NAME_THRESHOLD.
                 match = profile_service.find_match(
-                    embedding, threshold=PROFILE_NAME_THRESHOLD)
+                    embedding, threshold=CENTROID_NAME_THRESHOLD)
                 if match is None:
                     return None
                 profile, similarity = match

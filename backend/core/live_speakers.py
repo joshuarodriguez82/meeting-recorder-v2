@@ -172,6 +172,19 @@ MAX_LIVE_SPEAKERS = 10
 # that it takes a real convergence, not one lucky clip.
 CONSOLIDATE_THRESHOLD = 0.65
 
+# Naming a live speaker from the SPEAKER'S averaged voice rather than one
+# clip. The per-clip bar (PROFILE_NAME_THRESHOLD, 0.88) exists because a
+# single 2-3 s clip is noisy — and it is so strict that, in practice,
+# recognised voices stayed "Speaker 2" all call (field report
+# 2026-10-01). A centroid averaged over several clips and many seconds is
+# far less noisy than any one clip, so once a live speaker has that much
+# speech behind it, its centroid is compared to the saved profiles at
+# the bar the post-call pass uses for a user-confirmed match, plus a
+# margin: the live preview has no confirm step.
+CENTROID_NAME_THRESHOLD = 0.80
+CENTROID_NAME_MIN_SECONDS = 8.0
+CENTROID_NAME_MIN_CLIPS = 3
+
 
 class LiveSpeakerTracker:
     """Assigns a running "Speaker N" (or known display name) label to
@@ -229,6 +242,8 @@ class LiveSpeakerTracker:
         self._labels: List[str] = []
         # Running-mean sample counts, parallel to _centroids/_labels.
         self._counts: List[int] = []
+        # Seconds of speech behind each centroid, parallel to _counts.
+        self._seconds: List[float] = []
         self._last_label: Optional[str] = None
         # Monotonic, so a merge that removes "Speaker 2" can't make the
         # next new voice collide with a surviving "Speaker 3".
@@ -258,6 +273,7 @@ class LiveSpeakerTracker:
         self._centroids = []
         self._labels = []
         self._counts = []
+        self._seconds = []
         self._last_label = None
         self._next_number = 1
         self._relabels = []
@@ -393,6 +409,7 @@ class LiveSpeakerTracker:
         self._centroids.append(embedding)
         self._labels.append(name)
         self._counts.append(1)
+        self._seconds.append(0.0)
         self._consolidate()
 
     def _consolidate(self) -> None:
@@ -423,6 +440,7 @@ class LiveSpeakerTracker:
                     if norm > 1e-8:
                         self._centroids[keep] = mean / norm
                     self._counts[keep] = ck + cd
+                    self._seconds[keep] += self._seconds[drop]
                     logger.info(
                         f"Live speakers merged: {self._labels[drop]} → "
                         f"{self._labels[keep]} (centroid similarity "
@@ -431,6 +449,7 @@ class LiveSpeakerTracker:
                     del self._centroids[drop]
                     del self._labels[drop]
                     del self._counts[drop]
+                    del self._seconds[drop]
                     merged = True
                     break
                 if merged:
@@ -477,6 +496,8 @@ class LiveSpeakerTracker:
             # it was at 0.75.
             label = self._labels[best_idx]
             self._update_centroid(best_idx, embedding)
+            self._seconds[best_idx] += duration_s
+            self._name_from_centroid(best_idx)
             # Learning may have pulled this centroid onto another one
             # that is the same person; if so the label may have changed.
             self._consolidate()
@@ -497,6 +518,7 @@ class LiveSpeakerTracker:
             self._centroids.append(embedding)
             self._labels.append(label)
             self._counts.append(1)
+            self._seconds.append(duration_s)
             logger.debug(
                 f"Live speaker created: {label} (best existing similarity "
                 f"{best_sim:.3f} < {self._new_speaker_threshold}, "
@@ -527,6 +549,59 @@ class LiveSpeakerTracker:
         # long enough still gets to create "Speaker 1" from a
         # trustworthy sample.
         return "Speaker 1"
+
+    def _name_from_centroid(self, idx: int) -> None:
+        """Give a generic live speaker a saved profile's name once there
+        is enough of their voice to trust the average. See
+        CENTROID_NAME_THRESHOLD. A name already on another live speaker
+        means the two are one person — the rename makes _consolidate
+        merge them."""
+        if self._profile_lookup is None:
+            return
+        label = self._labels[idx]
+        if not self._is_generic(label):
+            return
+        if (self._seconds[idx] < CENTROID_NAME_MIN_SECONDS
+                or self._counts[idx] < CENTROID_NAME_MIN_CLIPS):
+            return
+        try:
+            match = self._profile_lookup(self._centroids[idx])
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Live centroid profile lookup failed: {e}")
+            return
+        if not match:
+            return
+        name, similarity = match
+        try:
+            sim = float(similarity)
+        except (TypeError, ValueError):
+            return
+        if not name or sim < CENTROID_NAME_THRESHOLD:
+            return
+        logger.info(f"Live speaker {label} recognised as a saved voice "
+                    f"(centroid similarity {sim:.3f}, "
+                    f"{self._seconds[idx]:.0f}s of speech)")
+        self._rename(label, name)
+        self._labels[idx] = name
+        if self._labels.count(name) > 1:
+            self._merge_same_name(name)
+
+    def _merge_same_name(self, name: str) -> None:
+        idxs = [i for i, lab in enumerate(self._labels) if lab == name]
+        keep = idxs[0]
+        for drop in reversed(idxs[1:]):
+            ck, cd = self._counts[keep], self._counts[drop]
+            mean = (self._centroids[keep] * ck
+                    + self._centroids[drop] * cd) / (ck + cd)
+            norm = float(np.linalg.norm(mean))
+            if norm > 1e-8:
+                self._centroids[keep] = mean / norm
+            self._counts[keep] = ck + cd
+            self._seconds[keep] += self._seconds[drop]
+            del self._centroids[drop]
+            del self._labels[drop]
+            del self._counts[drop]
+            del self._seconds[drop]
 
     def _resolve(self, label: str) -> str:
         """Where a label went after the renames recorded so far."""
