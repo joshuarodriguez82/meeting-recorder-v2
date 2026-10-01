@@ -57,12 +57,16 @@ SYSTEM_AUDIO_DEAD = "system_audio_dead"
 REASON_UNSUPPORTED_FORMAT = "unsupported_format"
 REASON_DEVICE_UNAVAILABLE = "device_unavailable"
 REASON_DEVICE_IN_USE = "device_in_use"
+REASON_PERMISSION = "permission_denied"
 REASON_UNKNOWN = "unknown"
 
 # Substrings as they actually appear in the field, most specific first.
 # -9997/-9998 are PortAudio's invalid-sample-rate / invalid-channel-count;
 # -9996 is invalid device.
 _REASON_MARKERS = (
+    # macOS native system audio (core/mac_system_audio.py): the Screen &
+    # System Audio Recording permission is off.
+    (REASON_PERMISSION, ("Screen & System Audio Recording", "-3801")),
     (REASON_DEVICE_IN_USE, ("AUDCLNT_E_DEVICE_IN_USE",
                             "AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED",
                             "exclusive mode")),
@@ -98,6 +102,10 @@ def _remedy(reason: str, platform: str, raw: str) -> str:
     "stop and restart" is exactly what does not work for a refused
     format."""
     windows = platform.startswith("win")
+    if reason == REASON_PERMISSION:
+        return ("Turn on Meeting Recorder under System Settings → Privacy "
+                "& Security → Screen & System Audio Recording, then stop "
+                "and restart the recording.")
     if reason == REASON_UNSUPPORTED_FORMAT:
         if windows:
             # By the time this is shown the open ladder has already
@@ -217,6 +225,7 @@ def missing_system_audio_warning(
         REASON_DEVICE_UNAVAILABLE: "the speaker could not be opened",
         REASON_DEVICE_IN_USE: "another app had exclusive control of the "
                               "speaker",
+        REASON_PERMISSION: "macOS permission to record system audio is off",
     }.get(reason, "system audio never started")
     return ("Other participants were not recorded — " + why + ". Only your "
             "microphone was captured, so the transcript, summary and action "

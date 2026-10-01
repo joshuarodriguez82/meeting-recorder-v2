@@ -1914,8 +1914,11 @@ export const api = {
   // found out (field report 2026-09-09).
   probeMic: (index: number) =>
     request<MicProbe>(`/audio/probe-mic?index=${index}`, { method: "POST" }),
-  getAudioDevices: () =>
-    request<{ input: AudioDevice[]; output: AudioDevice[] }>("/audio/devices"),
+  // refresh=true re-scans the hardware first, so a headset connected
+  // since launch appears (skipped while recording — `refreshed` says).
+  getAudioDevices: (refresh = false) =>
+    request<{ input: AudioDevice[]; output: AudioDevice[]; refreshed?: boolean }>(
+      `/audio/devices${refresh ? "?refresh=true" : ""}`),
 
   // Mic↔loopback format mismatch check. Backed by WASAPI on Windows
   // (pycaw); returns level="unknown" on macOS / Linux where the OS

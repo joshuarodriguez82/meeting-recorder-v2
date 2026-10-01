@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, openExternal, openSystemSettings, type AudioDevice, type AudioSyncRisk, type Meeting, type MicProbe, type RecordingStatus, type SessionFull, type SessionSummary } from "@/lib/api";
 import { captureWarningTitle } from "@/lib/capture-warning";
+import { reselectByName } from "@/lib/audio-devices";
 import {
   refreshRecordingStatus,
   suppressWatchdogForNewRecording,
@@ -509,6 +510,49 @@ export function RecordView({
       }
     })();
   }, []);
+
+  // Pick up audio devices connected since launch. PortAudio used to see
+  // only the hardware present at startup, so a Bluetooth headset
+  // connected later needed a full app restart (field report 2026-09-23).
+  // Returning to the window is when someone has just connected one; the
+  // backend re-scans (never while recording) and the selection follows
+  // each device by name, since a re-scan renumbers them.
+  const devicesRef = useRef({ inputDevices, outputDevices, micIdx, outIdx });
+  devicesRef.current = { inputDevices, outputDevices, micIdx, outIdx };
+  useEffect(() => {
+    if (recording) return;
+    let last = 0;
+    let cancelled = false;
+    const onFocus = async () => {
+      const now = Date.now();
+      if (now - last < 10_000) return;
+      last = now;
+      try {
+        const devices = await api.getAudioDevices(true);
+        if (cancelled || !devices.refreshed) return;
+        const cur = devicesRef.current;
+        const saved = (key: string) =>
+          typeof window !== "undefined" ? window.localStorage.getItem(key) : null;
+        setInputDevices(devices.input);
+        setOutputDevices(devices.output);
+        setMicIdx(reselectByName(
+          cur.inputDevices, cur.micIdx, devices.input,
+          saved("mr.micDeviceName")));
+        const savedOut = saved("mr.outputDeviceName");
+        if (savedOut !== "__none__") {
+          setOutIdx(reselectByName(
+            cur.outputDevices, cur.outIdx, devices.output, savedOut));
+        }
+      } catch {
+        // Keep the list we have; the next focus tries again.
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [recording]);
 
   // Autocomplete data: clients are all unique client names, projects are
   // filtered to only those tagged under the currently-selected client.
