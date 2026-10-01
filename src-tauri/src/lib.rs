@@ -1963,19 +1963,9 @@ fn capture_screenshot(
     }
 }
 
-/// Tauri command: open an http(s) URL in the user's default browser.
-///
-/// In a Tauri webview a plain `<a target="_blank">` does NOT reach the
-/// system browser, so the "Join meeting" link (and every other external
-/// link in the app) silently did nothing in the packaged build. We
-/// shell out to the OS handler — same no-extra-crates approach as the
-/// screenshot command. The URL is passed as a single argument (no shell
-/// re-parsing) and scheme-validated so this can't be turned into an
-/// arbitrary-command/launch primitive from the web layer.
-#[tauri::command]
 /// `url` without its query string or fragment, for logging.
 fn redact_query(url: &str) -> String {
-    let cut = url.find(|c| c == '?' || c == '#').unwrap_or(url.len());
+    let cut = url.find(['?', '#']).unwrap_or(url.len());
     if cut < url.len() {
         format!("{}?…", &url[..cut])
     } else {
@@ -1998,6 +1988,16 @@ mod redact_query_tests {
     }
 }
 
+/// Tauri command: open an http(s) URL in the user's default browser.
+///
+/// In a Tauri webview a plain `<a target="_blank">` does NOT reach the
+/// system browser, so the "Join meeting" link (and every other external
+/// link in the app) silently did nothing in the packaged build. We
+/// shell out to the OS handler — same no-extra-crates approach as the
+/// screenshot command. The URL is passed as a single argument (no shell
+/// re-parsing) and scheme-validated so this can't be turned into an
+/// arbitrary-command/launch primitive from the web layer.
+#[tauri::command]
 fn open_external(url: String) -> Result<(), String> {
     let u = url.trim();
     let low = u.to_ascii_lowercase();
