@@ -11446,6 +11446,10 @@ async def _shutdown_event_log():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+    # basicConfig's root handler would print every app log line a
+    # second time — see utils.logger.dedupe_root_handlers.
+    from utils.logger import dedupe_root_handlers
+    dedupe_root_handlers()
     # The Tauri shell picks a free port at startup and hands it down via
     # MEETING_RECORDER_PORT. Falls back to 17645 only when running this
     # file standalone (manual `python server.py` for debugging).
