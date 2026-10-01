@@ -27,7 +27,7 @@ The decisions are pure functions; the subprocess calls are injectable.
 from __future__ import annotations
 
 import re
-import subprocess
+import subprocess  # nosec B404 — fixed argv only, see _run
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,7 +84,9 @@ class EncoderHealth:
 
 
 def _run(cmd, timeout):
-    return subprocess.run(cmd, capture_output=True, text=True,
+    # nosec B603: argv is this interpreter plus constant arguments (and a
+    # package spec read from our own constraints file) — never user input.
+    return subprocess.run(cmd, capture_output=True, text=True,  # nosec B603
                           timeout=timeout)
 
 
