@@ -1973,6 +1973,31 @@ fn capture_screenshot(
 /// re-parsing) and scheme-validated so this can't be turned into an
 /// arbitrary-command/launch primitive from the web layer.
 #[tauri::command]
+/// `url` without its query string or fragment, for logging.
+fn redact_query(url: &str) -> String {
+    let cut = url.find(|c| c == '?' || c == '#').unwrap_or(url.len());
+    if cut < url.len() {
+        format!("{}?…", &url[..cut])
+    } else {
+        url.to_string()
+    }
+}
+
+#[cfg(test)]
+mod redact_query_tests {
+    use super::redact_query;
+
+    #[test]
+    fn a_meeting_passcode_never_reaches_the_log() {
+        assert_eq!(redact_query("https://zoom.us/j/000?pwd=SECRET"),
+                   "https://zoom.us/j/000?…");
+        assert_eq!(redact_query("https://example.com/a#frag"),
+                   "https://example.com/a?…");
+        assert_eq!(redact_query("https://example.com/a"),
+                   "https://example.com/a");
+    }
+}
+
 fn open_external(url: String) -> Result<(), String> {
     let u = url.trim();
     let low = u.to_ascii_lowercase();
@@ -2002,7 +2027,10 @@ fn open_external(url: String) -> Result<(), String> {
 
     match res {
         Ok(_) => {
-            rlog(&format!("Opened external URL: {}", u));
+            // Host and path only: the query string of a meeting link IS
+            // its credential (Zoom ?pwd=, Teams ?context= / ?p=), and
+            // rust.log is a file people send when asking for help.
+            rlog(&format!("Opened external URL: {}", redact_query(u)));
             Ok(())
         }
         Err(e) => Err(format!("Could not open browser: {}", e)),
