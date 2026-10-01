@@ -305,6 +305,25 @@ def _verify_and_repair_dependencies() -> None:
 if os.environ.get("MEETING_RECORDER_SKIP_DEP_REPAIR") != "1":
     _verify_and_repair_dependencies()
 
+    # A package that EXISTS can still be half-installed and fail to
+    # import (field log 2026-09-15: speechbrain, every meeting, for
+    # weeks). Checked in a child process on a background thread so
+    # startup never waits for torch; repaired at the pinned version.
+    def _encoder_health_check() -> None:
+        from core import dependency_health
+        req = "constraints-cpu.txt" if os.name == "nt" else "constraints-mac.txt"
+        try:
+            dependency_health.CURRENT = dependency_health.check_and_repair(
+                constraints=Path(__file__).resolve().parent / req)
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"[deps] speech library check failed: {e}\n")
+        else:
+            sys.stderr.write(
+                f"[deps] speech library: {dependency_health.CURRENT.state}\n")
+
+    threading.Thread(target=_encoder_health_check, daemon=True,
+                     name="encoder-health").start()
+
 
 # Compatibility patches needed before importing pyannote/torch:
 #   - NumPy 2.0 removed np.NaN (pyannote uses it)
@@ -4495,6 +4514,8 @@ def _missing_fingerprint_reason(session: Session, speaker) -> str:
         encoder_available = is_available()
     except Exception:  # noqa: BLE001
         encoder_available = False
+    from core import dependency_health
+    encoder_problem = dependency_health.CURRENT.user_reason()
 
     audio_path = session.audio_path or ""
     audio_exists = False
@@ -4508,6 +4529,7 @@ def _missing_fingerprint_reason(session: Session, speaker) -> str:
         usable_seconds=usable_speech_seconds(spans),
         segment_count=len(spans),
         encoder_available=encoder_available,
+        encoder_problem=encoder_problem,
         audio_path=audio_path,
         audio_exists=audio_exists,
     ))
