@@ -1543,7 +1543,7 @@ def _fetch_openrouter_free() -> list:
         "https://openrouter.ai/api/v1/models",
         headers={"User-Agent": "MeetingRecorder/2"},
     )
-    with _urlreq.urlopen(req, timeout=10) as resp:
+    with _urlreq.urlopen(req, timeout=10) as resp:  # nosec B310 — fixed https URL
         data = _json.loads(resp.read().decode("utf-8"))
 
     out: list = []
@@ -1618,6 +1618,17 @@ _PROVIDER_MODELS_CACHE: dict[tuple[str, str], dict] = {}
 _PROVIDER_MODELS_TTL = 300  # 5 minutes
 
 
+def _require_http_url(url: str) -> str:
+    """Only http(s) may be fetched. urllib also opens file:// and ftp://,
+    and these URLs come partly from Settings (a provider's base URL), so
+    a mistyped or hostile value must not read a local file."""
+    from urllib.parse import urlparse
+    scheme = (urlparse(str(url)).scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(f"only http(s) URLs can be fetched (got {scheme or 'none'!r})")
+    return url
+
+
 def _stdlib_get_json(
     url: str, headers: Optional[dict] = None, timeout: float = 8.0,
 ) -> dict:
@@ -1627,9 +1638,10 @@ def _stdlib_get_json(
     import urllib.request as _urlreq
 
     req = _urlreq.Request(
-        url, headers=headers or {"User-Agent": "MeetingRecorder/2"},
+        _require_http_url(url),
+        headers=headers or {"User-Agent": "MeetingRecorder/2"},
     )
-    with _urlreq.urlopen(req, timeout=timeout) as resp:
+    with _urlreq.urlopen(req, timeout=timeout) as resp:  # nosec B310 — scheme checked above
         return _json.loads(resp.read().decode("utf-8"))
 
 
@@ -10172,8 +10184,12 @@ def _probe_http(url: str, timeout: float = 3.0) -> tuple[bool, str]:
     import urllib.request
     import urllib.error
     try:
+        _require_http_url(url)
+    except ValueError as e:
+        return False, str(e)
+    try:
         req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310 — scheme checked above
             return True, f"HTTP {resp.status}"
     except urllib.error.HTTPError as e:
         # A 4xx still means something is listening — endpoint is up.
