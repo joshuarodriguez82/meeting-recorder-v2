@@ -356,6 +356,10 @@ export interface CoPilotBoardItem {
   times_suggested: number;
   // Brought in or re-raised by the latest tick.
   fresh: boolean;
+  // Set after the call by checking the item against the full transcript
+  // (backend/core/copilot_followups.py). Absent = not checked.
+  resolution?: "answered" | "partly" | "open";
+  answer?: string;
 }
 
 export interface CoPilotQA {
@@ -707,6 +711,8 @@ export interface SessionFull {
   // made during the recording. Persisted with the session so the
   // bullets the model produced mid-call survive past the meeting.
   copilot_ticks?: CoPilotTickResponse[];
+  // The Co-Pilot board, with each question's after-call resolution.
+  copilot_board?: CoPilotBoardItem[];
   // Audio integrity — same fields as on SessionSummary, see above.
   audio_integrity_warning?: string | null;
   audio_actual_duration_s?: number | null;

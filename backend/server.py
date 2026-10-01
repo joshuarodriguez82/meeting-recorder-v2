@@ -6897,6 +6897,31 @@ class TemplateRequest(BaseModel):
     template: str = "General"
 
 
+async def _resolve_copilot_followups(session, transcript: str,
+                                     notes: str) -> str:
+    """Check the Co-Pilot's questions and follow-ups against the full
+    transcript and write the results onto the session's board (see
+    core/copilot_followups). Returns a stage string. Best-effort: a
+    failure here never fails processing."""
+    from core.copilot_followups import (
+        apply_resolutions, board_for, items_to_check)
+    board = board_for(session)
+    pending = items_to_check(board)
+    if not pending:
+        if board and not getattr(session, "copilot_board", None):
+            session.copilot_board = board
+        return "skipped (nothing to check)"
+    try:
+        results = await svc.summarizer.resolve_copilot_items(
+            transcript, pending, notes=notes)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Co-Pilot follow-up check failed: {e}")
+        return f"failed: {e}"
+    updated = apply_resolutions(board, results)
+    session.copilot_board = board
+    return f"ok ({updated} checked)"
+
+
 def _copilot_observations_blob(session) -> str:
     """Roll the session's live-copilot ticks into a deduplicated bullet
     blob for the summarizer. Returns empty string when there are no
@@ -7435,6 +7460,12 @@ async def process_full(session_id: str, req: ProcessFullRequest):
             logger.info(
                 "process_full: %s inputs unchanged — skipped 5 LLM calls",
                 session_id)
+            # The follow-up check is its own input: a meeting processed
+            # before it existed still gets it, once.
+            stages["copilot_followups"] = await _resolve_copilot_followups(
+                session, transcript, notes)
+            if stages["copilot_followups"].startswith("ok"):
+                await asyncio.to_thread(svc.session_svc.save, session)
             # Still enqueue. Skipping the LLM calls means the ARTIFACTS
             # are unchanged, not that they reached the Designated
             # Folder: an export dropped after its retries, a folder that
@@ -7499,6 +7530,10 @@ async def process_full(session_id: str, req: ProcessFullRequest):
         # NOT record "these inputs are done" — that would make the next
         # reprocess skip the very session that still needs finishing,
         # and the skip would be indistinguishable from success.
+        # After the extractors, so the transcript is read from cache.
+        stages["copilot_followups"] = await _resolve_copilot_followups(
+            session, transcript, notes)
+
         if all(not isinstance(r, Exception)
                for r in (summary_r, ai_r, dec_r, req_r, struct_r)):
             session.extraction_fingerprint = fingerprint
