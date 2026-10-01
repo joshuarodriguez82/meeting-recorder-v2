@@ -356,6 +356,10 @@ export interface CoPilotBoardItem {
   times_suggested: number;
   // Brought in or re-raised by the latest tick.
   fresh: boolean;
+  // Set after the call by checking the item against the full transcript
+  // (backend/core/copilot_followups.py). Absent = not checked.
+  resolution?: "answered" | "partly" | "open";
+  answer?: string;
 }
 
 export interface CoPilotQA {
@@ -707,6 +711,8 @@ export interface SessionFull {
   // made during the recording. Persisted with the session so the
   // bullets the model produced mid-call survive past the meeting.
   copilot_ticks?: CoPilotTickResponse[];
+  // The Co-Pilot board, with each question's after-call resolution.
+  copilot_board?: CoPilotBoardItem[];
   // Audio integrity — same fields as on SessionSummary, see above.
   audio_integrity_warning?: string | null;
   audio_actual_duration_s?: number | null;
@@ -2649,6 +2655,9 @@ export interface EngagementRegister {
     decisions: number;
     open_action_items: number;
     open_questions: number;
+    // Co-Pilot questions / follow-ups not answered in any meeting yet.
+    // Optional: an older backend doesn't send it.
+    open_copilot_followups?: number;
     outstanding_commitments: number;
     total_commitments: number;
   };
@@ -2662,6 +2671,9 @@ export interface EngagementRegister {
   decisions: EngagementRecord[];
   action_items: EngagementRecord[];
   open_questions: EngagementRecord[];
+  // The Co-Pilot's questions and follow-ups across the engagement,
+  // checked against each meeting's transcript. AI suggestions.
+  copilot_followups?: EngagementRecord[];
   // Manual overlay merged in by the backend. Always present (with
   // empty fields when nothing has been set yet) so the UI doesn't
   // have to null-check.

@@ -1073,6 +1073,52 @@ class Summarizer:
         raw = await self._chat(prompt, max_tokens=tokens, timeout=timeout_s)
         return (raw or "").strip()
 
+    async def resolve_copilot_items(
+        self, transcript: str, items: List[dict], notes: str = "",
+    ) -> Dict[str, dict]:
+        """Which of the Co-Pilot's questions and follow-ups the meeting
+        answered, from the full transcript. Returns {id: {"status",
+        "answer"}} with status answered | partly | open.
+
+        Same cache prefix as the other extractors (transcript + notes),
+        so after them this reads the transcript from cache. Strict about
+        evidence: an item is answered only when the transcript says so —
+        a confident "answered" on a question nobody addressed would bury
+        exactly the follow-up this exists to surface."""
+        if not items:
+            return {}
+        listing = "\n".join(
+            f'- id "{i.get("id")}": {" ".join(str(i.get("text") or "").split())}'
+            for i in items)
+        instruction = (
+            "During this meeting an AI assistant suggested the questions "
+            "and follow-ups listed below. For EACH one, decide from the "
+            "transcript whether the meeting answered it.\n\n"
+            f"{listing}\n\n"
+            "Reply with ONLY a JSON object: {\"items\": [{\"id\": ..., "
+            "\"status\": \"answered\" | \"partly\" | \"open\", "
+            "\"answer\": \"...\"}]} with one entry per id above.\n"
+            "- answered: the transcript contains the answer. Give it in one "
+            "or two sentences and say who gave it.\n"
+            "- partly: some of it was addressed; say what was and what "
+            "wasn't.\n"
+            "- open: not addressed. answer is an empty string.\n"
+            "Use only what was said in the transcript or the user's notes. "
+            "If you are not sure it was answered, it is open.")
+        _cache_prefix, _tail = _split_for_cache(instruction, transcript, notes)
+        raw = await self._chat(
+            _tail, cache_prefix=_cache_prefix,
+            max_tokens=self._budget(4096), timeout=120.0, json_mode=True)
+        parsed = _coerce_json(raw) or {}
+        out: Dict[str, dict] = {}
+        for entry in parsed.get("items") or []:
+            if isinstance(entry, dict) and entry.get("id") is not None:
+                out[str(entry["id"])] = {
+                    "status": entry.get("status"),
+                    "answer": entry.get("answer") or "",
+                }
+        return out
+
     async def extract_action_items(
         self, transcript: str, notes: str = "",
         image_paths: Optional[List[str]] = None,

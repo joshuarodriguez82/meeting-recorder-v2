@@ -497,3 +497,94 @@ def test_a_merge_never_makes_the_next_label_collide():
     assert ("Speaker 2", "Speaker 1") in tracker.drain_relabels()
     shown = {"Speaker 1", "Speaker 3"}
     assert tracker.assign(_clip(20.0), SR) not in shown
+
+
+# ── Naming from the speaker's averaged voice (2026-10-01) ────────────
+#
+# Saved voices stayed "Speaker 2" all call: one 2-3 s clip rarely clears
+# the 0.88 per-clip bar. A centroid over several clips is far steadier,
+# and is held to CENTROID_NAME_THRESHOLD once it has enough speech.
+
+from core.live_speakers import (  # noqa: E402
+    CENTROID_NAME_MIN_CLIPS, CENTROID_NAME_MIN_SECONDS,
+    CENTROID_NAME_THRESHOLD,
+)
+
+
+def _lookup_at(sim, name="Jane Roe"):
+    """A saved profile that scores `sim` against the speaker's voice —
+    the shape SpeakerProfileService.find_match returns, after the
+    service's own threshold (now the lower centroid bar)."""
+    def lookup(embedding):
+        return (name, sim) if sim >= CENTROID_NAME_THRESHOLD else None
+    return lookup
+
+
+def _voice_clips(n, seconds=3.0):
+    vecs = {float(i): _unit_vec([1.0, 0.05 * (i % 3), 0.0]) for i in range(n)}
+    return vecs, [_clip(float(i), duration_s=seconds) for i in range(n)]
+
+
+def _unit_vec(v):
+    v = np.asarray(v, dtype=np.float32)
+    return v / np.linalg.norm(v)
+
+
+def test_a_saved_voice_is_named_once_there_is_enough_of_it():
+    vecs, clips = _voice_clips(4)
+    tracker = LiveSpeakerTracker(embed_fn=_make_embed_fn(vecs),
+                                 profile_lookup=_lookup_at(0.84))
+    labels = [tracker.assign(c, SR) for c in clips]
+    assert labels[0] == "Speaker 1"        # one clip: 0.84 < 0.88 per clip
+    assert labels[-1] == "Jane Roe"        # averaged voice: 0.84 >= 0.80
+    assert ("Speaker 1", "Jane Roe") in tracker.drain_relabels()
+
+
+def test_too_little_speech_is_not_named():
+    # Long enough clips to be TRACKED (>= 2.5 s), too few to name from.
+    vecs, clips = _voice_clips(2, seconds=3.0)
+    assert 2 < CENTROID_NAME_MIN_CLIPS and 6.0 < CENTROID_NAME_MIN_SECONDS
+    tracker = LiveSpeakerTracker(embed_fn=_make_embed_fn(vecs),
+                                 profile_lookup=_lookup_at(0.84))
+    assert [tracker.assign(c, SR) for c in clips] == ["Speaker 1"] * 2
+
+
+def test_a_weak_match_is_never_named():
+    vecs, clips = _voice_clips(6)
+    tracker = LiveSpeakerTracker(embed_fn=_make_embed_fn(vecs),
+                                 profile_lookup=lambda e: ("Jane Roe", 0.74))
+    labels = [tracker.assign(c, SR) for c in clips]
+    assert "Jane Roe" not in labels
+
+
+def test_two_labels_recognised_as_one_saved_voice_become_one():
+    """Speaker 1 and Speaker 2 both turn out to be Jane Roe: one name,
+    one tracked speaker, everything shown relabelled."""
+    a = _unit_vec([0.6, 0.8, 0.0])
+    b = _unit_vec([0.6, -0.8, 0.0])        # 0.40 apart: two labels at first
+    vecs = {1.0: a, 2.0: b}
+    for k in range(3, 9):
+        vecs[float(k)] = a if k % 2 else b
+    tracker = LiveSpeakerTracker(embed_fn=_make_embed_fn(vecs),
+                                 # Below the per-clip bar, so only the
+                                 # averaged voice can name them.
+                                 profile_lookup=_lookup_at(0.84),
+                                 consolidate_threshold=0.99)
+    for k in range(1, 9):
+        tracker.assign(_clip(float(k)), SR)
+    relabels = tracker.drain_relabels()
+    assert ("Speaker 1", "Jane Roe") in relabels
+    assert ("Speaker 2", "Jane Roe") in relabels
+    assert tracker.speaker_count == 1
+
+
+def test_many_short_clips_are_still_too_little_to_name():
+    """Four clips, but only ~7 s of speech: the seconds rule, not the
+    clip count, is what holds the name back."""
+    vecs = {float(i): _unit_vec([1.0, 0.05 * i, 0.0]) for i in range(4)}
+    clips = [_clip(0.0, duration_s=3.0)] + [
+        _clip(float(i), duration_s=1.3) for i in range(1, 4)]
+    assert 3.0 + 3 * 1.3 < CENTROID_NAME_MIN_SECONDS
+    tracker = LiveSpeakerTracker(embed_fn=_make_embed_fn(vecs),
+                                 profile_lookup=_lookup_at(0.84))
+    assert "Jane Roe" not in [tracker.assign(c, SR) for c in clips]

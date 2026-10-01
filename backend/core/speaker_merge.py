@@ -327,10 +327,11 @@ def suggest_merges(
     **A voice that scores at or above ``threshold``.** Every such pair
     is returned, most similar first.
 
-    Both are emitted as two-speaker groups. Deliberately pairwise rather
-    than transitively clustered: A-B and B-C both scoring 0.76 does not
-    make A and C the same person, and chaining them is how a
-    three-person conversation collapses into one.
+    Voice matches are emitted as groups whose members ALL match one
+    another (complete linkage — see similar_voice_groups), never chained:
+    A-B and B-C both scoring 0.76 does not make A and C the same person,
+    and chaining them is how a three-person conversation collapses into
+    one.
 
     Name and profile evidence needs no embedding, which matters: the
     owner frequently has none (see core/fingerprint_status.py), so a
@@ -364,19 +365,68 @@ def suggest_merges(
                     == normalize_name(other.display_name)):
                 _add([owner, other], "same name")
 
-    scored: List[Tuple[float, SpeakerFacts, SpeakerFacts]] = []
-    with_voice = [s for s in pool if len(s.embedding) > 0]
-    for i, left in enumerate(with_voice):
-        for right in with_voice[i + 1:]:
-            similarity = cosine_similarity(left.embedding, right.embedding)
-            if similarity is None or similarity < threshold:
-                continue
-            scored.append((similarity, left, right))
-    scored.sort(key=lambda t: (-t[0], t[1].speaker_id, t[2].speaker_id))
-    for similarity, left, right in scored:
-        _add([left, right], "similar voice", round(similarity, 4))
+    for members, similarity in similar_voice_groups(pool, threshold):
+        _add(members, "similar voice", round(similarity, 4))
 
     return groups
+
+
+def similar_voice_groups(
+    speakers: Sequence[SpeakerFacts], threshold: float = SUGGEST_THRESHOLD,
+) -> List[Tuple[List[SpeakerFacts], float]]:
+    """Speakers that ALL sound like one another, as groups.
+
+    Field report 2026-10-01: one voice split four ways in a 34-minute
+    call (a name and three SPEAKER_n labels), every pair scoring
+    91-94 %. Offered pairwise, that was six cards for one decision — and
+    merging pairs one at a time re-asks about the rest.
+
+    COMPLETE linkage, not chaining: a speaker joins a group only if it
+    scores at or above ``threshold`` against EVERY member already in it.
+    A-B and B-C both scoring high does not put A and C together unless
+    A-C does too — which is how a three-person conversation would
+    otherwise collapse into one. Strongest pair first; each speaker is
+    offered in at most one group (the list is recomputed after a merge).
+    The reported similarity is the group's WEAKEST pair.
+    """
+    with_voice = [s for s in speakers if len(s.embedding) > 0]
+    sim: Dict[Tuple[str, str], float] = {}
+    pairs: List[Tuple[float, str, str]] = []
+    for i, left in enumerate(with_voice):
+        for right in with_voice[i + 1:]:
+            value = cosine_similarity(left.embedding, right.embedding)
+            if value is None:
+                continue
+            sim[(left.speaker_id, right.speaker_id)] = value
+            sim[(right.speaker_id, left.speaker_id)] = value
+            if value >= threshold:
+                pairs.append((value, left.speaker_id, right.speaker_id))
+    pairs.sort(key=lambda t: (-t[0], t[1], t[2]))
+    by_id = {s.speaker_id: s for s in with_voice}
+
+    used: set = set()
+    out: List[Tuple[List[SpeakerFacts], float]] = []
+    for _, a, b in pairs:
+        if a in used or b in used:
+            continue
+        members = [a, b]
+        # Grow: the candidate closest to the whole group first.
+        while True:
+            best, best_floor = None, -1.0
+            for cand in by_id:
+                if cand in used or cand in members:
+                    continue
+                floor = min(sim.get((cand, m), -1.0) for m in members)
+                if floor >= threshold and floor > best_floor:
+                    best, best_floor = cand, floor
+            if best is None:
+                break
+            members.append(best)
+        weakest = min(sim[(x, y)] for i, x in enumerate(members)
+                      for y in members[i + 1:])
+        used.update(members)
+        out.append(([by_id[m] for m in members], weakest))
+    return out
 
 
 @dataclass

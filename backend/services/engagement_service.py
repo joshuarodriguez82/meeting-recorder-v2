@@ -44,6 +44,60 @@ _RESOLVED = {"met", "dropped", "done", "answered"}
 from models.extraction import DEFECT_CLOSED_STATUSES as _DEFECT_CLOSED  # noqa: E402
 
 
+_COPILOT_KINDS = {"clarifying_questions": "question",
+                  "follow_ups": "follow-up"}
+
+
+def _copilot_status(item: dict) -> Optional[str]:
+    """Register status for one Co-Pilot board item, or None to leave it
+    out. Dismissed = the user said it wasn't useful. Answered (checked
+    against the transcript) and done / saved (handled in the call) are
+    resolved; everything else — open, partly answered, not yet
+    checked — is open."""
+    if item.get("status") == "dismissed":
+        return None
+    if item.get("resolution") == "answered":
+        return "answered"
+    if item.get("status") in ("done", "saved"):
+        return "done"
+    return "open"
+
+
+def _copilot_rollup(loaded, provenance) -> List[dict]:
+    """The Co-Pilot's questions and follow-ups across every session of
+    the engagement (core/copilot_followups decides them per meeting).
+
+    Kept as their own section rather than folded into open questions:
+    these are AI suggestions, not things anyone in the meeting asked,
+    and the register is read as a record of the engagement. Same dedupe
+    and same "resolved anywhere stays resolved" rule as the rest of the
+    register; the answer shown is the newest one."""
+    from types import SimpleNamespace
+    agg: Dict[str, dict] = {}
+    for meta, session in loaded:
+        for item in getattr(session, "copilot_board", None) or []:
+            kind = _COPILOT_KINDS.get(item.get("kind"))
+            status = _copilot_status(item)
+            text = str(item.get("text") or "")
+            key = _norm(text)
+            if not kind or status is None or not key:
+                continue
+            rec = SimpleNamespace(
+                created_at=str(item.get("first_seen") or ""))
+            if key not in agg:
+                agg[key] = {"id": item.get("id"), "text": text,
+                            "kind": kind, "source": "co-pilot",
+                            "answer": "", "status": status,
+                            "occurrences": []}
+            entry = agg[key]
+            entry["occurrences"].append(provenance(meta, rec))
+            if status in _RESOLVED:
+                entry["status"] = status
+            if item.get("answer"):
+                entry["answer"] = str(item["answer"])
+    return list(agg.values())
+
+
 def _norm(text: str) -> str:
     """Dedupe key: lowercase, collapse internal whitespace, strip
     surrounding quotes and trailing sentence punctuation. Conservative
@@ -288,6 +342,8 @@ class EngagementService:
             reverse=True,
         )
 
+        copilot = _copilot_rollup(loaded, provenance)
+
         def open_first(rows):
             # Open items float to the top; resolved ones sink but stay
             # for history.
@@ -295,6 +351,7 @@ class EngagementService:
             return rows
 
         reqs, acts, qs = open_first(reqs), open_first(acts), open_first(qs)
+        copilot = open_first(copilot)
         is_open = lambda r: r.get("status", "open") not in _RESOLVED
 
         # Defects have their own terminal set: `retest` is NOT resolved —
@@ -311,6 +368,8 @@ class EngagementService:
                 "decisions": len(decs),
                 "open_action_items": sum(1 for a in acts if is_open(a)),
                 "open_questions": sum(1 for q in qs if is_open(q)),
+                "open_copilot_followups": sum(
+                    1 for c in copilot if is_open(c)),
                 "open_defects": len(open_defects),
                 # The number a delivery lead is asked for in every status
                 # call, and the one that gates go-live.
@@ -322,6 +381,7 @@ class EngagementService:
             "decisions": decs,
             "action_items": acts,
             "open_questions": qs,
+            "copilot_followups": copilot,
             "defects": defects,
         }
 

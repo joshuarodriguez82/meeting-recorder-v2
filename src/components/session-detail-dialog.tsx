@@ -5,6 +5,8 @@ import {
   api, openExternal, type ComposeLink, type SessionFull, type Speaker,
   formatDuration,
 } from "@/lib/api";
+import type { CoPilotBoardItem } from "@/lib/api";
+import { followUps, openAsText } from "@/lib/copilot-followups";
 import { toast } from "sonner";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
@@ -606,7 +608,8 @@ export function SessionDetailDialog({
                 </TabsTrigger>
                 <TabsTrigger
                   value="copilot"
-                  disabled={(session.copilot_ticks?.length ?? 0) === 0}
+                  disabled={(session.copilot_ticks?.length ?? 0) === 0
+                    && (session.copilot_board?.length ?? 0) === 0}
                 >
                   <Sparkles className="h-3.5 w-3.5 mr-1" />
                   Co-Pilot {(session.copilot_ticks?.length ?? 0) > 0 && (
@@ -985,6 +988,7 @@ export function SessionDetailDialog({
                 </TabsContent>
 
                 <TabsContent value="copilot" className="mt-0">
+                  <CoPilotFollowUpsView session={session} />
                   <CoPilotTicksView session={session} />
                 </TabsContent>
 
@@ -1094,6 +1098,65 @@ function ScreenshotsView({ session }: { session: SessionFull }) {
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+// The Co-Pilot's questions and follow-ups for this meeting, checked
+// against the transcript after the call (backend/core/copilot_followups).
+// Still-open items first: those are what's left to send the customer.
+// Same content as the exported copilot_followups_<meeting>.md.
+function CoPilotFollowUpsView({ session }: { session: SessionFull }) {
+  const f = followUps(session.copilot_board);
+  if (f.open.length + f.partly.length + f.answered.length === 0) return null;
+  return (
+    <div className="mb-4 space-y-3 rounded-lg border bg-card p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-medium">Follow-ups</p>
+          <p className="text-xs text-muted-foreground">
+            {f.checked
+              ? "The Co-Pilot's questions and asks, checked against the transcript. "
+                + "Suggestions, not commitments — review before sending."
+              : "Not checked against the transcript yet — process the meeting to see "
+                + "which were answered."}
+          </p>
+        </div>
+        {(f.open.length + f.partly.length) > 0 && (
+          <CopyButton text={openAsText(f)} label="Copy open items" />
+        )}
+      </div>
+      {f.open.length > 0 && (
+        <FollowUpGroup title={f.checked ? "Still open" : "To check"} items={f.open} />
+      )}
+      {f.partly.length > 0 && (
+        <FollowUpGroup title="Partly answered" items={f.partly} showAnswer />
+      )}
+      {f.answered.length > 0 && (
+        <FollowUpGroup title="Answered during the call" items={f.answered} showAnswer />
+      )}
+    </div>
+  );
+}
+
+function FollowUpGroup({
+  title, items, showAnswer = false,
+}: { title: string; items: CoPilotBoardItem[]; showAnswer?: boolean }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+        {title} ({items.length})
+      </p>
+      <ul className="space-y-1.5">
+        {items.map((i) => (
+          <li key={i.id} className="text-sm leading-snug">
+            <span>{i.text}</span>
+            {showAnswer && i.answer && (
+              <span className="block text-xs text-muted-foreground">{i.answer}</span>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -1406,7 +1469,11 @@ function SpeakersView({
             className="rounded-lg border border-primary/40 bg-primary/5 p-3 space-y-2"
           >
             <div className="text-sm">
-              <span className="font-medium">{sug.names.join(" and ")}</span>{" "}
+              <span className="font-medium">
+                {sug.names.length > 2
+                  ? `${sug.names.slice(0, -1).join(", ")} and ${sug.names[sug.names.length - 1]}`
+                  : sug.names.join(" and ")}
+              </span>{" "}
               {/* The wording has to match the evidence. "Sound like the
                   same person" over a NAME match is wrong twice: it is
                   not what was measured, and it invites the user to
@@ -1430,7 +1497,7 @@ function SpeakersView({
                 {merging
                   ? <Loader2 className="h-3 w-3 animate-spin mr-1" />
                   : <Users className="h-3 w-3 mr-1" />}
-                Merge them
+                {sug.names.length > 2 ? `Merge all ${sug.names.length}` : "Merge them"}
               </Button>
               <Button
                 size="sm"

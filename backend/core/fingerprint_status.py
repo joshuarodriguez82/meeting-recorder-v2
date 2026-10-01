@@ -59,6 +59,9 @@ class FingerprintInputs:
     segment_count: int = 0
     #: False when speechbrain / torch / torchaudio cannot be imported.
     encoder_available: bool = True
+    #: Why the encoder is unavailable, when the startup check found out
+    #: (core/dependency_health.EncoderHealth.user_reason); "" otherwise.
+    encoder_problem: str = ""
     #: The session's recorded audio path, "" when it has none.
     audio_path: str = ""
     #: Whether that path is readable right now.
@@ -87,9 +90,11 @@ def describe_missing_fingerprint(inputs: FingerprintInputs) -> str:
        stop.
     """
     if not inputs.encoder_available:
+        why = (f" — {inputs.encoder_problem}" if inputs.encoder_problem
+               else "")
         return ("voice fingerprinting is not available in this install, so "
                 "no speaker on any session can be saved to the known-speakers "
-                "list")
+                f"list{why}")
     if not inputs.audio_path:
         return ("this session has no audio file recorded, so there is nothing "
                 "to take a voice fingerprint from")

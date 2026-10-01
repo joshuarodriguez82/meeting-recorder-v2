@@ -305,6 +305,25 @@ def _verify_and_repair_dependencies() -> None:
 if os.environ.get("MEETING_RECORDER_SKIP_DEP_REPAIR") != "1":
     _verify_and_repair_dependencies()
 
+    # A package that EXISTS can still be half-installed and fail to
+    # import (field log 2026-09-15: speechbrain, every meeting, for
+    # weeks). Checked in a child process on a background thread so
+    # startup never waits for torch; repaired at the pinned version.
+    def _encoder_health_check() -> None:
+        from core import dependency_health
+        req = "constraints-cpu.txt" if os.name == "nt" else "constraints-mac.txt"
+        try:
+            dependency_health.CURRENT = dependency_health.check_and_repair(
+                constraints=Path(__file__).resolve().parent / req)
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"[deps] speech library check failed: {e}\n")
+        else:
+            sys.stderr.write(
+                f"[deps] speech library: {dependency_health.CURRENT.state}\n")
+
+    threading.Thread(target=_encoder_health_check, daemon=True,
+                     name="encoder-health").start()
+
 
 # Compatibility patches needed before importing pyannote/torch:
 #   - NumPy 2.0 removed np.NaN (pyannote uses it)
@@ -1524,7 +1543,7 @@ def _fetch_openrouter_free() -> list:
         "https://openrouter.ai/api/v1/models",
         headers={"User-Agent": "MeetingRecorder/2"},
     )
-    with _urlreq.urlopen(req, timeout=10) as resp:
+    with _urlreq.urlopen(req, timeout=10) as resp:  # nosec B310 — fixed https URL
         data = _json.loads(resp.read().decode("utf-8"))
 
     out: list = []
@@ -1599,6 +1618,17 @@ _PROVIDER_MODELS_CACHE: dict[tuple[str, str], dict] = {}
 _PROVIDER_MODELS_TTL = 300  # 5 minutes
 
 
+def _require_http_url(url: str) -> str:
+    """Only http(s) may be fetched. urllib also opens file:// and ftp://,
+    and these URLs come partly from Settings (a provider's base URL), so
+    a mistyped or hostile value must not read a local file."""
+    from urllib.parse import urlparse
+    scheme = (urlparse(str(url)).scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(f"only http(s) URLs can be fetched (got {scheme or 'none'!r})")
+    return url
+
+
 def _stdlib_get_json(
     url: str, headers: Optional[dict] = None, timeout: float = 8.0,
 ) -> dict:
@@ -1608,9 +1638,10 @@ def _stdlib_get_json(
     import urllib.request as _urlreq
 
     req = _urlreq.Request(
-        url, headers=headers or {"User-Agent": "MeetingRecorder/2"},
+        _require_http_url(url),
+        headers=headers or {"User-Agent": "MeetingRecorder/2"},
     )
-    with _urlreq.urlopen(req, timeout=timeout) as resp:
+    with _urlreq.urlopen(req, timeout=timeout) as resp:  # nosec B310 — scheme checked above
         return _json.loads(resp.read().decode("utf-8"))
 
 
@@ -4495,6 +4526,8 @@ def _missing_fingerprint_reason(session: Session, speaker) -> str:
         encoder_available = is_available()
     except Exception:  # noqa: BLE001
         encoder_available = False
+    from core import dependency_health
+    encoder_problem = dependency_health.CURRENT.user_reason()
 
     audio_path = session.audio_path or ""
     audio_exists = False
@@ -4508,6 +4541,7 @@ def _missing_fingerprint_reason(session: Session, speaker) -> str:
         usable_seconds=usable_speech_seconds(spans),
         segment_count=len(spans),
         encoder_available=encoder_available,
+        encoder_problem=encoder_problem,
         audio_path=audio_path,
         audio_exists=audio_exists,
     ))
@@ -6863,6 +6897,31 @@ class TemplateRequest(BaseModel):
     template: str = "General"
 
 
+async def _resolve_copilot_followups(session, transcript: str,
+                                     notes: str) -> str:
+    """Check the Co-Pilot's questions and follow-ups against the full
+    transcript and write the results onto the session's board (see
+    core/copilot_followups). Returns a stage string. Best-effort: a
+    failure here never fails processing."""
+    from core.copilot_followups import (
+        apply_resolutions, board_for, items_to_check)
+    board = board_for(session)
+    pending = items_to_check(board)
+    if not pending:
+        if board and not getattr(session, "copilot_board", None):
+            session.copilot_board = board
+        return "skipped (nothing to check)"
+    try:
+        results = await svc.summarizer.resolve_copilot_items(
+            transcript, pending, notes=notes)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Co-Pilot follow-up check failed: {e}")
+        return f"failed: {e}"
+    updated = apply_resolutions(board, results)
+    session.copilot_board = board
+    return f"ok ({updated} checked)"
+
+
 def _copilot_observations_blob(session) -> str:
     """Roll the session's live-copilot ticks into a deduplicated bullet
     blob for the summarizer. Returns empty string when there are no
@@ -7401,6 +7460,12 @@ async def process_full(session_id: str, req: ProcessFullRequest):
             logger.info(
                 "process_full: %s inputs unchanged — skipped 5 LLM calls",
                 session_id)
+            # The follow-up check is its own input: a meeting processed
+            # before it existed still gets it, once.
+            stages["copilot_followups"] = await _resolve_copilot_followups(
+                session, transcript, notes)
+            if stages["copilot_followups"].startswith("ok"):
+                await asyncio.to_thread(svc.session_svc.save, session)
             # Still enqueue. Skipping the LLM calls means the ARTIFACTS
             # are unchanged, not that they reached the Designated
             # Folder: an export dropped after its retries, a folder that
@@ -7465,6 +7530,10 @@ async def process_full(session_id: str, req: ProcessFullRequest):
         # NOT record "these inputs are done" — that would make the next
         # reprocess skip the very session that still needs finishing,
         # and the skip would be indistinguishable from success.
+        # After the extractors, so the transcript is read from cache.
+        stages["copilot_followups"] = await _resolve_copilot_followups(
+            session, transcript, notes)
+
         if all(not isinstance(r, Exception)
                for r in (summary_r, ai_r, dec_r, req_r, struct_r)):
             session.extraction_fingerprint = fingerprint
@@ -10150,8 +10219,12 @@ def _probe_http(url: str, timeout: float = 3.0) -> tuple[bool, str]:
     import urllib.request
     import urllib.error
     try:
+        _require_http_url(url)
+    except ValueError as e:
+        return False, str(e)
+    try:
         req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310 — scheme checked above
             return True, f"HTTP {resp.status}"
     except urllib.error.HTTPError as e:
         # A 4xx still means something is listening — endpoint is up.

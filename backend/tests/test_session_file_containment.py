@@ -44,6 +44,12 @@ def _wire(monkeypatch, session_svc):
     so load_settings() is a no-op)."""
     import server
     monkeypatch.setattr(server.svc, "settings", SimpleNamespace())
+    # load_settings() rebuilds every service whenever _services_ready is
+    # False — a non-None settings alone no longer makes it a no-op. Left
+    # False, it rebuilt SessionService from the mocked dotenv, whose
+    # recordings dir is the RELATIVE path "MagicMock/…", and left that
+    # tree in the repo after every run.
+    monkeypatch.setattr(server.svc, "_services_ready", True)
     monkeypatch.setattr(server.svc, "session_svc", session_svc)
     return server
 

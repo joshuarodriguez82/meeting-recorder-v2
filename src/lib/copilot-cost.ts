@@ -14,12 +14,15 @@
 /** Average tokens we send per wide tick — full window, mode prompt,
  *  meeting-type modifier, custom context, prior-tick memory, ~10 min
  *  transcript. Empirically 1500-3000 in; 100-300 out. */
-const AVG_WIDE_TOKENS_IN = 2000;
+// Raised in 2.83: the prompt now carries the meeting's details (name,
+// client, organiser, attendees, the user's notes) and the Co-Pilot
+// board (up to 30 items) as well as the ~4.5 min transcript window.
+const AVG_WIDE_TOKENS_IN = 2600;
 const AVG_WIDE_TOKENS_OUT = 200;
 
 /** Hot tick — narrow window, same prompt prefix but ~90s of transcript
  *  instead of 10 min. Often returns empty arrays (small completion). */
-const AVG_HOT_TOKENS_IN = 1200;
+const AVG_HOT_TOKENS_IN = 1800;
 const AVG_HOT_TOKENS_OUT = 100;
 
 // USD per 1k tokens, (input, output). Public Anthropic / OpenAI prices
@@ -28,7 +31,9 @@ type RatePair = { in: number; out: number; note?: string };
 
 const PROVIDER_RATES: Record<string, RatePair> = {
   // Anthropic
-  "anthropic:claude-haiku-4-5": { in: 0.00025, out: 0.00125 },
+  // Haiku 4.5 is $1 / $5 per million tokens. This row said $0.25 /
+  // $1.25 — Haiku 3's price — so every estimate was 4x low.
+  "anthropic:claude-haiku-4-5": { in: 0.001, out: 0.005 },
   "anthropic:claude-sonnet-4-6": { in: 0.003, out: 0.015 },
   "anthropic:claude-opus-4-7": { in: 0.015, out: 0.075 },
   // OpenAI
@@ -76,7 +81,10 @@ export interface CostEstimate {
  *  override takes precedence over the main provider when set. */
 function rateKey(provider: string, model: string): string {
   const p = (provider || "anthropic").trim().toLowerCase();
-  const m = (model || "").trim().toLowerCase();
+  // A dated snapshot ID ("claude-haiku-4-5-20251001", what Settings
+  // stores) is priced as its model — without this the lookup missed
+  // and the estimate showed nothing for the most common setting.
+  const m = (model || "").trim().toLowerCase().replace(/-\d{8}$/, "");
   return `${p}:${m}`;
 }
 

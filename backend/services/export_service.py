@@ -111,6 +111,9 @@ class ExportService:
                 out.append(self.export_decisions(session))
             if session.requirements:
                 out.append(self.export_requirements(session))
+            followups = self.export_copilot_followups(session)
+            if followups:
+                out.append(followups)
             if copy_audio and session.audio_path and Path(session.audio_path).exists():
                 src = Path(session.audio_path)
                 dst = self._dir / f"{self._base_name(session)}{src.suffix.lower()}"
@@ -185,6 +188,18 @@ class ExportService:
         lines.append(session.decisions)
         self._write_text_if_changed(path, "\n".join(lines))
         logger.info(f"Decisions exported: {path}")
+        return str(path)
+
+    def export_copilot_followups(self, session: Session) -> str:
+        """The Co-Pilot's questions and follow-ups, checked against the
+        transcript (core/copilot_followups). "" when there are none."""
+        from core.copilot_followups import render_markdown
+        text = render_markdown(session)
+        if not text:
+            return ""
+        path = self._dir / f"copilot_followups_{self._base_name(session)}.md"
+        self._write_text_if_changed(path, text)
+        logger.info(f"Co-Pilot follow-ups exported: {path}")
         return str(path)
 
     def export_requirements(self, session: Session) -> str:
