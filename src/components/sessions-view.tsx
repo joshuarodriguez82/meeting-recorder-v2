@@ -9,7 +9,7 @@ import { toast } from "sonner";
 import {
   Loader2, Trash2, FolderOpen, Upload, Pencil, Check, X,
   RotateCcw, ChevronDown, ChevronRight, ClipboardCopy,
-  Mic, Captions, Sparkles, ListChecks, Target, FileText,
+  Mic, Captions, Sparkles, ListChecks, Target, FileText, Video,
   type LucideIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -26,8 +26,8 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import {
-  IMPORT_EXTENSIONS, defaultMeetingName, isImportable, isVideo,
-  pickImportable,
+  IMPORT_EXTENSIONS, TRANSCRIPT_EXTENSIONS, fileNameOf, groupImportFiles,
+  isImportable, isTranscript, isVideo, itemName, type ImportItem,
 } from "@/lib/media-import";
 
 interface Props {
@@ -502,7 +502,9 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
   const [filter, setFilter] = useState("");
   const [bulkRunning, setBulkRunning] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
-  const [droppedPath, setDroppedPath] = useState("");
+  // The import list lives here so files dropped on the tab land in it
+  // directly, whether or not the window is already open.
+  const [importItems, setImportItems] = useState<ImportItem[]>([]);
   const [dragging, setDragging] = useState(false);
 
   // Drop a video or audio file anywhere on this tab to import it. The
@@ -523,13 +525,14 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
             setDragging(false);
           } else if (p.type === "drop") {
             setDragging(false);
-            const picked = pickImportable(p.paths ?? []);
-            if (picked) {
-              setDroppedPath(picked);
+            const paths = p.paths ?? [];
+            if (paths.some((x) => isImportable(x) || isTranscript(x))) {
+              noticeRejected(paths);
+              setImportItems((prev) => groupImportFiles(paths, prev).items);
               setImportOpen(true);
-            } else if ((p.paths ?? []).length) {
-              toast.error("That file type can't be imported", {
-                description: "Drop a video (.mp4, .mov, .mkv, .webm) or audio file (.wav, .mp3, .m4a).",
+            } else if (paths.length) {
+              toast.error("Those files can't be imported", {
+                description: "Drop videos, audio files, or Teams / Zoom transcripts (.vtt, .srt, .docx).",
               });
             }
           }
@@ -599,7 +602,7 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
             <FolderOpen className="h-4 w-4 mr-2" />
             Open Recordings Folder
           </Button>
-          <Button variant="outline" onClick={() => { setDroppedPath(""); setImportOpen(true); }}>
+          <Button variant="outline" onClick={() => setImportOpen(true)}>
             <Upload className="h-4 w-4 mr-2" />
             Import Recording
           </Button>
@@ -616,8 +619,8 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
         <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-background/70 backdrop-blur-sm">
           <div className="rounded-lg border-2 border-dashed border-primary px-8 py-6 text-center">
             <Upload className="mx-auto h-6 w-6 text-primary" />
-            <p className="mt-2 text-sm font-medium">Drop to import this recording</p>
-            <p className="text-xs text-muted-foreground">Video or audio</p>
+            <p className="mt-2 text-sm font-medium">Drop to import</p>
+            <p className="text-xs text-muted-foreground">Videos, audio, and Teams / Zoom transcripts</p>
           </div>
         </div>
       )}
@@ -626,10 +629,12 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
         open={importOpen}
         onOpenChange={setImportOpen}
         sessions={sessions}
-        initialPath={droppedPath}
-        onImported={(id) => {
+        items={importItems}
+        setItems={setImportItems}
+        onImported={(ids) => {
           onReload();
-          onOpenSession(id);
+          // One meeting: open it. Several: they're in the list.
+          if (ids.length === 1) onOpenSession(ids[0]);
         }}
       />
 
@@ -809,28 +814,43 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
   );
 }
 
+/** Say which of `paths` can't be imported. Kept out of the state
+ *  update itself, which React may run twice. */
+function noticeRejected(paths: string[]): void {
+  const rejected = paths.filter((p) => !isImportable(p) && !isTranscript(p));
+  if (!rejected.length) return;
+  toast.error(
+    rejected.length === 1
+      ? `Can't import ${fileNameOf(rejected[0])}`
+      : `Can't import ${rejected.length} of those files`,
+    { description: "Use a video, an audio file, or a Teams / Zoom transcript (.vtt, .srt, .docx)." });
+}
+
 function ImportSessionDialog({
-  open, onOpenChange, onImported, sessions, initialPath,
+  open, onOpenChange, onImported, sessions, items, setItems,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
-  onImported: (sessionId: string) => void;
+  /** Called once, with every meeting that was imported. */
+  onImported: (sessionIds: string[]) => void;
   sessions: SessionSummary[];
-  /** A file dropped on the Sessions tab, to start from. */
-  initialPath: string;
+  /** The meetings to import; files dropped on the tab are added here. */
+  items: ImportItem[];
+  setItems: React.Dispatch<React.SetStateAction<ImportItem[]>>;
 }) {
-  const [path, setPath] = useState("");
-  const [name, setName] = useState("");
+  const [pasted, setPasted] = useState("");
   const [client, setClient] = useState("");
   const [project, setProject] = useState("");
   const [template, setTemplate] = useState("General");
   const [templates, setTemplates] = useState<string[]>(["General"]);
   const [processNow, setProcessNow] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState("");
 
-  useEffect(() => {
-    if (open && initialPath) setPath(initialPath);
-  }, [open, initialPath]);
+  const addPaths = (paths: string[]) => {
+    noticeRejected(paths);
+    setItems((prev) => groupImportFiles(paths, prev).items);
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -850,126 +870,214 @@ function ImportSessionDialog({
       .map((s) => (s.project || "").trim())
       .filter(Boolean))).sort();
 
-  const trimmedPath = path.trim();
-  const video = isVideo(trimmedPath);
-  const knownType = !trimmedPath || isImportable(trimmedPath);
+  const update = (i: number, patch: Partial<ImportItem>) =>
+    setItems((prev) => prev.map((it, j) => (j === i ? { ...it, ...patch } : it)));
+  const remove = (i: number) =>
+    setItems((prev) => prev.filter((_, j) => j !== i));
+
+  const pick = async (kind: "any" | "transcript"): Promise<string[]> => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const picked = await open({
+        multiple: kind === "any",
+        directory: false,
+        title: kind === "any"
+          ? "Choose recordings and transcripts to import"
+          : "Choose the meeting's transcript",
+        filters: kind === "any"
+          ? [
+            { name: "Recordings and transcripts",
+              extensions: [...IMPORT_EXTENSIONS, ...TRANSCRIPT_EXTENSIONS] },
+            { name: "Video or audio", extensions: [...IMPORT_EXTENSIONS] },
+            { name: "Transcripts (Teams / Zoom)", extensions: [...TRANSCRIPT_EXTENSIONS] },
+          ]
+          : [{ name: "Transcripts (Teams / Zoom)", extensions: [...TRANSCRIPT_EXTENSIONS] }],
+      });
+      if (Array.isArray(picked)) return picked.filter(Boolean);
+      return typeof picked === "string" && picked ? [picked] : [];
+    } catch (e) {
+      toast.error(`File picker unavailable: ${(e as Error).message ?? e}`);
+      return [];
+    }
+  };
 
   const reset = () => {
-    setPath(""); setName(""); setClient(""); setProject("");
-    setTemplate("General"); setProcessNow(true);
+    setItems([]); setPasted(""); setClient(""); setProject("");
+    setTemplate("General"); setProcessNow(true); setProgress("");
   };
 
   const handleImport = async () => {
-    if (!trimmedPath) return;
+    if (!items.length) return;
     setBusy(true);
-    try {
-      const res = await api.importSession({
-        file_path: trimmedPath,
-        display_name: name.trim(),
-        client: client.trim(),
-        project: project.trim(),
-        template,
-        process: processNow,
-      });
-      const slidesNote = res.slides
-        ? " Slides and shared screens from the video go in its Screenshots tab."
-        : "";
-      if (res.processing) {
-        toast.success("Imported — transcribing in the background", {
-          description:
-            "Speakers, summary and action items fill in when it finishes; " +
-            "a long meeting can take several minutes." + slidesNote,
+    const imported: string[] = [];
+    const failed: { item: ImportItem; error: string }[] = [];
+    const notes: string[] = [];
+    let slides = false;
+    for (const [n, item] of items.entries()) {
+      setProgress(items.length > 1
+        ? `Importing ${n + 1} of ${items.length}: ${itemName(item)}`
+        : isVideo(item.recording) ? "Extracting audio…" : "Importing…");
+      try {
+        const res = await api.importSession({
+          file_path: item.recording,
+          transcript_path: item.transcript,
+          display_name: item.name.trim(),
+          client: client.trim(),
+          project: project.trim(),
+          template,
+          process: processNow,
         });
-      } else {
-        toast.success("Imported", {
-          description: "Process it from the meeting when you're ready." + slidesNote,
-        });
+        imported.push(res.session_id);
+        slides = slides || !!res.slides;
+        for (const note of res.notes ?? []) {
+          notes.push(items.length > 1 ? `${itemName(item)}: ${note}` : note);
+        }
+      } catch (e) {
+        failed.push({ item, error: e instanceof Error ? e.message : String(e) });
       }
+    }
+    setBusy(false);
+    setProgress("");
+
+    if (imported.length) {
       // A client typed here for the first time becomes a real client,
       // as it does when tagged on the Record tab.
       const c = client.trim();
       if (c && !existingClients.some((x) => x.toLowerCase() === c.toLowerCase())) {
         api.setClientConfig(c, { export_folder: "" }).catch(() => {});
       }
+      const what = imported.length === 1 ? "Imported" : `Imported ${imported.length} meetings`;
+      const parts = [
+        processNow
+          ? (imported.length === 1
+            ? "Transcript, speakers, summary and action items fill in in the background; a long meeting can take several minutes."
+            : "They process one after another in the background.")
+          : "Process them from each meeting when you're ready.",
+        slides ? "Slides and shared screens from the video go in the Screenshots tab." : "",
+        ...notes,
+      ].filter(Boolean);
+      toast.success(what, { description: parts.join(" ") });
+      onImported(imported);
+    }
+    if (failed.length) {
+      toast.error(
+        failed.length === 1
+          ? `Couldn't import ${itemName(failed[0].item)}`
+          : `${failed.length} meetings couldn't be imported`,
+        { description: failed.map((f) => `${itemName(f.item)}: ${f.error}`).join("\n") });
+      // Keep only what failed, to fix and retry.
+      setItems(failed.map((f) => f.item));
+    } else {
       onOpenChange(false);
       reset();
-      onImported(res.session_id);
-    } catch (e) {
-      toast.error(`Import failed: ${e instanceof Error ? e.message : e}`);
-    } finally {
-      setBusy(false);
     }
   };
 
+  const count = items.length;
   return (
     <Dialog open={open} onOpenChange={(v) => { if (!busy) onOpenChange(v); }}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Import a recording</DialogTitle>
+          <DialogTitle>Import recordings</DialogTitle>
         </DialogHeader>
         <div className="space-y-3 py-2">
           <p className="text-xs text-muted-foreground">
-            For a meeting recorded somewhere else: a Teams or Zoom video,
-            or an audio file. It becomes a session like any other, with
-            the same transcript, speakers, summary and exports.
+            For meetings recorded somewhere else: Teams or Zoom videos,
+            audio files, and their transcripts. Each becomes a session like
+            any other. Add the meeting&apos;s Teams / Zoom transcript (.vtt or
+            .docx) to get everyone&apos;s real names; a transcript can also be
+            imported on its own.
           </p>
+
           <div className="space-y-2">
-            <Label>Video or audio file</Label>
-            <div className="flex gap-2">
-              <Input
-                value={path}
-                onChange={(e) => setPath(e.target.value)}
-                placeholder="Browse, paste a path, or drop a file on the Sessions tab"
-                autoFocus
-                autoComplete="off"
-                className="flex-1"
-                disabled={busy}
-              />
-              <Button
-                type="button"
-                variant="outline"
-                disabled={busy}
-                onClick={async () => {
-                  try {
-                    const { open } = await import("@tauri-apps/plugin-dialog");
-                    const picked = await open({
-                      multiple: false,
-                      directory: false,
-                      title: "Choose a recording to import",
-                      filters: [
-                        { name: "Video or audio", extensions: [...IMPORT_EXTENSIONS] },
-                      ],
-                    });
-                    if (typeof picked === "string" && picked) {
-                      setPath(picked);
-                    }
-                  } catch (e) {
-                    toast.error(
-                      `File picker unavailable: ${(e as Error).message ?? e}`);
-                  }
-                }}
-              >
-                Browse…
+            <div className="flex items-center justify-between gap-2">
+              <Label>Meetings</Label>
+              <Button type="button" variant="outline" size="sm" disabled={busy}
+                onClick={async () => addPaths(await pick("any"))}>
+                Add files…
               </Button>
             </div>
-            <p className={`text-[11px] ${knownType ? "text-muted-foreground" : "text-destructive"}`}>
-              {knownType
-                ? video
-                  ? "The sound track and a still of each slide or shared screen are kept; the video itself isn't copied. The original file stays where it is."
-                  : "Video: .mp4, .mov, .mkv, .webm and more. Audio: .wav, .mp3, .m4a and more. The original file stays where it is."
-                : "This file type can't be imported. Use a video (.mp4, .mov, .mkv, .webm) or audio file (.wav, .mp3, .m4a)."}
-            </p>
+            {count === 0 ? (
+              <div className="rounded-md border border-dashed p-6 text-center text-xs text-muted-foreground">
+                <Upload className="mx-auto mb-2 h-5 w-5" />
+                Drop files anywhere on the Sessions tab, or use Add files.
+                A video and a transcript with the same name are paired.
+              </div>
+            ) : (
+              <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
+                {items.map((item, i) => (
+                  <div key={`${item.recording}|${item.transcript}`}
+                    className="space-y-1.5 rounded-md border p-2">
+                    <div className="flex items-center gap-2">
+                      <Input
+                        value={item.name}
+                        onChange={(e) => update(i, { name: e.target.value })}
+                        placeholder={itemName({ ...item, name: "" })}
+                        aria-label="Meeting name"
+                        autoComplete="off"
+                        className="h-8 flex-1"
+                        disabled={busy}
+                      />
+                      <Button type="button" variant="ghost" size="sm" disabled={busy}
+                        aria-label="Remove from the list" onClick={() => remove(i)}>
+                        <X className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                      <span className="inline-flex items-center gap-1">
+                        {item.recording
+                          ? (isVideo(item.recording)
+                            ? <Video className="h-3 w-3" />
+                            : <Mic className="h-3 w-3" />)
+                          : <Mic className="h-3 w-3 opacity-40" />}
+                        {item.recording ? fileNameOf(item.recording) : "No recording — transcript only"}
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <Captions className={`h-3 w-3 ${item.transcript ? "" : "opacity-40"}`} />
+                        {item.transcript ? (
+                          <>
+                            {fileNameOf(item.transcript)}
+                            {item.recording && (
+                              <button type="button" disabled={busy}
+                                className="underline-offset-2 hover:underline"
+                                onClick={() => update(i, { transcript: "" })}>
+                                remove
+                              </button>
+                            )}
+                          </>
+                        ) : (
+                          <button type="button" disabled={busy}
+                            className="underline-offset-2 hover:underline"
+                            onClick={async () => {
+                              const [t] = await pick("transcript");
+                              if (t) update(i, { transcript: t });
+                            }}>
+                            Add transcript (for real names)
+                          </button>
+                        )}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex gap-2">
+              <Input
+                value={pasted}
+                onChange={(e) => setPasted(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && pasted.trim()) {
+                    addPaths([pasted.trim()]); setPasted("");
+                  }
+                }}
+                placeholder="Or paste a file path and press Enter"
+                autoComplete="off"
+                className="h-8 flex-1 text-xs"
+                disabled={busy}
+              />
+            </div>
           </div>
-          <div className="space-y-2">
-            <Label>Meeting name</Label>
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder={trimmedPath ? defaultMeetingName(trimmedPath) : "Defaults to the file name"}
-              autoComplete="off"
-              disabled={busy}
-            />
-          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div className="space-y-2">
               <Label htmlFor="import-client">Client</Label>
@@ -1002,6 +1110,11 @@ function ImportSessionDialog({
               </datalist>
             </div>
           </div>
+          {count > 1 && (
+            <p className="-mt-1 text-[11px] text-muted-foreground">
+              Client, project and template apply to every meeting in the list.
+            </p>
+          )}
           <div className="space-y-2">
             <Label>Summary template</Label>
             <Select value={template} onValueChange={(v) => v && setTemplate(v)} disabled={busy}>
@@ -1020,8 +1133,9 @@ function ImportSessionDialog({
               <Label htmlFor="import-process">Transcribe and summarize now</Label>
               <p className="text-[11px] text-muted-foreground">
                 Runs in the background, the same as after a recording:
-                transcript, speakers (using your saved voices), summary,
-                action items and exports.
+                transcript (or the one you added), speakers, summary,
+                action items and exports. A video&apos;s slides are added
+                first so the summary can use them.
               </p>
             </div>
             <Switch
@@ -1032,13 +1146,16 @@ function ImportSessionDialog({
             />
           </div>
         </div>
-        <DialogFooter>
+        <DialogFooter className="items-center gap-2">
+          {busy && progress && (
+            <span className="mr-auto truncate text-xs text-muted-foreground">{progress}</span>
+          )}
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
             Cancel
           </Button>
-          <Button onClick={handleImport} disabled={!trimmedPath || !knownType || busy}>
+          <Button onClick={handleImport} disabled={!count || busy}>
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : null}
-            {busy ? (video ? "Extracting audio…" : "Importing…") : "Import"}
+            {count > 1 ? `Import ${count} meetings` : "Import"}
           </Button>
         </DialogFooter>
       </DialogContent>

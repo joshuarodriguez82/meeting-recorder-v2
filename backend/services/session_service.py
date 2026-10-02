@@ -785,65 +785,131 @@ class SessionService:
 
     def import_from_file(
         self,
-        source_path: str,
+        source_path: str = "",
         display_name: str = "",
         client: str = "",
         project: str = "",
         template: str = "",
         progress=None,
+        transcript_path: str = "",
     ) -> Session:
         """
-        Import a recording made elsewhere — audio or video — as a new
-        session.
+        Import a recording made elsewhere — audio or video, its
+        transcript, or both — as a new session.
 
         A WAV is copied in as-is. Anything else (a Teams / Zoom .mp4,
         an .m4a from a phone) has its sound track extracted to a WAV
         (core/media_import explains why); the original is never moved
         or modified, and a video is not copied — only its audio is
-        kept. The returned session has no transcript yet; the caller
-        decides whether to process it now.
-        """
-        from core import media_import
+        kept.
 
-        src = Path(source_path)
-        if not src.is_file():
-            raise FileNotFoundError(f"File not found: {source_path}")
-        if not media_import.is_supported(src):
-            raise ValueError(
-                f"Unsupported file type: {src.suffix or '(none)'}. Use "
-                + ", ".join(media_import.SUPPORTED_EXTS) + ".")
+        A transcript (core/transcript_import: Teams / Zoom .vtt, .srt,
+        Teams .docx) becomes the session's transcript with the speakers
+        it names, so processing skips transcription and goes straight
+        to the summary. A transcript that names nobody is set aside when
+        there is audio — the app's own speaker separation does better
+        than one unnamed speaker — and used as-is when there isn't.
+
+        ``session.import_notes`` (not saved) lists anything the caller
+        should tell the user.
+        """
+        from core import media_import, transcript_import
+
+        if not source_path and not transcript_path:
+            raise ValueError("Choose a recording, a transcript, or both.")
+        src = Path(source_path) if source_path else None
+        if src is not None:
+            if not src.is_file():
+                raise FileNotFoundError(f"File not found: {source_path}")
+            if not media_import.is_supported(src):
+                raise ValueError(
+                    f"Unsupported file type: {src.suffix or '(none)'}. Use "
+                    + ", ".join(media_import.SUPPORTED_EXTS) + ".")
+        cues = None
+        if transcript_path:
+            # Read it BEFORE extracting audio: a bad transcript must fail
+            # the import before anything is written.
+            cues = transcript_import.read_transcript(transcript_path)
 
         session_id = uuid.uuid4().hex[:8].upper()
-        dst = self._recordings_dir / f"session_{session_id}.wav"
-        recorded_at = None
-        if media_import.needs_extraction(src):
-            result = media_import.extract_audio(src, dst, progress=progress)
-            duration_s = result.duration_s
-            recorded_at = result.recorded_at
-        else:
-            shutil.copy2(src, dst)
-            duration_s = media_import.wav_duration(dst)
-
         session = Session(session_id=session_id)
-        session.display_name = (display_name or src.stem).strip()
+        notes: list = []
+        recorded_at = None
+        duration_s = 0.0
+        dst = self._recordings_dir / f"session_{session_id}.wav"
+        if src is not None:
+            if media_import.needs_extraction(src):
+                result = media_import.extract_audio(src, dst, progress=progress)
+                duration_s = result.duration_s
+                recorded_at = result.recorded_at
+            else:
+                shutil.copy2(src, dst)
+                duration_s = media_import.wav_duration(dst)
+            session.audio_path = str(dst)
+
+        if cues is not None:
+            names = transcript_import.speaker_names(cues)
+            if not names and src is not None:
+                notes.append(
+                    "The transcript doesn't say who is speaking, so the "
+                    "recording is transcribed instead and speakers are "
+                    "told apart by voice.")
+            else:
+                self._apply_transcript(session, cues, names)
+                if not names:
+                    notes.append(
+                        "The transcript doesn't say who is speaking; "
+                        "everything is under one speaker.")
+                if src is None:
+                    duration_s = max(c.end for c in cues)
+
+        named_from = src or Path(transcript_path)
+        session.display_name = (display_name or named_from.stem).strip()
         # The container's own recording time when it has one; the file's
         # modified time otherwise (often the download time — the best
         # the file can say).
         session.started_at = recorded_at or datetime.datetime.fromtimestamp(
-            src.stat().st_mtime)
+            named_from.stat().st_mtime)
         # Ended = started + length, so the list shows the real duration
         # instead of 0:00 for every import.
         session.ended_at = session.started_at + datetime.timedelta(
             seconds=duration_s or 0.0)
-        session.audio_path = str(dst)
-        if duration_s:
+        if duration_s and src is not None:
             session.audio_actual_duration_s = duration_s
         session.client = client
         session.project = project
         if template:
             session.template = template
         self.save(session)
+        session.import_notes = notes
         logger.info(
-            f"Imported {src.suffix.lower()} file as session {session_id} "
-            f"({duration_s:.0f}s of audio)")
+            f"Imported session {session_id}: "
+            f"{src.suffix.lower() if src else 'no'} recording, "
+            f"{len(session.segments)} transcript segment(s), "
+            f"{duration_s:.0f}s")
         return session
+
+    @staticmethod
+    def _apply_transcript(session: Session, cues, names) -> None:
+        """Speakers and segments from an imported transcript. Names come
+        from the meeting's own roster, so they are shown as given."""
+        from models.segment import Segment
+        from models.speaker import Speaker
+
+        ids = {name: f"SPEAKER_{i:02d}" for i, name in enumerate(names)}
+        session.speakers = {}
+        for name, sid in ids.items():
+            session.speakers[sid] = Speaker(speaker_id=sid, display_name=name)
+        if any(not c.speaker for c in cues):
+            # Lines the file doesn't attribute get their own speaker,
+            # never the first named one.
+            sid = f"SPEAKER_{len(ids):02d}"
+            ids[""] = sid
+            session.speakers[sid] = Speaker(
+                speaker_id=sid,
+                display_name="Speaker 1" if not names else "Unknown speaker")
+        session.segments = [
+            Segment(speaker_id=ids[c.speaker], start=c.start, end=c.end,
+                    text=c.text)
+            for c in cues
+        ]

@@ -46,3 +46,69 @@ export function isVideo(path: string): boolean {
 export function pickImportable(paths: readonly string[]): string | null {
   return paths.find(isImportable) ?? null;
 }
+
+// Transcripts Teams / Zoom download, imported with a recording or alone.
+// Mirrors backend/core/transcript_import.py's TRANSCRIPT_EXTS.
+export const TRANSCRIPT_EXTENSIONS = ["vtt", "srt", "docx", "txt"] as const;
+
+export function isTranscript(path: string): boolean {
+  return (TRANSCRIPT_EXTENSIONS as readonly string[]).includes(extensionOf(path));
+}
+
+/** One meeting to import: a recording, its transcript, or both. */
+export interface ImportItem {
+  recording: string;
+  transcript: string;
+  name: string;
+}
+
+/** The meeting an item will be called when no name is typed. */
+export function itemName(item: ImportItem): string {
+  return item.name.trim()
+    || defaultMeetingName(item.recording || item.transcript);
+}
+
+/**
+ * Files picked or dropped together, as meetings to import. A recording
+ * and a transcript with the same file name ("Weekly sync.mp4" and
+ * "Weekly sync.vtt") are one meeting; anything else is its own. Files
+ * that can't be imported are returned separately so the window can say
+ * which. Adding to an existing list fills in a missing half before
+ * starting a new meeting, and never adds the same file twice.
+ */
+export function groupImportFiles(
+  paths: readonly string[],
+  existing: readonly ImportItem[] = [],
+): { items: ImportItem[]; rejected: string[] } {
+  const items = existing.map((i) => ({ ...i }));
+  const rejected: string[] = [];
+  const have = new Set(
+    items.flatMap((i) => [i.recording, i.transcript]).filter(Boolean));
+  const stem = (p: string) => defaultMeetingName(p).toLowerCase();
+
+  for (const raw of paths) {
+    const p = raw.trim();
+    if (!p || have.has(p)) continue;
+    const recording = isImportable(p);
+    const transcript = isTranscript(p);
+    if (!recording && !transcript) {
+      rejected.push(p);
+      continue;
+    }
+    have.add(p);
+    const slot = recording ? "recording" : "transcript";
+    const other = recording ? "transcript" : "recording";
+    const partner = items.find(
+      (i) => !i[slot] && i[other] && stem(i[other]) === stem(p));
+    if (partner) {
+      partner[slot] = p;
+    } else {
+      items.push({
+        recording: recording ? p : "",
+        transcript: transcript ? p : "",
+        name: "",
+      });
+    }
+  }
+  return { items, rejected };
+}

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  defaultMeetingName, extensionOf, fileNameOf, isImportable, isVideo,
-  pickImportable,
+  defaultMeetingName, extensionOf, fileNameOf, groupImportFiles,
+  isImportable, isTranscript, isVideo, itemName, pickImportable,
 } from "./media-import";
 
 describe("media import file handling", () => {
@@ -32,5 +32,51 @@ describe("media import file handling", () => {
       .toBe("~/call.mp4");
     expect(pickImportable(["~/agenda.docx"])).toBeNull();
     expect(pickImportable([])).toBeNull();
+  });
+
+  it("tells transcripts from recordings", () => {
+    expect(isTranscript("t.vtt")).toBe(true);
+    expect(isTranscript("t.DOCX")).toBe(true);
+    expect(isTranscript("t.mp4")).toBe(false);
+    expect(isImportable("t.vtt")).toBe(false);
+  });
+});
+
+describe("grouping dropped files into meetings", () => {
+  it("pairs a recording with the transcript of the same name", () => {
+    const { items, rejected } = groupImportFiles([
+      "C:\\d\\Weekly sync.mp4",
+      "C:\\d\\Globex kickoff.mp4",
+      "C:\\d\\weekly SYNC.vtt",
+      "C:\\d\\agenda.pdf",
+    ]);
+    expect(items).toEqual([
+      { recording: "C:\\d\\Weekly sync.mp4",
+        transcript: "C:\\d\\weekly SYNC.vtt", name: "" },
+      { recording: "C:\\d\\Globex kickoff.mp4", transcript: "", name: "" },
+    ]);
+    expect(rejected).toEqual(["C:\\d\\agenda.pdf"]);
+  });
+
+  it("imports a transcript on its own", () => {
+    const { items } = groupImportFiles(["~/Hooli review.docx"]);
+    expect(items).toEqual([
+      { recording: "", transcript: "~/Hooli review.docx", name: "" }]);
+    expect(itemName(items[0])).toBe("Hooli review");
+  });
+
+  it("adds to an existing list without duplicates, filling a missing half", () => {
+    const first = groupImportFiles(["~/a.mp4"]).items;
+    first[0].name = "Kept name";
+    const { items } = groupImportFiles(["~/a.mp4", "~/a.vtt", "~/b.wav"], first);
+    expect(items).toEqual([
+      { recording: "~/a.mp4", transcript: "~/a.vtt", name: "Kept name" },
+      { recording: "~/b.wav", transcript: "", name: "" },
+    ]);
+  });
+
+  it("never pairs two recordings", () => {
+    const { items } = groupImportFiles(["~/a.mp4", "~/a.m4a"]);
+    expect(items).toHaveLength(2);
   });
 });

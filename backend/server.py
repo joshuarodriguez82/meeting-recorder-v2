@@ -6509,7 +6509,12 @@ async def open_folder(req: OpenFolderRequest):
 
 
 class ImportSessionRequest(BaseModel):
-    file_path: str
+    #: The recording (audio or video). May be empty when a transcript
+    #: is imported on its own.
+    file_path: str = ""
+    #: A Teams / Zoom transcript (.vtt, .srt, .docx) — with the
+    #: recording, or alone.
+    transcript_path: str = ""
     display_name: str = ""
     client: str = ""
     project: str = ""
@@ -6538,6 +6543,7 @@ async def import_session(req: ImportSessionRequest):
             client=req.client,
             project=req.project,
             template=req.template,
+            transcript_path=req.transcript_path,
         )
         # No enqueue here: v2.19+ never copies the raw WAV to a network
         # folder. Once the user processes this imported session, the
@@ -6562,7 +6568,11 @@ async def import_session(req: ImportSessionRequest):
     return {"ok": True, "session_id": session.session_id,
             "processing": bool(req.process),
             "slides": is_video,
-            "duration_s": getattr(session, "audio_actual_duration_s", None)}
+            "duration_s": getattr(session, "audio_actual_duration_s", None),
+            # From an imported transcript: named speakers, and anything
+            # the user should know about how it was used.
+            "speakers": [sp.display_name for sp in session.speakers.values()],
+            "notes": list(getattr(session, "import_notes", []) or [])}
 
 
 async def _after_import(session_id: str, video_path: str,
@@ -7396,7 +7406,13 @@ async def process_full(session_id: str, req: ProcessFullRequest):
                 detail="API keys not configured. Open Settings → save tokens → retry.",
             )
 
-        await asyncio.to_thread(svc.ensure_models_loaded)
+        # The speech models are only for transcribing. A session that
+        # already has a transcript (an imported Teams / Zoom transcript,
+        # or a re-run of the extractions) must not wait on — or fail
+        # with — a model load it never uses.
+        _pre = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+        if _pre is None or not _pre.segments:
+            await asyncio.to_thread(svc.ensure_models_loaded)
 
         stages: dict[str, str] = {}
 
