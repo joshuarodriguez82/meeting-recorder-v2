@@ -21,6 +21,14 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import {
+  IMPORT_EXTENSIONS, defaultMeetingName, isImportable, isVideo,
+  pickImportable,
+} from "@/lib/media-import";
 
 interface Props {
   sessions: SessionSummary[];
@@ -494,6 +502,46 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
   const [filter, setFilter] = useState("");
   const [bulkRunning, setBulkRunning] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [droppedPath, setDroppedPath] = useState("");
+  const [dragging, setDragging] = useState(false);
+
+  // Drop a video or audio file anywhere on this tab to import it. The
+  // desktop webview hands dropped files to the app as paths through
+  // its own event (an HTML drop handler never sees them), and the
+  // backend reads the file from that path — nothing is uploaded.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+        const off = await getCurrentWebview().onDragDropEvent((event) => {
+          const p = event.payload;
+          if (p.type === "enter" || p.type === "over") {
+            setDragging(true);
+          } else if (p.type === "leave") {
+            setDragging(false);
+          } else if (p.type === "drop") {
+            setDragging(false);
+            const picked = pickImportable(p.paths ?? []);
+            if (picked) {
+              setDroppedPath(picked);
+              setImportOpen(true);
+            } else if ((p.paths ?? []).length) {
+              toast.error("That file type can't be imported", {
+                description: "Drop a video (.mp4, .mov, .mkv, .webm) or audio file (.wav, .mp3, .m4a).",
+              });
+            }
+          }
+        });
+        if (cancelled) off(); else unlisten = off;
+      } catch {
+        // Not running inside the desktop app (e.g. a browser preview):
+        // Browse… and a pasted path still work.
+      }
+    })();
+    return () => { cancelled = true; unlisten?.(); };
+  }, []);
 
   const filtered = sessions.filter((s) => {
     if (!filter) return true;
@@ -551,9 +599,9 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
             <FolderOpen className="h-4 w-4 mr-2" />
             Open Recordings Folder
           </Button>
-          <Button variant="outline" onClick={() => setImportOpen(true)}>
+          <Button variant="outline" onClick={() => { setDroppedPath(""); setImportOpen(true); }}>
             <Upload className="h-4 w-4 mr-2" />
-            Load Session
+            Import Recording
           </Button>
           {unprocessed.length > 0 && (
             <Button onClick={bulkProcess} disabled={bulkRunning}>
@@ -564,9 +612,21 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
         </div>
       </div>
 
+      {dragging && (
+        <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-background/70 backdrop-blur-sm">
+          <div className="rounded-lg border-2 border-dashed border-primary px-8 py-6 text-center">
+            <Upload className="mx-auto h-6 w-6 text-primary" />
+            <p className="mt-2 text-sm font-medium">Drop to import this recording</p>
+            <p className="text-xs text-muted-foreground">Video or audio</p>
+          </div>
+        </div>
+      )}
+
       <ImportSessionDialog
         open={importOpen}
         onOpenChange={setImportOpen}
+        sessions={sessions}
+        initialPath={droppedPath}
         onImported={(id) => {
           onReload();
           onOpenSession(id);
@@ -750,73 +810,131 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
 }
 
 function ImportSessionDialog({
-  open, onOpenChange, onImported,
+  open, onOpenChange, onImported, sessions, initialPath,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   onImported: (sessionId: string) => void;
+  sessions: SessionSummary[];
+  /** A file dropped on the Sessions tab, to start from. */
+  initialPath: string;
 }) {
   const [path, setPath] = useState("");
   const [name, setName] = useState("");
   const [client, setClient] = useState("");
   const [project, setProject] = useState("");
+  const [template, setTemplate] = useState("General");
+  const [templates, setTemplates] = useState<string[]>(["General"]);
+  const [processNow, setProcessNow] = useState(true);
   const [busy, setBusy] = useState(false);
 
+  useEffect(() => {
+    if (open && initialPath) setPath(initialPath);
+  }, [open, initialPath]);
+
+  useEffect(() => {
+    if (!open) return;
+    api.getTemplates()
+      .then((t) => { if (t.length) setTemplates(t.map((x) => x.name)); })
+      .catch(() => { /* keep "General" */ });
+  }, [open]);
+
+  // Same suggestions the Record tab offers: every client already used,
+  // and the projects tagged under the chosen client.
+  const existingClients = Array.from(new Set(
+    sessions.map((s) => (s.client || "").trim()).filter(Boolean))).sort();
+  const existingProjects = Array.from(new Set(
+    sessions
+      .filter((s) => !client.trim()
+        || (s.client || "").trim().toLowerCase() === client.trim().toLowerCase())
+      .map((s) => (s.project || "").trim())
+      .filter(Boolean))).sort();
+
+  const trimmedPath = path.trim();
+  const video = isVideo(trimmedPath);
+  const knownType = !trimmedPath || isImportable(trimmedPath);
+
+  const reset = () => {
+    setPath(""); setName(""); setClient(""); setProject("");
+    setTemplate("General"); setProcessNow(true);
+  };
+
   const handleImport = async () => {
-    const p = path.trim();
-    if (!p) return;
+    if (!trimmedPath) return;
     setBusy(true);
     try {
       const res = await api.importSession({
-        file_path: p,
+        file_path: trimmedPath,
         display_name: name.trim(),
         client: client.trim(),
         project: project.trim(),
+        template,
+        process: processNow,
       });
-      toast.success("Session loaded");
+      if (res.processing) {
+        toast.success("Imported — transcribing in the background", {
+          description:
+            "Speakers, summary and action items fill in when it finishes. " +
+            "A long meeting can take several minutes.",
+        });
+      } else {
+        toast.success("Imported", {
+          description: "Process it from the meeting when you're ready.",
+        });
+      }
+      // A client typed here for the first time becomes a real client,
+      // as it does when tagged on the Record tab.
+      const c = client.trim();
+      if (c && !existingClients.some((x) => x.toLowerCase() === c.toLowerCase())) {
+        api.setClientConfig(c, { export_folder: "" }).catch(() => {});
+      }
       onOpenChange(false);
-      setPath(""); setName(""); setClient(""); setProject("");
+      reset();
       onImported(res.session_id);
     } catch (e) {
-      toast.error(`Load failed: ${e instanceof Error ? e.message : e}`);
+      toast.error(`Import failed: ${e instanceof Error ? e.message : e}`);
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(v) => { if (!busy) onOpenChange(v); }}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Load Session from Audio File</DialogTitle>
+          <DialogTitle>Import a recording</DialogTitle>
         </DialogHeader>
         <div className="space-y-3 py-2">
+          <p className="text-xs text-muted-foreground">
+            For a meeting recorded somewhere else: a Teams or Zoom video,
+            or an audio file. It becomes a session like any other, with
+            the same transcript, speakers, summary and exports.
+          </p>
           <div className="space-y-2">
-            <Label>Audio / video file</Label>
+            <Label>Video or audio file</Label>
             <div className="flex gap-2">
               <Input
                 value={path}
                 onChange={(e) => setPath(e.target.value)}
-                placeholder="C:\Users\<you>\Downloads\teams-recording.mp4"
+                placeholder="Browse, paste a path, or drop a file on the Sessions tab"
                 autoFocus
                 autoComplete="off"
                 className="flex-1"
+                disabled={busy}
               />
               <Button
                 type="button"
                 variant="outline"
+                disabled={busy}
                 onClick={async () => {
                   try {
                     const { open } = await import("@tauri-apps/plugin-dialog");
                     const picked = await open({
                       multiple: false,
                       directory: false,
-                      title: "Choose recording to import",
+                      title: "Choose a recording to import",
                       filters: [
-                        {
-                          name: "Audio / video",
-                          extensions: ["wav", "mp3", "m4a", "flac", "mp4", "mov"],
-                        },
+                        { name: "Video or audio", extensions: [...IMPORT_EXTENSIONS] },
                       ],
                     });
                     if (typeof picked === "string" && picked) {
@@ -831,45 +949,93 @@ function ImportSessionDialog({
                 Browse…
               </Button>
             </div>
-            <p className="text-[11px] text-muted-foreground">
-              Accepts .wav, .mp3, .m4a, .flac, .mp4, or .mov. The file is
-              copied into your recordings folder — the original stays where
-              it is.
+            <p className={`text-[11px] ${knownType ? "text-muted-foreground" : "text-destructive"}`}>
+              {knownType
+                ? video
+                  ? "Only the sound track is kept, so the video itself isn't copied. The original file stays where it is."
+                  : "Video: .mp4, .mov, .mkv, .webm and more. Audio: .wav, .mp3, .m4a and more. The original file stays where it is."
+                : "This file type can't be imported. Use a video (.mp4, .mov, .mkv, .webm) or audio file (.wav, .mp3, .m4a)."}
             </p>
+          </div>
+          <div className="space-y-2">
+            <Label>Meeting name</Label>
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={trimmedPath ? defaultMeetingName(trimmedPath) : "Defaults to the file name"}
+              autoComplete="off"
+              disabled={busy}
+            />
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div className="space-y-2">
-              <Label>Meeting name (optional)</Label>
+              <Label htmlFor="import-client">Client</Label>
               <Input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Defaults to the filename"
-                autoComplete="off"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>Client (optional)</Label>
-              <Input
+                id="import-client"
+                list="import-clients-list"
                 value={client}
                 onChange={(e) => setClient(e.target.value)}
+                placeholder="Type new or pick existing"
                 autoComplete="off"
+                disabled={busy}
               />
+              <datalist id="import-clients-list">
+                {existingClients.map((c) => <option key={c} value={c} />)}
+              </datalist>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="import-project">Project</Label>
+              <Input
+                id="import-project"
+                list="import-projects-list"
+                value={project}
+                onChange={(e) => setProject(e.target.value)}
+                placeholder="Type new or pick existing"
+                autoComplete="off"
+                disabled={busy}
+              />
+              <datalist id="import-projects-list">
+                {existingProjects.map((p) => <option key={p} value={p} />)}
+              </datalist>
             </div>
           </div>
           <div className="space-y-2">
-            <Label>Project (optional)</Label>
-            <Input
-              value={project}
-              onChange={(e) => setProject(e.target.value)}
-              autoComplete="off"
+            <Label>Summary template</Label>
+            <Select value={template} onValueChange={(v) => v && setTemplate(v)} disabled={busy}>
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {templates.map((t) => (
+                  <SelectItem key={t} value={t}>{t}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex items-start justify-between gap-3 rounded-md border p-3">
+            <div className="space-y-0.5">
+              <Label htmlFor="import-process">Transcribe and summarize now</Label>
+              <p className="text-[11px] text-muted-foreground">
+                Runs in the background, the same as after a recording:
+                transcript, speakers (using your saved voices), summary,
+                action items and exports.
+              </p>
+            </div>
+            <Switch
+              id="import-process"
+              checked={processNow}
+              onCheckedChange={setProcessNow}
+              disabled={busy}
             />
           </div>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={handleImport} disabled={!path.trim() || busy}>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button onClick={handleImport} disabled={!trimmedPath || !knownType || busy}>
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : null}
-            Load
+            {busy ? (video ? "Extracting audio…" : "Importing…") : "Import"}
           </Button>
         </DialogFooter>
       </DialogContent>

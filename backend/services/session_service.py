@@ -789,38 +789,61 @@ class SessionService:
         display_name: str = "",
         client: str = "",
         project: str = "",
+        template: str = "",
+        progress=None,
     ) -> Session:
         """
-        Import an existing audio file (WAV) as a new session.
+        Import a recording made elsewhere — audio or video — as a new
+        session.
 
-        Copies (doesn't move) the source into the recordings directory
-        using the standard `session_<id>.wav` naming, creates a Session
-        with metadata from the file, and writes the session JSON. The
-        returned session has no transcript/summary yet — the user will
-        run processing from the UI like any freshly-recorded session.
+        A WAV is copied in as-is. Anything else (a Teams / Zoom .mp4,
+        an .m4a from a phone) has its sound track extracted to a WAV
+        (core/media_import explains why); the original is never moved
+        or modified, and a video is not copied — only its audio is
+        kept. The returned session has no transcript yet; the caller
+        decides whether to process it now.
         """
+        from core import media_import
+
         src = Path(source_path)
-        if not src.exists():
+        if not src.is_file():
             raise FileNotFoundError(f"File not found: {source_path}")
-        if src.suffix.lower() not in (
-                ".wav", ".mp3", ".m4a", ".flac", ".mp4", ".mov"):
+        if not media_import.is_supported(src):
             raise ValueError(
-                f"Unsupported audio format: {src.suffix}. "
-                "Use .wav, .mp3, .m4a, .flac, .mp4, or .mov.")
+                f"Unsupported file type: {src.suffix or '(none)'}. Use "
+                + ", ".join(media_import.SUPPORTED_EXTS) + ".")
 
         session_id = uuid.uuid4().hex[:8].upper()
-        # Keep the original extension so downstream tooling doesn't
-        # assume .wav when the user imported, say, an .m4a from Teams.
-        dst = self._recordings_dir / f"session_{session_id}{src.suffix.lower()}"
-        shutil.copy2(src, dst)
+        dst = self._recordings_dir / f"session_{session_id}.wav"
+        recorded_at = None
+        if media_import.needs_extraction(src):
+            result = media_import.extract_audio(src, dst, progress=progress)
+            duration_s = result.duration_s
+            recorded_at = result.recorded_at
+        else:
+            shutil.copy2(src, dst)
+            duration_s = media_import.wav_duration(dst)
 
         session = Session(session_id=session_id)
         session.display_name = (display_name or src.stem).strip()
-        session.started_at = datetime.datetime.fromtimestamp(src.stat().st_mtime)
-        session.ended_at = session.started_at
+        # The container's own recording time when it has one; the file's
+        # modified time otherwise (often the download time — the best
+        # the file can say).
+        session.started_at = recorded_at or datetime.datetime.fromtimestamp(
+            src.stat().st_mtime)
+        # Ended = started + length, so the list shows the real duration
+        # instead of 0:00 for every import.
+        session.ended_at = session.started_at + datetime.timedelta(
+            seconds=duration_s or 0.0)
         session.audio_path = str(dst)
+        if duration_s:
+            session.audio_actual_duration_s = duration_s
         session.client = client
         session.project = project
+        if template:
+            session.template = template
         self.save(session)
-        logger.info(f"Imported external file {src.name} as session {session_id}")
+        logger.info(
+            f"Imported {src.suffix.lower()} file as session {session_id} "
+            f"({duration_s:.0f}s of audio)")
         return session

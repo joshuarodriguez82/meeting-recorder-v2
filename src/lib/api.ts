@@ -2197,13 +2197,22 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  // Audio or video. A video's sound track is extracted on the backend;
+  // with `process` the full pipeline then runs in the background.
   importSession: (body: {
     file_path: string;
     display_name?: string;
     client?: string;
     project?: string;
+    template?: string;
+    process?: boolean;
   }) =>
-    request<{ ok: boolean; session_id: string }>("/sessions/import", {
+    request<{
+      ok: boolean;
+      session_id: string;
+      processing: boolean;
+      duration_s: number | null;
+    }>("/sessions/import", {
       method: "POST",
       body: JSON.stringify(body),
     }),

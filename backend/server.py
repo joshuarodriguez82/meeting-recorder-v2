@@ -4037,12 +4037,22 @@ def _maybe_auto_process(session) -> None:
     s = svc.settings
     if not s or not getattr(s, "auto_process_after_stop", False):
         return
+    _start_background_process(session)
+
+
+def _start_background_process(session) -> bool:
+    """Run the full pipeline for ``session`` in the background, with the
+    same retries, crash-resume marker and visible failure as
+    auto-process after a recording. Idempotent per session; returns
+    False when it was already running. Must be called on the event
+    loop."""
+    s = svc.settings
     sid = getattr(session, "session_id", "") or ""
     if not sid or sid in _auto_processed_sessions:
-        return
+        return False
     _auto_processed_sessions.add(sid)
     template = getattr(session, "template", "") or "General"
-    follow_up = bool(getattr(s, "auto_follow_up_email", False))
+    follow_up = bool(s and getattr(s, "auto_follow_up_email", False))
     logger.info(
         f"[auto-process] kicking off for session {sid} "
         f"(template={template}, follow_up={follow_up})")
@@ -4055,6 +4065,7 @@ def _maybe_auto_process(session) -> None:
         "started_at": datetime.now().isoformat(),
     })
     asyncio.create_task(_auto_process_session(sid, template, follow_up))
+    return True
 
 
 @app.post("/recording/stop")
@@ -6502,15 +6513,21 @@ class ImportSessionRequest(BaseModel):
     display_name: str = ""
     client: str = ""
     project: str = ""
+    template: str = ""
+    #: Transcribe, identify speakers and summarise straight away, the
+    #: same background pipeline a finished recording gets.
+    process: bool = False
 
 
 @app.post("/sessions/import")
 async def import_session(req: ImportSessionRequest):
     """
-    Import an audio file sitting somewhere on disk as a new session. The
-    file is copied into the recordings directory and a session JSON is
-    written. Transcription/summary are NOT run automatically — the user
-    triggers those from the session detail dialog like any other session.
+    Import a recording made elsewhere — audio, or a video such as a
+    Teams / Zoom .mp4 — as a new session. A video's sound track is
+    extracted to the recordings folder (core/media_import); the original
+    file is left where it is. With ``process`` the full pipeline starts
+    in the background and the session fills in as it finishes, exactly
+    like a recording that just stopped.
     """
     svc.load_settings()
 
@@ -6520,14 +6537,15 @@ async def import_session(req: ImportSessionRequest):
             display_name=req.display_name,
             client=req.client,
             project=req.project,
+            template=req.template,
         )
         # No enqueue here: v2.19+ never copies the raw WAV to a network
         # folder. Once the user processes this imported session, the
         # transcript/summary/extractions will enqueue themselves.
-        return session.session_id
+        return session
 
     try:
-        session_id = await asyncio.to_thread(_do)
+        session = await asyncio.to_thread(_do)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -6535,7 +6553,12 @@ async def import_session(req: ImportSessionRequest):
     except Exception as e:
         logger.exception("Import session failed")
         raise HTTPException(status_code=500, detail=str(e))
-    return {"ok": True, "session_id": session_id}
+    processing = False
+    if req.process:
+        processing = _start_background_process(session)
+    return {"ok": True, "session_id": session.session_id,
+            "processing": processing,
+            "duration_s": getattr(session, "audio_actual_duration_s", None)}
 
 
 # ── Finalize-in-progress three-way state (field repro 2026-08-14) ────

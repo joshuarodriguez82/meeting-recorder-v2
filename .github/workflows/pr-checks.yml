@@ -119,10 +119,15 @@ jobs:
       # backend — without olefile here those tests silently SKIP and it
       # ships untested. It earns its place on this list the same way the
       # others do: pure Python, zero transitive dependencies, ~115 KB.
+      # `av` (PyAV) is the decoder that imports a meeting video
+      # (core/media_import.py). The app already ships it as a
+      # faster-whisper dependency; a binary wheel with its own ffmpeg,
+      # no system packages. Without it the video-import tests SKIP and
+      # the extraction ships untested.
       # Heavier integration tests belong in a separate, optional job
       # when they exist.
       - name: Install test dependencies
-        run: pip install numpy scipy soundfile pytest fastapi httpx olefile
+        run: pip install numpy scipy soundfile pytest fastapi httpx olefile av
       - name: Run backend tests
         run: python -m pytest backend/tests -q
       # The MCP server is a standalone package (its own pyproject, no
