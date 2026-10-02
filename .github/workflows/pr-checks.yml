@@ -123,11 +123,14 @@ jobs:
       # (core/media_import.py). The app already ships it as a
       # faster-whisper dependency; a binary wheel with its own ffmpeg,
       # no system packages. Without it the video-import tests SKIP and
-      # the extraction ships untested.
+      # the extraction ships untested. Pinned to the version
+      # constraints-*.txt ships: av 19 removed an argument
+      # faster-whisper 1.2.1 passes, so "latest" would test a decoder
+      # no install has.
       # Heavier integration tests belong in a separate, optional job
       # when they exist.
       - name: Install test dependencies
-        run: pip install numpy scipy soundfile pytest fastapi httpx olefile av
+        run: pip install numpy scipy soundfile pytest fastapi httpx olefile av==18.1.0
       - name: Run backend tests
         run: python -m pytest backend/tests -q
       # The MCP server is a standalone package (its own pyproject, no
