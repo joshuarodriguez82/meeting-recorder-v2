@@ -2197,13 +2197,29 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  // Audio or video, a Teams / Zoom transcript, or both (file_path is ""
+  // for a transcript alone). A video's sound track is extracted on the
+  // backend; with `process` the full pipeline then runs in the background.
   importSession: (body: {
     file_path: string;
+    transcript_path?: string;
     display_name?: string;
     client?: string;
     project?: string;
+    template?: string;
+    process?: boolean;
   }) =>
-    request<{ ok: boolean; session_id: string }>("/sessions/import", {
+    request<{
+      ok: boolean;
+      session_id: string;
+      processing: boolean;
+      // A video: its slides / shared screens are being pulled out in
+      // the background and land in the meeting's Screenshots tab.
+      slides?: boolean;
+      duration_s: number | null;
+      speakers?: string[];
+      notes?: string[];
+    }>("/sessions/import", {
       method: "POST",
       body: JSON.stringify(body),
     }),

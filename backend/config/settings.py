@@ -52,6 +52,10 @@ def _user_data_dir() -> Path:
 
 USER_DATA_DIR = _user_data_dir()
 ENV_PATH = USER_DATA_DIR / "config.env"
+#: The dev-fallback copy next to the backend source tree, mirrored on
+#: every save. A module constant so a test can redirect it: the suite
+#: once wrote its throwaway settings here and over the real ENV_PATH.
+DEV_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 
 def _resolve_env_path() -> Path:
@@ -82,7 +86,7 @@ def _resolve_env_path() -> Path:
             candidates.append(Path(v) / "MeetingRecorder" / "config.env")
         candidates.append(Path.home() / ".config" / "MeetingRecorder" / "config.env")
     # Dev fallback — sibling .env next to the backend source tree
-    candidates.append(Path(__file__).resolve().parent.parent / ".env")
+    candidates.append(DEV_ENV_PATH)
     for c in candidates:
         try:
             if c.exists():
@@ -849,7 +853,4 @@ class Settings:
         # _resolve_env_path() even when the canonical path is unreachable
         # from the child process.
         Settings._write_env_file(ENV_PATH, content)
-        Settings._write_env_file(
-            Path(__file__).resolve().parent.parent / ".env",
-            content,
-        )
+        Settings._write_env_file(DEV_ENV_PATH, content)

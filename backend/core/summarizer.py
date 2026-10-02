@@ -68,7 +68,14 @@ def _image_blocks(image_paths: List[str]) -> list:
     whole summary — a broken screenshot shouldn't cost the user their
     meeting notes."""
     blocks: list = []
-    for p in (image_paths or [])[:_MAX_SCREENSHOTS]:
+    paths = list(image_paths or [])
+    if len(paths) > _MAX_SCREENSHOTS:
+        # An even spread, not the first N: an imported video's slides
+        # run the whole meeting, and the first eight are its first ten
+        # minutes.
+        step = len(paths) / _MAX_SCREENSHOTS
+        paths = [paths[int(i * step)] for i in range(_MAX_SCREENSHOTS)]
+    for p in paths:
         try:
             fp = Path(p)
             media = _IMG_MEDIA_TYPES.get(fp.suffix.lower())

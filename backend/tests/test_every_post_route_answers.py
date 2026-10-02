@@ -29,6 +29,8 @@ concrete reason. Every other POST, including any added later, is called.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from test_boot_smoke import isolated_server  # noqa: F401  (fixture)
 
 EXEMPT: dict[str, str] = {
@@ -109,3 +111,34 @@ def test_every_parameterless_post_answers_without_a_500(isolated_server):  # noq
         f"{len(failures)} of {checked} POST route(s) failed with an empty "
         f"body. A 4xx is fine — a handler that ran and declined. These "
         f"fell over:\n  " + "\n  ".join(failures))
+
+
+def test_the_sweep_never_writes_the_real_settings_files(isolated_server):  # noqa: F811
+    """Several POSTs save settings. They must land in the sandbox, never
+    in the developer's own config.env or backend/.env."""
+    import config.settings as cs
+    from fastapi.testclient import TestClient
+
+    real = [cs.USER_DATA_DIR / "config.env",
+            Path(cs.__file__).resolve().parent.parent / ".env"]
+    assert cs.ENV_PATH not in real and cs.DEV_ENV_PATH not in real
+
+    def _stamp(p):
+        try:
+            return p.stat().st_mtime_ns
+        except FileNotFoundError:
+            return None
+    before = [_stamp(p) for p in real]
+
+    services = isolated_server.Services()
+    services.load_settings()
+    backup = isolated_server.svc
+    isolated_server.svc = services
+    try:
+        with TestClient(isolated_server.app) as client:
+            for path in _parameterless_posts(isolated_server.app):
+                if path not in EXEMPT:
+                    client.post(path, json={}, timeout=REQUEST_TIMEOUT_S)
+    finally:
+        isolated_server.svc = backup
+    assert [_stamp(p) for p in real] == before

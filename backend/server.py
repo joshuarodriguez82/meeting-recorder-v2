@@ -4037,12 +4037,22 @@ def _maybe_auto_process(session) -> None:
     s = svc.settings
     if not s or not getattr(s, "auto_process_after_stop", False):
         return
+    _start_background_process(session)
+
+
+def _start_background_process(session) -> bool:
+    """Run the full pipeline for ``session`` in the background, with the
+    same retries, crash-resume marker and visible failure as
+    auto-process after a recording. Idempotent per session; returns
+    False when it was already running. Must be called on the event
+    loop."""
+    s = svc.settings
     sid = getattr(session, "session_id", "") or ""
     if not sid or sid in _auto_processed_sessions:
-        return
+        return False
     _auto_processed_sessions.add(sid)
     template = getattr(session, "template", "") or "General"
-    follow_up = bool(getattr(s, "auto_follow_up_email", False))
+    follow_up = bool(s and getattr(s, "auto_follow_up_email", False))
     logger.info(
         f"[auto-process] kicking off for session {sid} "
         f"(template={template}, follow_up={follow_up})")
@@ -4055,6 +4065,7 @@ def _maybe_auto_process(session) -> None:
         "started_at": datetime.now().isoformat(),
     })
     asyncio.create_task(_auto_process_session(sid, template, follow_up))
+    return True
 
 
 @app.post("/recording/stop")
@@ -6498,19 +6509,30 @@ async def open_folder(req: OpenFolderRequest):
 
 
 class ImportSessionRequest(BaseModel):
-    file_path: str
+    #: The recording (audio or video). May be empty when a transcript
+    #: is imported on its own.
+    file_path: str = ""
+    #: A Teams / Zoom transcript (.vtt, .srt, .docx) — with the
+    #: recording, or alone.
+    transcript_path: str = ""
     display_name: str = ""
     client: str = ""
     project: str = ""
+    template: str = ""
+    #: Transcribe, identify speakers and summarise straight away, the
+    #: same background pipeline a finished recording gets.
+    process: bool = False
 
 
 @app.post("/sessions/import")
 async def import_session(req: ImportSessionRequest):
     """
-    Import an audio file sitting somewhere on disk as a new session. The
-    file is copied into the recordings directory and a session JSON is
-    written. Transcription/summary are NOT run automatically — the user
-    triggers those from the session detail dialog like any other session.
+    Import a recording made elsewhere — audio, or a video such as a
+    Teams / Zoom .mp4 — as a new session. A video's sound track is
+    extracted to the recordings folder (core/media_import); the original
+    file is left where it is. With ``process`` the full pipeline starts
+    in the background and the session fills in as it finishes, exactly
+    like a recording that just stopped.
     """
     svc.load_settings()
 
@@ -6520,14 +6542,16 @@ async def import_session(req: ImportSessionRequest):
             display_name=req.display_name,
             client=req.client,
             project=req.project,
+            template=req.template,
+            transcript_path=req.transcript_path,
         )
         # No enqueue here: v2.19+ never copies the raw WAV to a network
         # folder. Once the user processes this imported session, the
         # transcript/summary/extractions will enqueue themselves.
-        return session.session_id
+        return session
 
     try:
-        session_id = await asyncio.to_thread(_do)
+        session = await asyncio.to_thread(_do)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -6535,7 +6559,57 @@ async def import_session(req: ImportSessionRequest):
     except Exception as e:
         logger.exception("Import session failed")
         raise HTTPException(status_code=500, detail=str(e))
-    return {"ok": True, "session_id": session_id}
+    from core import media_import
+    is_video = media_import.is_video(req.file_path)
+    if is_video or req.process:
+        asyncio.create_task(_after_import(
+            session.session_id, req.file_path if is_video else "",
+            req.process))
+    return {"ok": True, "session_id": session.session_id,
+            "processing": bool(req.process),
+            "slides": is_video,
+            "duration_s": getattr(session, "audio_actual_duration_s", None),
+            # From an imported transcript: named speakers, and anything
+            # the user should know about how it was used.
+            "speakers": [sp.display_name for sp in session.speakers.values()],
+            "notes": list(getattr(session, "import_notes", []) or [])}
+
+
+async def _after_import(session_id: str, video_path: str,
+                        process: bool) -> None:
+    """Background half of an import: pull the slides / shared screens
+    out of a video (core/video_slides), then start processing — in that
+    order, so the summary sees the slides. A failure to find slides
+    never stops processing."""
+    if video_path:
+        try:
+            from core.video_slides import extract_slides
+            session = await asyncio.to_thread(
+                svc.session_svc.load_full, session_id)
+            if session is not None and session.audio_path:
+                out_dir = (Path(session.audio_path).parent / "screenshots"
+                           / f"session_{session_id}")
+                slides = await asyncio.to_thread(
+                    extract_slides, video_path, out_dir)
+                if slides:
+                    # Re-load: the user may have renamed or tagged the
+                    # session while this ran.
+                    session = await asyncio.to_thread(
+                        svc.session_svc.load_full, session_id)
+                    if session is not None:
+                        for s in slides:
+                            if s.path not in session.screenshots:
+                                session.screenshots.append(s.path)
+                        await asyncio.to_thread(svc.session_svc.save, session)
+                logger.info(f"[import] {session_id}: {len(slides)} slide(s) "
+                            f"from the video")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[import] {session_id}: slide extraction "
+                           f"failed: {type(e).__name__}: {e}")
+    if process:
+        session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+        if session is not None:
+            _start_background_process(session)
 
 
 # ── Finalize-in-progress three-way state (field repro 2026-08-14) ────
@@ -7332,7 +7406,13 @@ async def process_full(session_id: str, req: ProcessFullRequest):
                 detail="API keys not configured. Open Settings → save tokens → retry.",
             )
 
-        await asyncio.to_thread(svc.ensure_models_loaded)
+        # The speech models are only for transcribing. A session that
+        # already has a transcript (an imported Teams / Zoom transcript,
+        # or a re-run of the extractions) must not wait on — or fail
+        # with — a model load it never uses.
+        _pre = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+        if _pre is None or not _pre.segments:
+            await asyncio.to_thread(svc.ensure_models_loaded)
 
         stages: dict[str, str] = {}
 

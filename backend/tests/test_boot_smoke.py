@@ -141,6 +141,15 @@ def isolated_server(tmp_path, monkeypatch):
     monkeypatch.setattr(
         config_settings_module, "_resolve_env_path",
         lambda: tmp_path / "config.env")
+    # And where it SAVES: Settings.save_to_env writes ENV_PATH and
+    # mirrors DEV_ENV_PATH. Redirecting only the read path above let any
+    # test that saved settings (the POST sweep reaches every settings
+    # endpoint) overwrite a developer's real config.env — API keys
+    # included — and backend/.env with throwaway values.
+    monkeypatch.setattr(config_settings_module, "ENV_PATH",
+                        tmp_path / "config.env")
+    monkeypatch.setattr(config_settings_module, "DEV_ENV_PATH",
+                        tmp_path / "dev.env")
     # The sidecar fails closed on auth by design (see
     # test_auth_fail_closed.py) — without a real MEETING_RECORDER_TOKEN
     # every non-exempt request 401s before ever reaching the handler,
