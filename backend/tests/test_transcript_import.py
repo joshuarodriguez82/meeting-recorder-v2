@@ -238,6 +238,27 @@ def test_a_docx_with_an_entity_bomb_is_refused_not_parsed(tmp_path):
         ti.read_transcript(p)
 
 
+def test_word_tab_stops_and_formatting_are_not_text(tmp_path):
+    """Real Word XML carries paragraph and run properties (w:pPr, w:rPr)
+    and tab-stop definitions (w:tabs/w:tab outside any run); none of
+    that is what was said."""
+    ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    xml = (f'<w:document xmlns:w="{ns}"><w:body>'
+           '<w:p w14:paraId="1A2B"><w:pPr><w:tabs><w:tab w:val="left" '
+           'w:pos="720"/></w:tabs></w:pPr><w:r><w:rPr><w:b/></w:rPr>'
+           '<w:t>Jane Doe</w:t></w:r><w:r><w:tab/></w:r><w:r>'
+           '<w:t>0:03</w:t></w:r></w:p>'
+           '<w:p><w:r><w:t xml:space="preserve">Fish &amp; chips </w:t>'
+           '</w:r><w:r><w:t>at noon.</w:t></w:r></w:p>'
+           '</w:body></w:document>')
+    p = tmp_path / "real.docx"
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("word/document.xml", xml)
+    cues = ti.read_transcript(p)
+    assert [(c.start, c.speaker, c.text) for c in cues] == [
+        (3.0, "Jane Doe", "Fish & chips at noon.")]
+
+
 def test_an_oversized_docx_is_refused_before_inflating(tmp_path, monkeypatch):
     monkeypatch.setattr(ti, "MAX_DOCX_XML_BYTES", 1000)
     p = _docx(tmp_path, "big.docx", ["Jane Doe   0:01", "x" * 5000])

@@ -38,7 +38,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
-from xml.etree import ElementTree  # nosec B405 — hardened in _docx_paragraphs
+from html import unescape
 
 TRANSCRIPT_EXTS = (".vtt", ".srt", ".docx", ".txt")
 
@@ -215,8 +215,19 @@ def parse_speaker_blocks(paragraphs: List[str]) -> List[Cue]:
     return cues
 
 
+# The handful of WordprocessingML tags a transcript needs. Matching
+# "w:p" with a lookahead keeps it from matching w:pPr, w:r from w:rPr.
+_DOCX_TAG = re.compile(r"<(/?)w:(p|r|t|tab|br|cr)(?=[\s/>])[^>]*?(/?)>")
+
+
 def _docx_paragraphs(path: Path) -> List[str]:
-    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    """The paragraphs of a .docx, as text.
+
+    The file is untrusted, so it is not handed to an XML parser at all:
+    a transcript is flat paragraphs of runs of text, and the few tags
+    that carry it are read directly. With no parser there is no entity
+    expansion and no external entity to resolve — the attacks an XML
+    parser would have to be hardened against do not exist here."""
     try:
         with zipfile.ZipFile(path) as z:
             info = z.getinfo("word/document.xml")
@@ -224,35 +235,42 @@ def _docx_paragraphs(path: Path) -> List[str]:
             if info.file_size > MAX_DOCX_XML_BYTES:
                 raise TranscriptError(
                     f"{path.name} is too large to be a meeting transcript.")
-            xml = z.read(info)
+            raw = z.read(info)
     except (zipfile.BadZipFile, KeyError, OSError) as e:
         raise TranscriptError(f"{path.name} isn't a readable Word file: {e}")
-    # The file is untrusted. Word never writes a DOCTYPE or entity
-    # declarations, and they are the only way into entity-expansion
-    # ("billion laughs") and external-entity attacks — so a document
-    # carrying one is refused rather than parsed. (defusedxml would do
-    # the same; it isn't shipped, and this is all it would add here.)
-    head = xml[:4096].lower()
-    if b"<!doctype" in xml.lower() or b"<!entity" in head:
+    # Word never writes a DOCTYPE; a document that has one was not made
+    # by Word, and is refused rather than half-read.
+    if b"<!doctype" in raw.lower():
         raise TranscriptError(
             f"{path.name} isn't a Word transcript (it declares a DOCTYPE).")
-    try:
-        root = ElementTree.fromstring(xml)  # nosec B314 — DOCTYPE refused above
-    except ElementTree.ParseError as e:
-        raise TranscriptError(f"{path.name} isn't a readable Word file: {e}")
-    out: List[str] = []
-    for p in root.iter(f"{ns}p"):
-        bits: List[str] = []
-        for node in p.iter():
-            if node.tag == f"{ns}t" and node.text:
-                bits.append(node.text)
-            elif node.tag == f"{ns}tab":
-                bits.append("\t")
-            elif node.tag in (f"{ns}br", f"{ns}cr"):
-                bits.append("\n")
-        # A soft line break inside a paragraph separates lines too.
-        out.extend("".join(bits).split("\n"))
-    return out
+    xml = raw.decode("utf-8", errors="replace")
+
+    paragraphs: List[str] = []
+    bits: List[str] = []
+    in_run = False
+    text_from: Optional[int] = None
+    for m in _DOCX_TAG.finditer(xml):
+        closing, name, empty = m.group(1) == "/", m.group(2), m.group(3) == "/"
+        if name == "t":
+            if closing and text_from is not None:
+                bits.append(unescape(xml[text_from:m.start()]))
+                text_from = None
+            elif not closing and not empty:
+                text_from = m.end()
+        elif name == "r":
+            in_run = not closing and not empty
+        elif name == "tab" and in_run and not closing:
+            bits.append("\t")        # a w:tab outside a run is a tab STOP
+        elif name in ("br", "cr") and in_run and not closing:
+            bits.append("\n")
+        elif name == "p":
+            if closing or empty:
+                # A soft line break inside a paragraph separates lines too.
+                paragraphs.extend("".join(bits).split("\n"))
+                bits = []
+            else:
+                bits = []
+    return paragraphs
 
 
 # ── entry point ──────────────────────────────────────────────────────
