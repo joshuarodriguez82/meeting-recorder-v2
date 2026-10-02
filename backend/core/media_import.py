@@ -60,6 +60,10 @@ def is_supported(path) -> bool:
     return Path(path).suffix.lower() in SUPPORTED_EXTS
 
 
+def is_video(path) -> bool:
+    return Path(path).suffix.lower() in VIDEO_EXTS
+
+
 def needs_extraction(path) -> bool:
     """Everything but WAV is converted, so every later stage sees one
     format. (FLAC and MP3 happen to be readable by libsndfile on some

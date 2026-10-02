@@ -270,12 +270,23 @@ def test_import_with_process_starts_the_pipeline(tmp_path, monkeypatch):
     started: list = []
     server = _server(monkeypatch, _svc(tmp_path), started)
 
-    resp = asyncio.run(server.import_session(server.ImportSessionRequest(
-        file_path=str(src), display_name="Initech review",
-        client="Initech", template="General", process=True)))
+    handed_off: list = []
+
+    async def _after(sid, video, process):
+        handed_off.append((sid, video, process))
+    monkeypatch.setattr(server, "_after_import", _after)
+
+    async def _run():
+        resp = await server.import_session(server.ImportSessionRequest(
+            file_path=str(src), display_name="Initech review",
+            client="Initech", template="General", process=True))
+        await asyncio.sleep(0)          # let the scheduled task run
+        return resp
+    resp = asyncio.run(_run())
 
     assert resp["ok"] and resp["processing"] is True
-    assert started == [resp["session_id"]]
+    # Slides first, then processing, in the background half.
+    assert handed_off == [(resp["session_id"], str(src), True)]
     assert abs(resp["duration_s"] - 1.0) < 0.1
 
 
@@ -302,3 +313,86 @@ def test_a_video_with_no_sound_is_a_400_not_a_500(tmp_path, monkeypatch):
     assert e.value.status_code == 400
     assert "no sound track" in e.value.detail
     assert started == []
+
+
+def _deck_with_sound(path: Path, slides: int = 3, slide_s: int = 12) -> Path:
+    """A shared deck with a sound track: the import that has slides."""
+    out = av.open(str(path), "w")
+    v = out.add_stream("libx264", rate=5)
+    v.width, v.height, v.pix_fmt = 320, 180, "yuv420p"
+    v.options = {"g": "10", "keyint_min": "10", "sc_threshold": "0"}
+    a = out.add_stream("aac", rate=48000)
+    a.layout = "mono"
+    for i in range(slides * slide_s * 5):
+        k = i // (slide_s * 5)
+        img = np.full((180, 320, 3), 250, np.uint8)
+        img[10:30, 20:200] = (30, 60, 140)
+        img[50 + k * 30:70 + k * 30, 20:300] = 40
+        f = av.VideoFrame.from_ndarray(img, format="rgb24")
+        f.pts, f.time_base = i, Fraction(1, 5)
+        for pkt in v.encode(f):
+            out.mux(pkt)
+    for pkt in v.encode(None):
+        out.mux(pkt)
+    n = 48000 * slides * slide_s
+    tone = (0.2 * np.sin(np.arange(n) * 2 * np.pi * 200 / 48000)).astype(np.float32)
+    for s0 in range(0, n, 1024):
+        f = av.AudioFrame.from_ndarray(tone[None, s0:s0 + 1024], format="fltp",
+                                       layout="mono")
+        f.sample_rate, f.pts, f.time_base = 48000, s0, Fraction(1, 48000)
+        for pkt in a.encode(f):
+            out.mux(pkt)
+    for pkt in a.encode(None):
+        out.mux(pkt)
+    out.close()
+    return path
+
+
+def test_a_video_import_attaches_its_slides_before_processing(
+        tmp_path, monkeypatch):
+    import asyncio
+    src = _deck_with_sound(tmp_path / "Hooli demo.mp4")
+    svc = _svc(tmp_path)
+    started: list = []
+    seen_at_start: list = []
+    server = _server(monkeypatch, svc, started)
+
+    def _start(session):
+        # What processing will see when it starts.
+        seen_at_start.append(len(svc.load_full(session.session_id).screenshots))
+        started.append(session.session_id)
+        return True
+    monkeypatch.setattr(server, "_start_background_process", _start)
+
+    resp = asyncio.run(server.import_session(server.ImportSessionRequest(
+        file_path=str(src), client="Hooli", process=True)))
+    sid = resp["session_id"]
+    assert resp["slides"] is True
+    # The endpoint scheduled the background half; run it to completion.
+    asyncio.run(server._after_import(sid, str(src), True))
+
+    session = svc.load_full(sid)
+    assert len(session.screenshots) == 3
+    for p in session.screenshots:
+        assert Path(p).is_file()
+        assert Path(p).parent == (tmp_path / "recordings" / "screenshots"
+                                  / f"session_{sid}")
+    assert started == [sid] and seen_at_start == [3]
+    assert session.client == "Hooli"
+
+
+def test_slides_failing_never_stops_processing(tmp_path, monkeypatch):
+    import asyncio
+    src = _deck_with_sound(tmp_path / "meeting.mp4", slides=1)
+    svc = _svc(tmp_path)
+    started: list = []
+    server = _server(monkeypatch, svc, started)
+    session = svc.import_from_file(str(src))
+    import core.video_slides as video_slides
+
+    def _boom(*a, **k):
+        raise RuntimeError("decoder fell over")
+    monkeypatch.setattr(video_slides, "extract_slides", _boom)
+    asyncio.run(server._after_import(session.session_id, str(src), True))
+    assert started == [session.session_id]
+    assert svc.load_full(session.session_id).screenshots == []

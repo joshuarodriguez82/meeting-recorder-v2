@@ -6553,12 +6553,53 @@ async def import_session(req: ImportSessionRequest):
     except Exception as e:
         logger.exception("Import session failed")
         raise HTTPException(status_code=500, detail=str(e))
-    processing = False
-    if req.process:
-        processing = _start_background_process(session)
+    from core import media_import
+    is_video = media_import.is_video(req.file_path)
+    if is_video or req.process:
+        asyncio.create_task(_after_import(
+            session.session_id, req.file_path if is_video else "",
+            req.process))
     return {"ok": True, "session_id": session.session_id,
-            "processing": processing,
+            "processing": bool(req.process),
+            "slides": is_video,
             "duration_s": getattr(session, "audio_actual_duration_s", None)}
+
+
+async def _after_import(session_id: str, video_path: str,
+                        process: bool) -> None:
+    """Background half of an import: pull the slides / shared screens
+    out of a video (core/video_slides), then start processing — in that
+    order, so the summary sees the slides. A failure to find slides
+    never stops processing."""
+    if video_path:
+        try:
+            from core.video_slides import extract_slides
+            session = await asyncio.to_thread(
+                svc.session_svc.load_full, session_id)
+            if session is not None and session.audio_path:
+                out_dir = (Path(session.audio_path).parent / "screenshots"
+                           / f"session_{session_id}")
+                slides = await asyncio.to_thread(
+                    extract_slides, video_path, out_dir)
+                if slides:
+                    # Re-load: the user may have renamed or tagged the
+                    # session while this ran.
+                    session = await asyncio.to_thread(
+                        svc.session_svc.load_full, session_id)
+                    if session is not None:
+                        for s in slides:
+                            if s.path not in session.screenshots:
+                                session.screenshots.append(s.path)
+                        await asyncio.to_thread(svc.session_svc.save, session)
+                logger.info(f"[import] {session_id}: {len(slides)} slide(s) "
+                            f"from the video")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[import] {session_id}: slide extraction "
+                           f"failed: {type(e).__name__}: {e}")
+    if process:
+        session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+        if session is not None:
+            _start_background_process(session)
 
 
 # ── Finalize-in-progress three-way state (field repro 2026-08-14) ────

@@ -2211,6 +2211,9 @@ export const api = {
       ok: boolean;
       session_id: string;
       processing: boolean;
+      // A video: its slides / shared screens are being pulled out in
+      // the background and land in the meeting's Screenshots tab.
+      slides?: boolean;
       duration_s: number | null;
     }>("/sessions/import", {
       method: "POST",

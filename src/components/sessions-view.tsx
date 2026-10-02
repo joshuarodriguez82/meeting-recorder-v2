@@ -871,15 +871,18 @@ function ImportSessionDialog({
         template,
         process: processNow,
       });
+      const slidesNote = res.slides
+        ? " Slides and shared screens from the video go in its Screenshots tab."
+        : "";
       if (res.processing) {
         toast.success("Imported — transcribing in the background", {
           description:
-            "Speakers, summary and action items fill in when it finishes. " +
-            "A long meeting can take several minutes.",
+            "Speakers, summary and action items fill in when it finishes; " +
+            "a long meeting can take several minutes." + slidesNote,
         });
       } else {
         toast.success("Imported", {
-          description: "Process it from the meeting when you're ready.",
+          description: "Process it from the meeting when you're ready." + slidesNote,
         });
       }
       // A client typed here for the first time becomes a real client,
@@ -952,7 +955,7 @@ function ImportSessionDialog({
             <p className={`text-[11px] ${knownType ? "text-muted-foreground" : "text-destructive"}`}>
               {knownType
                 ? video
-                  ? "Only the sound track is kept, so the video itself isn't copied. The original file stays where it is."
+                  ? "The sound track and a still of each slide or shared screen are kept; the video itself isn't copied. The original file stays where it is."
                   : "Video: .mp4, .mov, .mkv, .webm and more. Audio: .wav, .mp3, .m4a and more. The original file stays where it is."
                 : "This file type can't be imported. Use a video (.mp4, .mov, .mkv, .webm) or audio file (.wav, .mp3, .m4a)."}
             </p>
