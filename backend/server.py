@@ -4101,7 +4101,13 @@ async def list_sessions():
     def _do():
         svc.load_settings()
         return svc.session_svc.list_sessions()
-    return await asyncio.to_thread(_do)
+    rows = await asyncio.to_thread(_do)
+    # Live, not from disk: whether the background pipeline is running
+    # for the session right now. The on-disk auto_process_pending marker
+    # outlives a crash by design, so it can't answer this.
+    for row in rows:
+        row["processing_now"] = row.get("session_id") in _auto_processed_sessions
+    return rows
 
 
 # Declared BEFORE /sessions/{session_id} for the same reason as the
@@ -4190,6 +4196,9 @@ async def get_session(session_id: str):
     data = await asyncio.to_thread(_do)
     if not data:
         raise HTTPException(status_code=404, detail="Session not found")
+    # See list_sessions: live, so the meeting window can show the run
+    # in progress instead of offering Process.
+    data["processing_now"] = session_id in _auto_processed_sessions
     return data
 
 
@@ -6726,6 +6735,16 @@ def _raise_if_finalizing_dict(data: dict) -> None:
 
 @app.post("/sessions/{session_id}/process")
 async def process_session(session_id: str):
+    # The background pipeline (after a recording stops, or an import) is
+    # already on it. A second run transcribed the same audio again and
+    # raced the first one's saves: field log 2026-10-02, an imported
+    # video processed twice two minutes apart because the meeting
+    # window still offered Process while the background run was going.
+    if session_id in _auto_processed_sessions:
+        raise HTTPException(
+            status_code=409,
+            detail="This meeting is already being processed in the "
+                   "background. It updates when that finishes.")
     svc.load_settings()
     # In-flight indicator for /recording/status — see Services._begin_
     # processing. `finally` guarantees this releases on every exit path:

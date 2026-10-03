@@ -68,7 +68,9 @@ logger = get_logger(__name__)
 #          the truth.
 #   3 → 4: added capture_warning (other participants not recorded).
 #          Same reason: a cached v3 row would never show the chip.
-SCHEMA_VERSION = 4
+#   4 → 5: added imported_at, so a fresh import stays on top of the
+#          Sessions list.
+SCHEMA_VERSION = 5
 
 # The exact summary shape SessionService.list_sessions() has always
 # returned (see its docstring / the summary dict built in
@@ -88,7 +90,7 @@ SUMMARY_FIELDS: Tuple[str, ...] = (
     "audio_expected_duration_s", "processing_error", "sync_warning",
     "finalize_duration_s", "aec_outcome",
     "finalize_status", "finalize_started_at", "finalize_error",
-    "finalize_aec_requested", "capture_warning",
+    "finalize_aec_requested", "capture_warning", "imported_at",
 )
 
 

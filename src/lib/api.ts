@@ -455,6 +455,13 @@ export interface Meeting {
 }
 
 export interface SessionSummary {
+  // The background pipeline is running for this session right now
+  // (after a recording stops, or an import). Live, from the backend.
+  processing_now?: boolean;
+  // Set for a meeting imported rather than recorded here (ISO time).
+  // Its meeting date can be days back; the list keeps a fresh import
+  // on top so it doesn't vanish into the history.
+  imported_at?: string | null;
   session_id: string;
   display_name: string;
   started_at: string;
@@ -683,6 +690,10 @@ export interface RecordingStatus {
 }
 
 export interface SessionFull {
+  // See SessionSummary.processing_now / imported_at.
+  processing_now?: boolean;
+  imported_at?: string | null;
+  imported_from?: string | null;
   session_id: string;
   display_name: string;
   started_at: string | null;
