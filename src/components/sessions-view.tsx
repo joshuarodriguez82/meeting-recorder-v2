@@ -689,6 +689,7 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
                   floating in the vertical middle, which left dead space
                   under the metadata line on every card. */}
               <CardContent className="flex items-start gap-4">
+                <ClientMark client={s.client} />
                 <div className="flex-1 min-w-0">
                   <RenamableTitle
                     session={s}
@@ -1203,3 +1204,38 @@ function ImportSessionDialog({
     </Dialog>
   );
 }
+
+
+// A client's monogram, in one of the theme's chart colours chosen by
+// name — so every meeting with the same client carries the same mark and
+// a long list can be scanned by client before it's read. A meeting with
+// no client gets a neutral mark rather than a colour that means nothing.
+const CLIENT_TONES = [
+  "bg-[color-mix(in_oklab,var(--chart-1)_16%,transparent)] text-[var(--chart-1)]",
+  "bg-[color-mix(in_oklab,var(--chart-2)_14%,transparent)] text-[var(--chart-2)]",
+  "bg-[color-mix(in_oklab,var(--chart-3)_14%,transparent)] text-[var(--chart-3)]",
+  "bg-[color-mix(in_oklab,var(--chart-4)_16%,transparent)] text-[var(--chart-4)]",
+  "bg-[color-mix(in_oklab,var(--chart-5)_18%,transparent)] text-[color-mix(in_oklab,var(--chart-5)_70%,var(--foreground))]",
+];
+
+function ClientMark({ client }: { client: string }) {
+  const name = (client || "").trim();
+  if (!name) {
+    return (
+      <div aria-hidden className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-muted text-muted-foreground">
+        <Mic className="h-4 w-4" />
+      </div>
+    );
+  }
+  let h = 0;
+  for (const ch of name.toLowerCase()) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  const initials = name.split(/\s+/).filter(Boolean).slice(0, 2)
+    .map((w) => w[0]?.toUpperCase() ?? "").join("");
+  return (
+    <div aria-hidden title={name}
+      className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] text-[13px] font-bold tracking-tight ${CLIENT_TONES[h % CLIENT_TONES.length]}`}>
+      {initials}
+    </div>
+  );
+}
+

@@ -689,11 +689,48 @@ export interface RecordingStatus {
   capture_warning_code?: string | null;
 }
 
+// One slide or shared screen from an imported video, with what was said
+// while it was up (backend/core/slide_notes).
+export interface SlideNote {
+  slide: number;
+  time_s: number;
+  path: string;
+  title: string;
+  summary: string;
+  points: string[];
+  questions: string[];
+  actions: string[];
+  discussed: boolean;
+}
+
+// "What I missed" — a catch-up brief for a meeting you weren't in
+// (backend/core/catch_up).
+export interface CatchUpBrief {
+  headline: string;
+  decisions: string[];
+  asks_of_you: string[];
+  open_questions: string[];
+  changes_since_last: string[];
+  worth_hearing: { at: string; why: string }[];
+  compared_with: { session_id: string; display_name: string; started_at: string } | null;
+}
+
 export interface SessionFull {
+  catch_up?: CatchUpBrief | null;
+  slide_notes?: SlideNote[] | null;
   // See SessionSummary.processing_now / imported_at.
   processing_now?: boolean;
   imported_at?: string | null;
   imported_from?: string | null;
+  // An imported transcript's named speakers, learned as known voices —
+  // or why not (its timing didn't match the recording, too few names).
+  voice_learning?: {
+    state: "learned" | "skipped";
+    learned: { name: string; action: "created" | "linked" | "refined" }[];
+    reason?: string;
+    word_recall?: number;
+    agreement?: number;
+  } | null;
   session_id: string;
   display_name: string;
   started_at: string | null;
@@ -1412,6 +1449,11 @@ export const api = {
       }),
 
   // AI extraction
+  // Make (or remake) the "What I missed" brief for a processed meeting.
+  makeCatchUp: (id: string) =>
+    request<{ ok: boolean; catch_up: CatchUpBrief }>(
+      `/sessions/${id}/catch-up`, { method: "POST" }),
+
   processSession: (id: string) =>
     request<{ ok: boolean; segments: number; speakers: number }>(
       `/sessions/${id}/process`, { method: "POST" }

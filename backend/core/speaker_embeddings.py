@@ -172,7 +172,31 @@ def extract_speaker_centroids(
             chunk = chunk.mean(dim=0, keepdim=True)
         return chunk
 
+    per_turn = _embed_turns(classifier, _read_span, turns_by_speaker,
+                            min_total_seconds)
     centroids: Dict[str, np.ndarray] = {}
+    for speaker, embeddings in per_turn.items():
+        # Centroid = unweighted mean of per-turn embeddings, L2-normalized
+        # so cosine == dot product downstream.
+        centroid = np.mean(np.stack(embeddings), axis=0)
+        norm = float(np.linalg.norm(centroid))
+        if norm < 1e-8:
+            continue  # degenerate — would produce NaN comparisons
+        centroids[speaker] = (centroid / norm).astype(np.float32)
+
+    logger.info(
+        f"Computed {len(centroids)}/{len(turns_by_speaker)} speaker "
+        f"centroids from {audio_path}")
+    return centroids
+
+
+def _embed_turns(classifier, read_span, turns_by_speaker,
+                 min_total_seconds: float) -> Dict[str, List[np.ndarray]]:
+    """One ECAPA embedding per usable turn, per speaker. Speakers with
+    too little speech are left out. Never raises; frees ML memory once
+    at the end (a session-boundary call — see cleanup_ml_memory)."""
+    import torch
+    out: Dict[str, List[np.ndarray]] = {}
     try:
         for speaker, turns in turns_by_speaker.items():
             valid_turns = [(s, e) for (s, e) in turns
@@ -183,10 +207,9 @@ def extract_speaker_centroids(
                     f"Speaker {speaker}: only {total:.1f}s usable speech — "
                     f"skipping fingerprint (need >={min_total_seconds}s)")
                 continue
-
             embeddings = []
             for start_s, end_s in valid_turns:
-                segment = _read_span(start_s, end_s)
+                segment = read_span(start_s, end_s)
                 if segment is None:
                     continue
                 try:
@@ -199,30 +222,57 @@ def extract_speaker_centroids(
                     # keep going — one bad turn shouldn't lose the centroid.
                     logger.debug(f"ECAPA failed on turn {start_s}-{end_s}: {e}")
                     continue
-
-            if not embeddings:
-                continue
-
-            # Centroid = unweighted mean of per-turn embeddings, L2-normalized
-            # so cosine == dot product downstream.
-            centroid = np.mean(np.stack(embeddings), axis=0)
-            norm = float(np.linalg.norm(centroid))
-            if norm < 1e-8:
-                continue  # degenerate — would produce NaN comparisons
-            centroid = (centroid / norm).astype(np.float32)
-            centroids[speaker] = centroid
+            if embeddings:
+                out[speaker] = embeddings
     finally:
         # SESSION-BOUNDARY cleanup: this runs once per whole recording's
-        # worth of speaker turns (called from recording_service.
-        # _fingerprint_speakers after diarization), never per-utterance
-        # — embed_utterance() below is the hot live-tracking sibling and
-        # deliberately does NOT call this.
+        # worth of speaker turns, never per-utterance — embed_utterance()
+        # below is the hot live-tracking sibling and deliberately does
+        # NOT call this.
         cleanup_ml_memory()
+    return out
 
-    logger.info(
-        f"Computed {len(centroids)}/{len(turns_by_speaker)} speaker "
-        f"centroids from {audio_path}")
-    return centroids
+
+def extract_turn_embeddings(
+    audio_path: str,
+    turns_by_speaker: Dict[str, List[Tuple[float, float]]],
+    min_total_seconds: float = MIN_TOTAL_SECONDS,
+) -> Dict[str, List[np.ndarray]]:
+    """Like extract_speaker_centroids, but every turn's embedding rather
+    than their average — for checking that labelled turns really are
+    one voice each (core/voice_learning). Same reading rules: header
+    first, then only the turn spans. Never raises; {} on any failure."""
+    if not turns_by_speaker:
+        return {}
+    try:
+        import torchaudio
+        classifier = _get_classifier()
+        info = torchaudio.info(audio_path)
+    except Exception as e:
+        logger.warning(f"Could not prepare turn embeddings: {e}")
+        return {}
+    fs, total_frames = info.sample_rate, info.num_frames
+
+    def _read_span(start_s: float, end_s: float):
+        start_frame = max(0, int(start_s * fs))
+        end_frame = min(total_frames, int(end_s * fs))
+        if end_frame <= start_frame:
+            return None
+        try:
+            chunk, _ = torchaudio.load(
+                audio_path, frame_offset=start_frame,
+                num_frames=end_frame - start_frame)
+        except Exception as e:
+            logger.debug(f"Could not read {start_s}-{end_s}s: {e}")
+            return None
+        if chunk.shape[0] > 1:
+            chunk = chunk.mean(dim=0, keepdim=True)
+        return chunk
+
+    out = _embed_turns(classifier, _read_span, turns_by_speaker,
+                       min_total_seconds)
+    return {s: [(e / max(float(np.linalg.norm(e)), 1e-8)).astype(np.float32)
+                for e in embs] for s, embs in out.items()}
 
 
 def embed_utterance(

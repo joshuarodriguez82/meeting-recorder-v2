@@ -6,7 +6,10 @@ import { MCP_CLIENTS, mcpClient, mcpConfigSnippet } from "@/lib/mcp-config";
 import { estimateCopilotCost, formatUsd } from "@/lib/copilot-cost";
 import { confirmDialog } from "@/lib/confirm";
 import { toast } from "sonner";
-import { Loader2, Save, Trash2, Plus, RotateCcw, AlertTriangle, CheckCircle2, Copy, DownloadCloud, HelpCircle } from "lucide-react";
+import { Loader2, Save, Trash2, Plus, RotateCcw, AlertTriangle, CheckCircle2, Copy, DownloadCloud, HelpCircle, Sun, Moon, Monitor, Check } from "lucide-react";
+import {
+  ACCENTS, DEFAULT_THEME, loadTheme, saveTheme, type ThemeMode, type ThemePrefs,
+} from "@/lib/theme";
 import { GpuAccelerationCard } from "./gpu-acceleration-card";
 import { KnownSpeakersSection } from "./known-speakers-section";
 import { SemanticIndexSection } from "./semantic-index-section";
@@ -338,6 +341,7 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
     { id: "integrations", label: "Templates & Integrations" },
     { id: "recording", label: "Recording & Co-Pilot" },
     { id: "data", label: "Data & Diagnostics" },
+    { id: "appearance", label: "Appearance" },
   ];
 
   return (
@@ -1166,6 +1170,8 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
 
       </>)}
 
+      {tab === "appearance" && <AppearanceSettings />}
+
       {tab === "data" && (<>
       {/* Diagnostics — health checks + log tail */}
       <DiagnosticsCard />
@@ -1325,6 +1331,8 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
           viewport (measured: viewport bottom 880px, bar bottom 816px
           before this), and -mb-16/pb-16 extend the background across
           that band. */}
+      {/* Appearance applies as you click, so it has nothing to save. */}
+      {tab !== "appearance" && (
       <div className="sticky -bottom-16 z-10 -mx-6 -mb-16 border-t border-border bg-background px-6 pb-2">
         <div className="mx-auto max-w-3xl flex justify-end gap-2 py-2">
           <Button onClick={save} disabled={saving}>
@@ -1333,6 +1341,7 @@ export function SettingsView({ onSaved }: { onSaved?: () => void } = {}) {
           </Button>
         </div>
       </div>
+      )}
     </div>
   );
 }
@@ -4429,3 +4438,92 @@ function TerminologyCard() {
     </Card>
   );
 }
+
+
+/** Settings → Appearance: light / dark / system and a colour theme.
+ *  Applied instantly and remembered on this computer (src/lib/theme). */
+function AppearanceSettings() {
+  const [prefs, setPrefs] = useState<ThemePrefs>(DEFAULT_THEME);
+  useEffect(() => { setPrefs(loadTheme()); }, []);
+  const choose = (next: Partial<ThemePrefs>) => {
+    const p = { ...prefs, ...next };
+    setPrefs(p);
+    saveTheme(p);
+  };
+  const modes: { id: ThemeMode; label: string; icon: React.ElementType; hint: string }[] = [
+    { id: "light", label: "Light", icon: Sun, hint: "Always light" },
+    { id: "dark", label: "Dark", icon: Moon, hint: "Always dark" },
+    { id: "system", label: "System", icon: Monitor, hint: "Follows Windows / macOS" },
+  ];
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Appearance</CardTitle>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Changes apply straight away and are remembered on this computer.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-6">
+        <div className="space-y-2">
+          <Label>Mode</Label>
+          <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Mode">
+            {modes.map((m) => {
+              const Icon = m.icon;
+              const on = prefs.mode === m.id;
+              return (
+                <button
+                  key={m.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={on}
+                  onClick={() => choose({ mode: m.id })}
+                  className={`flex items-center gap-3 rounded-[12px] border px-3 py-3 text-left transition-colors ${
+                    on ? "border-primary bg-accent ring-1 ring-primary" : "border-border hover:border-foreground/25"}`}
+                >
+                  <Icon className={`h-5 w-5 shrink-0 ${on ? "text-primary" : "text-muted-foreground"}`} />
+                  <span>
+                    <span className="block text-sm font-semibold">{m.label}</span>
+                    <span className="block text-[11px] text-muted-foreground">{m.hint}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div className="space-y-2">
+          <Label>Colour theme</Label>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5" role="radiogroup" aria-label="Colour theme">
+            {ACCENTS.map((a) => {
+              const on = prefs.accent === a.id;
+              return (
+                <button
+                  key={a.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={on}
+                  onClick={() => choose({ accent: a.id })}
+                  className={`overflow-hidden rounded-[12px] border text-left transition-colors ${
+                    on ? "border-primary ring-1 ring-primary" : "border-border hover:border-foreground/25"}`}
+                >
+                  {/* A miniature of the app in that theme: the sidebar
+                      in the brand colour beside a page with one button. */}
+                  <span aria-hidden className="flex h-14">
+                    <span className="w-1/3" style={{ background: a.brand }} />
+                    <span className="flex flex-1 items-end bg-muted p-2">
+                      <span className="h-2.5 w-3/4 rounded-full" style={{ background: a.action }} />
+                    </span>
+                  </span>
+                  <span className="flex items-center justify-between px-2.5 py-2 text-sm font-semibold">
+                    {a.label}
+                    {on && <Check className="h-3.5 w-3.5 text-primary" />}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+

@@ -610,8 +610,8 @@ export function SessionDetailDialog({
         ) : session && (
           <Tabs value={tab} onValueChange={setTab} className="flex-1 flex flex-col min-h-0">
             <div className="px-6 pt-3 border-b">
-              <TabsList className="bg-transparent p-0 h-auto">
-                <TabsTrigger value="overview" className="data-[state=active]:bg-accent">Overview</TabsTrigger>
+              <TabsList variant="line" className="h-auto gap-1 p-0">
+                <TabsTrigger value="overview">Overview</TabsTrigger>
                 <TabsTrigger value="notes">
                   <StickyNote className="h-3.5 w-3.5 mr-1" />
                   Notes {notes && <span className="ml-1 text-[10px] text-muted-foreground">•</span>}
@@ -655,6 +655,10 @@ export function SessionDetailDialog({
             <ScrollArea className="flex-1 min-h-0">
               <div className="p-6 min-w-0 max-w-full break-words">
                 <TabsContent value="overview" className="mt-0 space-y-6">
+                  <CatchUpCard
+                    session={session}
+                    onMade={async () => { await reload(); onChanged?.(); }}
+                  />
                   {isFinalizing && (
                     <div
                       className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-300 text-xs px-3 py-2.5"
@@ -1010,6 +1014,7 @@ export function SessionDetailDialog({
                 </TabsContent>
 
                 <TabsContent value="speakers" className="mt-0">
+                  <VoiceLearningNote session={session} />
                   <SpeakersView
                     session={session}
                     onRenamed={async () => { await reload(); onChanged?.(); }}
@@ -1076,15 +1081,78 @@ function ScreenshotsView({ session }: { session: SessionFull }) {
   const srcFor = (i: number) =>
     `${baseUrl}/sessions/${session.session_id}/screenshots/${i}${authQ}`;
 
+  // Slides from an imported video come with notes: each one beside what
+  // was said while it was up. Anything else (screenshots taken while
+  // recording) stays in the grid below.
+  const notes = (session.slide_notes ?? []).filter((n) => shots.includes(n.path));
+  const noted = new Set(notes.map((n) => n.path));
+  const gridIdx = shots.map((_, i) => i).filter((i) => !noted.has(shots[i]));
+
   return (
     <div className="space-y-3">
+      {notes.length > 0 && (
+        <>
+          <p className="text-xs text-muted-foreground">
+            {notes.length} slide{notes.length !== 1 ? "s" : ""} from the
+            recording, each with what was said while it was on screen. Written
+            by AI from the transcript; also exported as slide notes with the
+            meeting&apos;s other files.
+          </p>
+          <div className="space-y-3">
+            {notes.map((n) => {
+              const i = shots.indexOf(n.path);
+              return (
+                <div key={n.path} className="flex flex-col gap-3 rounded-lg border p-3 sm:flex-row">
+                  <button
+                    type="button"
+                    onClick={() => setZoomed(i)}
+                    className="shrink-0 overflow-hidden rounded-md border bg-muted/30 transition hover:ring-2 hover:ring-primary sm:w-56"
+                    title="Click to enlarge"
+                  >
+                    {baseUrl && (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={srcFor(i)} alt={`Slide ${n.slide}`}
+                        className="h-32 w-full object-cover" loading="lazy" />
+                    )}
+                  </button>
+                  <div className="min-w-0 flex-1 space-y-1.5 text-sm">
+                    <div className="font-medium">
+                      <span className="text-muted-foreground tabular-nums">
+                        Slide {n.slide} · {formatClock(n.time_s)}
+                      </span>
+                      {n.title ? ` — ${n.title}` : ""}
+                    </div>
+                    {n.summary ? (
+                      <p className="text-muted-foreground">{n.summary}</p>
+                    ) : !n.discussed ? (
+                      <p className="text-xs italic text-muted-foreground">Shown without discussion.</p>
+                    ) : null}
+                    {([["Points", n.points], ["Questions raised", n.questions],
+                       ["Actions", n.actions]] as const).map(([label, items]) =>
+                      items.length > 0 && (
+                        <div key={label}>
+                          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">{label}</div>
+                          <ul className="ml-4 list-disc text-sm">
+                            {items.map((x, k) => <li key={k}>{x}</li>)}
+                          </ul>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+      {gridIdx.length > 0 && (
+      <>
       <p className="text-xs text-muted-foreground">
-        {shots.length} screenshot{shots.length !== 1 ? "s" : ""} captured during
+        {gridIdx.length} screenshot{gridIdx.length !== 1 ? "s" : ""} captured during
         this meeting. These are included as visual context when generating the
         summary, and stay with the recording for future reference.
       </p>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        {shots.map((_, i) => (
+        {gridIdx.map((i) => (
           <button
             key={i}
             type="button"
@@ -1107,6 +1175,8 @@ function ScreenshotsView({ session }: { session: SessionFull }) {
           </button>
         ))}
       </div>
+      </>
+      )}
 
       {zoomed !== null && baseUrl && (
         <div
@@ -1339,14 +1409,17 @@ function TranscriptView({ session }: { session: SessionFull }) {
       <div className="flex justify-end">
         <CopyButton text={plain} label="Copy transcript" />
       </div>
-      <div className="space-y-1 font-mono text-sm leading-relaxed max-w-full">
+      {/* Sans for what was said — it's prose, and in a code face a
+          conversation reads like a log. Only the timestamps stay mono,
+          where the digits need to line up. */}
+      <div className="space-y-0.5 text-[14.5px] leading-relaxed max-w-full">
         {session.segments.map((seg, i) => {
           const name = session.speakers[seg.speaker_id]?.display_name || seg.speaker_id;
           const start = formatTime(seg.start);
           return (
-            <div key={i} className="flex gap-3 py-0.5 hover:bg-muted/30 rounded px-2 min-w-0">
-              <span className="text-xs text-muted-foreground w-12 shrink-0 pt-0.5">{start}</span>
-              <span className="font-semibold text-primary w-32 shrink-0 truncate">{name}</span>
+            <div key={i} className="flex gap-4 rounded-[8px] px-2 py-1 hover:bg-muted/50 min-w-0">
+              <span className="w-12 shrink-0 pt-[3px] font-mono text-xs tabular-nums text-muted-foreground">{start}</span>
+              <span className="w-36 shrink-0 truncate font-semibold text-primary">{name}</span>
               <span className="flex-1 min-w-0 break-words">{seg.text}</span>
             </div>
           );
@@ -1858,3 +1931,129 @@ function formatTime(s: number): string {
   const sec = Math.floor(s % 60);
   return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
 }
+
+
+/** What happened when an imported transcript's named speakers were
+ *  learned as known voices (server._learn_voices_from_transcript). */
+function VoiceLearningNote({ session }: { session: SessionFull }) {
+  const v = session.voice_learning;
+  if (!v) return null;
+  if (v.state === "learned" && v.learned.length) {
+    const names = v.learned.map((x) => x.name);
+    const list = names.length > 1
+      ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`
+      : names[0];
+    return (
+      <div className="mb-3 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-800 dark:text-emerald-200">
+        Learned {names.length === 1 ? "a voice" : `${names.length} voices`} from
+        this meeting&apos;s transcript: {list}. They&apos;ll be named
+        automatically in future calls, live and after processing.
+      </div>
+    );
+  }
+  return (
+    <div className="mb-3 rounded-md border px-3 py-2 text-xs text-muted-foreground">
+      Voices weren&apos;t saved from this transcript
+      {v.reason ? ` — ${v.reason}` : ""}. Speakers can still be named here
+      one at a time.
+    </div>
+  );
+}
+
+
+/** m:ss, or h:mm:ss past the hour. */
+function formatClock(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+}
+
+
+/** "What I missed": the catch-up brief for a meeting you weren't in.
+ *  Made automatically for imported meetings; one click for any other. */
+function CatchUpCard({ session, onMade }: {
+  session: SessionFull;
+  onMade: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const brief = session.catch_up;
+  const hasTranscript = (session.segments?.length ?? 0) > 0;
+
+  const make = async () => {
+    setBusy(true);
+    try {
+      await api.makeCatchUp(session.session_id);
+      await onMade();
+    } catch (e) {
+      toast.error(`Couldn't write the brief: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!brief) {
+    if (!hasTranscript || session.processing_now) return null;
+    return (
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2.5">
+        <p className="text-xs text-muted-foreground">
+          Weren&apos;t in this meeting? Get a short brief: what was decided,
+          what&apos;s asked of you, what&apos;s still open, and what changed
+          since the last meeting with this client.
+        </p>
+        <Button size="sm" variant="outline" onClick={make} disabled={busy}>
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : null}
+          Catch me up
+        </Button>
+      </div>
+    );
+  }
+
+  const prev = brief.compared_with;
+  const sections: [string, string[]][] = [
+    ["Decided", brief.decisions],
+    ["Asked of you or your team", brief.asks_of_you],
+    ["Still open", brief.open_questions],
+    [prev
+      ? `Changed since ${prev.display_name || "last time"} (${(prev.started_at || "").slice(0, 10)})`
+      : "", brief.changes_since_last],
+  ];
+  return (
+    <div className="space-y-3 rounded-[14px] border border-ai/25 bg-ai-soft p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-wider text-ai-foreground">What I missed</div>
+          {brief.headline && <p className="mt-1 text-sm font-medium">{brief.headline}</p>}
+        </div>
+        <Button size="sm" variant="ghost" onClick={make} disabled={busy}
+          title="Write the brief again from the current transcript">
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Redo"}
+        </Button>
+      </div>
+      {sections.map(([label, items]) => label && items.length > 0 && (
+        <div key={label}>
+          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">{label}</div>
+          <ul className="ml-4 list-disc text-sm">
+            {items.map((x, k) => <li key={k}>{x}</li>)}
+          </ul>
+        </div>
+      ))}
+      {brief.worth_hearing.length > 0 && (
+        <div>
+          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Worth hearing yourself</div>
+          <ul className="ml-4 list-disc text-sm">
+            {brief.worth_hearing.map((m, k) => (
+              <li key={k}><span className="tabular-nums text-muted-foreground">{m.at}</span> — {m.why}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <p className="text-[11px] text-muted-foreground">
+        Written by AI from the transcript. Also exported as
+        what_i_missed with the meeting&apos;s other files.
+      </p>
+    </div>
+  );
+}
+

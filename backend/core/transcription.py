@@ -89,6 +89,20 @@ class TranscriptionEngine:
     def device(self) -> str:
         return self._device
 
+    def transcribe_clip(self, audio, language: str = "en") -> str:
+        """The words in a short in-memory clip (16 kHz mono float32), as
+        one string. Blocking. Used to spot-check that an imported
+        transcript's timestamps match the recording (core/voice_learning);
+        the full pipeline uses transcribe() below. "" on any failure."""
+        try:
+            opts = decode_options.build(language=language, live=False)
+            opts["word_timestamps"] = False
+            segments, _ = self._model.transcribe(audio, **opts)
+            return " ".join(s.text.strip() for s in segments if s.text.strip())
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Clip transcription failed: {e}")
+            return ""
+
     async def transcribe(self, audio_path, initial_prompt: str = "",
                          language: str = "en"):
         """Transcribe an audio file.

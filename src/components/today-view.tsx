@@ -323,24 +323,24 @@ export function TodayView({ onNavigate }: Props) {
     // space-y-5 (was 6) plus the header's own -mb-1: design review
     // 2026-08-11 flagged the page as top-heavy — a 24px gap under the
     // greeting pushed the Top Priority card too far down the fold.
-    <div className="space-y-5">
-      {/* Greeting header */}
-      <div className="flex items-start justify-between gap-4 -mb-1">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-foreground">
+    <div className="space-y-6">
+      {/* Greeting — the one hero in the app, on the page you land on:
+          the brand surface with a teal glow, so the day opens on
+          something that looks made rather than a heading on grey. */}
+      <div className="relative overflow-hidden rounded-[22px] bg-brand px-8 py-7 text-white shadow-[0_18px_40px_-18px_rgb(11_47_58/0.55)] flex items-start justify-between gap-4">
+        <div aria-hidden className="pointer-events-none absolute inset-0 bg-[radial-gradient(60%_90%_at_88%_10%,rgb(var(--glow)/0.28),transparent_60%),linear-gradient(135deg,transparent_40%,color-mix(in_oklab,var(--hero-end)_55%,transparent))]" />
+        <div className="relative">
+          <div className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--hero-kicker)]">
+            {todayPretty()} · {timeNow()}
+          </div>
+          <h1 className="mt-2 text-[34px] font-extrabold leading-tight tracking-tight">
             Good {timeOfDay()}
           </h1>
-          <p className="mt-0.5 text-sm text-muted-foreground">
-            {todayPretty()} · {timeNow()}
-            {briefing && (
-              <>
-                {" · "}
-                <span className="text-green-700">
-                  Briefing imported {importedAtPretty}
-                </span>
-              </>
-            )}
-          </p>
+          {briefing && (
+            <p className="mt-1.5 text-sm text-white/75">
+              Briefing imported {importedAtPretty}
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2 flex-wrap justify-end">
           {/* The Import/Re-import briefing button is gone (user
@@ -355,6 +355,7 @@ export function TodayView({ onNavigate }: Props) {
             size="sm"
             onClick={refreshBriefing}
             title="Refresh"
+            className="relative text-white hover:bg-white/10 hover:text-white"
           >
             <RefreshCw className="h-4 w-4" />
           </Button>

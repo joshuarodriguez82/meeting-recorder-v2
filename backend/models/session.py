@@ -166,6 +166,18 @@ class Session:
         # Sessions list uses imported_at to keep a fresh import on top.
         self.imported_at: Optional[str] = None
         self.imported_from: Optional[str] = None
+        # What happened when an imported transcript's named speakers
+        # were learned as known voices (server._learn_voices_from_
+        # transcript): {"state": "learned"|"skipped", "learned":
+        # [{"name", "action"}], "reason"?, "agreement"?}. None = not tried.
+        self.voice_learning: Optional[dict] = None
+        # Per-slide notes for a meeting imported from video
+        # (core/slide_notes): [{"slide", "time_s", "path", "title",
+        # "summary", "points", "questions", "actions", "discussed"}].
+        self.slide_notes: Optional[list] = None
+        # "What I missed" brief (core/catch_up) — made for imported
+        # meetings, on request for others. None = not made.
+        self.catch_up: Optional[dict] = None
         # Read-only sync-integrity finding from stop_recording: set when a
         # capture stream fell meaningfully behind wall-clock (dropped
         # frames / clock drift) or the mic + system-audio tracks diverged.
@@ -328,6 +340,9 @@ class Session:
             "auto_process_pending": self.auto_process_pending,
             "imported_at": self.imported_at,
             "imported_from": self.imported_from,
+            "voice_learning": self.voice_learning,
+            "slide_notes": self.slide_notes,
+            "catch_up": self.catch_up,
             "sync_warning": self.sync_warning,
             "capture_warning": self.capture_warning,
             "finalize_duration_s": self.finalize_duration_s,
@@ -409,6 +424,9 @@ class Session:
         session.auto_process_pending = data.get("auto_process_pending") or None
         session.imported_at = data.get("imported_at") or None
         session.imported_from = data.get("imported_from") or None
+        session.voice_learning = data.get("voice_learning") or None
+        session.slide_notes = data.get("slide_notes") or None
+        session.catch_up = data.get("catch_up") or None
         session.sync_warning = data.get("sync_warning") or None
         session.capture_warning = data.get("capture_warning") or None
         session.finalize_duration_s = data.get("finalize_duration_s")
