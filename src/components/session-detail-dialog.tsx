@@ -294,6 +294,33 @@ export function SessionDetailDialog({
     setSession(s);
   };
 
+  // The background pipeline is already on this meeting (it just stopped
+  // recording, or was just imported): say so instead of offering
+  // Process, and refresh when it finishes. Offering Process here is how
+  // an imported video got transcribed twice (field log 2026-10-02).
+  const backgroundRun = !!session?.processing_now;
+  useEffect(() => {
+    if (!open || !backgroundRun || !sessionId) return;
+    let cancelled = false;
+    const id = setInterval(async () => {
+      try {
+        const s = await api.getSessionFull(sessionId);
+        if (cancelled) return;
+        setSession(s);
+        if (!s.processing_now) {
+          onChanged?.();
+          toast.success("Processing finished", {
+            description: "Transcript, speakers and summary are ready.",
+          });
+        }
+      } catch {
+        // Backend busy mid-run — try again next tick.
+      }
+    }, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, backgroundRun, sessionId]);
+
   // FINALIZE-IN-PROGRESS (field repro 2026-08-14): a session mid-finalize
   // has no transcript/audio yet for a specific, temporary reason — not
   // because anything is wrong. `isFinalizing` gates the AI action
@@ -804,11 +831,17 @@ export function SessionDetailDialog({
                         variant={hasTranscript ? "outline" : "default"}
                         size="sm"
                         onClick={runProcess}
-                        disabled={processing !== null || actionsBlocked}
-                        title={actionsBlocked ? blockedTooltip : undefined}
+                        disabled={processing !== null || actionsBlocked || backgroundRun}
+                        title={backgroundRun
+                          ? "Already processing in the background — this updates when it finishes."
+                          : actionsBlocked ? blockedTooltip : undefined}
                       >
-                        {processing === "process" ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <Cog className="h-3.5 w-3.5 mr-2" />}
-                        {hasTranscript ? "Re-process" : "Process"}
+                        {processing === "process" || backgroundRun
+                          ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" />
+                          : <Cog className="h-3.5 w-3.5 mr-2" />}
+                        {backgroundRun
+                          ? "Processing in the background…"
+                          : hasTranscript ? "Re-process" : "Process"}
                       </Button>
                       <Button
                         variant="outline" size="sm"

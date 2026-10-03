@@ -159,6 +159,13 @@ class Session:
         # Shape: {"resumes": int, "template": str, "follow_up": bool,
         # "started_at": iso}. None = nothing pending.
         self.auto_process_pending: Optional[dict] = None
+        # Set when the session was imported (a recording or transcript
+        # made elsewhere) rather than recorded here: when, and the file
+        # name it came from. An imported meeting is dated by when it
+        # happened, which can put it far down a newest-first list — the
+        # Sessions list uses imported_at to keep a fresh import on top.
+        self.imported_at: Optional[str] = None
+        self.imported_from: Optional[str] = None
         # Read-only sync-integrity finding from stop_recording: set when a
         # capture stream fell meaningfully behind wall-clock (dropped
         # frames / clock drift) or the mic + system-audio tracks diverged.
@@ -319,6 +326,8 @@ class Session:
             "audio_expected_duration_s": self.audio_expected_duration_s,
             "processing_error": self.processing_error,
             "auto_process_pending": self.auto_process_pending,
+            "imported_at": self.imported_at,
+            "imported_from": self.imported_from,
             "sync_warning": self.sync_warning,
             "capture_warning": self.capture_warning,
             "finalize_duration_s": self.finalize_duration_s,
@@ -398,6 +407,8 @@ class Session:
         session.audio_expected_duration_s = data.get("audio_expected_duration_s")
         session.processing_error = data.get("processing_error") or None
         session.auto_process_pending = data.get("auto_process_pending") or None
+        session.imported_at = data.get("imported_at") or None
+        session.imported_from = data.get("imported_from") or None
         session.sync_warning = data.get("sync_warning") or None
         session.capture_warning = data.get("capture_warning") or None
         session.finalize_duration_s = data.get("finalize_duration_s")

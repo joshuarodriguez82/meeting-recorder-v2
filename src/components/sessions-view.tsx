@@ -556,7 +556,30 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
     );
   });
 
-  const unprocessed = sessions.filter((s) => s.audio_exists && !s.has_transcript);
+  // A meeting imported in the last day stays on top. It's dated by when
+  // it happened, which can be days back — newest-first alone put a
+  // fresh import far down the list, where it looked like it never
+  // arrived (field log 2026-10-02).
+  const nowMs = Date.now();
+  const justImported = (s: SessionSummary) =>
+    !!s.imported_at && nowMs - Date.parse(s.imported_at) < 24 * 3600 * 1000;
+  const ordered = [
+    ...filtered.filter(justImported)
+      .sort((a, b) => Date.parse(b.imported_at ?? "") - Date.parse(a.imported_at ?? "")),
+    ...filtered.filter((s) => !justImported(s)),
+  ];
+
+  // Keep the list current while a background run is going, so the
+  // "Processing…" chip clears by itself.
+  const anyProcessing = sessions.some((s) => s.processing_now);
+  useEffect(() => {
+    if (!anyProcessing) return;
+    const id = setInterval(onReload, 8000);
+    return () => clearInterval(id);
+  }, [anyProcessing, onReload]);
+
+  const unprocessed = sessions.filter(
+    (s) => s.audio_exists && !s.has_transcript && !s.processing_now);
 
   const bulkProcess = async () => {
     if (!unprocessed.length) return;
@@ -650,7 +673,7 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
         </Card>
       ) : (
         <div className="space-y-3">
-          {filtered.map((s) => (
+          {ordered.map((s) => (
             // `group/session-row` drives the hover/focus reveal of the
             // destructive delete control below. Named group (not the
             // card component's own `group/card`) so this row owns it.
@@ -738,6 +761,24 @@ export function SessionsView({ sessions, onReload, onOpenSession }: Props) {
                   {/* First, and red: this one changes what the rest of
                       the session means — the transcript, summary and
                       action items are one side of the conversation. */}
+                  {(justImported(s) || s.processing_now) && (
+                    <div className="flex flex-wrap gap-1.5 mt-2">
+                      {justImported(s) && (
+                        <span
+                          className="inline-flex items-center rounded-full border border-primary/30 bg-primary/10 text-primary text-[11px] px-2.5 py-0.5"
+                          title="Imported in the last day. Shown on top; the date is when the meeting happened."
+                        >
+                          Just imported
+                        </span>
+                      )}
+                      {s.processing_now && (
+                        <span className="inline-flex items-center gap-1 rounded-full border text-muted-foreground text-[11px] px-2.5 py-0.5">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          Processing…
+                        </span>
+                      )}
+                    </div>
+                  )}
                   {s.capture_warning && (
                     <div
                       className="inline-flex items-start gap-1.5 max-w-full rounded-full border border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300 text-[11px] px-2.5 py-1 mt-2"

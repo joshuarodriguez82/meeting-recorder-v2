@@ -499,6 +499,10 @@ class SessionService:
             # arrived). A warning chip, not an info one — see
             # Session.capture_warning.
             "capture_warning": data.get("capture_warning"),
+            # When it was imported (None for a recording made here) — the
+            # list keeps a fresh import on top, since its meeting date
+            # can be days back. See Session.imported_at.
+            "imported_at": data.get("imported_at"),
             # How long finalize (WAV merge + optional AEC) took, kept
             # separate from duration_s (the capture window) so a slow
             # post-process never reads as missing audio. See
@@ -880,6 +884,9 @@ class SessionService:
         session.project = project
         if template:
             session.template = template
+        session.imported_at = datetime.datetime.now().isoformat(
+            timespec="seconds")
+        session.imported_from = named_from.name
         self.save(session)
         session.import_notes = notes
         logger.info(

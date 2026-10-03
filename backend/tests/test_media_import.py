@@ -396,3 +396,81 @@ def test_slides_failing_never_stops_processing(tmp_path, monkeypatch):
     asyncio.run(server._after_import(session.session_id, str(src), True))
     assert started == [session.session_id]
     assert svc.load_full(session.session_id).screenshots == []
+
+
+# ── finding an import, and not processing it twice ───────────────────
+#
+# Field log 2026-10-02: an imported video imported and processed fine,
+# but (1) it was dated by when the meeting happened, so a newest-first
+# list put it far down and it looked like it never arrived, and (2) the
+# meeting window still offered Process during the background run, so it
+# was transcribed a second time.
+
+
+def test_an_import_records_when_it_was_imported(tmp_path):
+    import datetime as _dt
+    src = _make_video(tmp_path / "meeting.mp4", seconds=1.0,
+                      creation_time="2026-08-01T10:00:00.000000Z")
+    svc = _svc(tmp_path)
+    before = _dt.datetime.now().replace(microsecond=0)
+    session = svc.import_from_file(str(src))
+
+    assert session.started_at.year == 2026 and session.started_at.month == 8
+    assert _dt.datetime.fromisoformat(session.imported_at) >= before
+    assert session.imported_from == "meeting.mp4"
+    loaded = svc.load_full(session.session_id)
+    assert loaded.imported_at == session.imported_at
+    row = next(r for r in svc.list_sessions()
+               if r["session_id"] == session.session_id)
+    assert row["imported_at"] == session.imported_at
+
+
+def test_the_list_cache_carries_imported_at(tmp_path):
+    """Served from the SQLite index too, not only the direct scan."""
+    from services.session_service import SessionService
+    src = _make_video(tmp_path / "meeting.mp4", seconds=1.0)
+    svc = SessionService(str(tmp_path / "recordings"),
+                         index_db_path=str(tmp_path / "index.db"))
+    session = svc.import_from_file(str(src))
+    for _ in range(2):                       # second call is served cached
+        row = next(r for r in svc.list_sessions()
+                   if r["session_id"] == session.session_id)
+        assert row["imported_at"] == session.imported_at
+
+
+def test_a_recording_made_here_has_no_import_time(tmp_path):
+    from models.session import Session
+    svc = _svc(tmp_path)
+    s = Session(session_id="ABCDEF12")
+    svc.save(s)
+    assert svc.load_full("ABCDEF12").imported_at is None
+
+
+def test_process_is_refused_while_the_background_run_is_going(
+        tmp_path, monkeypatch):
+    import asyncio
+    from fastapi import HTTPException
+    started: list = []
+    server = _server(monkeypatch, _svc(tmp_path), started)
+    monkeypatch.setattr(server, "_auto_processed_sessions", {"ABCD1234"})
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(server.process_session("ABCD1234"))
+    assert e.value.status_code == 409
+    assert "already being processed" in e.value.detail
+
+
+def test_list_and_detail_say_which_sessions_are_processing(
+        tmp_path, monkeypatch):
+    import asyncio
+    svc = _svc(tmp_path)
+    src = _make_video(tmp_path / "meeting.mp4", seconds=1.0)
+    busy = svc.import_from_file(str(src)).session_id
+    idle = svc.import_from_file(str(src)).session_id
+    server = _server(monkeypatch, svc, [])
+    monkeypatch.setattr(server, "_auto_processed_sessions", {busy})
+
+    rows = {r["session_id"]: r for r in asyncio.run(server.list_sessions())}
+    assert rows[busy]["processing_now"] is True
+    assert rows[idle]["processing_now"] is False
+    assert asyncio.run(server.get_session(busy))["processing_now"] is True
+    assert asyncio.run(server.get_session(idle))["processing_now"] is False
