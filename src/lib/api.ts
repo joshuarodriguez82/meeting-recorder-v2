@@ -703,7 +703,20 @@ export interface SlideNote {
   discussed: boolean;
 }
 
+// "What I missed" — a catch-up brief for a meeting you weren't in
+// (backend/core/catch_up).
+export interface CatchUpBrief {
+  headline: string;
+  decisions: string[];
+  asks_of_you: string[];
+  open_questions: string[];
+  changes_since_last: string[];
+  worth_hearing: { at: string; why: string }[];
+  compared_with: { session_id: string; display_name: string; started_at: string } | null;
+}
+
 export interface SessionFull {
+  catch_up?: CatchUpBrief | null;
   slide_notes?: SlideNote[] | null;
   // See SessionSummary.processing_now / imported_at.
   processing_now?: boolean;
@@ -1436,6 +1449,11 @@ export const api = {
       }),
 
   // AI extraction
+  // Make (or remake) the "What I missed" brief for a processed meeting.
+  makeCatchUp: (id: string) =>
+    request<{ ok: boolean; catch_up: CatchUpBrief }>(
+      `/sessions/${id}/catch-up`, { method: "POST" }),
+
   processSession: (id: string) =>
     request<{ ok: boolean; segments: number; speakers: number }>(
       `/sessions/${id}/process`, { method: "POST" }

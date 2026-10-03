@@ -718,6 +718,12 @@
   ]
  ],
  [
+  "/sessions/{session_id}/catch-up",
+  [
+   "POST"
+  ]
+ ],
+ [
   "/sessions/{session_id}/decisions",
   [
    "POST"

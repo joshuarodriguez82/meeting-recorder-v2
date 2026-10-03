@@ -655,6 +655,10 @@ export function SessionDetailDialog({
             <ScrollArea className="flex-1 min-h-0">
               <div className="p-6 min-w-0 max-w-full break-words">
                 <TabsContent value="overview" className="mt-0 space-y-6">
+                  <CatchUpCard
+                    session={session}
+                    onMade={async () => { await reload(); onChanged?.(); }}
+                  />
                   {isFinalizing && (
                     <div
                       className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-300 text-xs px-3 py-2.5"
@@ -1961,5 +1965,92 @@ function formatClock(seconds: number): string {
   const m = Math.floor((s % 3600) / 60);
   const ss = String(s % 60).padStart(2, "0");
   return h ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+}
+
+
+/** "What I missed": the catch-up brief for a meeting you weren't in.
+ *  Made automatically for imported meetings; one click for any other. */
+function CatchUpCard({ session, onMade }: {
+  session: SessionFull;
+  onMade: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const brief = session.catch_up;
+  const hasTranscript = (session.segments?.length ?? 0) > 0;
+
+  const make = async () => {
+    setBusy(true);
+    try {
+      await api.makeCatchUp(session.session_id);
+      await onMade();
+    } catch (e) {
+      toast.error(`Couldn't write the brief: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!brief) {
+    if (!hasTranscript || session.processing_now) return null;
+    return (
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2.5">
+        <p className="text-xs text-muted-foreground">
+          Weren&apos;t in this meeting? Get a short brief: what was decided,
+          what&apos;s asked of you, what&apos;s still open, and what changed
+          since the last meeting with this client.
+        </p>
+        <Button size="sm" variant="outline" onClick={make} disabled={busy}>
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : null}
+          Catch me up
+        </Button>
+      </div>
+    );
+  }
+
+  const prev = brief.compared_with;
+  const sections: [string, string[]][] = [
+    ["Decided", brief.decisions],
+    ["Asked of you or your team", brief.asks_of_you],
+    ["Still open", brief.open_questions],
+    [prev
+      ? `Changed since ${prev.display_name || "last time"} (${(prev.started_at || "").slice(0, 10)})`
+      : "", brief.changes_since_last],
+  ];
+  return (
+    <div className="space-y-3 rounded-lg border border-primary/30 bg-primary/5 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-xs font-medium uppercase tracking-wider text-primary">What I missed</div>
+          {brief.headline && <p className="mt-1 text-sm font-medium">{brief.headline}</p>}
+        </div>
+        <Button size="sm" variant="ghost" onClick={make} disabled={busy}
+          title="Write the brief again from the current transcript">
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Redo"}
+        </Button>
+      </div>
+      {sections.map(([label, items]) => label && items.length > 0 && (
+        <div key={label}>
+          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">{label}</div>
+          <ul className="ml-4 list-disc text-sm">
+            {items.map((x, k) => <li key={k}>{x}</li>)}
+          </ul>
+        </div>
+      ))}
+      {brief.worth_hearing.length > 0 && (
+        <div>
+          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Worth hearing yourself</div>
+          <ul className="ml-4 list-disc text-sm">
+            {brief.worth_hearing.map((m, k) => (
+              <li key={k}><span className="tabular-nums text-muted-foreground">{m.at}</span> — {m.why}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <p className="text-[11px] text-muted-foreground">
+        Written by AI from the transcript. Also exported as
+        what_i_missed with the meeting&apos;s other files.
+      </p>
+    </div>
+  );
 }
 

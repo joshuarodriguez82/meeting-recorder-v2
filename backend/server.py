@@ -6853,6 +6853,32 @@ def _raise_if_finalizing_dict(data: dict) -> None:
     _raise_if_finalizing(fake)
 
 
+@app.post("/sessions/{session_id}/catch-up")
+async def make_catch_up(session_id: str):
+    """Make (or remake) the "what I missed" brief for any processed
+    meeting, and re-export the meeting's files so it lands in the
+    client folder too."""
+    svc.load_settings()
+    if not svc.summarizer:
+        raise HTTPException(status_code=400, detail="AI provider not configured.")
+    session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not session.segments:
+        raise HTTPException(status_code=400,
+                            detail="Process the meeting first — there's no "
+                                   "transcript to catch up on.")
+    stage = await _make_catch_up(session, session.full_transcript(),
+                                 _llm_notes(session))
+    if not stage.startswith("ok"):
+        raise HTTPException(status_code=502,
+                            detail=f"Couldn't write the brief: {stage}")
+    await asyncio.to_thread(svc.session_svc.save, session)
+    # Swallows its own failures; reconciliation is the safety net.
+    await asyncio.to_thread(_export_after_processing, session_id)
+    return {"ok": True, "catch_up": session.catch_up}
+
+
 @app.post("/sessions/{session_id}/process")
 async def process_session(session_id: str):
     # The background pipeline (after a recording stops, or an import) is
@@ -7108,6 +7134,31 @@ async def _run_extraction(session_id: str, extractor_name: str, field_name: str,
 
 class TemplateRequest(BaseModel):
     template: str = "General"
+
+
+async def _make_catch_up(session, transcript: str, notes: str) -> str:
+    """The "what I missed" brief (core/catch_up), compared with the
+    previous meeting with the same client when there is one. Returns a
+    stage string; best-effort, never fails processing."""
+    from core import catch_up as cu
+    try:
+        rows = await asyncio.to_thread(svc.session_svc.list_sessions)
+    except Exception:  # noqa: BLE001
+        rows = []
+    previous = cu.previous_meeting(rows, session)
+    reader = cu.reader_context(getattr(svc.settings, "email_to", "") or "")
+    try:
+        reply = await svc.summarizer.catch_up(
+            transcript, notes=notes, reader=reader,
+            previous=cu.previous_context(previous))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Catch-up brief failed: {e}")
+        return f"failed: {e}"
+    brief = cu.apply_reply(reply, previous)
+    if cu.is_empty(brief):
+        return "failed: empty reply"
+    session.catch_up = brief
+    return "ok"
 
 
 async def _make_slide_notes(session) -> str:
@@ -7777,6 +7828,12 @@ async def process_full(session_id: str, req: ProcessFullRequest):
         stages["copilot_followups"] = await _resolve_copilot_followups(
             session, transcript, notes)
         stages["slide_notes"] = await _make_slide_notes(session)
+        # Imported meetings are the ones most likely to have been missed;
+        # others get the brief on request (POST /sessions/{id}/catch-up).
+        stages["catch_up"] = (
+            await _make_catch_up(session, transcript, notes)
+            if getattr(session, "imported_at", None)
+            else "skipped (not imported)")
 
         if all(not isinstance(r, Exception)
                for r in (summary_r, ai_r, dec_r, req_r, struct_r)):

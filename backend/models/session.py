@@ -175,6 +175,9 @@ class Session:
         # (core/slide_notes): [{"slide", "time_s", "path", "title",
         # "summary", "points", "questions", "actions", "discussed"}].
         self.slide_notes: Optional[list] = None
+        # "What I missed" brief (core/catch_up) — made for imported
+        # meetings, on request for others. None = not made.
+        self.catch_up: Optional[dict] = None
         # Read-only sync-integrity finding from stop_recording: set when a
         # capture stream fell meaningfully behind wall-clock (dropped
         # frames / clock drift) or the mic + system-audio tracks diverged.
@@ -339,6 +342,7 @@ class Session:
             "imported_from": self.imported_from,
             "voice_learning": self.voice_learning,
             "slide_notes": self.slide_notes,
+            "catch_up": self.catch_up,
             "sync_warning": self.sync_warning,
             "capture_warning": self.capture_warning,
             "finalize_duration_s": self.finalize_duration_s,
@@ -422,6 +426,7 @@ class Session:
         session.imported_from = data.get("imported_from") or None
         session.voice_learning = data.get("voice_learning") or None
         session.slide_notes = data.get("slide_notes") or None
+        session.catch_up = data.get("catch_up") or None
         session.sync_warning = data.get("sync_warning") or None
         session.capture_warning = data.get("capture_warning") or None
         session.finalize_duration_s = data.get("finalize_duration_s")

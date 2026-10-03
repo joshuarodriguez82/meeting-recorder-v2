@@ -1086,6 +1086,37 @@ class Summarizer:
         raw = await self._chat(prompt, max_tokens=tokens, timeout=timeout_s)
         return (raw or "").strip()
 
+    async def catch_up(self, transcript: str, notes: str = "",
+                       reader: str = "", previous: str = "") -> dict:
+        """A "what I missed" brief for someone who wasn't in the meeting
+        (core/catch_up). Same transcript cache prefix as the other
+        extractors. Returns the parsed JSON reply ({} on failure)."""
+        instruction = (
+            "Write a catch-up brief for someone who was NOT in this "
+            "meeting and needs to know what matters to them.\n"
+            + (reader + "\n" if reader else "")
+            + (previous + "\n" if previous else "")
+            + "Reply with ONLY a JSON object with these keys:\n"
+            "- headline: one sentence — the single most important "
+            "outcome\n"
+            "- decisions: what was decided (max 8)\n"
+            "- asks_of_you: things the reader or their team were asked "
+            "to do, provide or decide, each with who asked (max 8)\n"
+            "- open_questions: questions left unanswered (max 8)\n"
+            + ("- changes_since_last: what is different from the previous "
+               "meeting summarised above — new decisions, reversed plans, "
+               "moved dates (max 8)\n" if previous else "")
+            + "- worth_hearing: up to 5 moments worth listening to "
+            "directly, as {\"at\": \"mm:ss\" from the transcript's "
+            "timestamps, \"why\": ...}\n"
+            "Use only what was said. Empty lists are fine; do not invent "
+            "asks, decisions or dates.")
+        _cache_prefix, _tail = _split_for_cache(instruction, transcript, notes)
+        raw = await self._chat(
+            _tail, cache_prefix=_cache_prefix,
+            max_tokens=self._budget(3000), timeout=120.0, json_mode=True)
+        return _coerce_json(raw) or {}
+
     #: Slides per request: images are what costs, and a reply for
     #: twenty slides is about as long as a reliable JSON answer gets.
     SLIDES_PER_CALL = 20

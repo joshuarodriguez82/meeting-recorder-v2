@@ -117,6 +117,9 @@ class ExportService:
             slides = self.export_slide_notes(session)
             if slides:
                 out.append(slides)
+            catch_up = self.export_catch_up(session)
+            if catch_up:
+                out.append(catch_up)
             if copy_audio and session.audio_path and Path(session.audio_path).exists():
                 src = Path(session.audio_path)
                 dst = self._dir / f"{self._base_name(session)}{src.suffix.lower()}"
@@ -203,6 +206,18 @@ class ExportService:
         path = self._dir / f"copilot_followups_{self._base_name(session)}.md"
         self._write_text_if_changed(path, text)
         logger.info(f"Co-Pilot follow-ups exported: {path}")
+        return str(path)
+
+    def export_catch_up(self, session: Session) -> str:
+        """The "what I missed" brief (core/catch_up). "" when there is
+        none."""
+        from core.catch_up import render_markdown
+        text = render_markdown(session)
+        if not text:
+            return ""
+        path = self._dir / f"what_i_missed_{self._base_name(session)}.md"
+        self._write_text_if_changed(path, text)
+        logger.info(f"Catch-up brief exported: {path}")
         return str(path)
 
     def export_slide_notes(self, session: Session) -> str:
