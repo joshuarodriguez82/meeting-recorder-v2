@@ -62,14 +62,19 @@ def _model_supports_vision(model: str) -> bool:
                 or "3-haiku" in m)
 
 
-def _image_blocks(image_paths: List[str]) -> list:
+def _image_blocks(image_paths: List[str],
+                  limit: Optional[int] = None) -> list:
     """Read screenshot files into Anthropic image content blocks.
     Skips anything missing/oversized/unknown rather than failing the
     whole summary — a broken screenshot shouldn't cost the user their
     meeting notes."""
     blocks: list = []
     paths = list(image_paths or [])
-    if len(paths) > _MAX_SCREENSHOTS:
+    if limit is not None:
+        # The caller has chosen exactly which images to send, in order
+        # (slide notes refer to them by position): send them all.
+        paths = paths[:limit]
+    elif len(paths) > _MAX_SCREENSHOTS:
         # An even spread, not the first N: an imported video's slides
         # run the whole meeting, and the first eight are its first ten
         # minutes.
@@ -527,7 +532,8 @@ class Summarizer:
                     timeout: float = 60.0,
                     image_paths: Optional[List[str]] = None,
                     json_mode: bool = False,
-                    cache_prefix: str = "") -> str:
+                    cache_prefix: str = "",
+                    image_limit: Optional[int] = None) -> str:
         """
         Provider-agnostic "one-shot user prompt → assistant text" helper.
 
@@ -543,7 +549,7 @@ class Summarizer:
         """
         if self._provider == "anthropic":
             imgs = (
-                _image_blocks(image_paths)
+                _image_blocks(image_paths, limit=image_limit)
                 if image_paths and _model_supports_vision(self._model)
                 else []
             )
@@ -1079,6 +1085,60 @@ class Summarizer:
         tokens = 400 if self._provider == "anthropic" else 1200
         raw = await self._chat(prompt, max_tokens=tokens, timeout=timeout_s)
         return (raw or "").strip()
+
+    #: Slides per request: images are what costs, and a reply for
+    #: twenty slides is about as long as a reliable JSON answer gets.
+    SLIDES_PER_CALL = 20
+
+    async def slide_notes(self, sections: List[dict]) -> Dict[int, dict]:
+        """Notes for each slide from what was said while it was up
+        (core/slide_notes). ``sections`` come from slide_sections();
+        returns {slide number: {"title", "summary", "points",
+        "questions", "actions"}}. The slide images are sent when the
+        model can see them, so a title can come from the slide itself."""
+        out: Dict[int, dict] = {}
+        for i in range(0, len(sections), self.SLIDES_PER_CALL):
+            batch = sections[i:i + self.SLIDES_PER_CALL]
+            parts = []
+            for sec in batch:
+                said = sec["text"].strip() or "(nothing was said while this was shown)"
+                parts.append(f"=== Slide {sec['slide']} ===\n{said}")
+            vision = (self._provider == "anthropic"
+                      and _model_supports_vision(self._model))
+            seen = (f"The {len(batch)} images above are slides "
+                    f"{batch[0]['slide']}–{batch[-1]['slide']}, in that "
+                    "order. " if vision else "")
+            prompt = (
+                "These are the slides (or shared screens) from a meeting, "
+                "each with what was said while it was on screen. " + seen +
+                "For EACH slide give:\n"
+                "- title: the slide's own title if you can see it, else a "
+                "short description of what it shows or what was discussed\n"
+                "- summary: one or two sentences on what was said about it\n"
+                "- points: the key points made about it (max 6)\n"
+                "- questions: questions anyone raised about it (max 6)\n"
+                "- actions: things someone agreed to do because of it, with "
+                "who (max 6)\n"
+                "Use only what is on the slide and what was said. Empty "
+                "lists are fine; do not invent.\n"
+                "Reply with ONLY a JSON object: {\"slides\": [{\"slide\": n, "
+                "\"title\": ..., \"summary\": ..., \"points\": [...], "
+                "\"questions\": [...], \"actions\": [...]}]}\n\n"
+                + "\n\n".join(parts))
+            raw = await self._chat(
+                prompt,
+                image_paths=[sec["path"] for sec in batch] if vision else None,
+                image_limit=len(batch),
+                max_tokens=self._budget(6000), timeout=180.0, json_mode=True)
+            parsed = _coerce_json(raw) or {}
+            for entry in parsed.get("slides") or []:
+                try:
+                    n = int(entry.get("slide"))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if isinstance(entry, dict):
+                    out[n] = entry
+        return out
 
     async def resolve_copilot_items(
         self, transcript: str, items: List[dict], notes: str = "",

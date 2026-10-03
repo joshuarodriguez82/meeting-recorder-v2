@@ -689,7 +689,22 @@ export interface RecordingStatus {
   capture_warning_code?: string | null;
 }
 
+// One slide or shared screen from an imported video, with what was said
+// while it was up (backend/core/slide_notes).
+export interface SlideNote {
+  slide: number;
+  time_s: number;
+  path: string;
+  title: string;
+  summary: string;
+  points: string[];
+  questions: string[];
+  actions: string[];
+  discussed: boolean;
+}
+
 export interface SessionFull {
+  slide_notes?: SlideNote[] | null;
   // See SessionSummary.processing_now / imported_at.
   processing_now?: boolean;
   imported_at?: string | null;

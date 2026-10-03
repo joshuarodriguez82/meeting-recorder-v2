@@ -7110,6 +7110,23 @@ class TemplateRequest(BaseModel):
     template: str = "General"
 
 
+async def _make_slide_notes(session) -> str:
+    """Slide-by-slide notes for a meeting imported from video
+    (core/slide_notes). Returns a stage string. Best-effort: a failure
+    here never fails processing."""
+    from core.slide_notes import apply_notes, slide_sections
+    sections = slide_sections(session)
+    if not sections:
+        return "skipped (no slides)"
+    try:
+        replies = await svc.summarizer.slide_notes(sections)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Slide notes failed: {e}")
+        return f"failed: {e}"
+    session.slide_notes = apply_notes(sections, replies)
+    return f"ok ({len(sections)} slides)"
+
+
 async def _resolve_copilot_followups(session, transcript: str,
                                      notes: str) -> str:
     """Check the Co-Pilot's questions and follow-ups against the full
@@ -7683,7 +7700,14 @@ async def process_full(session_id: str, req: ProcessFullRequest):
             # before it existed still gets it, once.
             stages["copilot_followups"] = await _resolve_copilot_followups(
                 session, transcript, notes)
-            if stages["copilot_followups"].startswith("ok"):
+            # Same for slide notes: made once for a meeting that has
+            # slides and none yet; not re-made when nothing changed.
+            stages["slide_notes"] = (
+                await _make_slide_notes(session)
+                if not getattr(session, "slide_notes", None)
+                else "skipped (unchanged)")
+            if (stages["copilot_followups"].startswith("ok")
+                    or stages["slide_notes"].startswith("ok")):
                 await asyncio.to_thread(svc.session_svc.save, session)
             # Still enqueue. Skipping the LLM calls means the ARTIFACTS
             # are unchanged, not that they reached the Designated
@@ -7752,6 +7776,7 @@ async def process_full(session_id: str, req: ProcessFullRequest):
         # After the extractors, so the transcript is read from cache.
         stages["copilot_followups"] = await _resolve_copilot_followups(
             session, transcript, notes)
+        stages["slide_notes"] = await _make_slide_notes(session)
 
         if all(not isinstance(r, Exception)
                for r in (summary_r, ai_r, dec_r, req_r, struct_r)):

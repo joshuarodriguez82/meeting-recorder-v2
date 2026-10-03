@@ -114,6 +114,9 @@ class ExportService:
             followups = self.export_copilot_followups(session)
             if followups:
                 out.append(followups)
+            slides = self.export_slide_notes(session)
+            if slides:
+                out.append(slides)
             if copy_audio and session.audio_path and Path(session.audio_path).exists():
                 src = Path(session.audio_path)
                 dst = self._dir / f"{self._base_name(session)}{src.suffix.lower()}"
@@ -200,6 +203,18 @@ class ExportService:
         path = self._dir / f"copilot_followups_{self._base_name(session)}.md"
         self._write_text_if_changed(path, text)
         logger.info(f"Co-Pilot follow-ups exported: {path}")
+        return str(path)
+
+    def export_slide_notes(self, session: Session) -> str:
+        """Slide-by-slide notes for a meeting imported from video
+        (core/slide_notes). "" when there are none."""
+        from core.slide_notes import render_markdown
+        text = render_markdown(session)
+        if not text:
+            return ""
+        path = self._dir / f"slide_notes_{self._base_name(session)}.md"
+        self._write_text_if_changed(path, text)
+        logger.info(f"Slide notes exported: {path}")
         return str(path)
 
     def export_requirements(self, session: Session) -> str:

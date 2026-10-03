@@ -1077,15 +1077,78 @@ function ScreenshotsView({ session }: { session: SessionFull }) {
   const srcFor = (i: number) =>
     `${baseUrl}/sessions/${session.session_id}/screenshots/${i}${authQ}`;
 
+  // Slides from an imported video come with notes: each one beside what
+  // was said while it was up. Anything else (screenshots taken while
+  // recording) stays in the grid below.
+  const notes = (session.slide_notes ?? []).filter((n) => shots.includes(n.path));
+  const noted = new Set(notes.map((n) => n.path));
+  const gridIdx = shots.map((_, i) => i).filter((i) => !noted.has(shots[i]));
+
   return (
     <div className="space-y-3">
+      {notes.length > 0 && (
+        <>
+          <p className="text-xs text-muted-foreground">
+            {notes.length} slide{notes.length !== 1 ? "s" : ""} from the
+            recording, each with what was said while it was on screen. Written
+            by AI from the transcript; also exported as slide notes with the
+            meeting&apos;s other files.
+          </p>
+          <div className="space-y-3">
+            {notes.map((n) => {
+              const i = shots.indexOf(n.path);
+              return (
+                <div key={n.path} className="flex flex-col gap-3 rounded-lg border p-3 sm:flex-row">
+                  <button
+                    type="button"
+                    onClick={() => setZoomed(i)}
+                    className="shrink-0 overflow-hidden rounded-md border bg-muted/30 transition hover:ring-2 hover:ring-primary sm:w-56"
+                    title="Click to enlarge"
+                  >
+                    {baseUrl && (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={srcFor(i)} alt={`Slide ${n.slide}`}
+                        className="h-32 w-full object-cover" loading="lazy" />
+                    )}
+                  </button>
+                  <div className="min-w-0 flex-1 space-y-1.5 text-sm">
+                    <div className="font-medium">
+                      <span className="text-muted-foreground tabular-nums">
+                        Slide {n.slide} · {formatClock(n.time_s)}
+                      </span>
+                      {n.title ? ` — ${n.title}` : ""}
+                    </div>
+                    {n.summary ? (
+                      <p className="text-muted-foreground">{n.summary}</p>
+                    ) : !n.discussed ? (
+                      <p className="text-xs italic text-muted-foreground">Shown without discussion.</p>
+                    ) : null}
+                    {([["Points", n.points], ["Questions raised", n.questions],
+                       ["Actions", n.actions]] as const).map(([label, items]) =>
+                      items.length > 0 && (
+                        <div key={label}>
+                          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">{label}</div>
+                          <ul className="ml-4 list-disc text-sm">
+                            {items.map((x, k) => <li key={k}>{x}</li>)}
+                          </ul>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+      {gridIdx.length > 0 && (
+      <>
       <p className="text-xs text-muted-foreground">
-        {shots.length} screenshot{shots.length !== 1 ? "s" : ""} captured during
+        {gridIdx.length} screenshot{gridIdx.length !== 1 ? "s" : ""} captured during
         this meeting. These are included as visual context when generating the
         summary, and stay with the recording for future reference.
       </p>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        {shots.map((_, i) => (
+        {gridIdx.map((i) => (
           <button
             key={i}
             type="button"
@@ -1108,6 +1171,8 @@ function ScreenshotsView({ session }: { session: SessionFull }) {
           </button>
         ))}
       </div>
+      </>
+      )}
 
       {zoomed !== null && baseUrl && (
         <div
@@ -1886,5 +1951,15 @@ function VoiceLearningNote({ session }: { session: SessionFull }) {
       one at a time.
     </div>
   );
+}
+
+
+/** m:ss, or h:mm:ss past the hour. */
+function formatClock(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
 }
 
