@@ -694,6 +694,15 @@ export interface SessionFull {
   processing_now?: boolean;
   imported_at?: string | null;
   imported_from?: string | null;
+  // An imported transcript's named speakers, learned as known voices —
+  // or why not (its timing didn't match the recording, too few names).
+  voice_learning?: {
+    state: "learned" | "skipped";
+    learned: { name: string; action: "created" | "linked" | "refined" }[];
+    reason?: string;
+    word_recall?: number;
+    agreement?: number;
+  } | null;
   session_id: string;
   display_name: string;
   started_at: string | null;

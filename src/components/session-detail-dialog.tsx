@@ -1010,6 +1010,7 @@ export function SessionDetailDialog({
                 </TabsContent>
 
                 <TabsContent value="speakers" className="mt-0">
+                  <VoiceLearningNote session={session} />
                   <SpeakersView
                     session={session}
                     onRenamed={async () => { await reload(); onChanged?.(); }}
@@ -1858,3 +1859,32 @@ function formatTime(s: number): string {
   const sec = Math.floor(s % 60);
   return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
 }
+
+
+/** What happened when an imported transcript's named speakers were
+ *  learned as known voices (server._learn_voices_from_transcript). */
+function VoiceLearningNote({ session }: { session: SessionFull }) {
+  const v = session.voice_learning;
+  if (!v) return null;
+  if (v.state === "learned" && v.learned.length) {
+    const names = v.learned.map((x) => x.name);
+    const list = names.length > 1
+      ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`
+      : names[0];
+    return (
+      <div className="mb-3 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-800 dark:text-emerald-200">
+        Learned {names.length === 1 ? "a voice" : `${names.length} voices`} from
+        this meeting&apos;s transcript: {list}. They&apos;ll be named
+        automatically in future calls, live and after processing.
+      </div>
+    );
+  }
+  return (
+    <div className="mb-3 rounded-md border px-3 py-2 text-xs text-muted-foreground">
+      Voices weren&apos;t saved from this transcript
+      {v.reason ? ` — ${v.reason}` : ""}. Speakers can still be named here
+      one at a time.
+    </div>
+  );
+}
+

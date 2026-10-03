@@ -4644,6 +4644,145 @@ def _ensure_session_embeddings(session: Session) -> bool:
     return changed
 
 
+def _save_voice_profile(session, speaker, name: str, emb,
+                        rename_linked: bool,
+                        voice_first: bool = False) -> str:
+    """Save ``speaker``'s voice under ``name`` in the known-speakers
+    store; returns what happened: "refined", "linked" or "created".
+
+    The rename flow (rename_linked=True) is the user correcting a name,
+    so an already-linked profile takes the new name. voice_first checks
+    the store by voice before by name — for names that came from a
+    meeting roster ("Doe, Jane [NA]"), whose spelling rarely matches the
+    one the user saved ("Jane Doe")."""
+    store = svc.speaker_profile_svc
+    # Case 1: speaker already linked (e.g. correcting an auto-match's
+    # name). Update the linked profile.
+    existing = store.get(speaker.profile_id) if speaker.profile_id else None
+    if existing is None and voice_first:
+        match = store.find_match(emb)
+        existing = match[0] if match else None
+    if existing is not None:
+        if rename_linked:
+            store.rename(existing.profile_id, name)
+        store.confirm_match(existing.profile_id, emb, session.session_id)
+        speaker.profile_id = existing.profile_id
+        return "refined"
+    # Case 2: name matches an existing profile case-insensitively → link
+    # instead of duplicating.
+    wanted = name.lower()
+    same_name = next((p for p in store.list_all()
+                      if p.display_name.lower() == wanted), None)
+    if same_name is not None:
+        speaker.profile_id = same_name.profile_id
+        store.confirm_match(same_name.profile_id, emb, session.session_id)
+        return "linked"
+    # Case 3: brand-new name → create a fresh profile.
+    profile = store.create(name, emb, session.session_id)
+    speaker.profile_id = profile.profile_id
+    return "created"
+
+
+def _transcript_timing_matches(session) -> tuple:
+    """Check 1 of core/voice_learning: transcribe a few of the imported
+    transcript's lines again from the recording, at the transcript's own
+    timestamps, and compare the words. (ok, median recall, reason).
+    Blocking — loads the speech model if it isn't loaded yet."""
+    from core import voice_learning
+    import soundfile as sf
+    lines = [(float(g.start), float(g.end), g.text) for g in session.segments]
+    spots = voice_learning.pick_spot_checks(lines)
+    if len(spots) < voice_learning.MIN_SPOTS:
+        return voice_learning.timing_matches([])
+    svc.ensure_models_loaded()
+    engine = svc.transcription
+    if engine is None:
+        return False, 0.0, "the speech model isn't available"
+    language = getattr(svc.settings, "whisper_language", "en") or "en"
+    recalls = []
+    with sf.SoundFile(session.audio_path) as f:
+        rate = f.samplerate
+        for start, end, text in spots:
+            a = max(0, int((start - voice_learning.SPOT_PAD_SECONDS) * rate))
+            b = int((end + voice_learning.SPOT_PAD_SECONDS) * rate)
+            f.seek(min(a, f.frames))
+            clip = f.read(max(0, min(b, f.frames) - a), dtype="float32",
+                          always_2d=True).mean(axis=1)
+            if rate != 16000 and len(clip):
+                from scipy.signal import resample_poly
+                clip = resample_poly(clip, 16000, rate).astype("float32")
+            heard = engine.transcribe_clip(clip, language=language)
+            recalls.append(voice_learning.word_recall(text, heard))
+    return voice_learning.timing_matches(recalls)
+
+
+def _learn_voices_from_transcript(session_id: str) -> Optional[dict]:
+    """Save the voices of the people an imported transcript names, when
+    the transcript's timing is shown to line up with the recording
+    (core/voice_learning explains the check and why it matters). The
+    outcome is kept on the session as ``voice_learning`` for the
+    Speakers tab. Blocking — run it off the event loop. Never raises."""
+    from core import voice_learning
+    try:
+        session = svc.session_svc.load_full(session_id)
+        if (session is None or not session.audio_path or not session.segments
+                or not svc.speaker_profile_svc):
+            return None
+        names = {sid: sp.display_name for sid, sp in session.speakers.items()}
+        named = voice_learning.named_speakers(names)
+        turns: dict = {}
+        for seg in session.segments:
+            if seg.speaker_id in named:
+                turns.setdefault(seg.speaker_id, []).append(
+                    (float(seg.start), float(seg.end)))
+        outcome: dict = {"state": "skipped", "learned": []}
+        if len(turns) < voice_learning.MIN_NAMED_SPEAKERS:
+            outcome["reason"] = ("the transcript names fewer than two "
+                                 "people")
+        else:
+            from core.speaker_embeddings import (
+                extract_turn_embeddings, is_available,
+            )
+            timing_ok, recall, why = _transcript_timing_matches(session)
+            outcome["word_recall"] = round(recall, 3)
+            if not timing_ok:
+                outcome["reason"] = why
+            elif not is_available():
+                outcome["reason"] = "voice fingerprinting isn't available"
+            else:
+                per_turn = extract_turn_embeddings(session.audio_path, turns)
+                check = voice_learning.check_alignment(per_turn)
+                outcome["agreement"] = round(check.agreement, 3)
+                if not check.ok:
+                    outcome["reason"] = check.reason
+                else:
+                    for sid, centroid in check.learnable.items():
+                        sp = session.speakers[sid]
+                        sp.embedding = [float(x) for x in centroid.tolist()]
+                        action = _save_voice_profile(
+                            session, sp, sp.display_name, centroid,
+                            rename_linked=False, voice_first=True)
+                        sp.match_confirmed = True
+                        sp.match_confidence = None
+                        outcome["learned"].append(
+                            {"name": sp.display_name, "action": action})
+                    outcome["state"] = ("learned" if outcome["learned"]
+                                        else "skipped")
+                    if not outcome["learned"]:
+                        outcome["reason"] = ("no speaker's lines were "
+                                             "consistent enough")
+        session.voice_learning = outcome
+        svc.session_svc.save(session)
+        logger.info(f"[import] {session_id}: voice learning "
+                    f"{outcome['state']} ({len(outcome['learned'])} saved"
+                    f"{'; ' + outcome['reason'] if outcome.get('reason') else ''})")
+        return outcome
+    except Exception as e:  # noqa: BLE001 - best-effort, never blocks import
+        logger.warning(f"[import] {session_id}: voice learning failed: "
+                       f"{type(e).__name__}: {e}")
+        return None
+
+
 @app.patch("/sessions/{session_id}/speakers/{speaker_id}")
 async def rename_speaker(session_id: str, speaker_id: str, req: SpeakerRenameRequest):
     """Rename a speaker on a session.
@@ -4718,34 +4857,8 @@ async def rename_speaker(session_id: str, speaker_id: str, req: SpeakerRenameReq
         else:
             import numpy as np
             emb = np.asarray(speaker.embedding, dtype=np.float32)
-
-            # Case 1: speaker was already linked (e.g. correcting an
-            # auto-match's name). Update the linked profile.
-            existing = (svc.speaker_profile_svc.get(speaker.profile_id)
-                        if speaker.profile_id else None)
-            if existing is not None:
-                svc.speaker_profile_svc.rename(existing.profile_id, new_name)
-                svc.speaker_profile_svc.confirm_match(
-                    existing.profile_id, emb, session.session_id)
-                profile_action = "refined"
-            else:
-                # Case 2: name matches an existing profile case-insensitively
-                # → link instead of duplicating.
-                wanted = new_name.lower()
-                same_name = next(
-                    (p for p in svc.speaker_profile_svc.list_all()
-                     if p.display_name.lower() == wanted), None)
-                if same_name is not None:
-                    speaker.profile_id = same_name.profile_id
-                    svc.speaker_profile_svc.confirm_match(
-                        same_name.profile_id, emb, session.session_id)
-                    profile_action = "linked"
-                else:
-                    # Case 3: brand-new name → create a fresh profile.
-                    profile = svc.speaker_profile_svc.create(
-                        new_name, emb, session.session_id)
-                    speaker.profile_id = profile.profile_id
-                    profile_action = "created"
+            profile_action = _save_voice_profile(
+                session, speaker, new_name, emb, rename_linked=True)
             speaker.match_confidence = None
 
     svc.session_svc.save(session)
@@ -6570,7 +6683,8 @@ async def import_session(req: ImportSessionRequest):
         raise HTTPException(status_code=500, detail=str(e))
     from core import media_import
     is_video = media_import.is_video(req.file_path)
-    if is_video or req.process:
+    learn = bool(req.transcript_path and req.file_path and session.segments)
+    if is_video or req.process or learn:
         asyncio.create_task(_after_import(
             session.session_id, req.file_path if is_video else "",
             req.process))
@@ -6615,6 +6729,12 @@ async def _after_import(session_id: str, video_path: str,
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[import] {session_id}: slide extraction "
                            f"failed: {type(e).__name__}: {e}")
+    # A transcript with the recording names everyone: learn their voices
+    # before processing, so this meeting's own speakers are linked too.
+    session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
+    if (session is not None and session.segments and session.audio_path
+            and getattr(session, "imported_at", None)):
+        await asyncio.to_thread(_learn_voices_from_transcript, session_id)
     if process:
         session = await asyncio.to_thread(svc.session_svc.load_full, session_id)
         if session is not None:
