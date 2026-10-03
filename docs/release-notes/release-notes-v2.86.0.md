@@ -1,4 +1,4 @@
-# v2.86.0 — Voices learned from transcripts, slide-by-slide notes, and "What I missed"
+# v2.86.0 — A new look, voices learned from transcripts, slide-by-slide notes, and "What I missed"
 
 ## Install (macOS)
 
@@ -31,6 +31,23 @@
 ## No extension update
 
 App-only. The Chrome extension stays at **1.25.0**.
+
+## A new look
+
+The app has a proper visual identity now instead of default styling:
+
+- A **deep teal-navy sidebar** with a clear marker on the page you're on.
+- **Inter** throughout, with bold page titles.
+- Crisp white fields and dropdowns instead of grey pills, and buttons with
+  a consistent shape and weight.
+- A **Today** page that opens on a greeting panel rather than a heading on
+  grey.
+- **Client marks** on every meeting in Sessions: each client gets its own
+  colour and initials, so a long list scans by client.
+- Meeting tabs underline the one you're on; transcripts read in the same
+  font as everything else (timestamps stay aligned).
+- **Violet marks what the AI wrote** — the "What I missed" brief stands
+  apart from what was actually said.
 
 ## Voices learned from a meeting's transcript
 

@@ -610,8 +610,8 @@ export function SessionDetailDialog({
         ) : session && (
           <Tabs value={tab} onValueChange={setTab} className="flex-1 flex flex-col min-h-0">
             <div className="px-6 pt-3 border-b">
-              <TabsList className="bg-transparent p-0 h-auto">
-                <TabsTrigger value="overview" className="data-[state=active]:bg-accent">Overview</TabsTrigger>
+              <TabsList variant="line" className="h-auto gap-1 p-0">
+                <TabsTrigger value="overview">Overview</TabsTrigger>
                 <TabsTrigger value="notes">
                   <StickyNote className="h-3.5 w-3.5 mr-1" />
                   Notes {notes && <span className="ml-1 text-[10px] text-muted-foreground">•</span>}
@@ -1409,14 +1409,17 @@ function TranscriptView({ session }: { session: SessionFull }) {
       <div className="flex justify-end">
         <CopyButton text={plain} label="Copy transcript" />
       </div>
-      <div className="space-y-1 font-mono text-sm leading-relaxed max-w-full">
+      {/* Sans for what was said — it's prose, and in a code face a
+          conversation reads like a log. Only the timestamps stay mono,
+          where the digits need to line up. */}
+      <div className="space-y-0.5 text-[14.5px] leading-relaxed max-w-full">
         {session.segments.map((seg, i) => {
           const name = session.speakers[seg.speaker_id]?.display_name || seg.speaker_id;
           const start = formatTime(seg.start);
           return (
-            <div key={i} className="flex gap-3 py-0.5 hover:bg-muted/30 rounded px-2 min-w-0">
-              <span className="text-xs text-muted-foreground w-12 shrink-0 pt-0.5">{start}</span>
-              <span className="font-semibold text-primary w-32 shrink-0 truncate">{name}</span>
+            <div key={i} className="flex gap-4 rounded-[8px] px-2 py-1 hover:bg-muted/50 min-w-0">
+              <span className="w-12 shrink-0 pt-[3px] font-mono text-xs tabular-nums text-muted-foreground">{start}</span>
+              <span className="w-36 shrink-0 truncate font-semibold text-primary">{name}</span>
               <span className="flex-1 min-w-0 break-words">{seg.text}</span>
             </div>
           );
@@ -2017,10 +2020,10 @@ function CatchUpCard({ session, onMade }: {
       : "", brief.changes_since_last],
   ];
   return (
-    <div className="space-y-3 rounded-lg border border-primary/30 bg-primary/5 p-4">
+    <div className="space-y-3 rounded-[14px] border border-ai/25 bg-ai-soft p-4">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="text-xs font-medium uppercase tracking-wider text-primary">What I missed</div>
+          <div className="text-xs font-semibold uppercase tracking-wider text-ai-foreground">What I missed</div>
           {brief.headline && <p className="mt-1 text-sm font-medium">{brief.headline}</p>}
         </div>
         <Button size="sm" variant="ghost" onClick={make} disabled={busy}

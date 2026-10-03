@@ -88,12 +88,12 @@ function RailButton({
   const button = (
     <button
       onClick={onClick}
-      className={`relative flex w-full items-center rounded-xl text-sm transition-colors ${
-        collapsed ? "justify-center px-0 py-2.5" : "gap-3 px-3 py-2.5"
+      className={`relative flex w-full items-center rounded-[10px] text-sm transition-colors ${
+        collapsed ? "justify-center px-0 py-2.5" : "gap-3 px-3 py-2"
       } ${
         active
-          ? "bg-accent text-accent-foreground font-medium"
-          : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+          ? "bg-accent text-accent-foreground font-semibold shadow-[inset_3px_0_0_0_var(--primary)]"
+          : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
       }`}
       // Collapsed mode has no visible text, so the accessible name has
       // to come from aria-label; expanded mode keeps the original
@@ -101,7 +101,7 @@ function RailButton({
       title={collapsed ? undefined : hint}
       aria-label={collapsed ? label : undefined}
     >
-      <Icon className="h-5 w-5 shrink-0" />
+      <Icon className={`h-[18px] w-[18px] shrink-0 ${active ? "text-primary" : ""}`} />
       {!collapsed && <span className="flex-1 text-left">{label}</span>}
       {badge > 0 && (collapsed ? (
         <span className="absolute top-1 right-1.5 inline-flex items-center justify-center min-w-4 h-4 px-1 rounded-full bg-primary text-primary-foreground text-[9px] font-semibold">
@@ -850,7 +850,7 @@ export default function Home() {
           mode, just abbreviated. */}
       <TooltipProvider>
       <aside
-        className={`flex h-full shrink-0 flex-col border-r border-border bg-sidebar transition-[width] duration-200 ${
+        className={`rail flex h-full shrink-0 flex-col border-r border-border transition-[width] duration-200 ${
           navCollapsed ? "w-16" : "w-64"
         }`}
       >
@@ -859,12 +859,12 @@ export default function Home() {
             navCollapsed ? "justify-center px-2" : "gap-2.5 px-4"
           }`}
         >
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm">
-            <Mic className="h-4 w-4" />
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br from-teal-300 to-teal-600 text-[#04201d] shadow-[0_4px_14px_-4px_rgb(45_212_191/0.6)]">
+            <Mic className="h-4 w-4" strokeWidth={2.5} />
           </div>
           {!navCollapsed && (
             <div className="flex flex-col leading-tight min-w-0 flex-1">
-              <span className="text-sm font-semibold">Meeting Recorder</span>
+              <span className="text-[15px] font-bold tracking-tight">Meeting Recorder</span>
               <span className="text-[10px] text-muted-foreground">
                 {appVersion ? `v${appVersion}` : "v2"}
               </span>
@@ -1115,10 +1115,10 @@ export default function Home() {
             the toolbar". The header is a flex sibling of the scroll
             container, so with an opaque fill nothing can visually
             overlap it. */}
-        <header className="flex h-16 items-center justify-between border-b border-border bg-background px-6 shrink-0">
+        <header className="flex h-[76px] items-center justify-between border-b border-border bg-background px-8 shrink-0">
           <div>
-            <h1 className="text-lg font-semibold capitalize">{nav.replace("-", " ")}</h1>
-            <p className="text-xs text-muted-foreground">
+            <h1 className="text-[22px] font-bold capitalize leading-tight tracking-tight">{nav.replace("-", " ")}</h1>
+            <p className="mt-0.5 text-[13px] text-muted-foreground">
               {nav === "today" && "Your daily briefing — top priority, agenda, action items, FYI"}
               {nav === "record" && "Start a new recording or pick one from your calendar"}
               {nav === "sessions" && "Browse every meeting you've recorded"}

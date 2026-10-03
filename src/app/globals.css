@@ -48,6 +48,12 @@
   --radius-4xl: calc(var(--radius) * 2.6);
   --shadow-card: var(--card-shadow);
   --shadow-card-hover: var(--card-shadow-hover);
+  /* Brand + AI tokens (see :root). `bg-brand`, `text-ai`, `bg-ai-soft`… */
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-ai: var(--ai);
+  --color-ai-soft: var(--ai-soft);
+  --color-ai-foreground: var(--ai-foreground);
 }
 
 :root {
@@ -60,86 +66,129 @@
      flipping it in .dark below) keeps those OS-drawn surfaces in step
      with the theme the rest of the app is using. */
   color-scheme: light;
-  --background: oklch(0.967 0.004 247);
-  --foreground: oklch(0.15 0.015 250);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.15 0.015 250);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.15 0.015 250);
-  --primary: oklch(0.55 0.18 255);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.96 0.01 240);
-  --secondary-foreground: oklch(0.25 0.05 255);
-  --muted: oklch(0.96 0.01 240);
-  --muted-foreground: oklch(0.5 0.03 250);
-  --accent: oklch(0.95 0.04 255);
-  --accent-foreground: oklch(0.35 0.12 255);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.928 0.006 264.531);
-  --input: oklch(0.92 0.015 240);
-  --ring: oklch(0.55 0.18 255);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
+
+  /* ── Palette ───────────────────────────────────────────────────────
+     One committed brand colour (deep teal-navy), one action colour
+     (teal), and neutrals tinted toward the brand rather than flat
+     grey: a grey with no hue reads as unchosen, which is most of why
+     the previous theme looked like a template. Violet is reserved for
+     what the AI wrote or suggests (Co-Pilot, briefs), so it reads as a
+     signal, not decoration. */
+  --brand: #0b2f3a;
+  --brand-foreground: #e8f3f5;
+  --ai: #7c3aed;
+  --ai-soft: rgb(124 58 237 / 0.08);
+  --ai-foreground: #5b21b6;
+
+  --background: #f4f7f9;
+  --foreground: #102027;
+  --card: #ffffff;
+  --card-foreground: #102027;
+  --popover: #ffffff;
+  --popover-foreground: #102027;
+  --primary: #0d9488;
+  --primary-foreground: #ffffff;
+  --secondary: #eaf0f3;
+  --secondary-foreground: #0b2f3a;
+  --muted: #eef3f6;
+  --muted-foreground: #5b6b77;
+  --accent: #e3f4f1;
+  --accent-foreground: #0b2f3a;
+  --destructive: #dc2626;
+  --border: #e2e8ee;
+  --input: #d5dee5;
+  --ring: #0d9488;
+  --chart-1: #0d9488;
+  --chart-2: #0b2f3a;
+  --chart-3: #7c3aed;
+  --chart-4: #0ea5e9;
+  --chart-5: #f59e0b;
   --radius: 0.875rem;
-  /* Soft, diffuse card elevation — used by ui/card.tsx and floating
-     list rows. Kept as separate tokens (not inline in @theme) so light
-     and dark can define genuinely different shadow colors/opacity
-     instead of just toggling one alpha value. */
-  --card-shadow: 0 1px 2px 0 oklch(0.15 0.02 250 / 0.04), 0 1px 3px 0 oklch(0.15 0.02 250 / 0.06);
-  --card-shadow-hover: 0 8px 24px -4px oklch(0.15 0.02 250 / 0.10), 0 2px 6px -2px oklch(0.15 0.02 250 / 0.06);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  /* Elevation tinted with the brand, as one soft lift rather than a
+     grey drop shadow. Separate tokens so dark mode can use a genuinely
+     different shadow instead of the same one at another alpha. */
+  --card-shadow: 0 1px 2px 0 rgb(11 47 58 / 0.04), 0 6px 24px -6px rgb(11 47 58 / 0.08);
+  --card-shadow-hover: 0 2px 4px 0 rgb(11 47 58 / 0.05), 0 14px 36px -8px rgb(11 47 58 / 0.14);
+  --sidebar: #0b2f3a;
+  --sidebar-foreground: #d7e5ea;
+  --sidebar-primary: #2dd4bf;
+  --sidebar-primary-foreground: #04201d;
+  --sidebar-accent: rgb(255 255 255 / 0.09);
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: rgb(255 255 255 / 0.08);
+  --sidebar-ring: #2dd4bf;
 }
 
 .dark {
   /* Counterpart to the :root declaration — see the comment there. */
   color-scheme: dark;
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  /* Dark cards sit slightly lighter than the backdrop (0.205 vs 0.145
-     background, same relationship as before) — shadows lean on a pure
-     black at higher opacity since a light shadow color would wash out
-     against a dark backdrop. */
-  --card-shadow: 0 1px 2px 0 oklch(0 0 0 / 0.20), 0 1px 3px 0 oklch(0 0 0 / 0.24);
-  --card-shadow-hover: 0 8px 24px -4px oklch(0 0 0 / 0.36), 0 2px 6px -2px oklch(0 0 0 / 0.24);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --brand: #0a1f2a;
+  --brand-foreground: #e6eef3;
+  --ai: #a78bfa;
+  --ai-soft: rgb(167 139 250 / 0.12);
+  --ai-foreground: #c4b5fd;
+
+  --background: #0b1620;
+  --foreground: #e6eef3;
+  --card: #111f2b;
+  --card-foreground: #e6eef3;
+  --popover: #13232f;
+  --popover-foreground: #e6eef3;
+  --primary: #14b8a6;
+  --primary-foreground: #032421;
+  --secondary: #182a37;
+  --secondary-foreground: #e6eef3;
+  --muted: #162733;
+  --muted-foreground: #93a6b3;
+  --accent: #123a3a;
+  --accent-foreground: #ccfbf1;
+  --destructive: #f87171;
+  --border: rgb(255 255 255 / 0.08);
+  --input: rgb(255 255 255 / 0.13);
+  --ring: #14b8a6;
+  --chart-1: #2dd4bf;
+  --chart-2: #7dd3fc;
+  --chart-3: #a78bfa;
+  --chart-4: #38bdf8;
+  --chart-5: #fbbf24;
+  /* Dark cards sit slightly lighter than the backdrop; shadows lean on
+     black at higher opacity since a light shadow washes out on dark. */
+  --card-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.30), 0 6px 20px -6px rgb(0 0 0 / 0.40);
+  --card-shadow-hover: 0 2px 4px 0 rgb(0 0 0 / 0.35), 0 14px 32px -8px rgb(0 0 0 / 0.55);
+  --sidebar: #08131b;
+  --sidebar-foreground: #c9d7df;
+  --sidebar-primary: #2dd4bf;
+  --sidebar-primary-foreground: #04201d;
+  --sidebar-accent: rgb(255 255 255 / 0.07);
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: rgb(255 255 255 / 0.07);
+  --sidebar-ring: #2dd4bf;
+}
+
+/* The navigation rail is always the dark brand surface, in both themes.
+   Everything inside it (activity centre, recording strip, storage
+   readout, tooltips' triggers) is styled with the ordinary tokens —
+   so instead of restyling each, the rail re-points those tokens at its
+   own dark palette and they all follow. */
+.rail {
+  color-scheme: dark;
+  --background: var(--sidebar);
+  --foreground: #eaf3f6;
+  --card: rgb(255 255 255 / 0.05);
+  --card-foreground: #eaf3f6;
+  --muted: rgb(255 255 255 / 0.06);
+  --muted-foreground: #8fb0ba;
+  --accent: var(--sidebar-accent);
+  --accent-foreground: var(--sidebar-accent-foreground);
+  --border: var(--sidebar-border);
+  --input: rgb(255 255 255 / 0.12);
+  --primary: var(--sidebar-primary);
+  --primary-foreground: var(--sidebar-primary-foreground);
+  --ring: var(--sidebar-ring);
+  background:
+    radial-gradient(120% 60% at 0% 0%, rgb(45 212 191 / 0.10), transparent 60%),
+    var(--sidebar);
+  color: var(--foreground);
 }
 
 @layer base {
@@ -154,5 +203,11 @@
   }
   h1, h2, h3, h4, h5, h6 {
     @apply font-semibold;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+  }
+  /* Digits that line up in columns: durations, counts, timestamps. */
+  .tabular-nums, time {
+    font-variant-numeric: tabular-nums;
   }
 }
