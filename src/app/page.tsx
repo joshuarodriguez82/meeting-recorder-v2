@@ -9,8 +9,9 @@ import {
   Mic, History, CheckSquare, Target, Library,
   LayoutDashboard, Settings as SettingsIcon, HelpCircle, Loader2,
   Sparkles, Handshake, BarChart3, FileSpreadsheet,
-  Sun, PanelLeftClose, PanelLeftOpen, AlertTriangle,
+  Sun, Moon, PanelLeftClose, PanelLeftOpen, AlertTriangle,
 } from "lucide-react";
+import { loadTheme, saveTheme } from "@/lib/theme";
 import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
 } from "@/components/ui/tooltip";
@@ -184,6 +185,16 @@ export default function Home() {
   // Opt-in "Today" daily-briefing tab. Hidden + skipped as landing view
   // unless the user enables it in Settings. Persisted server-side.
   const [todayEnabled, setTodayEnabled] = useState(false);
+  // Whether the app is showing dark right now — for the sidebar switch's
+  // icon and label. Follows Settings → Appearance and the OS (in System).
+  const [darkNow, setDarkNow] = useState(false);
+  useEffect(() => {
+    const read = () => setDarkNow(document.documentElement.classList.contains("dark"));
+    read();
+    const obs = new MutationObserver(read);
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => obs.disconnect();
+  }, []);
   // Auto-land on Today only ONCE per app launch (when enabled) — so the
   // periodic settings refresh on window focus doesn't yank the user back
   // to Today after they've navigated elsewhere.
@@ -859,7 +870,7 @@ export default function Home() {
             navCollapsed ? "justify-center px-2" : "gap-2.5 px-4"
           }`}
         >
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br from-teal-300 to-teal-600 text-[#04201d] shadow-[0_4px_14px_-4px_rgb(45_212_191/0.6)]">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[linear-gradient(135deg,var(--sidebar-primary),var(--primary))] text-[var(--sidebar-primary-foreground)] shadow-[0_4px_14px_-4px_rgb(var(--glow)/0.6)]">
             <Mic className="h-4 w-4" strokeWidth={2.5} />
           </div>
           {!navCollapsed && (
@@ -1063,6 +1074,18 @@ export default function Home() {
             active={nav === "help"}
             collapsed={navCollapsed}
             onClick={() => setNav("help")}
+          />
+          {/* Quick light/dark switch; the full choice (System, colour
+              themes) is in Settings → Appearance. */}
+          <RailButton
+            icon={darkNow ? Sun : Moon}
+            label={darkNow ? "Light mode" : "Dark mode"}
+            active={false}
+            collapsed={navCollapsed}
+            onClick={() => {
+              const t = loadTheme();
+              saveTheme({ ...t, mode: darkNow ? "light" : "dark" });
+            }}
           />
           {/* Collapse toggle lives in the utility cluster so it reads
               the same in both widths and never competes with the brand

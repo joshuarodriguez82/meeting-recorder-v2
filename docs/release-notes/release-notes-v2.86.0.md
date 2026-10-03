@@ -1,4 +1,4 @@
-# v2.86.0 — A new look, voices learned from transcripts, slide-by-slide notes, and "What I missed"
+# v2.86.0 — A new look with dark mode and colour themes, voices learned from transcripts, slide-by-slide notes, and "What I missed"
 
 ## Install (macOS)
 
@@ -48,6 +48,16 @@ The app has a proper visual identity now instead of default styling:
   font as everything else (timestamps stay aligned).
 - **Violet marks what the AI wrote** — the "What I missed" brief stands
   apart from what was actually said.
+
+### Dark mode and colour themes
+
+**Settings → Appearance** has a mode — **Light**, **Dark**, or **System**
+(follows Windows / macOS, including when it switches at sunset) — and five
+colour themes: **Teal**, **Ocean**, **Forest**, **Ember** and **Graphite**.
+Each re-tints the sidebar, buttons, highlights and the Today panel, in
+light and dark. Changes apply as you click and are remembered on that
+computer. There's also a light/dark switch at the bottom of the sidebar.
+Nothing changes until you choose: the app stays light teal by default.
 
 ## Voices learned from a meeting's transcript
 

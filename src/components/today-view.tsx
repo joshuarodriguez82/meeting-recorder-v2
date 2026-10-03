@@ -328,9 +328,9 @@ export function TodayView({ onNavigate }: Props) {
           the brand surface with a teal glow, so the day opens on
           something that looks made rather than a heading on grey. */}
       <div className="relative overflow-hidden rounded-[22px] bg-brand px-8 py-7 text-white shadow-[0_18px_40px_-18px_rgb(11_47_58/0.55)] flex items-start justify-between gap-4">
-        <div aria-hidden className="pointer-events-none absolute inset-0 bg-[radial-gradient(60%_90%_at_88%_10%,rgb(94_234_212/0.28),transparent_60%),linear-gradient(135deg,transparent_40%,rgb(15_118_110/0.55))]" />
+        <div aria-hidden className="pointer-events-none absolute inset-0 bg-[radial-gradient(60%_90%_at_88%_10%,rgb(var(--glow)/0.28),transparent_60%),linear-gradient(135deg,transparent_40%,color-mix(in_oklab,var(--hero-end)_55%,transparent))]" />
         <div className="relative">
-          <div className="text-xs font-semibold uppercase tracking-[0.14em] text-teal-200/90">
+          <div className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--hero-kicker)]">
             {todayPretty()} · {timeNow()}
           </div>
           <h1 className="mt-2 text-[34px] font-extrabold leading-tight tracking-tight">
