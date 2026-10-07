@@ -7,9 +7,10 @@
 // not exact-per-call accuracy. A 30% error here doesn't matter to the
 // user's decision; an order-of-magnitude error would.
 //
-// Maintained by hand. When prices change or new providers ship,
-// update the PROVIDER_RATES table below. Models we don't know about
-// fall through to "unknown" with a $0 estimate and a caveat.
+// Prices for the models known at release are in PROVIDER_RATES below.
+// A model released after this build has no row: Settings then asks for
+// its price per million tokens and remembers it on this computer
+// (customRates), so a new model is priced without an app update.
 
 /** Average tokens we send per wide tick — full window, mode prompt,
  *  meeting-type modifier, custom context, prior-tick memory, ~10 min
@@ -34,8 +35,21 @@ const PROVIDER_RATES: Record<string, RatePair> = {
   // Haiku 4.5 is $1 / $5 per million tokens. This row said $0.25 /
   // $1.25 — Haiku 3's price — so every estimate was 4x low.
   "anthropic:claude-haiku-4-5": { in: 0.001, out: 0.005 },
+  // Haiku 5.5: $0.10 / $0.50 per million for prompts up to 100K tokens
+  // (every Co-Pilot tick); $0.50 / $2.50 beyond.
+  "anthropic:claude-haiku-5-5": { in: 0.0001, out: 0.0005 },
   "anthropic:claude-sonnet-4-6": { in: 0.003, out: 0.015 },
-  "anthropic:claude-opus-4-7": { in: 0.015, out: 0.075 },
+  "anthropic:claude-sonnet-5": { in: 0.002, out: 0.01 },
+  "anthropic:claude-sonnet-5-5": { in: 0.002, out: 0.01 },
+  // Opus 4.6-4.8 and 5 are $5 / $25. The 4.7 row said $15 / $75 —
+  // Opus 4.1's price — so it read 3x high.
+  "anthropic:claude-opus-4-6": { in: 0.005, out: 0.025 },
+  "anthropic:claude-opus-4-7": { in: 0.005, out: 0.025 },
+  "anthropic:claude-opus-4-8": { in: 0.005, out: 0.025 },
+  "anthropic:claude-opus-5": { in: 0.005, out: 0.025 },
+  "anthropic:claude-opus-5-5": { in: 0.004, out: 0.02 },
+  "anthropic:claude-fable-5": { in: 0.01, out: 0.05 },
+  "anthropic:claude-fable-5-1": { in: 0.01, out: 0.05 },
   // OpenAI
   "openai:gpt-4o-mini": { in: 0.00015, out: 0.0006 },
   "openai:gpt-4o": { in: 0.0025, out: 0.01 },
@@ -53,8 +67,9 @@ const PROVIDER_RATES: Record<string, RatePair> = {
  *  the user has a different one selected — gives them a sense of what
  *  switching would cost. */
 const COMPARISON_KEYS: Array<{ key: string; label: string }> = [
+  { key: "anthropic:claude-haiku-5-5", label: "Anthropic Haiku 5.5" },
   { key: "anthropic:claude-haiku-4-5", label: "Anthropic Haiku 4.5" },
-  { key: "anthropic:claude-sonnet-4-6", label: "Anthropic Sonnet 4.6" },
+  { key: "anthropic:claude-sonnet-5-5", label: "Anthropic Sonnet 5.5" },
   { key: "openai:gpt-4o-mini", label: "OpenAI GPT-4o-mini" },
   { key: "openai:ollama", label: "Ollama (local)" },
   { key: "openai:openrouter-free", label: "OpenRouter free tier" },
@@ -79,7 +94,7 @@ export interface CostEstimate {
 /** Compose the rate key the same way the backend would — provider plus
  *  model id (lowercased + de-spaced for forgiving lookup). The "live"
  *  override takes precedence over the main provider when set. */
-function rateKey(provider: string, model: string): string {
+export function rateKey(provider: string, model: string): string {
   const p = (provider || "anthropic").trim().toLowerCase();
   // A dated snapshot ID ("claude-haiku-4-5-20251001", what Settings
   // stores) is priced as its model — without this the lookup missed
@@ -133,6 +148,9 @@ export function estimateCopilotCost(args: {
    *  detect Ollama / OpenRouter when the model id isn't in the rates
    *  table. */
   baseUrl: string;
+  /** Prices the user entered for models this build doesn't know, keyed
+   *  by rateKey(), in USD per MILLION tokens (how providers quote). */
+  customRates?: Record<string, { in: number; out: number }>;
 }): CostEstimate {
   const widePerHour = args.wideIntervalSec > 0
     ? 3600 / args.wideIntervalSec : 0;
@@ -142,6 +160,10 @@ export function estimateCopilotCost(args: {
 
   const key = rateKey(args.provider, args.model);
   let rate: RatePair | null = PROVIDER_RATES[key] ?? null;
+  const custom = args.customRates?.[key];
+  if (!rate && custom && (custom.in > 0 || custom.out > 0)) {
+    rate = { in: custom.in / 1000, out: custom.out / 1000 };
+  }
   if (!rate) rate = guessByBaseUrl(args.baseUrl);
 
   const currentHourlyUsd = rate
@@ -174,3 +196,32 @@ export function formatUsd(n: number): string {
   if (n < 10) return `$${n.toFixed(2)}`;
   return `$${n.toFixed(1)}`;
 }
+
+/** Whether this build has a price for the model (else Settings asks). */
+export function hasKnownRate(provider: string, model: string): boolean {
+  return rateKey(provider, model) in PROVIDER_RATES;
+}
+
+const CUSTOM_RATES_KEY = "mr-model-prices";
+
+/** Prices entered in Settings for models this build doesn't know —
+ *  per computer, since they only feed an estimate. USD per million. */
+export function loadCustomRates(): Record<string, { in: number; out: number }> {
+  try {
+    const v = JSON.parse(localStorage.getItem(CUSTOM_RATES_KEY) || "{}");
+    return v && typeof v === "object" ? v : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveCustomRate(key: string, rate: { in: number; out: number }): void {
+  try {
+    const all = loadCustomRates();
+    all[key] = rate;
+    localStorage.setItem(CUSTOM_RATES_KEY, JSON.stringify(all));
+  } catch {
+    // Storage blocked: the estimate just stays "unknown".
+  }
+}
+

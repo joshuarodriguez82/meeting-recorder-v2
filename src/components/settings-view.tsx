@@ -3,7 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, formatBytes, type ArchiveStatus, type McpClientState, type McpStatus, type Settings, type TemplateEntry, type CoPilotPromptEntry } from "@/lib/api";
 import { MCP_CLIENTS, mcpClient, mcpConfigSnippet } from "@/lib/mcp-config";
-import { estimateCopilotCost, formatUsd } from "@/lib/copilot-cost";
+import {
+  estimateCopilotCost, formatUsd, hasKnownRate, loadCustomRates, rateKey,
+  saveCustomRate,
+} from "@/lib/copilot-cost";
 import { confirmDialog } from "@/lib/confirm";
 import { toast } from "sonner";
 import { Loader2, Save, Trash2, Plus, RotateCcw, AlertTriangle, CheckCircle2, Copy, DownloadCloud, HelpCircle, Sun, Moon, Monitor, Check } from "lucide-react";
@@ -70,10 +73,15 @@ const WHISPER_LANGUAGES = [
 // across providers). The "Custom…" option lets the user type any string,
 // so niche models (new OpenRouter releases, fine-tuned Ollama tags) work
 // even when they're not on the shortlist.
+// Fallback only: with an API key, Settings lists every model the key
+// can use, live from Anthropic, so new releases appear without an
+// update. Any model id also works through Custom….
 const ANTHROPIC_MODELS = [
-  { value: "claude-haiku-4-5", label: "Claude Haiku 4.5 — cheap, great for summaries" },
-  { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 — premium (~4× cost)" },
-  { value: "claude-opus-4-7", label: "Claude Opus 4.7 — max quality, ~15× cost" },
+  { value: "claude-haiku-5-5", label: "Claude Haiku 5.5 — cheapest, great for summaries" },
+  { value: "claude-sonnet-5-5", label: "Claude Sonnet 5.5 — premium (~20× Haiku 5.5)" },
+  { value: "claude-opus-5-5", label: "Claude Opus 5.5 — max quality (~40× Haiku 5.5)" },
+  { value: "claude-haiku-4-5", label: "Claude Haiku 4.5 — previous Haiku (10× Haiku 5.5)" },
+  { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 — previous Sonnet" },
   // Pinned dated id, NOT the "-latest" alias: the API returns 404
   // not_found for claude-3-5-haiku-latest, so the alias is unusable here.
   { value: "claude-3-5-haiku-20241022", label: "Claude Haiku 3.5 — legacy" },
@@ -2479,7 +2487,7 @@ function AIProviderSection({
               value={settings.claude_model}
               onChange={(e) => update("claude_model", e.target.value)}
               placeholder={
-                preset === "anthropic" ? "claude-haiku-4-5" :
+                preset === "anthropic" ? "claude-haiku-5-5" :
                 preset === "openrouter" ? "meta-llama/llama-3.3-70b-instruct:free" :
                 preset === "ollama" ? "llama3.1" :
                 "model-id"
@@ -2904,7 +2912,7 @@ function LiveCoPilotModelCard({
                   value={settings.live_claude_model}
                   onChange={(e) => update("live_claude_model", e.target.value)}
                   placeholder={livePreset === "anthropic"
-                    ? "claude-haiku-4-5"
+                    ? "claude-haiku-5-5"
                     : "model id, e.g. llama-3.1-70b-instruct"}
                   className="font-mono text-sm"
                 />
@@ -3838,10 +3846,25 @@ function CoPilotCadenceCard({
   const model = (settings.live_claude_model || settings.claude_model || "").trim();
   const baseUrl = (settings.live_openai_base_url || settings.openai_base_url || "").trim();
 
+  // A model newer than this build has no price on file: the user
+  // enters it once (per million tokens, as providers quote it) and the
+  // estimate works from then on — no app update for a new model.
+  const [customRates, setCustomRates] = useState(loadCustomRates);
+  const priceKey = rateKey(provider, model);
+  const custom = customRates[priceKey];
+  const setPrice = (side: "in" | "out", v: string) => {
+    const n = Math.max(0, parseFloat(v) || 0);
+    const next = { in: custom?.in ?? 0, out: custom?.out ?? 0, [side]: n };
+    saveCustomRate(priceKey, next);
+    setCustomRates({ ...customRates, [priceKey]: next });
+  };
+  const askForPrice = provider === "anthropic" && !!model && !hasKnownRate(provider, model);
+
   const est = estimateCopilotCost({
     wideIntervalSec: wide,
     hotIntervalSec: hot,
     provider, model, baseUrl,
+    customRates,
   });
 
   return (
@@ -3919,6 +3942,20 @@ function CoPilotCadenceCard({
               Cost is unknown — compare against the rows below or check
               your provider&apos;s pricing page.
             </p>
+          )}
+          {askForPrice && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-muted-foreground">
+                {custom ? "Your price" : "Enter the price"} for{" "}
+                <code className="font-mono">{model}</code> (USD per million tokens):
+              </span>
+              <Input aria-label="Input price per million tokens" type="number" min={0} step={0.01}
+                className="h-7 w-24" placeholder="input"
+                value={custom?.in ?? ""} onChange={(e) => setPrice("in", e.target.value)} />
+              <Input aria-label="Output price per million tokens" type="number" min={0} step={0.01}
+                className="h-7 w-24" placeholder="output"
+                value={custom?.out ?? ""} onChange={(e) => setPrice("out", e.target.value)} />
+            </div>
           )}
           {est.currentNote && (
             <p className="text-amber-600 dark:text-amber-400 italic">

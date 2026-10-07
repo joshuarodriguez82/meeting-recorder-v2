@@ -25,6 +25,8 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 from anthropic import AsyncAnthropic
+
+from core import model_capabilities as mc
 from core._coach_text import dedup_against as _dedup_against
 # One shared no-invented-precision rule, referenced by every prompt
 # builder below rather than paraphrased in each of them. `_grounding_rules`
@@ -193,7 +195,7 @@ def _inline_markdown(text: str) -> str:
 # without restarting the backend. This module no longer owns the dict.
 
 
-DEFAULT_MODEL = "claude-haiku-4-5"
+DEFAULT_MODEL = "claude-haiku-5-5"
 
 
 # Prompt version + fingerprint live in a stdlib-only module so a
@@ -463,6 +465,9 @@ class Summarizer:
                 "Model id %r is not resolvable (Anthropic 404s it); "
                 "using %r instead", requested, self._model)
         self._anthropic_client: Optional[AsyncAnthropic] = None
+        # What the configured Claude model supports, from the Models API
+        # (core/model_capabilities). Looked up once, on first use.
+        self._traits = None
         self._openai_client = None  # lazily imported so the openai SDK
         # isn't a hard dep when the user stays on Anthropic
         if self._provider == "anthropic":
@@ -528,6 +533,31 @@ class Summarizer:
         except Exception:  # noqa: BLE001 - bookkeeping must never fail a call
             return
 
+    async def _model_traits(self):
+        """The configured model's capabilities from the Models API,
+        looked up once. On any failure (offline, a key without models
+        access, an older endpoint) the plain request is used — the one
+        every Claude model accepts — and the lookup is tried again next
+        time rather than remembered as unknown forever."""
+        cached = getattr(self, "_traits", None)
+        if cached is not None and cached.known:
+            return cached
+        try:
+            info = await asyncio.wait_for(
+                self._anthropic_client.models.retrieve(self._model),
+                timeout=10.0)
+            self._traits = mc.traits_from_model_info(info, self._model)
+            logger.info(
+                "Model %s: effort %s, adaptive thinking %s, max output %s",
+                self._model, ",".join(self._traits.effort_levels) or "no",
+                "yes" if self._traits.adaptive_thinking else "no",
+                self._traits.max_output_tokens)
+        except Exception as e:  # noqa: BLE001
+            logger.info("Couldn't look up %s's capabilities (%s); using the "
+                        "plain request", self._model, type(e).__name__)
+            self._traits = mc.unknown_traits(self._model)
+        return self._traits
+
     async def _chat(self, prompt: str, max_tokens: int = 1024,
                     timeout: float = 60.0,
                     image_paths: Optional[List[str]] = None,
@@ -568,21 +598,40 @@ class Summarizer:
                 content = [*imgs, {"type": "text", "text": prompt}]
             else:
                 content = prompt
-            msg = await asyncio.wait_for(
-                self._anthropic_client.messages.create(
-                    model=self._model,
-                    max_tokens=max_tokens,
-                    messages=[{"role": "user", "content": content}],
-                ),
-                timeout=timeout,
-            )
-            self._record_cache_usage(getattr(msg, "usage", None))
-            return _flag_truncation(
-                msg.content[0].text,
-                getattr(msg, "stop_reason", None) == "max_tokens",
-                max_tokens,
-                self._model,
-            )
+            # Shaped by what the model reports about itself, never by
+            # its name — see core/model_capabilities.
+            traits = await self._model_traits()
+            extras = mc.request_extras(traits, mc.configured_effort())
+            budget = max_tokens
+            for attempt in (1, 2):
+                msg = await asyncio.wait_for(
+                    self._anthropic_client.messages.create(
+                        model=self._model,
+                        max_tokens=budget,
+                        messages=[{"role": "user", "content": content}],
+                        **extras,
+                    ),
+                    timeout=timeout,
+                )
+                self._record_cache_usage(getattr(msg, "usage", None))
+                refusal = mc.declined(msg, self._model)
+                if refusal is not None:
+                    raise refusal
+                text = mc.response_text(getattr(msg, "content", None))
+                truncated = getattr(msg, "stop_reason", None) == "max_tokens"
+                # Thinking counts against max_tokens on models that think;
+                # a reply that ran out before writing anything gets one
+                # retry with more room instead of an empty result.
+                if truncated and not text.strip() and attempt == 1:
+                    bigger = mc.retry_budget(traits, budget)
+                    if bigger:
+                        logger.info(
+                            "%s used its %d-token budget before answering; "
+                            "retrying with %d", self._model, budget, bigger)
+                        budget = bigger
+                        continue
+                break
+            return _flag_truncation(text, truncated, budget, self._model)
         # OpenAI-compatible (OpenRouter / Ollama / LM Studio / ...).
         # Text-only — see docstring.
         #
@@ -652,11 +701,15 @@ class Summarizer:
         if self._provider == "anthropic":
             # Anthropic SDK's async streaming returns an async context
             # manager; text_stream is an async iterator of deltas.
+            traits = await self._model_traits()
             async with self._anthropic_client.messages.stream(
                 model=self._model,
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
+                **mc.request_extras(traits, mc.configured_effort()),
             ) as stream:
+                # text_stream carries only text deltas, so thinking (on
+                # models that think) never reaches the reader.
                 async for text in stream.text_stream:
                     if text:
                         yield text
