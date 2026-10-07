@@ -66,7 +66,7 @@ A guessed name now labels that meeting. It's added to a saved voice only
 when it agrees with the voice match, or the voice actually sounds like
 the saved person with that name.
 
-**Worth doing once after updating:** in **Speakers**, delete saved voices
+**Worth doing once after updating:** in **Settings → Known Speakers**, delete saved voices
 created from recent meetings that keep matching the wrong people. They
 were built from mixed audio and won't fix themselves. Then re-process a
 recent meeting that came out wrong to see the new result.
