@@ -1653,8 +1653,10 @@ def _fetch_anthropic_models(api_key: str) -> list[dict]:
     UI doesn't pollute with deprecated aliases."""
     if not api_key:
         return []
+    # limit=1000: the API pages at 20 by default, and the list has passed
+    # a dozen models — a new release must not fall off the first page.
     data = _stdlib_get_json(
-        "https://api.anthropic.com/v1/models",
+        "https://api.anthropic.com/v1/models?limit=1000",
         headers={
             "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
