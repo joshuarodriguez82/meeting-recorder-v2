@@ -20,7 +20,18 @@ The board keeps ONE entry per suggestion:
 * the model is shown the board, so it can see what is already there and
   what the user threw away, rather than one tick of memory.
 
-Pure — no I/O, no LLM. The session persists ``to_list()``.
+Two bullets are "the same" when their content words overlap, or —
+when the local sentence model is on this machine — when they mean the
+same thing. Word overlap alone missed the commonest repeat: the model
+re-asking one question with the words changed. Field board 2026-10-06,
+a call on one topic: 22 open questions, none merged; the true
+rephrasings shared 44-55 % of their content words (under the 60 % bar)
+and scored 0.72-0.77 on the sentence model, where distinct questions on
+the same topic scored 0.33-0.65.
+
+No I/O and no LLM in the merge. The sentence model runs in
+``prepare()``, which the caller runs off the event loop; ``merge()``
+only reads the vectors it left. The session persists ``to_list()``.
 """
 
 from __future__ import annotations
@@ -29,7 +40,10 @@ import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional
+from pathlib import Path
+from typing import Callable, Dict, Iterable, List, Optional
+
+import numpy as np
 
 KINDS = ("clarifying_questions", "risks", "follow_ups")
 STATUSES = ("open", "done", "dismissed", "saved")
@@ -38,6 +52,10 @@ STATUSES = ("open", "done", "dismissed", "saved")
 #: same thing. Measured against the SHORTER bullet, so a rephrasing
 #: that adds a clause still merges.
 SAME_THRESHOLD = 0.6
+
+#: Cosine similarity (local sentence model) at which two bullets mean
+#: the same thing. See the module docstring for the measurement.
+SAME_MEANING_THRESHOLD = 0.7
 
 _WORD = re.compile(r"[a-z0-9']+")
 # Words that carry no meaning of their own in a coaching bullet; without
@@ -77,9 +95,41 @@ class BoardItem:
     fresh: bool = True
 
 
+def _local_encoder() -> Optional[Callable[[List[str]], np.ndarray]]:
+    """The app's sentence model, if it is already on this machine.
+
+    Never downloads: a first-time download in the middle of a call is
+    the wrong moment, and the search index fetches it anyway. Returns
+    None when unavailable, and the board falls back to word overlap."""
+    try:
+        from config.settings import USER_DATA_DIR
+        from core import embeddings
+        cache = Path(USER_DATA_DIR) / "models" / "minilm-l6"
+        if embeddings._model is None and not (
+                cache.is_dir() and any(cache.iterdir())):
+            return None
+        if not embeddings.is_available():
+            return None
+    except Exception:
+        return None
+
+    def encode(texts: List[str]) -> np.ndarray:
+        return embeddings._get_model().encode(
+            texts, normalize_embeddings=True, convert_to_numpy=True,
+            show_progress_bar=False).astype(np.float32, copy=False)
+    return encode
+
+
+#: How `prepare()` turns text into vectors. Replaced in tests.
+encoder_factory: Callable[[], Optional[Callable[[List[str]], np.ndarray]]] \
+    = _local_encoder
+
+
 class CopilotBoard:
     def __init__(self, items: Optional[Iterable[dict]] = None):
         self.items: List[BoardItem] = []
+        #: text → unit vector, filled by prepare(). Not persisted.
+        self._vectors: Dict[str, np.ndarray] = {}
         for d in items or []:
             try:
                 self.items.append(BoardItem(**{
@@ -89,6 +139,35 @@ class CopilotBoard:
                 continue
 
     # ── merging ticks ────────────────────────────────────────────────
+
+    def prepare(self, tick: Dict[str, List[str]]) -> None:
+        """Embed the tick's bullets and any board entries not yet
+        embedded, so merge() can compare meanings. Slow on first use
+        (loads the model): run it off the event loop. Any failure
+        leaves merge() on word overlap."""
+        texts = [t.strip() for kind in KINDS for t in (tick.get(kind) or [])
+                 if isinstance(t, str) and t.strip()]
+        texts += [it.text for it in self.items]
+        todo = list(dict.fromkeys(t for t in texts if t not in self._vectors))
+        if not todo:
+            return
+        try:
+            encode = encoder_factory()
+            if encode is None:
+                return
+            vecs = encode(todo)
+            for t, v in zip(todo, vecs):
+                self._vectors[t] = np.asarray(v, dtype=np.float32)
+        except Exception:
+            return
+
+    def _same(self, existing: str, new: str) -> bool:
+        if same_suggestion(existing, new):
+            return True
+        a, b = self._vectors.get(existing), self._vectors.get(new)
+        if a is None or b is None or a.shape != b.shape:
+            return False
+        return float(np.dot(a, b)) >= SAME_MEANING_THRESHOLD
 
     def merge(self, tick: Dict[str, List[str]],
               now: Optional[str] = None) -> List[BoardItem]:
@@ -109,7 +188,7 @@ class CopilotBoard:
                     continue
                 match = next((it for it in self.items
                               if it.kind == kind
-                              and same_suggestion(it.text, text)), None)
+                              and self._same(it.text, text)), None)
                 if match is not None:
                     match.times_suggested += 1
                     match.last_seen = now

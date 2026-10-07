@@ -160,6 +160,9 @@ class CopilotRunner:
                     or payload["follow_ups"]):
                 # Kept as before: the post-meeting summary reads ticks.
                 deps.session.copilot_ticks.append(payload)
+                # Meaning-level matching loads a sentence model the first
+                # time: off the event loop. merge() itself is instant.
+                await asyncio.to_thread(self._board.prepare, payload)
                 self._board.merge(payload, now=now_iso)
                 self._persist(deps.session)
             payload["board"] = self._board.to_list()
