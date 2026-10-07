@@ -126,10 +126,10 @@ def test_speech_only_in_mic_is_attributed_to_the_user():
     turns = [{"start": 0.5, "end": 5.5, "speaker": "SPEAKER_00"}]
     out, stats = constrain_turns_to_owner(turns, doc)
     assert stats["applied"] is True
-    owner = [t for t in out if t["speaker"] == OWNER_SPEAKER_LABEL]
-    assert owner, out
-    assert owner[0]["start"] == pytest.approx(1.0, abs=0.1)
-    assert owner[0]["end"] == pytest.approx(5.0, abs=0.1)
+    # The turn's silent edges carry no far-end audio, so nothing says
+    # anyone else spoke in it: the whole turn is the user's.
+    assert [(t["start"], t["end"], t["speaker"]) for t in out] == [
+        (0.5, 5.5, OWNER_SPEAKER_LABEL)]
 
 
 def test_speech_only_in_loopback_is_never_attributed_to_the_user():
@@ -188,6 +188,70 @@ def test_turn_straddling_a_handover_is_split_not_voted():
     assert out[-1]["end"] == pytest.approx(10.0, abs=0.01)
     # No time is invented or lost by the split.
     assert sum(t["end"] - t["start"] for t in out) == pytest.approx(9.0, abs=0.01)
+
+
+def test_pauses_inside_the_users_speech_stay_the_users():
+    """Field transcript 2026-10-07: the user's sentences came out
+    interleaved word by word with a far-end name, because every dip in
+    the mic level between words left that stretch with pyannote's label
+    — and pyannote's cluster for those turns was the user's own voice
+    under another name. With no far-end audio in those dips, the turn
+    is one voice."""
+    mic, lb = two_stream_fixture(
+        mic_turns=((1.0, 2.6), (3.2, 5.0), (5.7, 8.0), (8.8, 10.5)),
+        far_turns=((13.0, 18.0),))
+    doc = compute_attribution(mic, lb, SR, loopback_offset_s=0.0)
+
+    turns = [{"start": 1.0, "end": 10.5, "speaker": "SPEAKER_01"}]
+    out, stats = constrain_turns_to_owner(turns, doc)
+    assert stats["applied"] is True
+    assert [t["speaker"] for t in out] == [OWNER_SPEAKER_LABEL], out
+
+
+def test_a_gap_where_the_far_end_is_heard_keeps_its_speaker():
+    """The bridge only crosses silence: where the loopback carries the
+    far end, that stretch is still theirs, inside the same turn."""
+    mic, lb = two_stream_fixture(
+        mic_turns=((1.0, 4.0), (7.0, 10.0)), far_turns=((4.4, 6.6),))
+    doc = compute_attribution(mic, lb, SR, loopback_offset_s=0.0)
+
+    turns = [{"start": 1.0, "end": 10.0, "speaker": "SPEAKER_01"}]
+    out, _stats = constrain_turns_to_owner(turns, doc)
+    labels = [t["speaker"] for t in out]
+    assert labels == [OWNER_SPEAKER_LABEL, "SPEAKER_01", OWNER_SPEAKER_LABEL], out
+    middle = out[1]
+    assert middle["start"] < 4.6 and middle["end"] > 6.4, middle
+
+
+@pytest.mark.parametrize("contested,bleed,expected", [
+    # Field values, 2026-10-07 and 2026-10-06 (external mic, laptop
+    # speakers): attribution was applied to both and was wrong.
+    (0.611, 0.101, (False, "mic_hears_far_end")),
+    (0.797, 0.024, (False, "mic_hears_far_end")),
+    # The same machine's other sessions that week.
+    (0.000, 0.222, (True, None)),
+    (0.000, 0.727, (True, None)),
+    # Ordinary double-talk on a headset.
+    (0.200, 0.050, (True, None)),
+])
+def test_most_user_speech_on_top_of_the_far_end_stands_down(
+        contested, bleed, expected):
+    doc = {
+        "version": 1,
+        "loopback_present": True,
+        "conference_room_mode": False,
+        "alignment": "wallclock",
+        "summary": {
+            "speech_seconds": 600.0,
+            "overlap_fraction": 0.0,
+            "bleed_correlation": bleed,
+            "contested_mic_fraction": contested,
+            "mean_mic_confidence": 0.9,
+        },
+        "spans": [{"start": 0.0, "end": 10.0, "label": LABEL_MIC,
+                   "confidence": 0.9}],
+    }
+    assert evaluate_trust(doc) == expected
 
 
 def test_far_end_can_never_inherit_the_owner_label():

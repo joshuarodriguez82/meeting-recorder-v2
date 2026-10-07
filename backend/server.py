@@ -4409,6 +4409,13 @@ async def _auto_extract_commitments(session) -> None:
         logger.exception(f"Commitment auto-extract failed: {e}")
 
 
+#: How alike a voice must be to a saved person of the same name before an
+#: AI-guessed name is folded into that person's voiceprint. Well under
+#: the 0.75 that auto-applies a match (the same person on another mic
+#: and room lands between), well over where two different people sit.
+AUTO_NAME_SAME_VOICE_FLOOR = 0.5
+
+
 async def _auto_identify_and_save_speakers(session) -> int:
     """Ask the LLM who each diarized speaker is — from an explicit
     self-introduction ("Hi, I'm Sarah") or a direct-address hand-off
@@ -4486,23 +4493,39 @@ async def _auto_identify_and_save_speakers(session) -> int:
             continue
         try:
             emb = np.asarray(speaker.embedding, dtype=np.float32)
+            wanted = new_name.lower()
             existing = (svc.speaker_profile_svc.get(speaker.profile_id)
                         if speaker.profile_id else None)
+            if (existing is not None
+                    and existing.display_name.lower() != wanted):
+                # The voice matched one saved person and the transcript
+                # names another. The name is a guess from what was said
+                # ("I went to Sam Poe" names someone who may not be the
+                # next voice), so it labels this meeting but never
+                # renames that saved person or folds this voice into
+                # them: one wrong guess would otherwise relabel them in
+                # every later meeting.
+                speaker.profile_id = None
+                existing = None
             if existing is not None:
-                # Already linked (e.g. an auto-match) — trust the
-                # explicit name and refine the centroid.
-                svc.speaker_profile_svc.rename(existing.profile_id, new_name)
+                # Already linked under the same name — refine it.
                 svc.speaker_profile_svc.confirm_match(
                     existing.profile_id, emb, session.session_id)
             else:
-                wanted = new_name.lower()
                 same_name = next(
                     (p for p in svc.speaker_profile_svc.list_all()
                      if p.display_name.lower() == wanted), None)
                 if same_name is not None:
-                    speaker.profile_id = same_name.profile_id
-                    svc.speaker_profile_svc.confirm_match(
-                        same_name.profile_id, emb, session.session_id)
+                    stored = np.asarray(same_name.embedding, dtype=np.float32)
+                    if (stored.shape == emb.shape
+                            and float(np.dot(emb, stored))
+                            >= AUTO_NAME_SAME_VOICE_FLOOR):
+                        speaker.profile_id = same_name.profile_id
+                        svc.speaker_profile_svc.confirm_match(
+                            same_name.profile_id, emb, session.session_id)
+                    # else: a saved person by that name sounds like
+                    # someone else. Keep the label for this meeting;
+                    # save nothing.
                 else:
                     profile = svc.speaker_profile_svc.create(
                         new_name, emb, session.session_id)
