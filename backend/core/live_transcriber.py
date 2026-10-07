@@ -115,6 +115,7 @@ import numpy as np
 from core.vad import find_utterances
 from core import decode_options
 from core.live_dedup import CrossStreamDeduper
+from core.live_mic_bleed import MicBleedGate
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -386,6 +387,10 @@ class LiveTranscriber:
         # one person, core/live_speakers).
         self._next_id = 1
         self._deduper = CrossStreamDeduper()
+        # Drops mic chunks that are the far end heard through speakers,
+        # once the mic is shown to hear the call. core/live_mic_bleed.
+        self._bleed = MicBleedGate(samplerate)
+        self._bleed_announced = False
 
     @property
     def is_running(self) -> bool:
@@ -435,6 +440,8 @@ class LiveTranscriber:
         with self._history_lock:
             self._history.clear()
         self._deduper.reset()
+        self._bleed = MicBleedGate(samplerate)
+        self._bleed_announced = False
         if self._speaker_tracker is not None:
             # Fresh meeting, fresh speakers — "Speaker 1" from a
             # previous recording must not bleed into this one. Known
@@ -505,6 +512,10 @@ class LiveTranscriber:
         if not self._running:
             return
         self._loopback.push(chunk)
+        try:
+            self._bleed.push_loopback(chunk)
+        except Exception as e:
+            logger.debug(f"Live mic-bleed timeline update failed: {e}")
 
     def subscribe(self, max_pending: int = 256) -> queue.Queue:
         """Return a Queue that will receive published segment dicts.
@@ -610,6 +621,25 @@ class LiveTranscriber:
         the same worker" section for why this doesn't need its own
         thread/queue.
         """
+        if source is self._mic and source.label == SPEAKER_YOU and len(audio):
+            try:
+                verdict = self._bleed.mic_chunk(
+                    window_start, window_start + len(audio) / source.sr)
+            except Exception as e:
+                logger.debug(f"Live mic-bleed check failed: {e}")
+                verdict = None
+            if verdict is not None:
+                if verdict.hears_call and not self._bleed_announced:
+                    self._bleed_announced = True
+                    logger.info(
+                        "Live: the mic is hearing the call (most mic speech "
+                        "lands on far-end playback) — mic chunks on top of "
+                        "playback are left to the system-audio stream")
+                if verdict.drop:
+                    logger.info(
+                        f"Live [{source.label}] chunk @ {window_start:.1f}s "
+                        f"dropped: {verdict.overlap:.0%} on far-end playback")
+                    return 0
         engine = self._engine_provider()
         if engine is None:
             # Engine not loaded yet — drop the window. Better to show
