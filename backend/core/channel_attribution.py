@@ -270,6 +270,23 @@ MIN_MEAN_CONFIDENCE = 0.5
 MAX_BLEED_CORRELATION = 0.5
 MAX_CONTESTED_MIC_FRACTION = 0.25
 
+# …except that past this point the contested fraction is enough on its
+# own. Double-talk on a headset is interruptions and backchannels: a
+# small share of the user's speech. When MOST of what would be handed
+# to the user happened while the far end was talking, the mic is
+# hearing the far end, whatever the envelope correlation says — and
+# the correlation can read low exactly then: people in the room with
+# the user are on the mic and not the loopback, and an input path with
+# its own latency puts the bleed out of step with the loopback frame by
+# frame. Field data, 2026-10-06/07, one machine with an external mic
+# and laptop speakers: contested 0.611 at
+# correlation 0.101, attribution applied, and four people's words
+# credited to the user in alternation with the far-end speaker's;
+# contested 0.797 at correlation 0.024, and the user's own label
+# voice-matched to another person. Its other sessions that week
+# measured 0.000.
+MAX_CONTESTED_MIC_FRACTION_ALONE = 0.5
+
 # Far-end speech needed before the bleed correlation means anything.
 # 32 frames ≈ 1 s at the default frame size.
 MIN_BLEED_FRAMES = 32
@@ -761,7 +778,10 @@ def evaluate_trust(doc: Optional[dict]) -> Tuple[bool, Optional[str]]:
                               above: loud bleed doesn't blur dominance,
                               it INVERTS it, so far-end speech could be
                               labelled `mic` with high confidence. See
-                              MAX_BLEED_CORRELATION.
+                              MAX_BLEED_CORRELATION. Also returned when
+                              most of the user's would-be speech lands
+                              on far-end speech, whatever the
+                              correlation: MAX_CONTESTED_MIC_FRACTION_ALONE.
       low_confidence        — mic spans exist but are too marginal.
       no_confident_user_spans — nothing clears MIN_OVERRIDE_CONFIDENCE,
                               so there is nothing to override with.
@@ -797,6 +817,9 @@ def _evaluate_trust(doc: dict) -> Tuple[bool, Optional[str]]:
     if (float(summary.get("bleed_correlation") or 0.0) > MAX_BLEED_CORRELATION
             and float(summary.get("contested_mic_fraction") or 0.0)
             > MAX_CONTESTED_MIC_FRACTION):
+        return False, "mic_hears_far_end"
+    if (float(summary.get("contested_mic_fraction") or 0.0)
+            > MAX_CONTESTED_MIC_FRACTION_ALONE):
         return False, "mic_hears_far_end"
     if float(summary.get("mean_mic_confidence") or 0.0) < MIN_MEAN_CONFIDENCE:
         return False, "low_confidence"
@@ -1164,6 +1187,7 @@ def constrain_turns_to_owner(
         }
 
     intervals = confident_intervals(doc, LABEL_MIC, min_confidence)
+    far_evidence = _far_end_intervals(doc)
     out: List[dict] = []
     owner_seconds = 0.0
     split_turns = 0
@@ -1185,6 +1209,7 @@ def constrain_turns_to_owner(
             FAR_END_FALLBACK_LABEL if speaker == owner_label else speaker)
 
         pieces = _split_turn(start, end, intervals, owner_label, far_label)
+        pieces = _bridge_owner_gaps(pieces, far_evidence, owner_label)
         pieces = _absorb_short_fragments(
             pieces, min_fragment_s, start, end, owner_label, far_label)
         if len(pieces) > 1:
@@ -1240,6 +1265,86 @@ def _split_turn(
     if not pieces:
         pieces.append((start, end, far_label))
     return pieces
+
+
+#: A stretch of a turn needs at least this share of far-end evidence
+#: (a `loopback` or `both` span) to keep the far-end label when it sits
+#: against the user's own speech. See `_bridge_owner_gaps`.
+MIN_FAR_EVIDENCE_FRACTION = 0.25
+
+
+def _far_end_intervals(doc: Optional[dict]) -> List[Tuple[float, float]]:
+    """Where the far end was audible at all: every `loopback` and `both`
+    span, whatever its confidence, coalesced."""
+    spans = []
+    for label in (LABEL_LOOPBACK, LABEL_BOTH):
+        spans.extend(confident_intervals(doc, label, min_confidence=0.0))
+    spans.sort()
+    out: List[List[float]] = []
+    for a, b in spans:
+        if out and a <= out[-1][1] + 1e-9:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [(a, b) for a, b in out]
+
+
+def _covered(a: float, b: float,
+             intervals: Sequence[Tuple[float, float]]) -> float:
+    """Seconds of [a, b) inside `intervals`."""
+    total = 0.0
+    for lo, hi in intervals:
+        if hi <= a:
+            continue
+        if lo >= b:
+            break
+        total += min(b, hi) - max(a, lo)
+    return total
+
+
+def _bridge_owner_gaps(
+    pieces: List[Tuple[float, float, str]],
+    far_evidence: Sequence[Tuple[float, float]],
+    owner_label: str,
+) -> List[Tuple[float, float, str]]:
+    """Give the user the pauses inside their own speech.
+
+    A confident `mic` span ends wherever the level dips — between
+    words, on a quiet syllable. Cutting a turn at every such dip left
+    those stretches with PyAnnote's label, and when PyAnnote's cluster
+    for that turn was the user's own voice under a far-end name, the
+    user's sentences came out interleaved word by word with that name
+    (field transcript 2026-10-07: one participant's single words
+    between every few of the user's, on a call where that participant
+    barely spoke).
+
+    So a stretch next to the user's speech in the same turn stays with
+    the far end only if the far end was audible there (a `loopback` or
+    `both` span covers at least MIN_FAR_EVIDENCE_FRACTION of it).
+    Without that evidence nothing says anyone else spoke, and the turn
+    is one voice. The guarantee that far-end words never go to the user
+    holds: anything the far end demonstrably said keeps its label.
+    """
+    if len(pieces) <= 1:
+        return pieces
+    out = list(pieces)
+    for i, (a, b, label) in enumerate(out):
+        if label == owner_label:
+            continue
+        before = i > 0 and out[i - 1][2] == owner_label
+        after = i + 1 < len(out) and out[i + 1][2] == owner_label
+        if not (before or after):
+            continue
+        if _covered(a, b, far_evidence) >= MIN_FAR_EVIDENCE_FRACTION * (b - a):
+            continue
+        out[i] = (a, b, owner_label)
+    merged: List[List] = []
+    for a, b, label in out:
+        if merged and merged[-1][2] == label:
+            merged[-1][1] = b
+        else:
+            merged.append([a, b, label])
+    return [(m[0], m[1], m[2]) for m in merged]
 
 
 def _absorb_short_fragments(
