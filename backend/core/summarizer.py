@@ -602,7 +602,7 @@ class Summarizer:
             # its name — see core/model_capabilities.
             traits = await self._model_traits()
             extras = mc.request_extras(traits, mc.configured_effort())
-            budget = max_tokens
+            budget = mc.first_budget(traits, max_tokens)
             for attempt in (1, 2):
                 msg = await asyncio.wait_for(
                     self._anthropic_client.messages.create(
@@ -704,7 +704,7 @@ class Summarizer:
             traits = await self._model_traits()
             async with self._anthropic_client.messages.stream(
                 model=self._model,
-                max_tokens=max_tokens,
+                max_tokens=mc.first_budget(traits, max_tokens),
                 messages=[{"role": "user", "content": prompt}],
                 **mc.request_extras(traits, mc.configured_effort()),
             ) as stream:

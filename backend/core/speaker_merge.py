@@ -64,6 +64,19 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 #: dismissed prompt.
 SUGGEST_THRESHOLD = 0.75
 
+#: The label diarization gives a line no turn covers, shown to the reader
+#: as UNATTRIBUTED_NAME. It is the honest "nobody we could identify",
+#: never a person: not counted, not named, never voice-matched.
+UNATTRIBUTED_LABEL = "SPEAKER_UNKNOWN"
+UNATTRIBUTED_NAME = "Unattributed"
+
+#: A group with less speech than this, whose lines are mostly this short,
+#: is interjections ("yeah", "right", "thank you"), not evidence of
+#: another person. See plan_low_evidence_merges.
+LOW_EVIDENCE_MAX_SECONDS = 45.0
+SHORT_LINE_MAX_WORDS = 3
+LOW_EVIDENCE_SHORT_FRACTION = 0.7
+
 #: Names that mean "unnamed", not a person. ``Speaker.__post_init__``
 #: defaults ``display_name`` to the label itself, and the diarizer emits
 #: both the numbered pyannote form and the app's own hex form.
@@ -86,6 +99,8 @@ class SpeakerFacts:
     embedding: Sequence[float] = ()
     seconds: float = 0.0
     segment_count: int = 0
+    #: Lines of SHORT_LINE_MAX_WORDS words or fewer.
+    short_line_count: int = 0
 
     @property
     def is_named(self) -> bool:
@@ -123,6 +138,8 @@ def is_placeholder_name(display_name: str, speaker_id: str = "") -> bool:
     """
     name = (display_name or "").strip()
     if not name:
+        return True
+    if speaker_id == UNATTRIBUTED_LABEL or name == UNATTRIBUTED_NAME:
         return True
     if speaker_id and name == speaker_id:
         return True
@@ -297,6 +314,82 @@ def plan_certain_merges(
             continue
         groups.append(_group(members, "same name"))
 
+    return groups
+
+
+def is_low_evidence(speaker: SpeakerFacts) -> bool:
+    """Interjections only: too little speech, almost all of it in lines
+    of a few words."""
+    return (speaker.segment_count > 0
+            and speaker.seconds < LOW_EVIDENCE_MAX_SECONDS
+            and speaker.short_line_count
+            >= LOW_EVIDENCE_SHORT_FRACTION * speaker.segment_count)
+
+
+def plan_low_evidence_merges(
+    speakers: Sequence[SpeakerFacts],
+    owner_label: str = "",
+    threshold: float = SUGGEST_THRESHOLD,
+) -> List[MergeGroup]:
+    """Resolve the groups that are interjections, not people.
+
+    Field data 2026-10-09, a 2-hour call with 12 people on it: 13 voice
+    groups plus the unattributed row. Eight spoke for a minute or more.
+    Of the small ones, one (38 s, 15 of 21 lines three words or fewer)
+    matched an established speaker at 0.795, and one (23 s, 12 of 15
+    lines that short: "right", "thank you", "make sense") resembled half
+    the room at 0.4-0.6, the mark of crosstalk rather than a voice.
+    ECAPA has little to go on in a one-word clip, so short interjections
+    cluster on their own and each such cluster reads as one more person.
+
+    This is the one place a voice score is acted on without the user,
+    and it is fenced to where a wrong answer costs least:
+
+    * only an UNNAMED group that is all interjections
+      (``is_low_evidence``) is ever absorbed — a group with real
+      sentences, a name or a profile is left alone;
+    * it joins an established (not low-evidence, not the owner) speaker
+      only at SUGGEST_THRESHOLD, the app's own "same person" bar;
+    * otherwise its lines go to UNATTRIBUTED_LABEL — "we can't say who
+      said 'right'" — rather than to a guess.
+
+    The owner is never absorbed and never a target: channel
+    attribution's invariant is that far-end words are not handed to the
+    user on a voice guess.
+    """
+    def _excluded(s: SpeakerFacts) -> bool:
+        return (s.speaker_id == UNATTRIBUTED_LABEL
+                or bool(owner_label) and s.speaker_id == owner_label)
+
+    targets = [s for s in speakers
+               if not _excluded(s) and s.segment_count > 0
+               and not is_low_evidence(s) and s.embedding]
+    into: Dict[str, List[Tuple[str, Optional[float]]]] = {}
+    for s in speakers:
+        if _excluded(s) or s.is_named or s.profile_id:
+            continue
+        if not is_low_evidence(s):
+            continue
+        best: Optional[Tuple[float, str]] = None
+        for t in targets:
+            sim = cosine_similarity(s.embedding, t.embedding)
+            if sim is not None and (best is None or sim > best[0]):
+                best = (sim, t.speaker_id)
+        if best is not None and best[0] >= threshold:
+            into.setdefault(best[1], []).append((s.speaker_id, best[0]))
+        else:
+            into.setdefault(UNATTRIBUTED_LABEL, []).append((s.speaker_id, None))
+
+    groups: List[MergeGroup] = []
+    for target, members in sorted(into.items()):
+        sims = [m[1] for m in members if m[1] is not None]
+        groups.append(MergeGroup(
+            into=target,
+            absorb=tuple(sorted(m[0] for m in members)),
+            reason=("interjections in a matching voice" if sims
+                    else "interjections with no distinct voice"),
+            similarity=round(min(sims), 4) if sims else None,
+        ))
     return groups
 
 

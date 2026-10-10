@@ -107,6 +107,41 @@ def test_vad_chunk_timestamps_advance_monotonically():
     assert 0 < r1.consumed_s <= 1.3 + 0.01
 
 
+def test_dropped_silence_still_moves_the_clock():
+    """Field log 2026-10-09: live mic chunks on a 2-hour call were
+    stamped up to ~40 minutes early, because every stretch of pure
+    silence dropped at the hard ceiling vanished from the clock."""
+    buf = _SourceBuffer("you", SR, vad_enabled=True)
+    for _ in range(3):
+        buf.push(_silence(VAD_HARD_CEILING_S + 0.5))
+        assert buf.try_vad_chunk() is None
+    silent = 3 * (VAD_HARD_CEILING_S + 0.5)
+    assert buf.next_window_start == pytest.approx(silent, abs=0.01)
+
+    buf.push(_sine(0.8))
+    buf.push(_silence(0.5))
+    chunk = buf.try_vad_chunk()
+    assert chunk is not None
+    assert buf.next_window_start + chunk.start_offset_s == pytest.approx(
+        silent, abs=0.05)
+
+
+def test_a_line_after_a_long_silence_carries_its_real_time():
+    """End to end: the published segment's start is where the speech
+    actually was in the recording."""
+    engine = _FakeEngine()
+    lt = LiveTranscriber(engine_provider=lambda: engine, samplerate=SR)
+    lt._running = True                     # drive the worker step by hand
+    lt.push_audio(_silence(VAD_HARD_CEILING_S + 2.0))
+    assert lt._try_drain_one(lt._mic) is False
+    lt.push_audio(_sine(0.8))
+    lt.push_audio(_silence(0.5))
+    assert lt._try_drain_one(lt._mic) is True
+    seg = lt.all_segments()[-1]
+    assert seg["speaker"] == "you"
+    assert seg["start"] == pytest.approx(VAD_HARD_CEILING_S + 2.0, abs=0.05)
+
+
 # ── Fake engine + end-to-end LiveTranscriber behavior ────────────────
 
 class _FakeSegment:

@@ -17,9 +17,11 @@ So the request is shaped by what the model says about itself, not by
 its name: Anthropic's Models API reports each model's capabilities
 (``GET /v1/models/{id}``), and those decide whether effort is sent and
 at which level. Text is read from the blocks whose type is ``text``,
-wherever they are. A reply cut off by ``max_tokens`` before any text is
-retried once with room to spare. A model that declines is reported as
-such. None of it names a model, so the next one works the same way.
+wherever they are. Thinking shares ``max_tokens`` with the answer, so a
+model that thinks gets headroom from the first request; a reply that
+still runs out before any text is retried once with room to spare. A
+model that declines is reported as such. None of it names a model, so
+the next one works the same way.
 
 Nothing here sends sampling parameters or assistant prefill: newer
 models reject both, and no request in the app needs them.
@@ -45,6 +47,16 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 #: A retry after an empty, truncated reply: the first budget plus this,
 #: capped by what the model can return.
 RETRY_EXTRA_TOKENS = 4096
+
+#: Added to every request to a model that thinks, before the first try.
+#: Thinking shares max_tokens with the answer, and every budget in the
+#: app was sized for the answer alone. Field log 2026-10-09, Haiku 5.5 at
+#: effort "low": a daily briefing cut off at 4,096 with ~800 tokens of
+#: answer written, a Co-Pilot tick cut off at 512 mid-JSON, and six
+#: calls that spent their whole budget thinking and had to be re-sent.
+#: max_tokens is a ceiling, not a charge — tokens are billed as
+#: produced — so the room costs nothing unless the model uses it.
+THINKING_HEADROOM_TOKENS = 4096
 
 
 @dataclass
@@ -134,6 +146,18 @@ def response_text(content: Iterable[Any]) -> str:
             text = block.get("text")
         parts.append(text or "")
     return "".join(parts)
+
+
+def first_budget(traits: ModelTraits, max_tokens: int) -> int:
+    """``max_tokens`` for the first request: the caller's budget for the
+    answer, plus THINKING_HEADROOM_TOKENS when the model thinks, capped
+    by what the model can return. Unchanged for a model that doesn't."""
+    if not traits.adaptive_thinking:
+        return max_tokens
+    bigger = max_tokens + THINKING_HEADROOM_TOKENS
+    if traits.max_output_tokens:
+        bigger = min(bigger, traits.max_output_tokens)
+    return max(max_tokens, bigger)
 
 
 def retry_budget(traits: ModelTraits, max_tokens: int) -> Optional[int]:

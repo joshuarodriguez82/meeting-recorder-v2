@@ -273,6 +273,14 @@ class _SourceBuffer:
                         f"of pure silence at the VAD hard ceiling")
                     self._chunks = []
                     self._chunk_samples = 0
+                    # The silence happened: the clock moves past it.
+                    # Without this every later chunk on this stream was
+                    # stamped earlier by the silence dropped so far —
+                    # field log 2026-10-09, a 2-hour call: mic chunks
+                    # ~40 minutes early by the end, which also put the
+                    # mic-bleed check (core/live_mic_bleed) against the
+                    # wrong stretch of system audio.
+                    self.next_window_start += n / self.sr
                 return None
 
             pre_roll_samples = int(self.sr * VAD_PRE_ROLL_S)

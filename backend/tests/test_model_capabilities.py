@@ -178,7 +178,32 @@ def test_thinking_that_uses_the_whole_budget_is_retried_with_more_room(monkeypat
         _reply(THINKING, _block("text", text="Done."), stop="end_turn"),
     ])
     assert asyncio.run(s._chat("x", max_tokens=1000)) == "Done."
-    assert [k["max_tokens"] for k in sent] == [1000, 1000 + mc.RETRY_EXTRA_TOKENS]
+    first = 1000 + mc.THINKING_HEADROOM_TOKENS
+    assert [k["max_tokens"] for k in sent] == [first, first + mc.RETRY_EXTRA_TOKENS]
+
+
+def test_a_model_that_thinks_gets_room_for_it_from_the_first_request(monkeypatch):
+    """Field log 2026-10-09 (Haiku 5.5, effort low): a 512-token Co-Pilot
+    tick came back cut off mid-JSON and a 4,096-token daily briefing
+    stopped ~800 tokens into its answer — thinking had used the rest."""
+    s, sent = _summarizer(monkeypatch, [_reply(THINKING, _block("text", text="{}"))])
+    asyncio.run(s._chat("x", max_tokens=512))
+    assert sent[0]["max_tokens"] == 512 + mc.THINKING_HEADROOM_TOKENS
+
+
+def test_a_model_that_does_not_think_gets_the_budget_it_asked_for(monkeypatch):
+    s, sent = _summarizer(monkeypatch, [_reply(_block("text", text="ok"))],
+                          model_info=OLD_MODEL)
+    asyncio.run(s._chat("x", max_tokens=512))
+    assert sent[0]["max_tokens"] == 512
+
+
+def test_the_headroom_never_exceeds_what_the_model_can_return():
+    traits = mc.ModelTraits(model="m", adaptive_thinking=True,
+                            max_output_tokens=6000)
+    assert mc.first_budget(traits, 4096) == 6000
+    assert mc.first_budget(traits, 8000) == 8000      # never below the ask
+    assert mc.first_budget(mc.unknown_traits("m"), 4096) == 4096
 
 
 def test_a_refusal_is_reported_as_such(monkeypatch):
@@ -210,6 +235,7 @@ def test_streamed_answers_carry_the_same_request_shape(monkeypatch):
         return [t async for t in s.stream_chat("q")]
     assert asyncio.run(run()) == ["Hello"]
     assert seen["output_config"] == {"effort": "low"}
+    assert seen["max_tokens"] > mc.THINKING_HEADROOM_TOKENS
 
 
 # ── the real SDK, against a mock transport ───────────────────────────
