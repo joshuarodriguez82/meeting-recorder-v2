@@ -8,7 +8,7 @@
 # performed rather than whatever PyPI resolves to that day.
 #
 # To refresh: dispatch Freeze Dependencies; it opens a PR.
-# Source run: https://github.com/joshuarodriguez82/meeting-recorder-v2/actions/runs/33087334936
+# Source run: https://github.com/joshuarodriguez82/meeting-recorder-v2/actions/runs/33106400713
 # Requirements: backend/requirements-mac.txt
 
 aiohappyeyeballs==2.7.1
