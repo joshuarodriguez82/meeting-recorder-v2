@@ -7,6 +7,7 @@ import {
 } from "@/lib/api";
 import type { CoPilotBoardItem } from "@/lib/api";
 import { followUps, openAsText } from "@/lib/copilot-followups";
+import { countPeople, isUnattributed } from "@/lib/speakers";
 import { toast } from "sonner";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
@@ -620,7 +621,7 @@ export function SessionDetailDialog({
                   Transcript {hasTranscript && <span className="ml-1 text-muted-foreground">({session.segments.length})</span>}
                 </TabsTrigger>
                 <TabsTrigger value="speakers" disabled={Object.keys(session.speakers).length === 0}>
-                  Speakers {Object.keys(session.speakers).length > 0 && <span className="ml-1 text-muted-foreground">({Object.keys(session.speakers).length})</span>}
+                  Speakers {countPeople(session.speakers) > 0 && <span className="ml-1 text-muted-foreground">({countPeople(session.speakers)})</span>}
                 </TabsTrigger>
                 <TabsTrigger
                   value="screenshots"
@@ -1467,8 +1468,11 @@ function SpeakersView({
   // flag it: the reference is inside a closure, and a closure COULD be
   // called later — it is `.filter` calling it immediately that turns a
   // legal-looking hoist into a crash.
+  // Unattributed lines (no voice matched) are listed last: they are not
+  // a person, and the count on the tab leaves them out.
   const speakers = Object.values(session.speakers)
-    .filter((sp) => !gone.includes(sp.speaker_id));
+    .filter((sp) => !gone.includes(sp.speaker_id))
+    .sort((a, b) => Number(isUnattributed(a.speaker_id)) - Number(isUnattributed(b.speaker_id)));
 
   const sessionId = session.session_id;
   const speakerCount = speakers.length;

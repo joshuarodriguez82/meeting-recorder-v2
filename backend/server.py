@@ -4471,7 +4471,12 @@ async def _auto_identify_and_save_speakers(session) -> int:
 
     import numpy as np
     named = 0
+    from core.speaker_merge import UNATTRIBUTED_LABEL
     for speaker_id, raw_name in mapping.items():
+        if speaker_id == UNATTRIBUTED_LABEL:
+            # Lines nobody was matched to are several people at once;
+            # a name for them is a name for none of them.
+            continue
         speaker = session.speakers.get(speaker_id)
         if speaker is None:
             continue
@@ -5011,12 +5016,17 @@ def _speaker_facts(session) -> "list":
     """
     from core.speaker_merge import SpeakerFacts
 
+    from core.speaker_merge import SHORT_LINE_MAX_WORDS
+
     seconds: dict[str, float] = {}
     counts: dict[str, int] = {}
+    short: dict[str, int] = {}
     for seg in (session.segments or []):
         seconds[seg.speaker_id] = seconds.get(seg.speaker_id, 0.0) + max(
             0.0, float(seg.end) - float(seg.start))
         counts[seg.speaker_id] = counts.get(seg.speaker_id, 0) + 1
+        if len((seg.text or "").split()) <= SHORT_LINE_MAX_WORDS:
+            short[seg.speaker_id] = short.get(seg.speaker_id, 0) + 1
     return [
         SpeakerFacts(
             speaker_id=sp.speaker_id,
@@ -5026,6 +5036,7 @@ def _speaker_facts(session) -> "list":
             embedding=tuple(sp.embedding or ()),
             seconds=seconds.get(sp.speaker_id, 0.0),
             segment_count=counts.get(sp.speaker_id, 0),
+            short_line_count=short.get(sp.speaker_id, 0),
         )
         for sp in session.speakers.values()
     ]
@@ -5153,6 +5164,63 @@ def auto_merge_split_speakers(session) -> list:
             ", ".join(group.absorb), group.into, session.session_id,
             group.reason, result["segments_moved"], result["display_name"])
         _refine_profile_after_merge(session, session.speakers[group.into])
+    applied.extend(_resolve_interjection_groups(session))
+    _label_unattributed(session)
+    return applied
+
+
+def _label_unattributed(session) -> None:
+    """Lines no diarization turn covered are "Unattributed", not a
+    speaker called SPEAKER_UNKNOWN: no name, no voice, no profile."""
+    from core.speaker_merge import UNATTRIBUTED_LABEL, UNATTRIBUTED_NAME
+    sp = (session.speakers or {}).get(UNATTRIBUTED_LABEL)
+    if sp is None:
+        return
+    sp.display_name = UNATTRIBUTED_NAME
+    sp.embedding = []
+    sp.profile_id = None
+    sp.match_confidence = None
+    sp.match_confirmed = False
+
+
+def _resolve_interjection_groups(session) -> list:
+    """Fold groups that are only interjections into the voice they match
+    or into Unattributed (core/speaker_merge.plan_low_evidence_merges).
+    Never refines a saved voice: a one-word clip is no evidence of one.
+    Never raises."""
+    try:
+        from core.speaker_merge import (
+            UNATTRIBUTED_LABEL, plan_low_evidence_merges)
+        groups = plan_low_evidence_merges(
+            _speaker_facts(session), _owner_label())
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not plan interjection merges for "
+                       f"{session.session_id}: {e}")
+        return []
+    applied = []
+    for group in groups:
+        try:
+            if group.into == UNATTRIBUTED_LABEL:
+                session.get_or_create_speaker(UNATTRIBUTED_LABEL)
+            result = _apply_speaker_merge(
+                session, group.into, list(group.absorb))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"Skipped folding {', '.join(group.absorb)} into "
+                f"{group.into} on {session.session_id}: {e}")
+            continue
+        if group.into == UNATTRIBUTED_LABEL:
+            _label_unattributed(session)
+            result["display_name"] = session.speakers[
+                UNATTRIBUTED_LABEL].display_name
+        result["reason"] = group.reason
+        applied.append(result)
+        logger.info(
+            "Folded %s into %s on %s (%s%s): %d segments",
+            ", ".join(group.absorb), group.into, session.session_id,
+            group.reason,
+            f", similarity {group.similarity}" if group.similarity else "",
+            result["segments_moved"])
     return applied
 
 
