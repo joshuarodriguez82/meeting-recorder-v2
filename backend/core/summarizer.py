@@ -1139,6 +1139,55 @@ class Summarizer:
         raw = await self._chat(prompt, max_tokens=tokens, timeout=timeout_s)
         return (raw or "").strip()
 
+    async def live_recap(
+        self, segments: List[dict], meeting_context: str = "",
+        notes: str = "", timeout_s: float = 120.0,
+    ) -> str:
+        """A recap of the call so far, for the people on it to read out
+        and agree on before it ends (the Recap button).
+
+        Every line transcribed so far goes in, not a recent window: a
+        recap that only saw the last stretch would read as the whole
+        meeting and leave out what was settled in the first half. The
+        user's notes go in whole too — they are what the recorder knew
+        that the transcript doesn't say."""
+        from core.copilot_context import format_transcript
+        segments = list(segments or [])
+        transcript = format_transcript(segments, limit=len(segments) or 1)
+        if not transcript.strip():
+            return ""
+        context = ""
+        if meeting_context.strip():
+            context += "ABOUT THIS MEETING:\n" + meeting_context.strip() + "\n\n"
+        if notes.strip():
+            context += ("THE RECORDER'S OWN NOTES (treat as fact):\n"
+                        + notes.strip() + "\n\n")
+        prompt = (
+            "You are writing a recap of a meeting that is STILL IN "
+            "PROGRESS. The participants will read it together before the "
+            "call ends to agree on it, so it must be accurate, short and "
+            "neutral.\n"
+            "Write markdown with these sections, in this order, leaving "
+            "out any section with nothing in it:\n"
+            "## Discussed\n## Decided\n## Action items\n## Open questions\n"
+            "- Bullets, one point each, plain language. Aim for under 300 "
+            "words in total.\n"
+            "- Action items: what, who, and when — but only the owner and "
+            "date the transcript actually states; otherwise leave them "
+            "out rather than guess.\n"
+            "- Decided means agreed on the call, not merely proposed.\n"
+            "- Speaker labels may be imperfect: \"You\" is the person "
+            "recording; \"Speaker N\" are others. Use a person's name only "
+            "when the transcript or notes give it.\n"
+            "- Never invent numbers, names, dates or commitments. No "
+            "preamble — start with the first heading.\n\n"
+            f"{context}"
+            "TRANSCRIPT SO FAR (in order):\n"
+            f"{transcript}")
+        raw = await self._chat(prompt, max_tokens=self._budget(1500),
+                               timeout=timeout_s)
+        return (raw or "").strip()
+
     async def catch_up(self, transcript: str, notes: str = "",
                        reader: str = "", previous: str = "") -> dict:
         """A "what I missed" brief for someone who wasn't in the meeting

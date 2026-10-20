@@ -8,6 +8,8 @@ import {
 import type { CoPilotBoardItem } from "@/lib/api";
 import { followUps, openAsText } from "@/lib/copilot-followups";
 import { countPeople, isUnattributed } from "@/lib/speakers";
+import { callClock } from "@/lib/recap";
+import { RecapBody } from "./live-recap";
 import { toast } from "sonner";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
@@ -660,6 +662,7 @@ export function SessionDetailDialog({
                     session={session}
                     onMade={async () => { await reload(); onChanged?.(); }}
                   />
+                  <CallRecapCard recap={session.live_recap} />
                   {isFinalizing && (
                     <div
                       className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-300 text-xs px-3 py-2.5"
@@ -1977,6 +1980,26 @@ function formatClock(seconds: number): string {
 
 /** "What I missed": the catch-up brief for a meeting you weren't in.
  *  Made automatically for imported meetings; one click for any other. */
+// The last recap made with the Recap button during the call: what the
+// people on it read out and agreed on. Shown as it was, labelled with how
+// far into the call it went — the summary above is made from the full
+// recording and may say more.
+function CallRecapCard({ recap }: { recap: SessionFull["live_recap"] }) {
+  if (!recap || !("recap" in recap) || !recap.recap) return null;
+  return (
+    <section className="rounded-lg border bg-muted/30 p-4">
+      <div className="mb-2 flex items-center gap-2">
+        <h3 className="text-sm font-semibold">Recap during the call</h3>
+        <span className="text-xs text-muted-foreground">
+          as of {callClock(recap.as_of_s)}
+        </span>
+        <CopyButton text={recap.recap} className="ml-auto" />
+      </div>
+      <RecapBody markdown={recap.recap} />
+    </section>
+  );
+}
+
 function CatchUpCard({ session, onMade }: {
   session: SessionFull;
   onMade: () => Promise<void>;

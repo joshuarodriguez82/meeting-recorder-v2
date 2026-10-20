@@ -567,6 +567,30 @@
   ]
  ],
  [
+  "/recording/notes",
+  [
+   "GET"
+  ]
+ ],
+ [
+  "/recording/notes",
+  [
+   "PUT"
+  ]
+ ],
+ [
+  "/recording/recap",
+  [
+   "GET"
+  ]
+ ],
+ [
+  "/recording/recap",
+  [
+   "POST"
+  ]
+ ],
+ [
   "/recording/screenshot",
   [
    "POST"

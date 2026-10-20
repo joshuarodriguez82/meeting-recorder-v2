@@ -715,8 +715,19 @@ export interface CatchUpBrief {
   compared_with: { session_id: string; display_name: string; started_at: string } | null;
 }
 
+/** A recap made during the call with the Recap button. */
+export interface LiveRecap {
+  recap: string;
+  /** Seconds into the call the recap covers up to. */
+  as_of_s: number;
+  /** Live transcript lines it was made from. */
+  lines: number;
+  generated_at: string;
+}
+
 export interface SessionFull {
   catch_up?: CatchUpBrief | null;
+  live_recap?: LiveRecap | Record<string, never> | null;
   slide_notes?: SlideNote[] | null;
   // See SessionSummary.processing_now / imported_at.
   processing_now?: boolean;
@@ -1318,6 +1329,21 @@ export const api = {
     }),
   copilotHistory: () =>
     request<{ ticks: CoPilotTickResponse[] }>("/recording/copilot/history"),
+
+  // In-call Recap button: a recap of every line transcribed so far.
+  recordingRecap: () =>
+    request<LiveRecap>("/recording/recap", { method: "POST" }),
+  latestRecordingRecap: () =>
+    request<LiveRecap | Record<string, never>>("/recording/recap"),
+  // Notes typed during the call, onto the recording's own session.
+  // `base` is what the panel last loaded or saved, so a Co-Pilot "Save
+  // to my notes" appended meanwhile is kept, not overwritten.
+  recordingNotes: () => request<{ notes: string }>("/recording/notes"),
+  saveRecordingNotes: (notes: string, base: string) =>
+    request<{ notes: string }>("/recording/notes", {
+      method: "PUT",
+      body: JSON.stringify({ notes, base }),
+    }),
 
   // Co-Pilot mode + meeting-type libraries. Editable persona/modifier
   // prompts the user picks from at recording time; same edit/reset/
