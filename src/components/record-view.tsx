@@ -34,6 +34,7 @@ import {
   FolderOpen,
   Copy,
   Check,
+  ListChecks,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -56,6 +57,8 @@ import { LiveTranscriptPanel } from "./live-transcript-panel";
 import { MeetingBriefModal } from "./meeting-brief-modal";
 import { LiveSearchPanel } from "./live-search-panel";
 import { CoPilotPanel } from "./co-pilot-panel";
+import { LiveRecapPanel, useLiveRecap } from "./live-recap";
+import { LiveNotesDrawer } from "./live-notes-drawer";
 
 interface Props {
   onSessionsChanged: () => void;
@@ -149,6 +152,7 @@ export function RecordView({
   const { status: recordingStatus, reachable: backendReachable } = useRecordingStatus();
   const recording = !!recordingStatus?.is_recording;
   const duration = recordingStatus?.duration_s ?? 0;
+  const recapState = useLiveRecap(recording);
   const modelsLoading = !!recordingStatus?.models_loading;
   // The active recording's session_id, captured from /recording/status.
   // Lets mid-recording form edits PATCH the right session without
@@ -1419,12 +1423,40 @@ export function RecordView({
             )}
             {screenshotCount > 0 ? `Screenshot (${screenshotCount})` : "Screenshot"}
           </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={recapState.run}
+            disabled={recapState.busy}
+            title="Recap the call so far from every line transcribed — to read out and agree on before the call ends"
+          >
+            {recapState.busy ? (
+              <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />
+            ) : (
+              <ListChecks className="h-3.5 w-3.5 mr-2" />
+            )}
+            Recap
+          </Button>
           <Button variant="destructive" size="sm" onClick={stop}>
             <Square className="h-3.5 w-3.5 mr-2" />
             Stop
           </Button>
         </div>
       )}
+
+      {recording && !recapState.hidden && (
+        <LiveRecapPanel
+          recap={recapState.recap}
+          busy={recapState.busy}
+          onRefresh={recapState.run}
+          onHide={() => recapState.setHidden(true)}
+        />
+      )}
+      <LiveNotesDrawer
+        recording={recording}
+        elapsedS={duration}
+        sessionId={activeSessionId ?? null}
+      />
 
       {/* Capture-confidence warning — the single most important banner
           on this page. This is NOT a toast: a toast can be missed while

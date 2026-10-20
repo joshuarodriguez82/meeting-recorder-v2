@@ -3824,6 +3824,124 @@ async def save_copilot_suggestion(req: CoPilotSaveRequest):
     return {"ok": True, "kind": kind}
 
 
+# ── In-call recap and notes ─────────────────────────────────────────
+#
+# Both work on the recording's IN-MEMORY session. The session JSON on
+# disk is overwritten from that object when the recording stops, so
+# anything written to disk mid-call (as PATCH /sessions/{id} did) was
+# lost at Stop.
+
+def _active_recording_session():
+    if not svc.recording_svc or not svc.recording_svc.is_recording:
+        raise HTTPException(status_code=409, detail="No recording is active.")
+    session = svc.recording_svc.current_session
+    if session is None:
+        raise HTTPException(status_code=409, detail="No active session.")
+    return session
+
+
+@app.post("/recording/recap")
+async def recording_recap():
+    """Recap of the call so far from EVERY line the live transcript has
+    published, by the live model (the main one if no separate live model
+    is set). The newest recap replaces the last; it is kept on the
+    session, so it is still there after the call."""
+    svc.load_settings()
+    session = _active_recording_session()
+    transcriber = svc.recording_svc.live_transcriber
+    if transcriber is None or not transcriber.is_running:
+        raise HTTPException(
+            status_code=409,
+            detail="Live transcription is off for this recording — Recap "
+                   "reads the live transcript. Turn it on in Settings for "
+                   "your next call.")
+    model = svc.live_summarizer or svc.summarizer
+    if model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No AI model is set up — add one in Settings → AI Models.")
+    segments = transcriber.all_segments()
+    if not any((s.get("text") or "").strip() for s in segments):
+        raise HTTPException(
+            status_code=409,
+            detail="Nothing has been transcribed yet — try again once "
+                   "people have started talking.")
+    from core.copilot_context import meeting_context
+    try:
+        recap = await model.live_recap(
+            segments,
+            meeting_context=meeting_context(session),
+            notes=session.notes or "")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Recap failed: {type(e).__name__}: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail="The AI model didn't return a recap — try again.")
+    if not recap:
+        raise HTTPException(
+            status_code=502,
+            detail="The AI model returned an empty recap — try again.")
+    entry = {
+        "recap": recap,
+        "as_of_s": round(max(float(s.get("end") or 0.0) for s in segments), 1),
+        "lines": len(segments),
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    session.live_recap = entry
+    logger.info(f"Recap for {session.session_id}: {len(segments)} live "
+                f"lines up to {entry['as_of_s']:.0f}s")
+    return entry
+
+
+@app.get("/recording/recap")
+async def recording_recap_latest():
+    """The newest recap for the recording in progress, or {}."""
+    session = _active_recording_session()
+    return dict(session.live_recap or {})
+
+
+class RecordingNotesRequest(BaseModel):
+    #: The whole notes text as the user now has it.
+    notes: str
+    #: The notes text the client last loaded or saved. Co-Pilot's "Save
+    #: to my notes" appends on the server mid-call; text appended since
+    #: `base` is kept after the user's version instead of being wiped by
+    #: their next keystroke.
+    base: Optional[str] = None
+
+
+def merge_recording_notes(current: str, base: Optional[str], incoming: str) -> str:
+    """The user's text, plus anything appended server-side since they
+    last loaded it. Anything else that differs is theirs to decide."""
+    current = current or ""
+    incoming = incoming or ""
+    if base is None or current == base or not current.startswith(base):
+        return incoming
+    extra = current[len(base):].lstrip("\n")
+    if not extra or extra in incoming:
+        return incoming
+    sep = "" if not incoming or incoming.endswith("\n\n") else (
+        "\n" if incoming.endswith("\n") else "\n\n")
+    return f"{incoming}{sep}{extra}"
+
+
+@app.get("/recording/notes")
+async def recording_notes():
+    session = _active_recording_session()
+    return {"notes": session.notes or ""}
+
+
+@app.put("/recording/notes")
+async def save_recording_notes(req: RecordingNotesRequest):
+    """Notes typed during the call, onto the recording's session — the
+    same Notes the session shows afterwards and the summary reads."""
+    if len(req.notes or "") > 200_000:
+        raise HTTPException(status_code=400, detail="Notes are too long.")
+    session = _active_recording_session()
+    session.notes = merge_recording_notes(session.notes, req.base, req.notes)
+    return {"notes": session.notes}
+
+
 def _stop_recording_sync():
     # In-flight indicator, same mechanism as process_session/process_full
     # — see Services._end_processing. This runs off the event loop (via
@@ -4363,6 +4481,20 @@ async def patch_session(session_id: str, req: SessionPatchRequest):
         session.template = req.template
     if req.notes is not None:
         session.notes = req.notes
+    # A recording in progress is saved from its in-memory session when it
+    # stops, overwriting this file. The record screen renames and tags
+    # the meeting mid-call through this endpoint, and those edits were
+    # lost at Stop; apply them to the live object as well.
+    rec = svc.recording_svc
+    live = rec.current_session if (rec and rec.is_recording) else None
+    if live is not None and live.session_id == session_id:
+        for field_name in ("display_name", "client", "project", "template",
+                           "notes"):
+            if getattr(req, field_name) is not None:
+                setattr(live, field_name, getattr(session, field_name))
+        if req.client is not None:
+            live.client_source = None
+            live.client_source_detail = None
     svc.session_svc.save(session)
     # Tagging an already-processed meeting to a client is the single most
     # common way a session acquires a Designated Folder, and until

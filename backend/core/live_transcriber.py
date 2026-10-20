@@ -152,6 +152,9 @@ VAD_PRE_ROLL_S = 0.2
 # render a "You" / "Them" / "Room" badge. Stable string constants so
 # the JSON contract with the frontend is explicit.
 SPEAKER_YOU = "you"
+
+#: Published segments kept for the co-pilot and the Recap button.
+HISTORY_MAX_SEGMENTS = 20000
 SPEAKER_THEM = "them"
 # Conference-room recordings: mic captures multiple in-room speakers,
 # no system-audio loopback. We use a single "room" label for the
@@ -365,12 +368,14 @@ class LiveTranscriber:
         self._consumers_lock = threading.Lock()
         self._running = False
         self._worker: Optional[threading.Thread] = None
-        # Rolling history of every published segment, kept so the live
-        # co-pilot tick endpoint can read the last N minutes of transcript
-        # without subscribing its own SSE queue. Bounded so a marathon
-        # meeting can't grow this unboundedly — a typical 15s window
-        # produces 1-4 segments, so 2000 holds ~2-3h of dense talking.
-        self._history: Deque[dict] = deque(maxlen=2000)
+        # Every published segment, so the co-pilot can read the last N
+        # minutes and the Recap button the whole call, without an SSE
+        # queue of their own. Bounded so a marathon can't grow it without
+        # limit, but well past the 4-hour hard cap: a 2-hour, 12-person
+        # call (field log 2026-10-09) published ~2,150 chunks of one or
+        # more segments each, which the old 2,000 cap had already begun
+        # to drop from the start — the part a recap needs most.
+        self._history: Deque[dict] = deque(maxlen=HISTORY_MAX_SEGMENTS)
         self._history_lock = threading.Lock()
         # Optional core.live_speakers.LiveSpeakerTracker — splits the
         # loopback "them" bucket into "Speaker N" / known display names.
